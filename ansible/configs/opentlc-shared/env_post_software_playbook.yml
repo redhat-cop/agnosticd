@@ -1,0 +1,288 @@
+######################### env-specific specific
+- name: Include vars and secret vars
+  hosts: localhost
+  connection: local
+  tasks:
+  vars_files:
+    - "./{{ env_type }}_vars.yml"
+    - "./{{ env_type }}_secret_vars.yml"
+
+
+# - name: env projects
+#   hosts: masters
+#   become: yes
+#   tags:
+#     - env-specific
+#     - env_specific_projects
+#   tasks:
+#     - name: Find current projects list
+#       command: oc get projects
+#       register: projects
+#
+
+- name: Configure Bastion for CF integration
+  hosts: bastions
+  become: yes
+  vars_files:
+    - "./{{ env_type }}_vars.yml"
+  tags: [ env-specific, cf_integration ]
+  tasks:
+    # This requires password :(
+    #- shell: "git clone http://github.com/redhat-gpe/OPEN_Admin /opt/OPEN_Admin/"
+    - name: Configure OPENTLC CloudForms integration
+      shell: "useradd opentlc-mgr"
+      ignore_errors: true
+    - hostname:
+      name: "bastion.{{guid}}.openshift.opentlc.com"
+
+  #  - shell: "chown -R opentlc-mgr.opentlc-mgr /opt/OPEN_Admin/"
+    - file: "path=/opt/OPEN_Admin/ state=directory owner=opentlc-mgr recurse=yes group=opentlc-mgr  mode=0770"
+    - shell: "cp -rf /root/.kube /home/opentlc-mgr/"
+      ignore_errors: true
+    - shell: "chown -R opentlc-mgr.opentlc-mgr /home/opentlc-mgr/.kube"
+      ignore_errors: true
+    - shell: |
+          mkdir /home/opentlc-mgr/bin;
+          ln -s /opt/OPEN_Admin/OPENTLC-OCP3/provision-ose-projects.sh /home/opentlc-mgr/bin/provision-accounts.sh
+          ln -s /opt/OPEN_Admin/OPENTLC-OCP3/provision-ose-projects.sh /home/opentlc-mgr/bin/provision-ose-projects.sh
+          mkdir /home/opentlc-mgr/.ssh
+          echo 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC4OojwKH74UWVOY92y87Tb/b56CMJoWbz2gyEYsr3geOc2z/n1pXMwPfiC2KT7rALZFHofc+x6vfUi6px5uTm06jXa78S7UB3MX56U3RUd8XF3svkpDzql1gLRbPIgL1h0C7sWHfr0K2LG479i0nPt/X+tjfsAmT3nWj5PVMqSLFfKrOs6B7dzsqAcQPInYIM+Pqm/pXk+Tjc7cfExur2oMdzx1DnF9mJaj1XTnMsR81h5ciR2ogXUuns0r6+HmsHzdr1I1sDUtd/sEVu3STXUPR8oDbXBsb41O5ek6E9iacBJ327G3/1SWwuLoJsjZM0ize+iq3HpT1NqtOW6YBLR opentlc-mgr@inf00-mwl.opentlc.com' >> /home/opentlc-mgr/.ssh/authorized_keys
+          chown -R opentlc-mgr.opentlc-mgr /home/opentlc-mgr/.ssh
+          chmod 400 /home/opentlc-mgr/.ssh/authorized_keys
+          chmod 700 /home/opentlc-mgr/.ssh
+
+
+- name: Change Environment Hostnames
+  hosts: localhost
+  become: yes
+  vars_files:
+    - "./{{ env_type }}_vars.yml"
+  tags: [ env-specific, change_internal_hostnames ]
+  tasks:
+  - name: Change hostnames
+    shell: "ansible all  -i /tmp/hosts-{{ env_type }}-{{guid}} -m shell -a 'sudo hostnamectl set-hostname {{ '{{'  }} openshift_hostname {{ '}}' }} '"
+
+
+
+- name: Create env_specific_shares NFS shares
+  hosts: nfs
+  become: yes
+  vars_files:
+    - "./{{ env_type }}_vars.yml"
+  tags:
+    - env-specific
+    - env-specific_nfs
+  tasks:
+    - name: Create env-specific nfs directory
+      file:
+        name: '/srv/nfs/{{ item }}'
+        state: directory
+        mode: 0777
+        owner: nfsnobody
+        group: nfsnobody
+        recurse: True
+      with_items: '{{ env_specific_shares }}'
+
+    - name: Create user vols
+      shell: "mkdir -p /srv/nfs/user-vols/vol{1..{{user_vols}}}"
+    - name: chmod the user vols
+      shell: "chmod -R 777 /srv/nfs/user-vols"
+    - name: Create env-specific exports file
+      file:
+        path: /etc/exports.d/{{ env_type }}-{{ guid }}-env-specific.exports
+        state: touch
+        mode: 0755
+
+    - name: Update env-specific exports file
+      lineinfile:
+        dest: /etc/exports.d/{{ env_type }}-{{ guid }}-env-specific.exports
+        line: '/srv/nfs/{{ item }} *(rw,root_squash,no_wdelay,sync)'
+        state: present
+      with_items: '{{ env_specific_shares }}'
+      run_once: True
+
+    - name: Reload NFS exports
+      shell: "exportfs -r"
+
+- name: env-specific PVs
+  hosts: masters
+  become: yes
+  vars_files:
+    - "./{{ env_type }}_vars.yml"
+  tags:
+    - env-specific
+    - create_env-specific_vol_pvs
+  tasks:
+    - set_fact:
+        pv_size: '10Gi'
+        pv_list: "{{ env_specific_shares }}"
+        persistentVolumeReclaimPolicy: Retain
+
+    - name: Generate env-specific PV file
+      template:
+        src: files/{{ env_type }}_pvs.j2
+        dest: /root/env-pvs-{{ env_type }}-{{ guid }}.yml
+
+    - name: Create env-specific PVs
+      shell: 'oc create -f /root/env-pvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/env-pvs-{{ env_type }}-{{ guid }}.yml'
+
+    - name: Create env-specific PVs
+      shell: 'oc label pv {{ item }} owner={{ item }}'
+      with_items: '{{ env_specific_shares }}'
+    - name: user-pv workaround
+      shell: 'oc delete pv user-vols'
+      ignore_errors: true
+
+- name: env-specific infrastructure
+  hosts: masters
+  become: yes
+  vars_files:
+    - "./{{ env_type }}_vars.yml"
+  tags:
+    - env-specific
+    - env-specific_infra
+  tasks:
+
+    - name: Give administrative user cluster-admin privileges
+      command: "oc adm policy add-cluster-role-to-user cluster-admin {{ admin_user }}"
+
+    - name: Check for opentlc-shared project
+      command: "oc get project opentlc-shared"
+      register: result
+      ignore_errors: true
+    - name: Create opentlc-shared project
+      command: "oc adm new-project opentlc-shared --admin {{admin_user}} --node-selector='region=infra'"
+      when: result | failed
+
+    - name: Make opentlc-shared project network global
+      command: "oc adm pod-network make-projects-global opentlc-shared"
+
+    - name: Set opentlc-shared SCC for anyuid
+      command: "oc adm policy add-scc-to-group anyuid system:serviceaccounts:opentlc-shared"
+
+    - name: Add capabilities within anyuid which is not really ideal
+      command: "oc patch scc/anyuid --patch '{\"requiredDropCapabilities\":[\"MKNOD\",\"SYS_CHROOT\"]}'"
+
+
+- name: Remove all users from self-provisioners group
+  hosts: masters
+  become: yes
+  vars_files:
+    - "./{{ env_type }}_vars.yml"
+  tags: [ env-specific, remove_self_provisioners ]
+  tasks:
+
+  - name: Remove system:authenticated from self-provisioner role
+    shell: "oadm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
+    ignore_errors: true
+  - name: create our own OPENTLC-PROJECT-PROVISIONERS
+    shell: "oadm groups new OPENTLC-PROJECT-PROVISIONERS"
+    ignore_errors: true
+  - name: allow OPENTLC-PROJECT-PROVISIONERS members to provision their own projects
+    shell: "oadm policy add-cluster-role-to-group self-provisioner OPENTLC-PROJECT-PROVISIONERS"
+
+
+
+- name: Project Request Template
+  hosts: masters
+  become: yes
+  vars_files:
+    - "./{{ env_type }}_vars.yml"
+  tags:
+    - env-specific
+    - project_request
+  tasks:
+
+    - name: Copy project request template to master
+      copy:
+        src: ./project-template.yml
+        dest: /root/project-template.yml
+
+    - name: Check for project request template
+      command: "oc get template project-request -n default"
+      register: request_template
+      ignore_errors: true
+
+    - name: Create project request template in default project
+      shell: "oc create -f /root/project-template.yml -n default || oc replace -f /root/project-template.yml -n default"
+      when: request_template | failed
+
+
+    - name: Update master config file to use project request template
+      lineinfile:
+        regexp: "  projectRequestTemplate"
+        dest: "/etc/origin/master/master-config.yaml"
+        line: '  projectRequestTemplate: "default/project-request"'
+        state: present
+      register: master_config
+
+    - name: Add Project request message
+      replace:
+        dest: '/etc/origin/master/master-config.yaml'
+        regexp: 'projectRequestMessage.*'
+        replace: "projectRequestMessage: 'To provision Projects you must request access in https://labs.opentlc.com or https://rhpds.redhat.com'"
+        backup: yes
+
+
+    - name: Restart master service
+      service:
+        name: atomic-openshift-master
+        state: restarted
+      when: master_config.changed
+
+
+# This isn't required anymore in version 3.4, if you are installing an older version you can uncomment these lines.
+# - name: Configure pipelines
+#   hosts: masters
+#   become: yes
+#   vars_files:
+#     - "./{{ env_type }}_vars.yml"
+#   tags: [ env-specific, enable_pipelines ]
+#   tasks:
+#
+# ## This adds one every time, should make sure it doesn't
+#     - name: Add extensionScripts line to master-config.yaml
+#       lineinfile:
+#         insertafter: "assetConfig:"
+#         dest: /etc/origin/master/master-config.yaml
+#         line: "  extensionScripts:\n\ \ \ \ - /etc/origin/master/tech-preview.js"
+#         state: present
+#
+#     - name: create tech-preview.js file with pipelines enabled
+#       lineinfile:
+#         insertafter: "assetConfig:"
+#         dest: /etc/origin/master/tech-preview.js
+#         line: "window.OPENSHIFT_CONSTANTS.ENABLE_TECH_PREVIEW_FEATURE['pipelines'] = true"
+#         create: yes
+#         state: present
+#     - name: Restart master service
+#       service:
+#         name: atomic-openshift-master
+#         state: restarted
+
+
+- name: Cache Docker images
+  hosts: nodes
+  become: yes
+  vars_files:
+    - "./{{ env_type }}_vars.yml"
+  tags:
+    - env-specific
+    - env_specific_images
+  tasks:
+
+    - name: 'Pull image'
+      command: "docker pull {{ item }}"
+      with_items: '{{ env_specific_images }}'
+
+
+#
+# ### Install Nexus
+# - name: Install Nexus
+#   hosts: masters
+#   become: yes
+#   roles:
+#     - nexus2
+#   tags:
+#     - env-specific
+#     - install_nexus
