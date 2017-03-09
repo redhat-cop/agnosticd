@@ -22,19 +22,25 @@
     - "env_vars.yml"
     - "env_secret_vars.yml"
     - "ssh_vars.yml"
+  tags:
+    - workshop
+    - workshop_user_nfs_volume_dirs
   tasks:
     - name: Create user vols
       shell: "mkdir -p /srv/nfs/user-vols/vol{1..{{ user_vols }}}"
     - name: chmod the user vols
       shell: "chmod -R 777 /srv/nfs/user-vols"
 
-- name: NFS voume configuration
+- name: NFS volume configuration
   hosts: 
-    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
   vars_files:
     - "env_vars.yml"
     - "env_secret_vars.yml"
     - "ssh_vars.yml"
+  tags:
+    - workshop
+    - workshop_nfs_user_base_pv
   tasks:
     - name: Set NFS related facts
       set_fact:
@@ -62,9 +68,11 @@
       tags:
         - gen_user_vol_pv
 
-    - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
+    - name: Create base PVs from file
+      shell: '{{ oc_path }} create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || {{ oc_path }} update -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
 
-    - shell: 'oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
+    - name: Create user PVs from file
+      shell: '{{ oc_path }} create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || {{ oc_path }} update -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
 
 - name: Workshop admins
   hosts: 
@@ -323,6 +331,13 @@
       tags:
         - wait-for-gitlab
 
+    - name: Annotate gitlab service to group database
+      shell: >
+        {{ oc_path }} annotate service gitlab-ce
+        service.alpha.openshift.io/dependencies='[{"name":"gitlab-ce-postgresql","namespace":"","kind":"Service"},{"name":"gitlab-ce-redis","namespace":"","kind":"Service"}]' 
+        --overwrite
+        -n workshop-infra
+
 - name: Lab guide
   hosts: 
     - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
@@ -475,6 +490,80 @@
         -e root_token={{ root_token }}
         -e gitlab_hostname={{ gitlab_hostname }}
       with_sequence: start=0 end={{ user_vols }} format=%02d
+
+- name: Deploy etherpad
+  hosts: 
+    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
+  vars_files:
+    - "env_vars.yml"
+    - "env_secret_vars.yml"
+    - "ssh_vars.yml"
+  tags:
+    - workshop
+    - workshop_etherpad
+  tasks:
+    - name: Check if MySQL for etherpad was already provisioned
+      command: "{{ oc_path }} get service mysql-pad -n workshop-infra"
+      register: install_pad_db
+      ignore_errors: true
+
+    - name: Etherpad MySQL
+      shell: >
+        {{ oc_path }} new-app 
+        --name=mysql-pad
+        --template=mysql-ephemeral
+        -p MYSQL_USER=etherpad
+        -p MYSQL_PASSWORD=etherpad
+        -p MYSQL_DATABASE=etherpad
+        -p DATABASE_SERVICE_NAME=mysql-pad
+        -n workshop-infra
+      when: install_pad_db | failed
+
+    - name: Wait for Etherpad MySQL to be running
+      command: "{{ oc_path }} get dc/mysql-pad -o yaml -n workshop-infra"
+      register: result
+      until: '"availableReplicas: 1" in result.stdout'
+      retries: 5
+      delay: 60
+
+    - name: Check if Etherpad was already provisioned
+      command: "{{ oc_path }} get service etherpad -n workshop-infra"
+      register: install_pad
+      ignore_errors: true
+
+    # TODO: etherpad template or health check or something
+    - name: Deploy Etherpad Docker image
+      shell: >
+        {{ oc_path }} new-app
+        --name=etherpad
+        centos/etherpad
+        -e DB_HOST=mysql-pad
+        -e DB_DBID=etherpad
+        -e DB_PASS=etherpad
+        -e DB_USER=etherpad
+        -e DB_PORT=3306
+        -n workshop-infra
+      when: install_pad | failed
+
+    - name: Wait for Etherpad to be running
+      command: "{{ oc_path }} get dc/etherpad -o yaml -n workshop-infra"
+      register: result
+      until: '"availableReplicas: 1" in result.stdout'
+      retries: 5
+      delay: 60
+
+    - name: Expose etherpad service
+      shell: "{{ oc_path }} expose service etherpad"
+      when: install_pad | failed
+
+    - name: Annotate etherpad service to group database
+      shell: >
+        {{ oc_path }} annotate service etherpad 
+        service.alpha.openshift.io/dependencies='[{"name":"mysql-pad","namespace":"","kind":"Service"}]' 
+        --overwrite
+        -n workshop-infra
+
+    # TODO: curl command to create default pad
 
 - name: Cache Java dependencies
   hosts: 
