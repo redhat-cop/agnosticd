@@ -5,8 +5,10 @@ metadata:
   name: gitlab-ce
   annotations:
     iconClass: fa fa-git
-    description: 'GitLab. Collaboration and source control management: code, test,
-      and deploy together!'
+    description: "GitLab. Collaboration and source control management: code, test,
+      and deploy together! \n\n GitLab requries that the serviceaccount for the main
+      GitLab app be added to the anyuid security context. The service account name
+      is: <application name>-user"
     tags: instant-app,gitlab,VCS
 labels:
   createdBy: gitlab-ce-template
@@ -15,7 +17,8 @@ parameters:
   displayName: Application name.
   name: APPLICATION_NAME
   value: gitlab-ce
-- description: 'Custom hostname for service routes. e.g.: <application-name>.<project>.<default-domain-suffix>'
+- description: Hostname for service routes. Set this in order to have the GitLab display
+    the correct clone urls.
   displayName: Gitlab instance hostname
   name: APPLICATION_HOSTNAME
   required: true
@@ -64,6 +67,34 @@ parameters:
   name: REDIS_VOL_SIZE
   value: 512Mi
 objects:
+- kind: ImageStream
+  apiVersion: v1
+  metadata:
+    name: "${APPLICATION_NAME}"
+    labels:
+      app: "${APPLICATION_NAME}"
+  spec:
+    tags:
+    - name: gitlab-8.16.1
+      from:
+        kind: DockerImage
+        name: gitlab/gitlab-ce:8.16.1-ce.0
+- kind: ImageStream
+  apiVersion: v1
+  metadata:
+    name: "${APPLICATION_NAME}-redis"
+    labels:
+      app: "${APPLICATION_NAME}"
+  spec:
+    tags:
+    - name: 3.2.3
+      from:
+        kind: DockerImage
+        name: redis:3.2.3-alpine
+- kind: ServiceAccount
+  apiVersion: v1
+  metadata:
+    name: "${APPLICATION_NAME}-user"
 - kind: DeploymentConfig
   apiVersion: v1
   metadata:
@@ -72,16 +103,19 @@ objects:
       app: "${APPLICATION_NAME}"
   spec:
     strategy:
-      type: Rolling
-      rollingParams:
-        updatePeriodSeconds: 1
-        intervalSeconds: 1
-        timeoutSeconds: 600
-        maxUnavailable: 25%
-        maxSurge: 25%
+      type: Recreate
+      recreateParams: {}
       resources: {}
     triggers:
     - type: ConfigChange
+    - type: ImageChange
+      imageChangeParams:
+        automatic: true
+        containerNames:
+        - gitlab-ce
+        from:
+          kind: ImageStreamTag
+          name: "${APPLICATION_NAME}:gitlab-8.16.1"
     replicas: 1
     test: false
     selector:
@@ -102,7 +136,7 @@ objects:
             claimName: "${APPLICATION_NAME}-data"
         containers:
         - name: gitlab-ce
-          image: gitlab/gitlab-ce:8.12.0-ce.0
+          image: gitlab-ce
           ports:
           - containerPort: 22
             protocol: TCP
@@ -110,24 +144,24 @@ objects:
             protocol: TCP
           env:
           - name: GITLAB_OMNIBUS_CONFIG
-            value: external_url 'http://${APPLICATION_HOSTNAME}/'; root_pass='${GITLAB_ROOT_PASSWORD}';
-              gitlab_rails['initial_root_password']=root_pass unless root_pass.to_s
-              == ''; postgresql['enable']=false; gitlab_rails['db_host'] = '${APPLICATION_NAME}-postgresql';
-              gitlab_rails['db_password']='${POSTGRESQL_PASSWORD}'; gitlab_rails['db_username']='${POSTGRESQL_USER}';
-              gitlab_rails['db_database']='${POSTGRESQL_DATABASE}'; redis['enable']
-              = false; gitlab_rails['redis_host']='${APPLICATION_NAME}-redis'; unicorn['worker_processes']
-              = 2; manage_accounts['enable'] = true; manage_storage_directories['manage_etc']
+            value: hostname='${APPLICATION_HOSTNAME}'; external_url "http://#{hostname}/"
+              unless hostname.to_s == ''; root_pass='${GITLAB_ROOT_PASSWORD}'; gitlab_rails['initial_root_password']=root_pass
+              unless root_pass.to_s == ''; postgresql['enable']=false; gitlab_rails['db_host']
+              = '${APPLICATION_NAME}-postgresql'; gitlab_rails['db_password']='${POSTGRESQL_PASSWORD}';
+              gitlab_rails['db_username']='${POSTGRESQL_USER}'; gitlab_rails['db_database']='${POSTGRESQL_DATABASE}';
+              redis['enable'] = false; gitlab_rails['redis_host']='${APPLICATION_NAME}-redis';
+              unicorn['worker_processes'] = 2; manage_accounts['enable'] = true; manage_storage_directories['manage_etc']
               = false; gitlab_shell['auth_file'] = '/gitlab-data/ssh/authorized_keys';
               git_data_dir '/gitlab-data/git-data'; gitlab_rails['shared_path'] =
               '/gitlab-data/shared'; gitlab_rails['uploads_directory'] = '/gitlab-data/uploads';
               gitlab_ci['builds_directory'] = '/gitlab-data/builds';
           resources:
             limits:
-              cpu: '2'
-              memory: 4Gi
-            requests:
               cpu: '1'
               memory: 2Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
           volumeMounts:
           - name: gitlab-ce-volume-1
             mountPath: "/etc/gitlab"
@@ -138,7 +172,7 @@ objects:
               path: "/help"
               port: 80
               scheme: HTTP
-            initialDelaySeconds: 480
+            initialDelaySeconds: 120
             timeoutSeconds: 1
             periodSeconds: 10
             successThreshold: 1
@@ -158,6 +192,7 @@ objects:
         restartPolicy: Always
         terminationGracePeriodSeconds: 30
         dnsPolicy: ClusterFirst
+        serviceAccount: "${APPLICATION_NAME}-user"
 - kind: DeploymentConfig
   apiVersion: v1
   metadata:
@@ -166,16 +201,19 @@ objects:
       app: "${APPLICATION_NAME}"
   spec:
     strategy:
-      type: Rolling
-      rollingParams:
-        updatePeriodSeconds: 1
-        intervalSeconds: 1
-        timeoutSeconds: 600
-        maxUnavailable: 25%
-        maxSurge: 25%
+      type: Recreate
+      recreateParams: {}
       resources: {}
     triggers:
     - type: ConfigChange
+    - type: ImageChange
+      imageChangeParams:
+        automatic: true
+        containerNames:
+        - gitlab-ce-redis
+        from:
+          kind: ImageStreamTag
+          name: "${APPLICATION_NAME}-redis:3.2.3"
     replicas: 1
     test: false
     selector:
@@ -193,7 +231,12 @@ objects:
             claimName: "${APPLICATION_NAME}-redis-data"
         containers:
         - name: gitlab-ce-redis
-          image: redis:3.2.3-alpine
+          image: gitlab-ce-redis
+          command:
+          - "/bin/sh"
+          - "-ec"
+          args:
+          - exec redis-server
           ports:
           - containerPort: 6379
             protocol: TCP
@@ -209,9 +252,6 @@ objects:
             mountPath: "/data"
           terminationMessagePath: "/dev/termination-log"
           imagePullPolicy: IfNotPresent
-          securityContext:
-            privileged: false
-            runAsUser: 997
         restartPolicy: Always
         terminationGracePeriodSeconds: 30
         dnsPolicy: ClusterFirst
@@ -223,13 +263,8 @@ objects:
       app: "${APPLICATION_NAME}"
   spec:
     strategy:
-      type: Rolling
-      rollingParams:
-        updatePeriodSeconds: 1
-        intervalSeconds: 1
-        timeoutSeconds: 600
-        maxUnavailable: 25%
-        maxSurge: 25%
+      type: Recreate
+      recreateParams:
         post:
           failurePolicy: Abort
           execNewPod:
@@ -248,8 +283,6 @@ objects:
               value: "/var/lib/pgsql/data/userdata"
             - name: CONTAINER_SCRIPTS_PATH
               value: "/usr/share/container-scripts/postgresql"
-            volumes:
-            - gitlab-ce-volume-3
       resources: {}
     triggers:
     - type: ConfigChange
@@ -295,7 +328,7 @@ objects:
                 'SELECT 1'
           livenessProbe:
             timeoutSeconds: 1
-            initialDelaySeconds: 480
+            initialDelaySeconds: 30
             tcpSocket:
               port: 5432
           env:
@@ -377,19 +410,6 @@ objects:
       deploymentconfig: "${APPLICATION_NAME}-postgresql"
     type: ClusterIP
     sessionAffinity: None
-- kind: Route
-  apiVersion: v1
-  metadata:
-    name: "${APPLICATION_NAME}"
-    labels:
-      app: "${APPLICATION_NAME}"
-  spec:
-    host: "${APPLICATION_HOSTNAME}"
-    to:
-      kind: Service
-      name: "${APPLICATION_NAME}"
-    port:
-      targetPort: 80-http
 - kind: PersistentVolumeClaim
   apiVersion: v1
   metadata:
@@ -442,3 +462,16 @@ objects:
     selector:
       matchLabels:
         owner: "postgres"
+- kind: Route
+  apiVersion: v1
+  metadata:
+    name: "${APPLICATION_NAME}"
+    labels:
+      app: "${APPLICATION_NAME}"
+  spec:
+    host: "${APPLICATION_HOSTNAME}"
+    to:
+      kind: Service
+      name: "${APPLICATION_NAME}"
+    port:
+      targetPort: 80-http
