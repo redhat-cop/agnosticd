@@ -17,5 +17,5 @@ time ansible-playbook -i inventory/ ./main.yml \
  -e "bastion_instance_type=t2.large" -e "master_instance_type=c4.xlarge" \
  -e "infranode_instance_type=m4.4xlarge" -e "node_instance_type=m4.4xlarge" \
  -e "nfs_instance_type=m3.large" -e "node_instance_count=2" -e "install_idm=ldap" \
- -e "software_to_deploy=openshift"
+ -e "software_to_deploy=openshift" ${3}
 
