@@ -1,6 +1,6 @@
 #vim: set ft=ansible:
 ---
-- name: Step 000 post software dummy
+- name: Step 005 post software dummy
   hosts: localhost
   connection: local
   become: false
@@ -10,12 +10,81 @@
   tags:
     - step005
   tasks:
-    - debug:
-        msg: "Step 000 post software - Dummy action"
+    - name: generate ansible hosts file
+      template:
+        src: "../../configs/{{ env_type }}/files/labs_hosts_template.j2"
+        dest: "../../workdir/labs_hosts-{{ env_type }}-{{ guid }}"
 
 
 
-- name: Step 00xxxxx pre software
+
+- name: Step 00xxxxx post software
+  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_nfs') | replace('-', '_') }}"
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "../../configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: Create user vols
+      shell: "mkdir -p /srv/nfs/user-vols/vol{1..{{user_vols}}}"
+      when: 'config_nfs_uservols is defined and config_nfs_uservols == "true"'
+    - name: chmod the user vols
+      shell: "chmod -R 777 /srv/nfs/user-vols"
+      when: 'config_nfs_uservols is defined and config_nfs_uservols == "true"'
+    - shell: "echo '/srv/nfs/user-vols  *(rw,root_squash,no_wdelay,sync)' >> /etc/exports.d/uservols.exports"
+      tags: [ uservol_workaround ]
+      when: 'config_nfs_uservols is defined and config_nfs_uservols == "true"'
+
+- name: Step 00xxxxx post software
+  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "../../configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: get nfs Hostname
+      run_once: true
+      set_fact:
+        nfs_host: "{{item}}"
+
+      with_items:
+        - "{{groups['tag_AnsibleGroup_nfs']}}"
+      when: 'config_nfs_uservols is defined and config_nfs_uservols == "true"'
+
+    - set_fact:
+        pv_size: '10Gi'
+        pv_list: "{{ ocp_pvs }}"
+        persistentVolumeReclaimPolicy: Retain
+      when: 'config_nfs_uservols is defined and config_nfs_uservols == "true"'
+    - name: Generate PV file
+      template:
+        src: "{{playbook_dir}}/files/pvs.j2"
+        dest: "/root//pvs-{{ env_type }}-{{ guid }}.yml"
+      tags: [ gen_pv_file ]
+      when: 'config_nfs_uservols is defined and config_nfs_uservols == "true"'
+    - set_fact:
+        pv_size: "{{user_vols_size}}"
+        persistentVolumeReclaimPolicy: Recycle
+
+
+      notify: restart nfs services
+      run_once: True
+
+    - name: Generate user vol PV file
+      template:
+        src: "{{playbook_dir}}/files/userpvs.j2"
+        dest: "/root/userpvs-{{ env_type }}-{{ guid }}.yml"
+      when: 'config_nfs_uservols is defined and config_nfs_uservols == "true"'
+      tags:
+        - gen_user_vol_pv
+
+    - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
+      when: 'config_nfs_uservols is defined and config_nfs_uservols == "true"'
+    - shell: 'oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
+      when: 'config_nfs_uservols is defined and config_nfs_uservols == "true"'
+
+
+- name: Step lab post software deployment
   hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
   gather_facts: False
   become: yes
@@ -28,3 +97,8 @@
         state: present
     - name: Register bastion with IPA
       shell: "/usr/sbin/ipa-client-install --domain=OPENTLC.COM -w {{ipa_host_password}} -N -U --mkhomedir --no-dns-sshfp --hostname={{bastion_public_dns_chomped}}"
+
+    - name: Copy over labs ansible hosts file
+      copy:
+        src: "../../workdir/labs_hosts-{{ env_type }}-{{ guid }}"
+        dest: /etc/ansible/hosts
