@@ -792,11 +792,12 @@ class Ec2Inventory(object):
             else:
                 hostname = getattr(instance, self.hostname_variable)
 
+        # Filed issue for this: https://github.com/ansible/ansible/issues/21167
         # If we can't get a nice hostname, use the destination address
-        if not hostname:
-            hostname = dest
-        else:
-            hostname = self.to_safe(hostname).lower()
+        #if not hostname:
+        #    hostname = dest
+        #else:
+        #    hostname = self.to_safe(hostname).lower()
 
         # if we only want to include hosts that match a pattern, skip those that don't
         if self.pattern_include and not self.pattern_include.match(hostname):
