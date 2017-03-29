@@ -69,6 +69,52 @@
     #   set_fact:
     #     bastion_hostname: "{{ hostvars[ groups[ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') ].0 ]['ec2_public_dns_name'] }}"
 
+    - name: Store bastion hostname as a fact
+      set_fact:
+        bastion_hostname: "{{ hostvars[ groups[ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') ].0 ]['ec2_public_dns_name'] }}"
+    
+    - name: Create empty local ssh config in /tmp
+      file:
+        dest: "/tmp/{{ env_type }}_{{ guid }}_ssh_conf"
+        state: touch
+
+    - name: Add bastion proxy config to /tmp/ ssh config file
+      blockinfile:
+        dest: "/tmp/{{ env_type }}_{{ guid }}_ssh_conf"
+        marker: "##### {mark} ADDED BASTION PROXY HOST {{ env_type }}-{{ guid }} ######"
+        content: |
+            Host {{ bastion_hostname }}
+              Hostname {{ bastion_hostname }}
+              ForwardAgent yes
+              IdentityFile ~/.ssh/{{ key_name }}.pem
+              IdentitiesOnly yes
+              User ec2-user
+              ControlMaster auto
+              ControlPath /tmp/%h-%r
+              ControlPersist 5m
+              ForwardAgent yes
+              StrictHostKeyChecking no
+      tags:
+        - bastion_proxy_config
+        - config_ssh_config_file
+
+    - name: Add all hosts to /tmp/ ssh config file
+      blockinfile:
+        dest: "/tmp/{{ env_type }}_{{ guid }}_ssh_conf"
+        marker: "##### {mark} ADDED Node Proxy Config  {{ item }} {{ env_type }}-{{ guid }} ######"
+        block: |
+            Host {{ item }}
+              Hostname {{ item }}
+              User ec2-user
+              IdentityFile ~/.ssh/{{ key_name }}.pem
+              ProxyCommand ssh {{ bastion_hostname }} -W %h:%p
+              ForwardAgent yes
+              StrictHostKeyChecking no
+      with_items:
+        - "{{ groups[('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_')] }}"
+      tags:
+        - bastion_proxy_config
+        - config_ssh_config_file
 
 - name: Readiness and SSH DNS disable
   hosts:
@@ -169,6 +215,34 @@
 
 - name: Install and configure common software
   hosts: "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
+  gather_facts: False
+  vars_files:
+    - "{{ playbook_dir }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ playbook_dir }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ playbook_dir }}/configs/{{ env_type }}/ssh_vars.yml"
+  tags:
+    - step004
+    - deploy_software
+    - subscriptions
+  roles:
+    - { role: subscriptions, when: "{{ use_subscriptions | default(false) }}" }
+
+- name: Configure repositories
+  hosts: "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
+  any_errors_fatal: true
+  vars_files:
+    - "{{ playbook_dir }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ playbook_dir }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ playbook_dir }}/configs/{{ env_type }}/ssh_vars.yml"
+  tags:
+    - step004
+    - deploy_software
+    - repositories
+  roles:
+    - repositories
+
+- name: Install and configure common software
+  hosts: "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
 
   serial: 15
   become: true
@@ -186,6 +260,7 @@
 
 - name: Configuring Bastion Hosts
   hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+
   become: true
   vars_files:
     - "{{ playbook_dir }}/configs/{{ env_type }}/env_vars.yml"
