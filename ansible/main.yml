@@ -20,6 +20,7 @@
 - name: Step 001 Deploy Infrastructure
   hosts: localhost
   connection: local
+  gather_facts: false
   become: false
   vars_files:
     - "{{ playbook_dir }}/configs/{{ env_type }}/env_vars.yml"
@@ -34,15 +35,25 @@
         - infrastructure_deployment 
 
     - name: Refresh cloud_provider cache
-      command: "{{ playbook_dir }}/inventory/{{ cloud_provider }}.py --refresh-cache"
+      environment:
+        AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+        AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+        AWS_DEFAULT_REGION: "{{aws_region}}"
+      shell: "{{ playbook_dir }}/inventory/{{ cloud_provider }}.py --refresh-cache"
+      when: "not tower_run == 'true'"
       tags:
         - refresh_inventory
+        - refresh_inventory_script
 
     - name: Refresh in-memory cloud_provider cache
       meta: refresh_inventory
       tags:
         - refresh_inventory
 
+# - name: tower workaround for inventory refresh_inventory
+#   include: "{{ playbook_dir }}/cloud_providers/launch-inventory-sync.yml"
+#   when: tower_run == 'true'
+#   tags: tower_workaround
       blockinfile:
         dest: "/tmp/{{ env_type }}_{{ guid }}_ssh_conf"
         marker: "##### {mark} ADDED Node Proxy Config  {{ item }} {{ env_type }}-{{ guid }} ######"
@@ -60,59 +71,6 @@
         - bastion_proxy_config
         - config_ssh_config_file
 
-- name: Wait for readiness
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
-=======
-#TODO: May still want to generate an SSH config for later use
-    #
-    # - name: Store bastion hostname as a fact
-    #   set_fact:
-    #     bastion_hostname: "{{ hostvars[ groups[ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') ].0 ]['ec2_public_dns_name'] }}"
-
-    - name: Store bastion hostname as a fact
-      set_fact:
-        bastion_hostname: "{{ hostvars[ groups[ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') ].0 ]['ec2_public_dns_name'] }}"
-    
-    - name: Create empty local ssh config in /tmp
-      file:
-        dest: "/tmp/{{ env_type }}_{{ guid }}_ssh_conf"
-        state: touch
-
-    - name: Add bastion proxy config to /tmp/ ssh config file
-      blockinfile:
-        dest: "/tmp/{{ env_type }}_{{ guid }}_ssh_conf"
-        marker: "##### {mark} ADDED BASTION PROXY HOST {{ env_type }}-{{ guid }} ######"
-        content: |
-            Host {{ bastion_hostname }}
-              Hostname {{ bastion_hostname }}
-              IdentityFile ~/.ssh/{{ key_name }}.pem
-              IdentitiesOnly yes
-              User {{ remote_user }}
-              ControlMaster auto
-              ControlPath /tmp/%h-%r
-              ControlPersist 5m
-              StrictHostKeyChecking no
-      tags:
-        - bastion_proxy_config
-        - config_ssh_config_file
-
-    - name: Add all hosts to /tmp/ ssh config file
-      blockinfile:
-        dest: "/tmp/{{ env_type }}_{{ guid }}_ssh_conf"
-        marker: "##### {mark} ADDED Node Proxy Config  {{ item }} {{ env_type }}-{{ guid }} ######"
-        block: |
-            Host {{ item }}
-              Hostname {{ item }}
-              User {{ remote_user }}
-              IdentityFile ~/.ssh/{{ key_name }}.pem
-              ProxyCommand ssh {{ remote_user }}@{{ bastion_hostname }} -W %h:%p
-              StrictHostKeyChecking no
-      with_items:
-        - "{{ groups[('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_')] }}"
-      tags:
-        - bastion_proxy_config
-        - config_ssh_config_file
-
 - name: Readiness and SSH DNS disable
   hosts:
     - "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
@@ -120,7 +78,7 @@
     - "{{ playbook_dir }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ playbook_dir }}/configs/{{ env_type }}/env_secret_vars.yml"
     - "{{ playbook_dir }}/configs/{{ env_type }}/ssh_vars.yml"
-  gather_facts: False
+  gather_facts: false
   any_errors_fatal: True
   become: true
   tags:
@@ -135,22 +93,8 @@
         host: '{{ inventory_hostname }}'
         port: 22
         search_regex: OpenSSH
-
-    - name: Disable SSH DNS lookup
-      lineinfile:
-        dest: "/etc/ssh/sshd_config"
-        regexp: "#UseDNS yes"
-        line: "UseDNS no"
-      register: dns_config_changed
-
-    - name: Restart SSHD as needed
-      service:
-        name: sshd
-        state: restarted
-      when: dns_config_changed | changed
-#TODO: May still want to generate an SSH config for later use
     - name: Configure local .ssh/config for bastion proxy use
-      gather_facts: False
+      gather_facts: false
       include: "{{playbook_dir}}/cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
       when: 'deploy_local_ssh_config is defined and deploy_local_ssh_config == "true"'
 
@@ -174,11 +118,42 @@
     - step003
     - pre_software_tasks
 
+- name: Step 003 - Create env key
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - "{{ playbook_dir }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ playbook_dir }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - step003
+    - generate_env_keys
+  tasks:
+    - name: Generate SSH keys
+      shell: ssh-keygen -b 2048 -t rsa -f ./workdir/{{env_authorized_key}} -q -N ""
+      args:
+        creates: ./workdir/{{env_authorized_key}}
+
+
 ##################################################################################
 ##################################################################################
 ############## Step 004 Software Deploy Tasks
 ##################################################################################
 ##################################################################################
+
+
+
+## This requires Ansible 2.3 (boo)
+# - name: Generate environment key
+#   openssl_privatekey:
+#   path: "{{ playbook_dir }}/workdir/{{env_authorized_key}}.pem"
+#   state: present
+# - name: Generate environment Public key
+#   openssl_publickey:
+#   path: "{{ playbook_dir }}/workdir/{{env_authorized_key}}.pub"
+#   privatekey_path: "{{ playbook_dir }}/workdir/{{env_authorized_key}}.pem"
+#   state: present
 
 # Cloudformation template should tag all hosts with Project:{{ env_type }}-{{ guid }}
 - name: Configure subscriptions
@@ -239,7 +214,6 @@
 
 - name: Install and configure common software
   hosts: "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
-
   serial: 15
   become: true
 
@@ -253,6 +227,22 @@
     - common_tasks
   roles:
     -  { role: common, when: "{{ install_common }}" }
+
+- name: Step 004 Deploy Software
+  hosts: "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
+  become: true
+  gather_facts: False
+  vars_files:
+    - "{{ playbook_dir }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ playbook_dir }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ playbook_dir }}/configs/{{ env_type }}/ssh_vars.yml"
+  tags:
+    - step004
+    - set_env_authorized_key
+  roles:
+    -  { role: set_env_authorized_key, when: "{{ set_env_authorized_key }}" }
+
+
 
 - name: Configuring Bastion Hosts
   hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
