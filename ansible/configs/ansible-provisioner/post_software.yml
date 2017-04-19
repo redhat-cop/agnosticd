@@ -1,0 +1,100 @@
+#vim: set ft=ansible:
+---
+- name: Step 000 post software dummy
+  hosts: localhost
+  connection: local
+  become: false
+  vars_files:
+    - "./env_vars.yml"
+    - "./env_secret_vars.yml"
+  tags:
+    - step005
+  tasks:
+    - debug:
+        msg: "Step 000 post software - Dummy action"
+
+- name: Configure Provisioner for CF integration
+  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_provisioner') | replace('-', '_') }}"
+  become: yes
+  gather_facts: False
+  vars_files:
+    - "../../configs/{{ env_type }}/env_vars.yml"
+    - "../../configs/{{ env_type }}/env_secret_vars.yml"
+  tags: [ env-specific, cf_integration ]
+  tasks:
+    - name: Add user opentlc-mgr for OPENTLC CloudForms integration
+      shell: "useradd opentlc-mgr"
+      ignore_errors: true
+    - shell: "rm -rf /opt/ansible_agnostic_deployer"
+    - name: Get updated files from git repository github.com/sborenst/ansible_agnostic_deployer
+      git: repo=https://{{ githubuser }}:{{ githubpassword }}@github.com/sborenst/ansible_agnostic_deployer.git dest=/opt/ansible_agnostic_deployer/ force=yes
+      ignore_errors: true
+
+    - shell: "rm -rf /opt/OPEN_Admin"
+    - name: Get updated files from git repository github.com/redhat-gpe/OPEN_Admin.git
+      git: repo=https://{{ githubuser }}:{{ githubpassword }}@github.com/redhat-gpe/OPEN_Admin.git dest=/opt/OPEN_Admin/ force=yes
+      ignore_errors: true
+
+    - file: "path=/opt/OPEN_Admin/ state=directory owner=opentlc-mgr recurse=yes group=opentlc-mgr  mode=0770"
+    - file: "path=/opt/ansible_agnostic_deployer/ state=directory owner=opentlc-mgr recurse=yes group=opentlc-mgr  mode=0770"
+
+    - name: Allow Access to opentlc-mgr user
+      shell: |
+          mkdir /home/opentlc-mgr/bin;
+          ln -s /opt/OPEN_Admin/OPENTLC-OCP3/provision_workshop_env.sh /home/opentlc-mgr/bin/provision_workshop_env.sh
+          ln -s /opt/OPEN_Admin/OPENTLC-OCP3/provision-ose-projects.sh /home/opentlc-mgr/bin/provision-ose-projects.sh
+          ln -s /opt/OPEN_Admin/OPENTLC-OCP3/deploy_scripts /home/opentlc-mgr/bin/deploy_scripts
+          mkdir /home/opentlc-mgr/.ssh
+          echo 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC4OojwKH74UWVOY92y87Tb/b56CMJoWbz2gyEYsr3geOc2z/n1pXMwPfiC2KT7rALZFHofc+x6vfUi6px5uTm06jXa78S7UB3MX56U3RUd8XF3svkpDzql1gLRbPIgL1h0C7sWHfr0K2LG479i0nPt/X+tjfsAmT3nWj5PVMqSLFfKrOs6B7dzsqAcQPInYIM+Pqm/pXk+Tjc7cfExur2oMdzx1DnF9mJaj1XTnMsR81h5ciR2ogXUuns0r6+HmsHzdr1I1sDUtd/sEVu3STXUPR8oDbXBsb41O5ek6E9iacBJ327G3/1SWwuLoJsjZM0ize+iq3HpT1NqtOW6YBLR opentlc-mgr@inf00-mwl.opentlc.com' >> /home/opentlc-mgr/.ssh/authorized_keys
+          chown -R opentlc-mgr.opentlc-mgr /home/opentlc-mgr/.ssh
+          chmod 400 /home/opentlc-mgr/.ssh/authorized_keys
+          chmod 700 /home/opentlc-mgr/.ssh
+    - name: Install awscli
+      shell: |
+          curl "https://s3.amazonaws.com/aws-cli/awscli-bundle.zip" -o "awscli-bundle.zip"
+          unzip awscli-bundle.zip
+          sudo ./awscli-bundle/install -i /usr/local/aws -b /bin/aws
+          aws --version
+    - name: Insert awscli credentials
+      shell: |
+          mkdir /home/opentlc-mgr/.aws
+          echo '
+          [default]
+          aws_access_key_id = "{{aws_access_key_id}}"
+          aws_secret_access_key = "{{aws_secret_access_key}}"' > /home/opentlc-mgr/.aws/credentials
+    - name: Copy boto.cfg file to /etc
+      shell: "cp /opt/ansible_agnostic_deployer/ansible/inventory/boto.cfg /etc/boto.cfg"
+    - name: Copy boto.cfg file to /etc
+      shell: "cp /opt/ansible_agnostic_deployer/ansible/configs/ansible-provisioner/files/Sync_Repositories.sh /root"
+    - lvg:
+        vg: "{{ storage_vg }}"
+        pvs: "{{ storage_pvs }}"
+      ignore_errors: true
+
+    - lvol:
+        vg: "{{ storage_vg }}"
+        lv: storagelv
+        size: 100%FREE
+      ignore_errors: true
+
+    - filesystem:
+        fstype: ext4
+        dev: "/dev/{{ storage_vg }}/storagelv"
+
+    - file:
+        path: "{{ storage_mount_path }}"
+        state: directory
+        mode: 0755
+
+    - lineinfile:
+        dest: /etc/fstab
+        insertafter: EOF
+        line: "/dev/{{ storage_vg }}/nfsmount {{ storage_mount_path}} ext4 defaults 0 0"
+        state: present
+      ignore_errors: true
+    - shell: "mount {{ storage_mount_path }} || echo already mounted"
+
+    - shell: "systemctl enable httpd && systemctl restart httpd"
+
+### Still need to add "env_secret_vars" files to actually get this to work
+### still need to run the repository sync script.
