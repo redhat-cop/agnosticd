@@ -1,0 +1,85 @@
+#!/usr/bin/env python
+# A Ravello SDK example for getting an application state
+#
+# Copyright 2011-2016 Ravello Systems, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may not
+# use this file except in compliance with the License.  You may obtain a copy
+# of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.  See the
+# License for the specific language governing permissions and limitations under
+# the License.
+
+import ravello_sdk
+import sys
+import os
+from argparse import ArgumentParser
+from common import *
+
+def mkparser():
+	parser = ArgumentParser()
+	parser.add_argument("-i", dest="id",default=0,type=int,help='application ID')
+	parser.add_argument("-u", dest="username",default=None,help='Ravello user account name')
+	parser.add_argument("name",nargs='?',default=None,help='application name')
+	return parser
+
+def validate_param(args):
+	if args.id == 0 and not args.name: # Neither app ID nor app name are provided 
+                print("Error: Invalid parameters, either application name or ID must be provided")
+                return False
+	return True
+
+def initapp(args,client):
+	app_id = args.id
+	app_name = args.name
+	if app_id == 0: 		# If app ID is unknown find the app based on the app name
+		for app in client.get_applications():
+			if app['name'].lower() == app_name.lower():
+				app_id = app['id']
+				break
+
+	try:				# Check is this is a valid app ID
+		app = client.get_application(app_id)
+		app_name = app['name']
+	except Exception as e:
+		sys.stderr.write('Error: {!s}\n'.format(e))
+		print('Error: invalid application ID', app_id)
+		exit(1)
+
+	return app	
+
+
+def main():
+	parser = mkparser()
+	args = parser.parse_args()
+
+	if not validate_param(args):
+		parser.print_help()
+		exit(1)
+
+
+        #Get user credentials
+	username, password  = get_user_credentials(args.username)
+	if not username or not password:
+		exit(1)
+
+	#Connect to Ravello
+	client = connect(username, password)
+	if not client:
+		exit (1)
+
+	app = initapp(args,client)
+
+	if(app):
+		print(application_state(app))
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        sys.stderr.write('Error: {!s}\n'.format(e))
