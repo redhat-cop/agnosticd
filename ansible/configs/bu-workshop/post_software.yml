@@ -14,10 +14,9 @@
 
 # TODO: metrics nodeselector
 
-
 - name: User volumes on NFS server
   hosts: 
-    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_nfs') | replace('-', '_') }}"
+    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_support') | replace('-', '_') }}"
   gather_facts: False
   vars_files:
     - "env_vars.yml"
@@ -32,6 +31,46 @@
     - name: chmod the user vols
       shell: "chmod -R 777 /srv/nfs/user-vols"
 
+- name: Create Workshop NFS shares
+  hosts: 
+    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_support') | replace('-', '_') }}"
+  vars_files:
+    - "env_vars.yml"
+    - "env_secret_vars.yml"
+    - "ssh_vars.yml"
+  tags:
+    - workshop
+    - workshop_nfs
+  tasks:
+    - name: Create workshop nfs directory
+      file:
+        name: '/srv/nfs/{{ item }}'
+        state: directory
+        mode: 0777
+        owner: nfsnobody
+        group: nfsnobody
+        recurse: True
+      with_items:
+        - '{{ workshop_shares }}'
+
+    - name: Create workshop exports file
+      file:
+        path: "/etc/exports.d/{{ env_type }}-{{ guid }}-workshop.exports"
+        state: touch
+        mode: 755
+
+    - name: Update workshop exports file
+      lineinfile:
+        dest: "/etc/exports.d/{{ env_type }}-{{ guid }}-workshop.exports"
+        line: "/srv/nfs/{{ item }} *(rw,root_squash,no_wdelay,sync)"
+        state: present
+      with_items:
+        - '{{ workshop_shares }}'
+      run_once: True
+
+    - name: Reload NFS exports
+      shell: "exportfs -r"
+
 - name: NFS volume configuration
   hosts: 
     - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
@@ -45,7 +84,7 @@
   tasks:
     - name: Set NFS related facts
       set_fact:
-        nfs_host: "{{ hostvars[ groups[ ('tag_' ~ env_type ~ '_' ~ guid ~ '_nfs') | replace('-', '_') ].0 ]['ec2_public_dns_name'] }}"
+        nfs_host: "{{ hostvars[ groups[ ('tag_' ~ env_type ~ '_' ~ guid ~ '_support') | replace('-', '_') ].0 ]['ec2_public_dns_name'] }}"
         pv_size: '10Gi'
         pv_list: "{{ nfs_shares }}"
         persistentVolumeReclaimPolicy: Retain
@@ -96,46 +135,6 @@
     - name: Give administrative user cluster-admin privileges
       command: "{{ oc_path }} adm policy add-cluster-role-to-user cluster-admin admin"
 
-- name: Create Workshop NFS shares
-  hosts: 
-    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_nfs') | replace('-', '_') }}"
-  vars_files:
-    - "env_vars.yml"
-    - "env_secret_vars.yml"
-    - "ssh_vars.yml"
-  tags:
-    - workshop
-    - workshop_nfs
-  tasks:
-    - name: Create workshop nfs directory
-      file:
-        name: '/srv/nfs/{{ item }}'
-        state: directory
-        mode: 0777
-        owner: nfsnobody
-        group: nfsnobody
-        recurse: True
-      with_items:
-        - '{{ workshop_shares }}'
-
-    - name: Create workshop exports file
-      file:
-        path: "/etc/exports.d/{{ env_type }}-{{ guid }}-workshop.exports"
-        state: touch
-        mode: 755
-
-    - name: Update workshop exports file
-      lineinfile:
-        dest: "/etc/exports.d/{{ env_type }}-{{ guid }}-workshop.exports"
-        line: "/srv/nfs/{{ item }} *(rw,root_squash,no_wdelay,sync)"
-        state: present
-      with_items:
-        - '{{ workshop_shares }}'
-      run_once: True
-
-    - name: Reload NFS exports
-      shell: "exportfs -r"
-
 - name: Workshop PVs
   hosts: 
     - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
@@ -151,7 +150,7 @@
         pv_size: '10Gi'
         pv_list: "{{ workshop_shares }}"
         persistentVolumeReclaimPolicy: Retain
-        nfs_hostname: "{{ hostvars[ groups[ ('tag_' ~ env_type ~ '_' ~ guid ~ '_nfs') | replace('-', '_') ].0 ]['ansible_fqdn'] }}"
+        nfs_hostname: "{{ hostvars[ groups[ ('tag_' ~ env_type ~ '_' ~ guid ~ '_support') | replace('-', '_') ].0 ]['ansible_fqdn'] }}"
 
     - name: Generate workshop PV file
       template:
@@ -159,7 +158,7 @@
         dest: "/root/pvs-{{ env_type }}-{{ guid }}.yml"
 
     - name: Create workshop PVs
-      shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
+      shell: '{{ oc_path }} create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || {{ oc_path }} update -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
 
 - name: Workshop prerequisites
   hosts: 
@@ -218,95 +217,6 @@
       tags:
         - create-pipeline-template
 
-- name: Nexus server
-  hosts: 
-    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
-  vars_files:
-    - "env_vars.yml"
-    - "env_secret_vars.yml"
-    - "ssh_vars.yml"
-  tags:
-    - workshop
-    - workshop_nexus
-  tasks:
-
-    - name: Copy nexus.yaml to master
-      copy:
-        src: "files/nexus.yaml"
-        dest: "/root/nexus.yaml"
-
-    - name: Check if Nexus was already provisioned
-      command: "{{ oc_path }} get service nexus -n workshop-infra"
-
-      register: install_nexus
-      ignore_errors: true
-
-    - name: Instantiate nexus from template
-      command: "{{ oc_path }} create -f /root/nexus.yaml -n workshop-infra"
-
-      when: install_nexus | failed
-
-    # looks like we need a better check - it seems we're ready up to several
-    # seconds before the router finds out about us, so we might want another
-    # http check to make sure nexus is responding
-    - name: Wait for Nexus to be running
-      command: "{{ oc_path }} get dc/nexus -o yaml -n workshop-infra"
-
-      register: result
-      until: '"availableReplicas: 1" in result.stdout'
-      retries: 5
-      delay: 60
-
-    - name: Wait for Nexus to be happy
-      uri:
-        url: "http://nexus.workshop-infra.svc.cluster.local:8081/content/repositories/"
-        status_code: 200
-      register: nexus_happy
-      until: nexus_happy | success
-      retries: 5
-      delay: 60
-
-    - name: Install EPEL (for jq)
-      package:
-        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm"
-        state: installed
-
-    - name: Disable EPEL
-      command: "yum-config-manager --disablerepo=epel"
-
-    - name: Install jq
-      package:
-        name: jq
-        state: present
-        enablerepo: epel
-
-    - name: Copy Nexus addrepo script
-      copy:
-        src: "files/addrepo.sh"
-        dest: "/root/addrepo.sh"
-
-    - name: Check for redhat-ga repository in Nexus
-      uri:
-        url: "http://nexus.workshop-infra.svc.cluster.local:8081/content/repositories/redhat-ga"
-        status_code: 200
-      register: redhat_ga_out
-      ignore_errors: true
-
-    - name: Add redhat-ga repository for Nexus
-      shell: "NEXUS_BASE_URL=nexus.workshop-infra.svc.cluster.local:8081 bash /root/addrepo.sh redhat-ga https://maven.repository.redhat.com/ga/"
-      when: redhat_ga_out | failed
-
-    - name: Check for JBoss repository in Nexus
-      uri:
-        url: "http://nexus.workshop-infra.svc.cluster.local:8081/content/repositories/jboss"
-        status_code: 200
-      register: redhat_ga_out
-      ignore_errors: true
-
-    - name: Add redhat-ga repository for Nexus
-      shell: "NEXUS_BASE_URL=nexus.workshop-infra.svc.cluster.local:8081 bash /root/addrepo.sh jboss https://repository.jboss.org/nexus/content/repositories/public"
-      when: redhat_ga_out | failed
-
 - name: Gitlab
   hosts: 
     - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
@@ -352,8 +262,6 @@
       tags:
         - wait-for-gitlab
 
-# This was added by "PR #21"
-#https://github.com/sborenst/ansible_agnostic_deployer/pull/21
     - name: Annotate gitlab service to group database
       shell: >
         {{ oc_path }} annotate service gitlab-ce
@@ -361,27 +269,6 @@
         --overwrite
         -n workshop-infra
         
- #Commented out in PR #21 Merge
-    - name: Copy simple-java-s2i IS to server
-      copy:
-        src: "files/java-s2i-is.yaml"
-        dest: "/root/java-s2i-is.yaml"
-      tags:
-        - copy-java-s2i-is
-
-    - name: Create simple-java-s2i IS in openshift namespace
-      shell: "{{ oc_path }} create -f /root/java-s2i-is.yaml -n openshift || {{ oc_path }} replace -f /root/java-s2i-is.yaml -n openshift"
-
-      tags:
-        - create-java-s2i-is
-
-    - name: Create Jenkins pipeline template in openshift namespace
-      shell: "{{ oc_path }} create -f https://raw.githubusercontent.com/openshift-roadshow/nationalparks/1.0.0/ose3/pipeline-template.yaml -n openshift || {{ oc_path }} replace -f https://raw.githubusercontent.com/openshift-roadshow/nationalparks/1.0.0/ose3/pipeline-template.yaml -n openshift"
-
-      tags:
-        - create-pipeline-template
- #Commented out in PR #21 Merge
-
 - name: Lab guide
   hosts: 
     - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
@@ -403,7 +290,6 @@
       shell: >
         {{ oc_path }} new-app
         --name=labs jboss-eap70-openshift~{{ lab_url }}#{{ lab_tag }}
-
         -e ROUTER_ADDRESS={{cloudapps_suffix}}
         -e CONSOLE_ADDRESS=master.{{subdomain_base}}
         -e DEFAULT_LAB=roadshow
@@ -412,14 +298,13 @@
         -e WORKSHOPS_URLS={{ lab_content }}
         -n workshop-infra;
         {{ oc_path }} expose service labs -n workshop-infra
-
       when: labs_service_out | failed
       tags:
         - build-workshop-labs
 
 - name: GitLab nfs permissions hack
   hosts: 
-    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_nfs') | replace('-', '_') }}"
+    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_support') | replace('-', '_') }}"
   vars_files:
     - "env_vars.yml"
     - "env_secret_vars.yml"
@@ -594,59 +479,4 @@
         -n workshop-infra
 
     # TODO: curl command to create default pad
-
-- name: Cache Java dependencies
-  hosts: 
-    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
-  vars_files:
-    - "env_vars.yml"
-    - "env_secret_vars.yml"
-    - "ssh_vars.yml"
-  vars:
-    workshop_repos:
-      - "nationalparks"
-      - "mlbparks"
-      - "parksmap-web"
-  tags:
-    - workshop
-    - workshop_java_dependencies
-  tasks:
-    - name: Install Maven and Java
-      yum:
-        name: '{{ item }}'
-        state: present
-        enablerepo: "rhel-7-server-optional-rpms"
-      with_items:
-        - "maven"
-        - "java-1.8.0-openjdk-devel"
-
-    - name: Remove m2 folder
-      file:
-        path: "/home/ec2-user/.m2/repository"
-        state: absent
-
-    - name: Make repos directory
-      file:
-        path: "/home/ec2-user/repos"
-        state: directory
-
-    - name: Clone app repositories
-      git:
-        repo: 'https://github.com/openshift-roadshow/{{ item }}'
-        dest: "/home/ec2-user/repos/{{ item }}"
-      with_items:
-        - '{{ workshop_repos }}'
-
-    - name: Deploy maven settings file
-      template:
-        src: "files/maven.xml.j2"
-        dest: "/home/ec2-user/maven.xml"
-        mode: 0755
-        owner: ec2-user
-
-    - name: Build and cache dependencies
-      shell: >
-        mvn -q -s /home/ec2-user/maven.xml -f /home/ec2-user/repos/{{ item }}/pom.xml install
-      with_items:
-        - '{{ workshop_repos }}'
 
