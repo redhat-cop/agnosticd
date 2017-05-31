@@ -211,7 +211,6 @@ class RavelloInventory(object):
                     groups['_meta']['hostvars'][hostname] = { 'externalFqdn': vm['externalFqdn'] }
                   if tag == 'bastion' and 'externalFqdn' in vm:
                     groups['_meta']['hostvars'][hostname].update({ 'bastion': True })
-                    
         print json.dumps(groups, indent=5)  
 
 #Run the script
