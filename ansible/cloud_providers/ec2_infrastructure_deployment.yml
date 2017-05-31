@@ -1,48 +1,103 @@
 ---
-- name: AWS Generate CloudFormation Template
-  template:
-    src: "{{playbook_dir}}/configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.j2"
-    dest: "{{playbook_dir}}/workdir/{{cloud_provider}}_cloud_template.{{ env_type }}.{{ guid }}.json"
+- name: Step 001 Deploy Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - "{{ inventory_dir }}/../configs/{{ env_type }}/env_vars.yml"
+    - "{{ inventory_dir }}/../configs/{{ env_type }}/env_secret_vars.yml"
   tags:
-    - aws_infrastructure_deployment
-    - gen_cf_template
-#- pause:
-######################### Launch CF Template
-
-- name: Launch CloudFormation template
-  cloudformation:
-    stack_name: "{{ project_tag }}"
-    state: "present"
-    region: "{{ aws_region }}"
-    disable_rollback: true
-    template: "{{playbook_dir}}/workdir/{{cloud_provider}}_cloud_template.{{ env_type }}.{{ guid }}.json"
+    - step001
+    - deploy_infrastructure
+  tasks:
+  - name: AWS Generate CloudFormation Template
+    template:
+      src: "{{ inventory_dir }}/../configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.j2"
+      dest: "{{ inventory_dir }}/../workdir/{{cloud_provider}}_cloud_template.{{ env_type }}.{{ guid }}.json"
     tags:
-      Stack: "project {{ project_tag }}"
-  tags:
-    - aws_infrastructure_deployment
-    - provision_cf_template
-  register: cloudformation_out
+      - aws_infrastructure_deployment
+      - gen_cf_template
+  ######################### Launch CF Template
 
-- debug:
-   var: cloudformation_out.stack_outputs
+  - name: Launch CloudFormation template
+    environment:
+      AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+      AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+      AWS_DEFAULT_REGION: "{{aws_region}}"
+    cloudformation:
+      stack_name: "{{ project_tag }}"
+      state: "present"
+      region: "{{ aws_region }}"
+      disable_rollback: true
+      template: "{{ inventory_dir }}/../workdir/{{cloud_provider}}_cloud_template.{{ env_type }}.{{ guid }}.json"
+      tags:
+        Stack: "project {{ project_tag }}"
+    tags:
+      - aws_infrastructure_deployment
+      - provision_cf_template
+    register: cloudformation_out
 
-- name: Refresh cloud_provider cache
-  environment:
-    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
-    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
-    AWS_DEFAULT_REGION: "{{aws_region}}"
-  shell: "{{ playbook_dir }}/inventory/{{ cloud_provider }}.py --refresh-cache"
-  when: "not tower_run == 'true'"
-  register: task_result
-  until: task_result.rc == 0
-  retries: 5
-  delay: 30
-  ignore_errors: yes
-  tags:
-    - refresh_inventory
-    - refresh_inventory_script
+  - debug:
+     var: cloudformation_out.stack_outputs
 
-- name: Refresh in-memory cloud_provider cache
-  meta: refresh_inventory
+  - name: "Sleeping 60 seconds"
+    pause:
+      seconds: 1
+
+  - name: Refresh cloud_provider cache
+    environment:
+      AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+      AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+      AWS_DEFAULT_REGION: "{{aws_region}}"
+    shell: "{{ inventory_dir }}/{{ cloud_provider }}.py --refresh-cache"
+    when: "not tower_run == 'true'"
+    register: task_result
+    until: task_result.rc == 0
+    retries: 5
+    delay: 30
+    ignore_errors: yes
+    tags:
+      - refresh_inventory
+      - refresh_inventory_script
+
+  - name: Refresh in-memory cloud_provider cache
+    environment:
+      AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+      AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+      AWS_DEFAULT_REGION: "{{aws_region}}"
+    meta: refresh_inventory
+    tags:
+      - refresh_inventory
+
+  - name: Configure local ssh config for bastion proxy use
+    include: "{{inventory_dir}}/../cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
+
+
+- name: Wait for environment Readiness
+  hosts:
+    - "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
+  vars_files:
+    - "{{ inventory_dir }}/../configs/{{ env_type }}/env_vars.yml"
+    - "{{ inventory_dir }}/../configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ inventory_dir }}/../configs/{{ env_type }}/ssh_vars.yml"
+  gather_facts: false
+  any_errors_fatal: True
+  become: true
   tags:
-    - refresh_inventory
+    - step001
+    - wait_ssh
+    - set_hostname
+  tasks:
+    - name: wait for host to be available and set hostnames
+      wait_for:
+        host: '{{ inventory_hostname }}'
+        port: 22
+        search_regex: OpenSSH
+      delegate_to: localhost
+      become: false
+    - debug:
+        msg: "{{hostvars[inventory_hostname].ec2_tag_internaldns}}"
+    - name: Set hostname based on ec2_tag_internaldns
+      hostname:
+        name: "{{ec2_tag_internaldns}}"
