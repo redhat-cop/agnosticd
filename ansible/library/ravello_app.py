@@ -41,7 +41,7 @@ short_description: Create/delete/start/stop an application in ravellosystems
 description:
      - Create/delete/start/stop an application in ravellosystems and wait for it (optionally) to be 'running'
      - list state will return a fqdn list of exist application hosts with their external services
-     - blueprint state wil create a blueprint from an existing app (must provide blueprint_name)
+     - blueprint state will create a blueprint from an existing app (must provide blueprint_name)
 options:
   state:
     description:
@@ -474,10 +474,22 @@ def create_app(client, module):
         new_vm['memorySize'] = { 'unit': vm['memorySize']['unit'],
                                  'value': vm['memorySize']['value']
                                }
-      if 'keypairName' in vm:
-        new_vm['keypairName'] = vm['keypairName']
       if 'supportsCloudInit' in vm:
         new_vm['supportsCloudInit'] = vm['supportsCloudInit']
+        if 'keypairId' in vm:
+          new_vm['keypairId'] = vm['keypairId']
+        else:
+          module.fail_json(msg = 'ERROR no keypairId in template!')
+        if 'keypairName' in vm:
+          new_vm['keypairName'] = vm['keypairName']
+        else:
+          module.fail_json(msg = 'ERROR no keypairName in template!')
+        if 'userData' in vm:
+          new_vm['userData'] = vm['userData']
+        else:
+          module.fail_json(msg = 'ERROR no userData in template!')
+      else:
+        module.fail_json(msg = 'ERROR supportsCloudInit not set to true in template!')
       if 'stopTimeOut' in vm:
         new_vm['stopTimeOut'] = vm['stopTimeOut']
       else:
@@ -620,7 +632,7 @@ def create_app(client, module):
     blueprint_dict = {"applicationId":appID, "blueprintName":blueprint_name, "offline": False, "description":app_description }
     try:
         blueprint_id=((client.create_blueprint(blueprint_dict))['_href'].split('/'))[2]
-        client.delete_application(created_app)
+        client.delete_application(appID)
         module.exit_json(changed=True, app_name='%s' % app_name, blueprint_name='%s' % blueprint_name, blueprint_id='%s' % blueprint_id)
     except Exception, e:
         log_contents = log_capture_string.getvalue()
