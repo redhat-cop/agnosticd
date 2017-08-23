@@ -44,6 +44,7 @@ class Service:
         self.external = from_kwargs(kwargs, 'external', True)
         self.port_range = from_kwargs(kwargs, 'port_range', Exception('Missing required field: port_range'))
         self.protocol = from_kwargs(kwargs, 'protocol', Exception('Missing required field: protocol'))
+        self.ip = from_kwargs(kwargs, 'ip', Exception('Missing required field: ip'))
        
 class NetworkDevice:
     def __init__(self, name, ip, mac):
@@ -81,7 +82,7 @@ class Vm:
         # Parse kwargs
         self.name = kwargs['name']
         self.tag = kwargs['tag']
-        self.description = "\"" + self.name + "\\nnohbac: true\\n\""
+        self.description = from_kwargs(kwargs, 'description', "\"" + self.name + "\\nnohbac: true\\n\"")
         self.num_cpus = from_kwargs(kwargs, 'num_cpus', 1)
         self.memory_size = from_kwargs(kwargs, 'mem_size', 2)
         self.memory_unit = from_kwargs(kwargs, 'memory_unit', "GB")
@@ -115,6 +116,7 @@ class Vm:
         self.hard_drives.append(hd)
 
     def add_service(self, **kwargs):
+        kwargs['ip'] = from_kwargs(kwargs, 'ip', self.ip)
         s = Service(**kwargs)
         self.services.append(s)
 
@@ -203,7 +205,7 @@ class Vm:
         for service in self.services:
             yaml_segment = """\
   - external: {service_external}
-    ip: {vm_ip}
+    ip: {service_ip}
     name: {service_name}
     portRange: {service_portrange}
     protocol: {service_protocol}
@@ -213,7 +215,8 @@ class Vm:
                                               service_external = service.external,
                                               service_name = service.name,
                                               service_protocol = service.protocol,
-                                              service_portrange = service.port_range)
+                                              service_portrange = service.port_range,
+                                              service_ip = service.ip)
         return services_yaml
     def to_yaml(self):
       return "".join([self.vm_core_yaml(), 

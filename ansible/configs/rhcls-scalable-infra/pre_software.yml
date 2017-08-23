@@ -17,20 +17,8 @@
         creates: "{{ ANSIBLE_REPO_PATH }}/workdir/{{env_authorized_key}}"
       when: set_env_authorized_key
 
-
-
 # Cloudformation template or equivalent should tag all hosts with Project:{{ env_type }}-{{ guid }}
 #
-- name: Configure extra host groups
-  hosts: localhost
-  become: true
-  vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
-  roles:
-    -  { role: "{{ ANSIBLE_REPO_PATH }}/roles/configure-host-groups" }
-
 - name: Configure all hosts with Repositories, Common Files and Set environment key
   hosts: "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
   become: true
@@ -60,6 +48,7 @@
     - step004
     - bastion_tasks
 
+
 - name: Install additional software on bastion
   hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
   become: true
@@ -88,23 +77,192 @@
         state: latest
       with_items: "{{ osp_packages }}"
 
-#- name: Pre-software verification and ipa client
-#  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
-#  gather_facts: False
-#  become: yes
-#  tags:
-#    - opentlc_bastion_tasks
-#  vars_files:
-#    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-#  tasks:
-#    - name: install ipa client packages
-#      yum:
-#        name: "ipa-client"
-#        state: present
-#      when: "install_ipa_client"
-#    - name: Register bastion with IPA
-#      shell: "/usr/sbin/ipa-client-install --domain=OPENTLC.COM -w {{ipa_host_password}} -N -U --mkhomedir --no-dns-sshfp --hostname={{bastion_public_dns_chomped}}"
-#      when: "install_ipa_client"
+- name: Wait for full environment readiness
+  hosts: 
+    - "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
+  gather_facts: false
+  any_errors_fatal: True
+  become: true
+  tags:
+    - step001
+    - wait_ssh
+    - set_hostname
+  tasks:
+    - name: wait for host to be available and set hostnames
+      wait_for:
+        host: '{{ inventory_hostname }}'
+        port: 22
+        search_regex: OpenSSH
+      delegate_to: "{{ (hostvars['localhost']['groups'][('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_')].0) }}"
+      become: false
+    - debug:
+        msg: "{{hostvars[inventory_hostname]}}"
+    - name: Set hostname based on ec2_tag_internaldns
+      hostname:
+        name: "{{inventory_hostname}}"
+
+- name: Wait for SSH connection to be released
+  hosts: localhost
+  tasks:
+    - pause:
+        seconds: 3
+
+- name: Copy the iptables template file
+  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+  become: true
+  vars:
+    - internal_network: 192.168.122.0/24
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
+  tasks:
+    - template:
+        src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/iptables.j2"
+        dest: /etc/sysconfig/iptables
+      notify: restart iptables 
+  handlers:
+    - name: restart iptables
+      service:
+        name: iptables
+        state: restarted
+
+- name: Configure enabled services
+  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+  become: true
+  vars:
+    - enabled_services:
+        - ntpd
+        - iptables
+        - nfs
+    - disabled_services:
+        - avahi-daemon
+        - chronyd
+        - firewalld
+        - cups
+        - libvirtd
+        - ModemManager
+        - oddjobd
+        - postfix
+        - wpa_supplicant
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
+  tasks:
+    - name: Enabling custom services
+      systemd:
+        state: started
+        enabled: yes
+        name: "{{ item }}"
+      with_items: "{{ enabled_services | default([])}}"
+      when: enabled_services is defined
+    - name: Stopping and disabling systemD services which are not needed
+      ignore_errors: yes
+      systemd:
+        state: stopped
+        enabled: no
+        name: "{{ item }}"
+      with_items: "{{ disabled_services }}"
+
+
+
+- name: Create directories for nfs exports
+  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+  become: true
+  vars:
+    - exports_url: https://raw.githubusercontent.com/RedHatDemos/RHCLS_ScalableInfrastructure/master/exports
+    # This needs to change
+    - nfs_exports:
+        - /exports/cinder/paris
+        - /exports/cinder/tokyo
+        - /exports/cinder/newyork
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
+  handlers:
+    - name: Export NFS
+      command: exportfs -ra
+  tasks:
+    - name: Create directories for NFS export
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: 0755
+      with_items: "{{ nfs_exports }}"
+    - name: Configure /etc/exports
+      get_url:
+        url: "{{ exports_url }}"
+        dest: /etc/exports
+        mode: 0644
+        force: yes
+      notify: Export NFS
+
+- name: generate ssl certs
+  hosts: localhost
+  become: true
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
+  tasks:
+  - command: 'openssl req -subj "/C=XX/ST=XX/L=XX/O=XX/OU=IT Department/CN=XX" -x509 -sha256 -newkey rsa:2048 -keyout {{ ANSIBLE_REPO_PATH }}/workdir/selfkey-{{ guid }}.key -out {{ ANSIBLE_REPO_PATH }}/workdir/selfcert-{{ guid }}.crt -days 1024 -nodes'
+
+- name: Install OSP
+  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_OSP_Nodes') | replace('-', '_') }}"
+  become: true
+  vars:
+    - host_tag: "{{ inventory_hostname | replace('-REPL.rhpds.opentlc.com', '') }}"
+    - answers_file_url: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/answers.j2"
+    - answers_file: /home/{{ remote_user }}/answers.txt
+    - glance_img_destination: /root/cloud_images
+    - glance_images:
+        - { name: 'Windows', src: '', dst: '', flavor: 'm1.medium' }
+        - { name: 'Ubuntu', src: '', dst: '', flavor: 'm1.small' }
+        - { name: 'RHEL', src: '',dst: '', flavor: 'm1.small' }
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
+  tasks:
+    - name: copy ssl cert to OSP Nodes
+      copy:
+        src: "{{ ANSIBLE_REPO_PATH }}/workdir/selfcert-{{ guid }}.crt"
+        dest: /etc/pki/tls/certs/selfcert.crt
+    - name: copy ssl cert to OSP Nodes
+      copy:
+        src: "{{ ANSIBLE_REPO_PATH }}/workdir/selfcert-{{ guid }}.crt"
+        dest: /etc/pki/tls/certs/packstack_cacert.crt
+    - name: copy ssl key to OSP Nodes
+      copy:
+        src: "{{ ANSIBLE_REPO_PATH }}/workdir/selfkey-{{ guid }}.key"
+        dest: /etc/pki/tls/private/selfkey.key
+    - name: Capture answers file for all-in-one OSP install
+      template:
+        src: "{{ answers_file_url }}" 
+        dest: "{{ answers_file }}"
+    - name: Install OSP using answers file
+      command: /usr/bin/packstack --answer-file={{answers_file}}
+#    - name: Capture glance images
+#      get_url:
+#        src: "{{ item.src }}"
+#        dst: "{{ glance_image_location }}/{{ item.dst }}"
+#      with_items: "{{ glance_images  }}"
+#    
+#    - name: Source keystone credentials and import images
+#      command: source ./keystonerc_admin
+#    - name: Import images into glance
+#      command:  /usr/bin/glance image-upload --file {{ glance_image_location }}/{{ item.dst }}
+#      with_items: "{{ glance_images }}"
+#    
+#    - name: Create instances from glance images
+#      command: nova boot --image {{ item.name }} --flavor {{ item.flavor }} {{ item.name }}
+#      with_items: "{{ glance_images }}"
 
 - name: PreSoftware flight-check
   hosts: localhost
