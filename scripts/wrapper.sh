@@ -2,7 +2,7 @@
 
 # wapper script to agnostic_ansible_deployer playbooks
 
-if [ $# != 2 ]; then
+if [ $# -lt 2 ]; then
     echo "2 args needed" >&2
     echo
     echo 'wapper script to agnostic_ansible_deployer playbooks'
@@ -43,6 +43,7 @@ DEPLOYER_REPO_PATH="${ORIG}/ansible"
 
 case $2 in
     provision)
+        shift; shift
         ansible-playbook \
             ${DEPLOYER_REPO_PATH}/main.yml  \
             -i ${DEPLOYER_REPO_PATH}/inventory/${CLOUDPROVIDER}.py \
@@ -56,9 +57,11 @@ case $2 in
             -e "install_ipa_client=${INSTALL_IPA_CLIENT}" \
             -e "software_to_deploy=${SOFTWARE_TO_DEPLOY}" \
             -e "repo_method=${REPO_METHOD}" \
-            ${ENVTYPE_ARGS[@]}
+            ${ENVTYPE_ARGS[@]} \
+            "$@"
         ;;
     destroy)
+        shift; shift
         ansible-playbook \
             ${DEPLOYER_REPO_PATH}/configs/${ENVTYPE}/destroy_env.yml \
             -i ${DEPLOYER_REPO_PATH}/inventory/${CLOUDPROVIDER}.py \
@@ -69,6 +72,7 @@ case $2 in
             -e "aws_region=${REGION}"  \
             -e "HostedZoneId=${HOSTZONEID}"  \
             -e "key_name=${KEYNAME}"  \
+            "$@"
         ;;
     stop)
         aws ec2 stop-instances --region $REGION --instance-ids $(aws ec2 describe-instances --filters "Name=tag:aws:cloudformation:stack-name,Values=${STACK_NAME}" --query Reservations[*].Instances[*].InstanceId --region $REGION --output text)
