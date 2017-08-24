@@ -30,9 +30,9 @@ ospnewyork.add_service(name='http', external=True, port_range=80, protocol='HTTP
 ospnewyork.add_service(name='https', external=True, port_range=443, protocol='HTTPS')
 ospnewyork.add_service(name='novnc', external=True, port_range=6080, protocol='TCP')
 
-cloudforms = ravello.Vm(name="4CloudForms 4.2", tag="cloudforms", boot_disk_size_GB=40, 
+cloudforms = ravello.Vm(name="4CloudForms 4.2", tag="cloudforms", boot_disk_size_GB=60, 
                      ip="10.0.1.20", mac="2c:c2:60:7e:44:d3",
-                     num_cpus=4, mem_size=16)
+                     num_cpus=4, mem_size=16, boot_image="cfme-vsphere-5.8.0.17-1.x86_64.vsphere_hd0")
 cloudforms.add_service(name='http', external=True, port_range=80, protocol='HTTP')
 cloudforms.add_service(name='https', external=True, port_range=443, protocol='HTTPS')
 cloudforms.add_hard_drive(name='vol', size=60)

@@ -3,8 +3,8 @@
 import sys
 import yaml
 
-DEFAULT_DISK_IMAGE = "rhel-guest-image-7.3-35.x86_64"
-#DEFAULT_DISK_IMAGE = "Fedora-Workstation-Live-x86_64-26-1.5.iso"
+DEFAULT_BOOT_IMAGE = "rhel-guest-image-7.3-35.x86_64"
+#DEFAULT_BOOT_IMAGE = "Fedora-Workstation-Live-x86_64-26-1.5.iso"
 
 def yaml_indent(level):
     return '  ' * level
@@ -35,16 +35,32 @@ class HardDrive:
         self.memory_unit = from_kwargs(kwargs, 'memory_unit', "GB")
         self.bootable = from_kwargs (kwargs, 'bootable', False)
         self.controller = "virtio"
-        self.image_name =  from_kwargs(kwargs, 'image', DEFAULT_DISK_IMAGE)
+        self.image =  from_kwargs(kwargs, 'image', '')
         self.device_type = from_kwargs(kwargs, 'device_type', "DISK")
 
 class Service:
     def __init__(self, **kwargs):
-        self.name = from_kwargs(kwargs, 'name', Exception('Missing required field: name'))
+        self.name = \
+            from_kwargs(
+                kwargs, 
+                'name', 
+                Exception('Missing required field: name'))
         self.external = from_kwargs(kwargs, 'external', True)
-        self.port_range = from_kwargs(kwargs, 'port_range', Exception('Missing required field: port_range'))
-        self.protocol = from_kwargs(kwargs, 'protocol', Exception('Missing required field: protocol'))
-        self.ip = from_kwargs(kwargs, 'ip', Exception('Missing required field: ip'))
+        self.port_range = \
+            from_kwargs(
+                kwargs, 
+                'port_range', 
+                Exception('Missing required field: port_range'))
+        self.protocol = \
+            from_kwargs(
+                kwargs, 
+                'protocol', 
+                 Exception('Missing required field: protocol'))
+        self.ip = \
+            from_kwargs(
+                kwargs, 
+                'ip', 
+                Exception('Missing required field: ip'))
        
 class NetworkDevice:
     def __init__(self, name, ip, mac):
@@ -82,14 +98,22 @@ class Vm:
         # Parse kwargs
         self.name = kwargs['name']
         self.tag = kwargs['tag']
-        self.description = from_kwargs(kwargs, 'description', "\"" + self.name + "\\nnohbac: true\\n\"")
+        self.description = \
+           from_kwargs(
+               kwargs, 
+               'description', 
+               "\"" + self.name + "\\nnohbac: true\\n\"")
+
         self.num_cpus = from_kwargs(kwargs, 'num_cpus', 1)
         self.memory_size = from_kwargs(kwargs, 'mem_size', 2)
         self.memory_unit = from_kwargs(kwargs, 'memory_unit', "GB")
-        self.hostnames = from_kwargs(kwargs, 'hostnames',
-                            [self.tag + "-REPL.rhpds.opentlc.com",
-                             self.tag + ".example.com",
-                             self.tag])
+
+        self.hostnames = \
+            from_kwargs(kwargs, 'hostnames',
+            [self.tag + "-REPL.rhpds.opentlc.com",
+            self.tag + ".example.com",
+            self.tag])
+
         self.hard_drives = []
         self.network_devices = []
         self.stop_timeout = 300
@@ -99,8 +123,11 @@ class Vm:
         self.users = []
 
         # Add boot disk
-        boot_hd = HardDrive(name=from_kwargs(kwargs, 'hd_name', 'root disk'), 
-                            size=kwargs['boot_disk_size_GB'])
+        boot_hd = \
+            HardDrive(
+                name=from_kwargs(kwargs, 'hd_name', 'root disk'), 
+                image=from_kwargs(kwargs, 'boot_image', DEFAULT_BOOT_IMAGE),
+                size=kwargs['boot_disk_size_GB'])
         boot_hd.bootable = True
         self.hard_drives.append(boot_hd)
 
@@ -148,19 +175,20 @@ class Vm:
       - sed -i -e '$aUseDNS no' /etc/ssh/sshd_config
       - systemctl restart sshd
 """
-        return core_yaml.format(vm_name = self.name, 
-                                  vm_tag = self.tag, 
-                                  vm_description = self.description,
-                                  vm_num_cpus = self.num_cpus,
-                                  vm_memory_unit = self.memory_unit,
-                                  vm_memory_size = self.memory_size,
-                                  vm_hostnames_list = \
-                                      yaml.dump(self.hostnames).rstrip())
+        return core_yaml.format(
+            vm_name = self.name, 
+            vm_tag = self.tag, 
+            vm_description = self.description,
+            vm_num_cpus = self.num_cpus,
+            vm_memory_unit = self.memory_unit,
+            vm_memory_size = self.memory_size,
+            vm_hostnames_list = \
+                yaml.dump(self.hostnames).rstrip())
+
     def vm_hard_drives_yaml(self):
         def convert_hd_yaml(hd, index):
             hd_yaml = """\
-  - index: {hd_index}
-    imageName: {hd_image_name}
+  - index: {hd_index}{hd_image_str}
     boot: {hd_boot}
     controller: {hd_controller}
     name: {hd_name}
@@ -169,14 +197,18 @@ class Vm:
       value: {hd_memory_size}
     type: {hd_type}
 """
-            return hd_yaml.format(hd_index = index,
-                                  hd_image_name = hd.image_name,
-                                  hd_boot = hd.bootable,
-                                  hd_controller = hd.controller,
-                                  hd_name = hd.name,
-                                  hd_memory_unit = hd.memory_unit,
-                                  hd_memory_size = hd.memory_size,
-                                  hd_type = hd.device_type)
+            return hd_yaml.format(
+               hd_index = index,
+               hd_image_str = \
+               (lambda: '' \
+                 if hd.image == '' \
+                 else '\n    imageName: ' + hd.image)(),
+               hd_boot = hd.bootable,
+               hd_controller = hd.controller,
+               hd_name = hd.name,
+               hd_memory_unit = hd.memory_unit,
+               hd_memory_size = hd.memory_size,
+               hd_type = hd.device_type)
 
         hard_drives_yaml = "".join([convert_hd_yaml(hd, i) \
                   for i, hd in enumerate(self.hard_drives)])
@@ -191,11 +223,12 @@ class Vm:
       deviceType: {nd_controller}
       {nd_mac_section}
     {nd_ip_section}"""
-            return nd_yaml.format(nd_name = nd.name,
-                                  nd_index = index,
-                                  nd_controller = nd.controller,
-                                  nd_mac_section = nd.gen_mac_yaml(3),
-                                  nd_ip_section = nd.gen_ip_yaml(2))
+            return nd_yaml.format(
+                nd_name = nd.name,
+                nd_index = index,
+                nd_controller = nd.controller,
+                nd_mac_section = nd.gen_mac_yaml(3),
+                nd_ip_section = nd.gen_ip_yaml(2))
         network_device_yaml = "".join([convert_nd_yaml(nd, i) \
                  for i, nd in enumerate(self.network_devices)])
         return "  networkConnections:\n" + network_device_yaml
@@ -210,14 +243,17 @@ class Vm:
     portRange: {service_portrange}
     protocol: {service_protocol}
 """
-            services_yaml = services_yaml + \
-                              yaml_segment.format(vm_ip = self.ip, 
-                                              service_external = service.external,
-                                              service_name = service.name,
-                                              service_protocol = service.protocol,
-                                              service_portrange = service.port_range,
-                                              service_ip = service.ip)
+            services_yaml = \
+                services_yaml + \
+                    yaml_segment.format(
+                        vm_ip = self.ip, 
+                        service_external = service.external,
+                        service_name = service.name,
+                        service_protocol = service.protocol,
+                        service_portrange = service.port_range,
+                        service_ip = service.ip)
         return services_yaml
+
     def to_yaml(self):
       return "".join([self.vm_core_yaml(), 
                       self.vm_hard_drives_yaml(), 
