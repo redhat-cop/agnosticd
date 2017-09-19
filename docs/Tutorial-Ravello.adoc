@@ -1,0 +1,276 @@
+= Ansible Agnostic Deployer Tutorial (Ravello)
+
+This document walks through a full deployment of an example 
+web server environment using Ravello.
+
+Before reading, you should be familiar with all the information in 
+<link to Readme.adoc>.
+
+== Preparation
+
+The following dependencies must be installed:
+- Python >= 2.7
+- Ansible 2.3
+
+Credentials for a ravello subscription must be stored in 
+`~/.ravello_login` as described in <link to creds>
+
+A useable virtual disk image of Red Hat Enterprise Linux in your Ravello 
+disk images library.  We will use an image called
+`rhel-guest-image-7.3-35.x86_64`.  If you would like to use an
+image with a different name, you will need to use the name of
+your disk image in every place the example image name is provided.
+
+A subscription to the Red Hat CDN for installing software.
+
+== Creating a New Configuration
+
+```
+cp -r ansible_agnostic_deployer/ansible/configs/bastion-workstation \
+       ansible_agnostic_deployer/ansible/configs/my-webserver
+```
+
+== Adding a New Virtual Machine
+
+Edit the ravello cloud-template file, `ansible_agnostic_deployer/ansible/configs/my-webserver/files/cloud_providers/ravello_cloud_template.j2`.
+
+Add the following vm config information at the bottom of the file:
+
+```
+- name: Web Server
+  tag: webserver0
+  description: "Web Server 0\nnohbac: true\n"
+  numCpus: 2
+  memorySize:
+    unit: GB
+    value: 2
+  hostnames: [webserver0.example.com, www0]
+  supportsCloudInit: True
+  keypairId: 62226455
+  keypairName: "opentlc-admin-backdoor"
+  userData: |
+    #cloud-config
+    ssh_pwauth: False
+    disable_root: False
+    users:
+      - name: "{{ remote_user }}"
+        sudo: ALL=(ALL) NOPASSWD:ALL
+        lock_passwd: False
+        ssh-authorized-keys:
+          - "{{ env_public_key }}"
+    runcmd:
+      - sed -i -e '/^GSSAPIAuthentication/s/^.*$/GSSAPIAuthentication no/' /etc/ssh/sshd_config
+      - sed -i -e '$aUseDNS no' /etc/ssh/sshd_config
+      - systemctl restart sshd
+  hardDrives:
+  - index: 0
+    imageName: rhel-guest-image-7.3-35.x86_64
+    boot: True
+    controller: virtio
+    name: root disk
+    size:
+      unit: GB
+      value: 40
+    type: DISK
+  - index: 1
+    boot: False
+    controller: virtio
+    name: vol
+    size:
+      unit: GB
+      value: 100
+    type: DISK
+  networkConnections:
+  - name: eth0
+    device:
+      index: 0
+      deviceType: virtio
+      useAutomaticMac: False
+      mac: 2c:c2:60:14:42:53
+    ipConfig:
+      autoIpConfig:
+        reservedIp: 10.0.2.10
+      hasPublicIp: true
+  suppliedServices:
+  - external: True
+    ip: 10.0.2.10
+    name: ssh
+    portRange: 22
+    protocol: SSH
+- name: Web Server 1
+  tag: webserver1
+  description: "Web Server 1\nnohbac: true\n"
+  numCpus: 2
+  memorySize:
+    unit: GB
+    value: 2
+  hostnames: [webserver1.example.com, www1]
+  supportsCloudInit: True
+  keypairId: 62226455
+  keypairName: "opentlc-admin-backdoor"
+  userData: |
+    #cloud-config
+    ssh_pwauth: False
+    disable_root: False
+    users:
+      - name: "{{ remote_user }}"
+        sudo: ALL=(ALL) NOPASSWD:ALL
+        lock_passwd: False
+        ssh-authorized-keys:
+          - "{{ env_public_key }}"
+    runcmd:
+      - sed -i -e '/^GSSAPIAuthentication/s/^.*$/GSSAPIAuthentication no/' /etc/ssh/sshd_config
+      - sed -i -e '$aUseDNS no' /etc/ssh/sshd_config
+      - systemctl restart sshd
+  hardDrives:
+  - index: 0
+    imageName: rhel-guest-image-7.3-35.x86_64
+    boot: True
+    controller: virtio
+    name: root disk
+    size:
+      unit: GB
+      value: 40
+    type: DISK
+  - index: 1
+    boot: False
+    controller: virtio
+    name: vol
+    size:
+      unit: GB
+      value: 100
+    type: DISK
+  networkConnections:
+  - name: eth0
+    device:
+      index: 0
+      deviceType: virtio
+      useAutomaticMac: False
+      mac: 2c:c2:60:14:42:54
+    ipConfig:
+      autoIpConfig:
+        reservedIp: 10.0.3.10
+      hasPublicIp: true
+  suppliedServices:
+  - external: True
+    ip: 10.0.3.10
+    name: ssh
+    portRange: 22
+    protocol: SSH
+```
+
+Reminder: If you are using a different image than the example, you must use
+your disk image name in place of the example for the `vms.<index>.hardDrives.imageName`
+value.  There should be three of these values to change.
+
+Next, define the name of a dynamic webservers host group which will be created 
+after the vm instances are provisioned. Add the following variable to 
+`ansible_agnostic_deployer/ansible/configs/my-webserver/env_vars.yml`:
+
+```
+extra_host_groups:
+  - name: webservers
+    hosts:
+      # list the tags of the vms to put in the group
+      - webserver0
+      - webserver1
+```
+
+== Configuring Software Repositories
+
+Store your Red Hat CDN username and password as the following variables in the file 
+`ansible_agnostic_deployer/ansible/configs/my-webserver/env_secret_vars.yml`
+
+```
+# This file is ignored by git
+rhel_subscription_user: < your username >
+rhel_subscription_pass: < your password >
+```
+
+Ensure the repositories to enable are defined using the following variable in
+`ansible_agnostic_deployer/ansible/configs/my-webserver/env_vars.yml`.
+
+```
+rhel_repos:
+  - rhel-7-server-rpms
+  - rhel-7-server-extras-rpms
+```
+
+Add the following play to the playbook 
+`ansible_agnostic_deployer/ansible/configs/my-webserver/pre_software.yml`.
+
+```
+# This play calls a role to configure the software repositories specified in 
+# env_vars.yml
+- name: Configure all hosts with Repositories, Common Files and Set environment key
+  # The following line specifies ansible to run the play on all hosts
+  hosts: "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
+  become: true
+  gather_facts: False
+  vars:
+    - attach_pool_retries: 25
+    - register_node_retries: 25
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
+  tags:
+    - step004
+    - common_tasks
+  roles:
+    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/set-repositories", when: 'repo_method is defined' }
+```
+
+== Installing Software
+
+Copy the file 
+`ansible_agnostic_deployer/ansible/software_playbooks/bastion-workstation.yml` to
+`ansible_agnostic_deployer/ansible/software_playbooks/my-webserver.yml`.
+
+Add the following play to
+`ansible_agnostic_deployer/ansible/software_playbooks/my-webserver.yml`.
+
+```
+# Install apache on webservers
+- name: Install additional software on webservers
+  # This specifies ansible to use the webservers host group we created
+  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_webservers') | replace('-', '_') }}"
+  become: true
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
+  vars:
+    # Get the tag we gave to our host
+    - host_tag: "{{ inventory_hostname | replace('.example.com', '') }}"
+  tasks:
+    - name: webservers - install apache
+      yum:
+        name: "apache"
+        state: latest
+    - name: create index.html
+      copy:
+        content: "Hello from {{ host_tag }}!"
+        dest: /var/www/index.html
+      notify: restart httpd
+  handlers:
+    - name: restart httpd
+      service:
+        name: httpd
+        state: restarted
+  
+```
+
+== Deploying the environment
+
+To deploy the environment, run the following command from the 
+`ansible_agnostic_deployer` directory:
+
+```
+ansible-playbook main.yml \
+  -e "env_type=my-webserver" \
+  -e "cloud_provider=ravello" \
+  -e "ANSIBLE_REPO_PATH=`pwd`/ansible"\
+  -e "software_to_deploy=my-webserver"
+```
+
