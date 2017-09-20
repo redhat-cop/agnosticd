@@ -17,28 +17,31 @@
   hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_provisioner') | replace('-', '_') }}"
   become: yes
   gather_facts: False
-  vars:
-    symlinks:
-      - src: /opt/OPEN_Admin/OPENTLC-OCP3/provision_workshop_env.sh
-        path: /home/opentlc-mgr/bin/provision_workshop_env.sh
-      - src: /opt/OPEN_Admin/OPENTLC-OCP3/provision-ose-projects.sh
-        path: /home/opentlc-mgr/bin/provision-ose-projects.sh
-      - src: /opt/OPEN_Admin/OPENTLC-OCP3/deploy_scripts
-        path: /home/opentlc-mgr/bin/deploy_scripts
   roles:
     - role: "{{ ANSIBLE_REPO_PATH }}/roles/opentlc-integration"
-      when: install_opentlc_integration == true
+      when: install_opentlc_integration
+      no_log: yes
   vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/mgr_users.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   tags: [ env-specific, cf_integration ]
   tasks:
-    - name: Copy ssh key to provisioner
-      copy:
-        src: "~/.ssh/{{ key_name }}.pem"
-        dest: "/home/opentlc-mgr/.ssh/{{ key_name }}.pem"
+    - name: Install vim
+      yum:
+        name: vim
 
-    - name: Install EPEL (for jq)
+    - name: Copy SSH private key to provisioner for users
+      copy:
+        src: "~/.ssh/{{ item.private_key }}.pem"
+        dest: "{{ item.home }}/.ssh/{{ item.private_key }}.pem"
+        mode: 0400
+        owner: "{{ item.name }}"
+      when: item.private_key is defined
+      with_items: "{{ mgr_users }}"
+      no_log: yes
+
+    - name: Install EPEL (for python-pip and ansible)
       package:
         name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm"
         use: yum
@@ -48,6 +51,12 @@
       yum:
         name: python2-pip
 
+    - name: install ansible
+      yum:
+        name: python2-pip
+    - name: install boto3
+      command: pip install boto3
+
     - name: Install awscli
       pip:
         name: awscli
@@ -55,22 +64,31 @@
     - name: test awscli
       command: aws --version
 
-    - name: create ~opentlc-mgr/.aws 
+    - name: Create ~/.aws for users
       file:
-        path: /home/opentlc-mgr/.aws
-        owner: opentlc-mgr
-        group: opentlc-mgr
+        path: "{{ item.home }}/.aws"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: 0700
         state: directory
+      when: item.aws_access_key_id is defined
+      with_items: "{{ mgr_users }}"
+      no_log: yes
 
     - name: Insert awscli credentials
       copy:
-        dest: /home/opentlc-mgr/.aws/credentials
-        owner: opentlc-mgr
-        group: opentlc-mgr
+        dest: "{{ item.home }}/.aws/credentials"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
         content: |
           [default]
-          aws_access_key_id = {{aws_access_key_id}}
-          aws_secret_access_key = {{aws_secret_access_key}}
+          aws_access_key_id = {{ item.aws_access_key_id }}
+          aws_secret_access_key = {{ item.aws_secret_access_key }}
+      when:
+        - item.aws_access_key_id is defined
+        - item.aws_secret_access_key is defined
+      with_items: "{{ mgr_users }}"
+      no_log: yes
 
     - name: Copy boto.cfg file to /etc
       copy:
@@ -85,7 +103,7 @@
     - name: install lvm2
       yum:
         name: lvm2
-    
+
     - lvg:
         vg: "{{ storage_vg }}"
         pvs: "{{ storage_pvs }}"
@@ -120,10 +138,16 @@
 
     - shell: "mkdir -p {{ storage_mount_path }} &&  mount {{ storage_mount_path }}"
       ignore_errors: true
-#    - shell: "SELINUX=enforcing"
-    #- shell: "systemctl enable http && systemctl restart httpd"
-    #- shell: "ln -s {{storage_mount_path}}/repos /var/www/html/repos"
-#    - shell: "chcon -R -t httpd_user_content_t /srv"
-#    - shell: "chcon -R -t httpd_user_content_t /var/www/html/repos"
-### Still need to add "env_secret_vars" files to actually get this to work
-### still need to run the repository sync script.
+
+- name: Zabbix
+  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_provisioner') | replace('-', '_') }}"
+  gather_facts: true
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  roles:
+    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/zabbix-client" }
+  tags:
+    - env-specific
+    - install_zabbix
