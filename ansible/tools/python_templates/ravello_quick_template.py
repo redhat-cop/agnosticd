@@ -151,6 +151,8 @@ class Vm:
         core_yaml = """\
 - name: {vm_name}
   tag: {vm_tag}
+  allowNested: {{{{ nested_virt }}}}
+  preferPhysicalHost: {{{{ physical_host }}}}
   description: {vm_description}
   numCpus: {vm_num_cpus}
   memorySize:

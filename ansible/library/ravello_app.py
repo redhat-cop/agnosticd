@@ -669,7 +669,8 @@ def create_app_and_publish(client, module):
     app = client.create_application(app)
     req = {}
     if 'performance' == module.params.get("publish_optimization"):
-        req = {'id': app['id'] ,'preferredCloud': module.params.get("cloud"),'preferredRegion': module.params.get("region"), 'optimizationLevel': 'PERFORMANCE_OPTIMIZED'}
+        #req = {'id': app['id'] ,'preferredCloud': module.params.get("cloud"),'preferredRegion': module.params.get("region"), 'optimizationLevel': 'PERFORMANCE_OPTIMIZED'}
+        req = {'id': app['id'], 'preferredRegion': module.params.get("region"), 'optimizationLevel': 'PERFORMANCE_OPTIMIZED'}
     ttl=module.params.get("application_ttl")
     if ttl != -1:
         ttl =ttl * 60
