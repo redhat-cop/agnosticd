@@ -99,6 +99,9 @@ options:
   app_template:
     description:
      - Path to a YML file that defines an application infrastructure then creates a blueprint for further processing with follow-on playbooks.  Must use state=design
+  cost_bucket:
+    description:
+     - Path to a YML file that defines an application infrastructure then creates a blueprint for further processing with follow-on playbooks.  Must use state=design
 '''
 
 EXAMPLES = '''
@@ -157,6 +160,19 @@ import base64
 import getpass
 import logging
 import logging.handlers
+
+def set_cost_bucket(appID, appType, cost_bucket_name, client):
+    available_cbs = ''
+    for cost_bucket in client.get_cost_buckets(permissions='execute'):
+        available_cbs = available_cbs + ', ' + cost_bucket['name']
+        if cost_bucket['name'] == cost_bucket_name:
+            client.associate_resource_to_cost_bucket(
+                         cost_bucket['id'], 
+                         {'resourceId': appID, 'resourceType': appType}) 
+            return
+
+    raise Exception("Cost Bucket: " + cost_bucket_name + " - not found.  Available cost buckets: " + available_cbs)
+    return
 
 def get_credentials():
         with open(os.path.expanduser("~/.ravello_login"),"r") as pf:
@@ -266,7 +282,8 @@ def main():
             blueprint_description=dict(required=False, type='str'),
             blueprint_name=dict(required=False, type='str'),
             wait=dict(type='bool', default=True ,choices=BOOLEANS),
-            wait_timeout=dict(default=1200, type='int')
+            wait_timeout=dict(default=1200, type='int'),
+            cost_bucket=dict(default='Organization', type='str')
     )
     module = AnsibleModule(
         argument_spec=argument_spec,
@@ -652,13 +669,15 @@ def create_app_and_publish(client, module):
     app = client.create_application(app)
     req = {}
     if 'performance' == module.params.get("publish_optimization"):
-        req = {'id': app['id'] ,'preferredCloud': module.params.get("cloud"),'preferredRegion': module.params.get("region"), 'optimizationLevel': 'PERFORMANCE_OPTIMIZED'}
+        #req = {'id': app['id'] ,'preferredCloud': module.params.get("cloud"),'preferredRegion': module.params.get("region"), 'optimizationLevel': 'PERFORMANCE_OPTIMIZED'}
+        req = {'id': app['id'], 'preferredRegion': module.params.get("region"), 'optimizationLevel': 'PERFORMANCE_OPTIMIZED'}
     ttl=module.params.get("application_ttl")
     if ttl != -1:
         ttl =ttl * 60
         exp_req = {'expirationFromNowSeconds': ttl}
         client.set_application_expiration(app,exp_req)
     client.publish_application(app, req)
+    set_cost_bucket(app['id'], 'application', module.params.get('cost_bucket'), client)
     _wait_for_state(client,'STARTED',module)
     log_contents = log_capture_string.getvalue()
     log_capture_string.close()
