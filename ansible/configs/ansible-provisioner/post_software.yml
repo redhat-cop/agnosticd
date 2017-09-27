@@ -17,60 +17,93 @@
   hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_provisioner') | replace('-', '_') }}"
   become: yes
   gather_facts: False
+  roles:
+    - role: "{{ ANSIBLE_REPO_PATH }}/roles/opentlc-integration"
+      when: install_opentlc_integration
+      no_log: yes
   vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/mgr_users.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   tags: [ env-specific, cf_integration ]
   tasks:
-    - name: Add user opentlc-mgr for OPENTLC CloudForms integration
-      shell: "useradd opentlc-mgr"
-      ignore_errors: true
-    - shell: "rm -rf /opt/ansible_agnostic_deployer"
-    - name: Get updated files from git repository github.com/sborenst/ansible_agnostic_deployer
-      git: repo=https://{{ githubuser }}:{{ githubpassword }}@github.com/sborenst/ansible_agnostic_deployer.git dest=/opt/ansible_agnostic_deployer/ force=yes
-      ignore_errors: true
+    - name: Install vim
+      yum:
+        name: vim
 
-    - shell: "rm -rf /opt/OPEN_Admin"
-    - name: Get updated files from git repository github.com/redhat-gpe/OPEN_Admin.git
-      git: repo=https://{{ githubuser }}:{{ githubpassword }}@github.com/redhat-gpe/OPEN_Admin.git dest=/opt/OPEN_Admin/ force=yes
-      ignore_errors: true
-
-    - file: "path=/opt/OPEN_Admin/ state=directory owner=opentlc-mgr recurse=yes group=opentlc-mgr  mode=0770"
-    - file: "path=/opt/ansible_agnostic_deployer/ state=directory owner=opentlc-mgr recurse=yes group=opentlc-mgr  mode=0770"
-    - name: Copy ssh key to provisioner
+    - name: Copy SSH private key to provisioner for users
       copy:
-        src: ~/.ssh/{key_name}.pem
-        dest: /home/opentlc-mgr/.ssh/{key_name}.pem
-    - name: Allow Access to opentlc-mgr user
-      shell: |
-          mkdir /home/opentlc-mgr/bin;
-          ln -s /opt/OPEN_Admin/OPENTLC-OCP3/provision_workshop_env.sh /home/opentlc-mgr/bin/provision_workshop_env.sh
-          ln -s /opt/OPEN_Admin/OPENTLC-OCP3/provision-ose-projects.sh /home/opentlc-mgr/bin/provision-ose-projects.sh
-          ln -s /opt/OPEN_Admin/OPENTLC-OCP3/deploy_scripts /home/opentlc-mgr/bin/deploy_scripts
-          mkdir /home/opentlc-mgr/.ssh
-          echo 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC4OojwKH74UWVOY92y87Tb/b56CMJoWbz2gyEYsr3geOc2z/n1pXMwPfiC2KT7rALZFHofc+x6vfUi6px5uTm06jXa78S7UB3MX56U3RUd8XF3svkpDzql1gLRbPIgL1h0C7sWHfr0K2LG479i0nPt/X+tjfsAmT3nWj5PVMqSLFfKrOs6B7dzsqAcQPInYIM+Pqm/pXk+Tjc7cfExur2oMdzx1DnF9mJaj1XTnMsR81h5ciR2ogXUuns0r6+HmsHzdr1I1sDUtd/sEVu3STXUPR8oDbXBsb41O5ek6E9iacBJ327G3/1SWwuLoJsjZM0ize+iq3HpT1NqtOW6YBLR opentlc-mgr@inf00-mwl.opentlc.com' >> /home/opentlc-mgr/.ssh/authorized_keys
-          chown -R opentlc-mgr.opentlc-mgr /home/opentlc-mgr/.ssh
-          chmod 400 /home/opentlc-mgr/.ssh/authorized_keys
-          chmod 700 /home/opentlc-mgr/.ssh
+        src: "~/.ssh/{{ item.private_key }}.pem"
+        dest: "{{ item.home }}/.ssh/{{ item.private_key }}.pem"
+        mode: 0400
+        owner: "{{ item.name }}"
+      when: item.private_key is defined
+      with_items: "{{ mgr_users }}"
+      no_log: yes
+
+    - name: Install EPEL (for python-pip and ansible)
+      package:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm"
+        use: yum
+        state: installed
+
+    - name: install python-pip
+      yum:
+        name: python2-pip
+
+    - name: install ansible
+      yum:
+        name: python2-pip
+    - name: install boto3
+      command: pip install boto3
+
     - name: Install awscli
-      shell: |
-          curl "https://s3.amazonaws.com/aws-cli/awscli-bundle.zip" -o "awscli-bundle.zip"
-          unzip awscli-bundle.zip
-          sudo ./awscli-bundle/install -i /usr/local/aws -b /bin/aws
-          aws --version
+      pip:
+        name: awscli
+
+    - name: test awscli
+      command: aws --version
+
+    - name: Create ~/.aws for users
+      file:
+        path: "{{ item.home }}/.aws"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: 0700
+        state: directory
+      when: item.aws_access_key_id is defined
+      with_items: "{{ mgr_users }}"
+      no_log: yes
+
     - name: Insert awscli credentials
-      shell: |
-          mkdir /home/opentlc-mgr/.aws
-          echo '
+      copy:
+        dest: "{{ item.home }}/.aws/credentials"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        content: |
           [default]
-          aws_access_key_id = {{aws_access_key_id}}
-          aws_secret_access_key = {{aws_secret_access_key}}' > /home/opentlc-mgr/.aws/credentials
-          chown -R opentlc-mgr.opentlc-mgr /home/opentlc-mgr/.aws
+          aws_access_key_id = {{ item.aws_access_key_id }}
+          aws_secret_access_key = {{ item.aws_secret_access_key }}
+      when:
+        - item.aws_access_key_id is defined
+        - item.aws_secret_access_key is defined
+      with_items: "{{ mgr_users }}"
+      no_log: yes
 
     - name: Copy boto.cfg file to /etc
-      shell: "cp /opt/ansible_agnostic_deployer/ansible/inventory/boto.cfg /etc/boto.cfg"
+      copy:
+        src: "{{ ANSIBLE_REPO_PATH }}/inventory/boto.cfg"
+        dest: /etc/boto.cfg
+
     - name: Copy Sync_Repositories.sh file to /root
-      shell: "cp /opt/ansible_agnostic_deployer/ansible/configs/ansible-provisioner/files/Sync_Repositories.sh /root"
+      copy:
+        src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/Sync_Repositories.sh"
+        dest: /root/
+
+    - name: install lvm2
+      yum:
+        name: lvm2
+
     - lvg:
         vg: "{{ storage_vg }}"
         pvs: "{{ storage_pvs }}"
@@ -103,11 +136,18 @@
         state: present
       ignore_errors: true
 
-    - shell: "mkdir {{ storage_mount_path }} &&  mount {{ storage_mount_path }}"
-#    - shell: "SELINUX=enforcing"
-    - shell: "systemctl enable http && systemctl restart httpd"
-    - shell: "ln -s {{storage_mount_path}}/repos /var/www/html/repos"
-#    - shell: "chcon -R -t httpd_user_content_t /srv"
-#    - shell: "chcon -R -t httpd_user_content_t /var/www/html/repos"
-### Still need to add "env_secret_vars" files to actually get this to work
-### still need to run the repository sync script.
+    - shell: "mkdir -p {{ storage_mount_path }} &&  mount {{ storage_mount_path }}"
+      ignore_errors: true
+
+- name: Zabbix
+  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_provisioner') | replace('-', '_') }}"
+  gather_facts: true
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  roles:
+    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/zabbix-client" }
+  tags:
+    - env-specific
+    - install_zabbix
