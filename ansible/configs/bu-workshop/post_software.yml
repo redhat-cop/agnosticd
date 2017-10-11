@@ -12,8 +12,6 @@
       set_fact:
         bastion_hostname: "{{ hostvars[ groups[ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') ].0 ]['ec2_public_dns_name'] }}"
 
-# TODO: metrics nodeselector
-
 - name: User volumes on NFS server
   hosts: 
     - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_support') | replace('-', '_') }}"
@@ -92,7 +90,7 @@
     # TODO: I think I can get rid of this pvs because I do it later
     - name: Generate PV file
       template:
-        src: "{{ ANSIBLE_REPO_PATH }}/files/pvs.j2"
+        src: "{{ ANSIBLE_REPO_PATH }}/configs/bu-workshop/files/pvs.j2"
         dest: "/root/pvs-{{ env_type }}-{{ guid }}.yml"
       tags: 
         - gen_pv_file
@@ -103,7 +101,7 @@
 
     - name: Generate user vol PV file
       template:
-        src: "{{ ANSIBLE_REPO_PATH }}/files/userpvs.j2"
+        src: "{{ ANSIBLE_REPO_PATH }}/configs/bu-workshop//files/userpvs.j2"
         dest: "/root/userpvs-{{ env_type }}-{{ guid }}.yml"
       tags:
         - gen_user_vol_pv
@@ -125,11 +123,17 @@
     - workshop
     - workshop_admins
   tasks:
+    - name: check admin password is set
+      fail: msg="Bailing out. You need to set 'admin_user_password'"
+      when: admin_user_password is undefined
+    - name: check admin password is not empty string
+      fail: msg="Bailing out. 'admin_user_password' can not be empty string"
+      when: admin_user_password == ""
     - name: Add administrative user to htpasswd file
       htpasswd:
         dest: "/etc/origin/master/htpasswd"
         name: "admin"
-        password: "openshift3"
+        password: "{{ admin_user_password }}"
         state: present
 
     - name: Give administrative user cluster-admin privileges
@@ -171,15 +175,16 @@
     - workshop
     - workshop_prereq
   tasks:
+    - name: Fix for logging BZ (1466626)
+      shell: "{{ oc_path }} get configmap logging-elasticsearch -n logging -o yaml | sed '/io.fabric8.elasticsearch.kibana.mapping.ops/a \\    io.fabric8.elasticsearch.kibana.mapping.empty: /usr/share/elasticsearch/index_patterns/com.redhat.viaq-openshift.index-pattern.json' | {{ oc_path }} replace configmap -n logging logging-elasticsearch -f -"
+
     - name: Check for workshop-infra project
       command: "{{ oc_path }}  get project workshop-infra"
-
       register: result
       ignore_errors: true
 
     - name: Create workshop-infra project
       command: "{{ oc_path }} adm new-project workshop-infra --admin admin --node-selector='env=infra'"
-
       when: result | failed
 
     - name: Make workshop-infra project network global
@@ -191,26 +196,16 @@
     - name: Add capabilities within anyuid which is not really ideal
       command: "{{ oc_path }} patch scc/anyuid --patch '{\"requiredDropCapabilities\":[\"MKNOD\",\"SYS_CHROOT\"]}'"
 
-    #TODO: Switch to official Java builder
     - name: Copy RH official JDK IS to server
       copy:
         src: "files/openjdk-is.yaml"
         dest: "/root/openjdk-is.yaml"
 
+    - name: Delete the existing IS becuase it is defined wrong
+      command: "{{ oc_path }} delete is redhat-openjdk18-openshift -n openshift"
+
     - name: Create RH official JDK IS in openshift namespace
       shell: "{{ oc_path }} create -f /root/openjdk-is.yaml -n openshift || {{ oc_path }} replace -f /root/openjdk-is.yaml -n openshift"
-
-    - name: Copy simple-java-s2i IS to server
-      copy:
-        src: "files/java-s2i-is.yaml"
-        dest: "/root/java-s2i-is.yaml"
-      tags:
-        - copy-java-s2i-is
-
-    - name: Create simple-java-s2i IS in openshift namespace
-      shell: "{{ oc_path }} create -f /root/java-s2i-is.yaml -n openshift || {{ oc_path }} replace -f /root/java-s2i-is.yaml -n openshift"
-      tags:
-        - create-java-s2i-is
 
     - name: Create Jenkins pipeline template in openshift namespace
       shell: "{{ oc_path }} create -f https://raw.githubusercontent.com/openshift-roadshow/nationalparks/1.0.0/ose3/pipeline-template.yaml -n openshift || {{ oc_path }} replace -f https://raw.githubusercontent.com/openshift-roadshow/nationalparks/1.0.0/ose3/pipeline-template.yaml -n openshift"
@@ -280,27 +275,27 @@
     - workshop
     - workshop_lab_guide
   tasks:
-    - name: Check for workshop lab build
+    - name: Check for workshop lab service
       command: "{{ oc_path }} get svc/labs -n workshop-infra"
-
       ignore_errors: true
       register: labs_service_out
 
-    - name: Build workshop lab server
+    - name: Deploy workshop lab server if not present
       shell: >
         {{ oc_path }} new-app
-        --name=labs jboss-eap70-openshift~{{ lab_url }}#{{ lab_tag }}
+        --name=labs docker.io/osevg/workshopper:{{ workshopper_tag }}
         -e ROUTER_ADDRESS={{cloudapps_suffix}}
         -e CONSOLE_ADDRESS=master.{{subdomain_base}}
         -e DEFAULT_LAB=roadshow
         -e NODES={{ num_nodes }}
         -e NUM_USERS={{ user_vols }}
         -e WORKSHOPS_URLS={{ lab_content }}
+        -e CONTENT_URL_PREFIX={{ content_url_prefix }}
         -n workshop-infra;
         {{ oc_path }} expose service labs -n workshop-infra
       when: labs_service_out | failed
       tags:
-        - build-workshop-labs
+        - deploy_workshop_labs
 
 - name: GitLab nfs permissions hack
   hosts: 
@@ -478,5 +473,16 @@
         --overwrite
         -n workshop-infra
 
-    # TODO: curl command to create default pad
-
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Post-Software checks completed successfully"
