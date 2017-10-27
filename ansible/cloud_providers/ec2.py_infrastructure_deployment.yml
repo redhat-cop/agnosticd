@@ -44,6 +44,9 @@
     delay: 60
     ignore_errors: yes
 
+  - debug:
+     var: cloudformation_out
+
   - name: report Cloudformation error
     fail:
       msg: "FAIL {{ project_tag }} Create Cloudformation"
@@ -51,56 +54,50 @@
     tags:
       - provision_cf_template
 
-  - name: Gather EC2 facts
-    ec2_remote_facts:
-      region: "{{ aws_region }}"
-      filters:
-        instance-state-name: running
-        "tag:Project": "{{project_tag}}"
-    register: ec2_facts
+  - name: Refresh cloud_provider cache
+    environment:
+      AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+      AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+      AWS_DEFAULT_REGION: "{{aws_region}}"
+    shell: "{{ ANSIBLE_REPO_PATH }}/inventory/{{cloud_provider }}.py --refresh-cache"
+    when: "not tower_run == 'true'"
+    register: task_result
+    until: task_result.rc == 0
+    retries: 5
+    delay: 60
+    ignore_errors: yes
+    changed_when: task_result.rc == 0
+    tags:
+      - refresh_inventory
+      - refresh_inventory_script
 
-  - name: debug checkout ec2_facts
-    debug:
-      var: ec2_facts
-  - name: windows ostype workaround
-    set_fact:
-      project_tag_ostype: "{{project_tag}}_ostype"
-  - add_host:
-      name: "{{item['public_dns_name']}}"
-      shortname: "{{item['tags']['Name'] | default('default_value')}}"
-      groups: "{{item['tags']['AnsibleGroup']}},tag_Project_{{env_type| replace('-', '_')}}_{{guid}},tag_{{env_type| replace('-', '_')}}_{{guid}}_{{item['tags'][project_tag]}},tag_{{env_type| replace('-', '_')}}_{{guid}}_ostype_{{item['tags'][project_tag_ostype] | default('unknown')}},{{item['tags'][project_tag_ostype] | default('unknowns')}}"
-      ansible_ssh_user: ec2-user
-      remote_user: ec2-user
-      ansible_ssh_private_key_file: "{{item['key_name']}}"
-      key_name: "{{item['key_name']}}"
-      state: "{{item['state']}}"
-      internaldns: "{{item['tags']['internaldns'] | default('default_value')}}"
-      region: "{{item['region']}}"
-      public_dns_name: "{{item['public_dns_name']}}"
-      private_dns_name: "{{item['private_dns_name']}}"
-      private_ip_address: "{{item['private_ip_address']}}"
-      public_ip_address: "{{item['public_ip_address']}}"
-      placement: "{{item['placement']['zone']}}"
-      image_id: "{{item['image_id']}}"
-    with_items: "{{ec2_facts['instances']}}"
+  - name: report Cache refresh error
+    fail:
+      msg: "FAIL {{ project_tag }} Cache refresh error"
+    when: not task_result|succeeded
 
-  - name: debug checkout ec2_facts
-    debug:
-      var: hostvars
+  - name: Refresh in-memory cloud_provider cache
+    environment:
+      AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+      AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+      AWS_DEFAULT_REGION: "{{aws_region}}"
+    meta: refresh_inventory
+    tags:
+      - refresh_inventory
 
 - name: Configure local ssh config for bastion proxy use
   include: "{{ ANSIBLE_REPO_PATH }}/cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
-  when: groups['bastions']
+  when: ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') in groups
 
 
 
 - name: wait_for_connection for all non-windows machines and set hostname
   hosts:
-    - all:!windows
+    - "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}:!{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_ostype_windows') | replace('-', '_') }}"
   vars_files:
-      - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-      - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-      - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
   gather_facts: false
   any_errors_fatal: true
   ignore_errors: false
@@ -121,7 +118,7 @@
 - name: Set facts for Windows hosts if any exist and wait_for_connection
   gather_facts: false
   hosts:
-    - windows
+    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_ostype_windows') | replace('-', '_') }}"
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
