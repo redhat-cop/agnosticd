@@ -335,3 +335,217 @@
         src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/ocp_report.adoc.j2"
         dest: "{{ ANSIBLE_REPO_PATH }}/workdir/ocp_report_{{ env_type }}-{{ guid }}.adoc"
       when: ocp_report
+
+# Set up Prometheus/Node Exporter/Alertmanager/Grafana on the OpenShift Cluster
+- hosts: localhost
+  gather_facts: false
+  tasks:
+  # Find out which nodes are Infranodes and add them to a new group: infranodes
+  - name: Add Infranodes to a new infranodes Group
+    add_host:
+      name: "{{ item }}"
+      groups: infranodes
+    with_items: "{{ groups['nodes'] }}"
+    when:
+    - item | match("^infranode.*")
+  - name: Add Masters to a new masters Group
+    add_host:
+      name: "{{ item }}"
+      groups: masters
+    with_items: "{{ groups['nodes'] }}"
+    when:
+    - item | match("^master.*")
+
+- hosts: infranodes[0]
+  tasks:
+  # OpenShift Routers expose /metrics on port 1936. Therefore we need to open
+  # the port for both future and current sessions so that Prometheus can access
+  # the router metrics.
+  # Open Firewall Port 1936 for future sessions by adding the rule to
+  # the iptables file.
+  - name: Open Firewall port 1936 for future sessions
+    lineinfile:
+      dest: /etc/sysconfig/iptables
+      insertafter: '-A FORWARD -j REJECT --reject-with icmp-host-prohibited'
+      line: '-A OS_FIREWALL_ALLOW -p tcp -m state --state NEW -m tcp --dport 1936 -j ACCEPT'
+      state: present
+    tags:
+    - prometheus
+  # Open Firewall Port 1936 for current session by adding the rule to the
+  # current iptables configuration. We won't need to restart the iptables
+  # service - which will ensure all OpenShift rules stay in place.
+  - name: Open Firewall Port 1936 for current session
+    iptables:
+      action: insert
+      protocol: tcp
+      destination_port: 1936
+      state: present
+      chain: OS_FIREWALL_ALLOW
+      jump: ACCEPT
+    tags:
+    - prometheus
+  # Create Directory /var/lib/prometheus-data with correct permissions
+  # Make sure the directory has SELinux Type svirt_sandbox_file_t otherwise
+  # there is a permissions problem trying to mount it into the pod.
+  # If there are more than one infranodes this directory will be created on all
+  # infranodes - but only used on the first one
+  - name: Create directory /var/lib/prometheus-data
+    file:
+      path: /var/lib/prometheus-data
+      state: directory
+      group: root
+      owner: root
+      mode: 0777
+      setype: svirt_sandbox_file_t
+    tags:
+    - prometheus
+
+# Configure all Nodes (including Infranodes and Masters) for monitoring
+- hosts: nodes
+  tasks:
+  # Node Exporters on all Nodes liston on port 9100.
+  # Open Firewall Port 9100 for future sessions by adding the rule to
+  # the iptables file.
+  - name: Open Firewall port 9100 for future sessions
+    lineinfile:
+      dest: /etc/sysconfig/iptables
+      insertafter: '-A FORWARD -j REJECT --reject-with icmp-host-prohibited'
+      line: '-A OS_FIREWALL_ALLOW -p tcp -m state --state NEW -m tcp --dport 9100 -j ACCEPT'
+      state: present
+    tags:
+    - prometheus
+  # Open Firewall Port 9100 for current session by adding the rule to the
+  # current iptables configuration. We won't need to restart the iptables
+  # service - which will ensure all OpenShift rules stay in place.
+  - name: Open Firewall Port 9100 for current session
+    iptables:
+      action: insert
+      protocol: tcp
+      destination_port: 9100
+      state: present
+      chain: OS_FIREWALL_ALLOW
+      jump: ACCEPT
+    tags:
+    - prometheus
+  # The Node Exporter reads information from the Nodes. In addition it can
+  # read arbitrary information from a (properly formatted) text file.
+  # We have a shell script that puts information about Docker into a textfile
+  # to be read by the Node Exporter. Therefore we need to create the directory
+  # where the text file is to be written.
+  - name: Create textfile_collector directory
+    file:
+      path:    /var/lib/node_exporter/textfile_collector
+      state:   directory
+      owner:   root
+      group:   root
+      mode:    0775
+    tags:
+    - prometheus
+  # Copy the shell script to the nodes to collect docker information and write
+  # to a text file
+  - name: Copy dockerinfo to node
+    get_url:
+      url:   https://raw.githubusercontent.com/wkulhanek/openshift-prometheus/ChangeToHostPath/node-exporter/dockerinfo/dockerinfo.sh
+      dest:  /usr/local/bin/dockerinfo.sh
+      owner: root
+      group: root
+      mode:  0755
+    tags:
+    - prometheus
+  # Create a cron job to run the dockerinfo shell script periodically.
+  - name: Copy cron.d/docker_info.cron to node
+    get_url:
+      url:   https://raw.githubusercontent.com/wkulhanek/openshift-prometheus/ChangeToHostPath/node-exporter/dockerinfo/dockerinfo.cron
+      dest:  /etc/cron.d/dockerinfo.cron
+      owner: root
+      group: root
+      mode:  0644
+    tags:
+    - prometheus
+  # Restart crond service to pick up new cron job
+  - name: Restart crond service on node
+    systemd:
+      name: crond
+      state: restarted
+    tags:
+    - prometheus
+
+# Finally create all the necessary OpenShift objects. This happens via the
+# oc binary on the (first) master host.
+- hosts: masters[0]
+  vars:
+    # The Web Hook URL for the Alert Manager to send alerts to Rocket Chat
+    # The default is #gpte-devops-prometheus channel on the Red Hat Chat instance
+    webhook_url: https://chat.consulting.redhat.com/hooks/LTtLntjbTBNvij6br/Rfa6WZSANJJBB8QDsu5nhynQ2sJG2wrSL3BLzbxYJqit3EGk
+  tasks:
+  # Add label "prometheus-host=true" to the first infranode
+  - name: Label Infranodes with prometheus-host=true
+    shell: oc label node {{ groups['infranodes'][0] }} prometheus-host=true --overwrite
+    tags:
+    - prometheus
+  # Check if there is already a prometheus project
+  - name: Check for prometheus project
+    command: "oc get project prometheus"
+    register: prometheus_project_present
+    ignore_errors: true
+  # Create the Prometheus Project if it's not there yet
+  - name: Create Prometheus Project
+    shell: oc new-project prometheus --display-name="Prometheus Monitoring"
+    when: prometheus_project_present | failed
+    tags:
+    - prometheus
+  - name: Set Node Selectors to empty on Prometheus Project
+    shell: oc annotate namespace prometheus openshift.io/node-selector=""
+    when: prometheus_project_present | failed
+    tags:
+    - prometheus
+  - name: Determine Router Password
+    shell: oc set env dc router -n default --list|grep STATS_PASSWORD|awk -F"=" '{print $2}'
+    when: prometheus_project_present | failed
+    register: router_password
+    tags:
+    - prometheus
+  - name: Deploy Prometheus
+    shell: oc new-app -f https://raw.githubusercontent.com/wkulhanek/openshift-prometheus/ChangeToHostPath/prometheus.yaml --param ROUTER_PASSWORD={{ router_password.stdout }}
+    when: prometheus_project_present | failed
+    tags:
+    - prometheus
+  - name: Grant privileged SCC to Prometheus Service account
+    shell: oc adm policy add-scc-to-user privileged system:serviceaccount:prometheus:prometheus
+    when: prometheus_project_present | failed
+    tags:
+    - prometheus
+  - name: Grant privileged SCC to default service account for Node Exporter
+    shell: oc adm policy add-scc-to-user privileged system:serviceaccount:prometheus:default
+    when: prometheus_project_present | failed
+    tags:
+    - prometheus
+  - name: Deploy Node Exporter Daemon Set
+    shell: oc new-app -f https://raw.githubusercontent.com/wkulhanek/openshift-prometheus/ChangeToHostPath/node-exporter/node-exporter.yaml
+    when: prometheus_project_present | failed
+    tags:
+    - prometheus
+  - name: Deploy Alertmanager
+    shell: oc new-app -f https://raw.githubusercontent.com/wkulhanek/openshift-prometheus/ChangeToHostPath/alertmanager/alertmanager.yaml -p "WEBHOOK_URL={{ webhook_url }}"
+    when: prometheus_project_present | failed
+    tags:
+    - prometheus
+    - alertmanager
+  - name: Move Alertmanager to an Infranode
+    command: "oc patch dc alertmanager --patch '{ \"spec\": { \"template\": { \"spec\": { \"nodeSelector\": { \"env\":\"infra\"}}}}}' "
+    when: prometheus_project_present | failed
+    tags:
+    - prometheus
+    - alertmanager
+  - name: Deploy Grafana
+    shell: oc new-app -f https://raw.githubusercontent.com/wkulhanek/docker-openshift-grafana/master/grafana.yaml
+    when: prometheus_project_present | failed
+    tags:
+    - prometheus
+    - grafana
+  - name: Move Grafana to an Infranode
+    command: "oc patch dc grafana --patch '{ \"spec\": { \"template\": { \"spec\": { \"nodeSelector\": { \"env\":\"infra\"}}}}}' "
+    when: prometheus_project_present | failed
+    tags:
+    - prometheus
+    - grafana
