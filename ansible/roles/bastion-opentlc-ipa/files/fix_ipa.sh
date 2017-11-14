@@ -4,3 +4,4 @@
 if [ $? = 0 ]; then exit 0; fi
 
 systemctl restart sssd
+exit 1
