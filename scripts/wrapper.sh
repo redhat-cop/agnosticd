@@ -14,6 +14,8 @@ if [ $# -lt 2 ]; then
 fi
 
 set -xe -o pipefail
+ORIG=$(cd $(dirname $0); cd ..; pwd)
+DEPLOYER_REPO_PATH="${ORIG}/ansible"
 
 . "$1"
 
@@ -21,6 +23,7 @@ if [ -z "${GUID}" ]; then
     echo "GUID is mandatory"
     exit 2
 fi
+
 
 REGION=${REGION:-us-east-1}
 KEYNAME=${KEYNAME:-ocpkey}
@@ -31,6 +34,9 @@ if [ "$CLOUDPROVIDER" = "ec2" ]; then
         echo "HOSTZONEID vars are mandatory"
         exit 2
     fi
+    INVENTORY=${DEPLOYER_REPO_PATH}/inventory/ec2.sh
+else
+    INVENTORY=${DEPLOYER_REPO_PATH}/inventory/${CLOUDPROVIDER}.py
 fi
 
 INSTALL_IPA_CLIENT=${INSTALL_IPA_CLIENT:-false}
@@ -38,15 +44,13 @@ REPO_METHOD=${REPO_METHOD:-file}
 SOFTWARE_TO_DEPLOY=${SOFTWARE_TO_DEPLOY:-none}
 
 STACK_NAME=${ENVTYPE}-${GUID}
-ORIG=$(cd $(dirname $0); cd ..; pwd)
-DEPLOYER_REPO_PATH="${ORIG}/ansible"
 
 case $2 in
     provision)
         shift; shift
         ansible-playbook \
             ${DEPLOYER_REPO_PATH}/main.yml  \
-            -i ${DEPLOYER_REPO_PATH}/inventory/${CLOUDPROVIDER}.py \
+            -i ${INVENTORY} \
             -e "ANSIBLE_REPO_PATH=${DEPLOYER_REPO_PATH}" \
             -e "guid=${GUID}" \
             -e "env_type=${ENVTYPE}" \
@@ -64,7 +68,7 @@ case $2 in
         shift; shift
         ansible-playbook \
             ${DEPLOYER_REPO_PATH}/configs/${ENVTYPE}/destroy_env.yml \
-            -i ${DEPLOYER_REPO_PATH}/inventory/${CLOUDPROVIDER}.py \
+            -i ${INVENTORY} \
             -e "ANSIBLE_REPO_PATH=${DEPLOYER_REPO_PATH}" \
             -e "guid=${GUID}" \
             -e "env_type=${ENVTYPE}"  \
