@@ -9,7 +9,7 @@ if [ $# -lt 2 ]; then
     echo "./$0 RCFILE ACTION"
     echo 'args'
     echo '- RCFILE: to be sourced, containing needed env variables (especially envtype_args array)'
-    echo '- ACTION: provision|destroy|stop|start'
+    echo '- ACTION: provision|destroy|stop|start|scaleup'
     exit 2
 fi
 
@@ -64,6 +64,7 @@ case $2 in
             ${ENVTYPE_ARGS[@]} \
             "$@"
         ;;
+
     destroy)
         shift; shift
         ansible-playbook \
@@ -78,6 +79,26 @@ case $2 in
             -e "key_name=${KEYNAME}"  \
             "$@"
         ;;
+
+    scaleup)
+        shift; shift
+        ansible-playbook \
+            ${DEPLOYER_REPO_PATH}/configs/${ENVTYPE}/scaleup.yml \
+            -i ${INVENTORY} \
+            -e "ANSIBLE_REPO_PATH=${DEPLOYER_REPO_PATH}" \
+            -e "guid=${GUID}" \
+            -e "env_type=${ENVTYPE}" \
+            -e "key_name=${KEYNAME}" \
+            -e "cloud_provider=${CLOUDPROVIDER}" \
+            -e "aws_region=${REGION}" \
+            -e "HostedZoneId=${HOSTZONEID}" \
+            -e "install_ipa_client=${INSTALL_IPA_CLIENT}" \
+            -e "software_to_deploy=${SOFTWARE_TO_DEPLOY}" \
+            -e "repo_method=${REPO_METHOD}" \
+            ${ENVTYPE_ARGS[@]} \
+            "$@"
+        ;;
+
     stop)
         aws ec2 stop-instances --region $REGION --instance-ids $(aws ec2 describe-instances --filters "Name=tag:aws:cloudformation:stack-name,Values=${STACK_NAME}" --query Reservations[*].Instances[*].InstanceId --region $REGION --output text)
         ;;
