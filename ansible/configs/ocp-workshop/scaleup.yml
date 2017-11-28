@@ -1,22 +1,5 @@
 # Run the Infra steps (step000, step001,step002) 
 
-# Before running this playbook, assert that:
-# current number of nodes = node_instance_count - new_node_instance_count
-# This will prevent misuse of the playbook, and unexpected tag 'newnode' on instances.
-- hosts: localhost
-  connection: local
-  gather_facts: false
-  become: false
-  vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  tasks:
-    - name: Assert new_node_instance_count and node_instance_count are setup properly
-      tags: assert_new_node
-      assert:
-        that:
-          - "(groups[('tag_' ~ project_tag ~ '_node') | replace('-', '_')] | length) == \
-          (node_instance_count|int) - (new_node_instance_count|int)"
-
 ################################################################################
 ################################################################################
 ############ Step 000 Pre Infrastructure Deploy Tasks
@@ -39,6 +22,25 @@
     - step001
     - deploy_infrastructure
 
+# Before continuing this playbook, assert that there is at least one new node
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: Assert new_node_instance_count and node_instance_count are setup properly.
+      tags: assert_new_node
+      assert:
+        that:
+          - (groups['nodes'] | length) == (node_instance_count|int)
+          - groups['newnodes'] | length > 0
+
+    - name: Ensure one bastion is present
+      assert:
+        that: groups['bastions'] | length > 0
+
 #################################################################################
 #################################################################################
 ############# Step 002 Post Infrastructure Deploy Tasks
@@ -60,13 +62,12 @@
 
 - name: Configure all hosts with Repositories, Common Files and Set environment key
   hosts:
-    - "{{ ('tag_' ~ project_tag ~ '_node') | replace('-', '_') }}:&tag_newnode_true"
+    - "newnodes"
   become: true
   gather_facts: False
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
   tags:
     - step004
     - common_tasks
@@ -100,7 +101,7 @@
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   hosts:
-    - "{{ ('tag_' ~ project_tag ~ '_node') | replace('-', '_') }}:&tag_newnode_true"
+    - "newnodes"
   roles:
     - "{{ ANSIBLE_REPO_PATH }}/roles/openshift-node"
   tags:
@@ -116,23 +117,21 @@
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
   tags:
     - generate_ansible_hosts_file
   tasks:
     - name: generate ansible hosts file
       template:
-        src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/scaleup_hosts_template.j2" ## path is wrong
+        src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/scaleup_hosts_template.j2"
         dest: "{{ ANSIBLE_REPO_PATH }}/workdir/scaleup_hosts-{{ env_type }}-{{ guid }}"
 
 - name: Step 00xxxxx bastion preparation for OpenShift deployment
-  hosts: "{{ ('tag_' ~ project_tag ~ '_bastion') | replace('-', '_') }}"
+  hosts: bastions
   become: true
   gather_facts: False
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
   tags:
     - openshift_host_templates
     - openshift_install_idm_cert
@@ -144,13 +143,12 @@
 
 ## Run Scaleup playbook
 
-- name: Run OpenShift Scaleup playbook
+- name: Run OpenShift Scaleup playbook on first bastion
   gather_facts: False
   become: yes
-  hosts: "{{ ('tag_' ~ project_tag ~ '_bastion') | replace('-', '_') }}"
+  hosts: bastions[0]
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
   tags:
     - installing_openshift
   tasks: ## Change to scale up, and change inventory file
@@ -162,6 +160,7 @@
     - name: show output of the scaleup playbook
       debug:
         var: openshift_install_log
+        verbosity: 2
 
 - name: Tag freshly created node as node
   hosts: localhost
@@ -178,10 +177,11 @@
     - name: Ensure tags 'newnode' for instance is set to 'false'
       ec2_tag:
         region: "{{ aws_region }}"
-        resource: "{{ hostvars[item].ec2_id }}"
+        resource: "{{ hostvars[item].instance_id }}"
         tags:
           newnode: false
-      with_items: "{{ groups[('tag_' ~ project_tag ~ '_node') | replace('-', '_')] | intersect(groups['tag_newnode_true']) }}"
+      with_items: "{{ groups['newnodes'] }}"
+      when: cloud_provider == 'ec2'
 
 ## Generate new /etc/ansible/hosts file 
 - name: Generate new-version of bastion /etc/ansible/hosts, move new_nodes hosts into nodes group
@@ -201,13 +201,12 @@
         dest: "{{ ANSIBLE_REPO_PATH }}/workdir/hosts-{{ env_type }}-{{ guid }}"
 
 - name: Update /etc/ansible/host file on bastion
-  hosts: "{{ ('tag_' ~ project_tag ~ '_bastion') | replace('-', '_') }}"
+  hosts: bastions
   become: true
   gather_facts: False
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
   tags:
     - openshift_host_templates
     - openshift_install_idm_cert
