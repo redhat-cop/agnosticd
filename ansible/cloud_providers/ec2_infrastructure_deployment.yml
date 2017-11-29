@@ -14,23 +14,56 @@
   - name: AWS Generate CloudFormation Template
     template:
       src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.j2"
-      dest: "{{ ANSIBLE_REPO_PATH }}/workdir/{{cloud_provider}}_cloud_template.{{ env_type }}.{{ guid }}.json"
+      dest: "{{ ANSIBLE_REPO_PATH }}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template-orig"
     tags:
       - aws_infrastructure_deployment
       - gen_cf_template
-  ######################### Launch CF Template
 
-  - name: Launch CloudFormation template
+  ######################### Minimize template (avoid size limitation as much as possible)
+  - name: minimize json
+    shell: "jq -c . < {{ ANSIBLE_REPO_PATH }}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template-orig >  {{ ANSIBLE_REPO_PATH }}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
+    register: jq_minify
+    ignore_errors: true
+    tags:
+      - aws_infrastructure_deployment
+      - gen_cf_template
+      - minify_cf_template
+
+  - name: use original if jq failed
+    command: "cp {{ ANSIBLE_REPO_PATH }}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template-orig {{ ANSIBLE_REPO_PATH }}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
+    when: jq_minify|failed
+    tags:
+      - aws_infrastructure_deployment
+      - gen_cf_template
+      - minify_cf_template
+
+  ######################### Validate CF Template
+
+  - name: validate cloudformation template
     environment:
       AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
       AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
       AWS_DEFAULT_REGION: "{{aws_region}}"
+    shell: "aws cloudformation validate-template --region {{ aws_region | default(region) | default('us-east-1')}} --template-body file://{{ ANSIBLE_REPO_PATH }}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
+    tags:
+      - aws_infrastructure_deployment
+      - validate_cf_template
+
+  ######################### Launch CF Template
+
+  - name: Launch CloudFormation template
+    # environment:
+    #   AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    #   AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    #   AWS_DEFAULT_REGION: "{{aws_region}}"
     cloudformation:
+      aws_access_key: "{{ aws_access_key_id }}"
+      aws_secret_key: "{{ aws_secret_access_key }}"
       stack_name: "{{ project_tag }}"
       state: "present"
-      region: "{{ aws_region }}"
+      region: "{{ aws_region | default(region) | default('us-east-1')}}"
       disable_rollback: true
-      template: "{{ ANSIBLE_REPO_PATH }}/workdir/{{cloud_provider}}_cloud_template.{{ env_type }}.{{ guid }}.json"
+      template: "{{ ANSIBLE_REPO_PATH }}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
       tags:
         Stack: "project {{ project_tag }}"
     tags:
@@ -44,9 +77,6 @@
     delay: 60
     ignore_errors: yes
 
-  - debug:
-     var: cloudformation_out
-
   - name: report Cloudformation error
     fail:
       msg: "FAIL {{ project_tag }} Create Cloudformation"
@@ -54,50 +84,87 @@
     tags:
       - provision_cf_template
 
-  - name: Refresh cloud_provider cache
-    environment:
-      AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
-      AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
-      AWS_DEFAULT_REGION: "{{aws_region}}"
-    shell: "{{ ANSIBLE_REPO_PATH }}/inventory/{{cloud_provider }}.py --refresh-cache"
-    when: "not tower_run == 'true'"
-    register: task_result
-    until: task_result.rc == 0
-    retries: 5
-    delay: 60
-    ignore_errors: yes
-    changed_when: task_result.rc == 0
+  - name: Gather EC2 facts
+    ec2_remote_facts:
+      aws_access_key: "{{ aws_access_key_id }}"
+      aws_secret_key: "{{ aws_secret_access_key }}"
+      region: "{{ aws_region | default(region) | default('us-east-1')}}"
+      filters:
+        instance-state-name: running
+        "tag:Project": "{{project_tag}}"
+    register: ec2_facts
     tags:
-      - refresh_inventory
-      - refresh_inventory_script
+      - create_inventory
+      - must
 
-  - name: report Cache refresh error
-    fail:
-      msg: "FAIL {{ project_tag }} Cache refresh error"
-    when: not task_result|succeeded
+  - name: debug ec2_facts
+    debug:
+      var: ec2_facts
+      verbosity: 2
 
-  - name: Refresh in-memory cloud_provider cache
-    environment:
-      AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
-      AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
-      AWS_DEFAULT_REGION: "{{aws_region}}"
-    meta: refresh_inventory
+  - name: windows ostype workaround
+    set_fact:
+      project_tag_ostype: "{{project_tag}}_ostype"
     tags:
-      - refresh_inventory
+      - create_inventory
+      - must
+
+  - set_fact:
+      stack_tag: "{{env_type | replace('-', '_')}}_{{guid}}"
+
+  - add_host:
+      name: "{{item.public_dns_name}}"
+      shortname: "{{item.tags.Name | default(item.private_dns_name)}}"
+      groups:
+        - "tag_Project_{{stack_tag}}"
+        - "tag_{{stack_tag}}_{{item['tags'][project_tag] | default('unknowns')}}"
+        - "tag_{{stack_tag}}_ostype_{{item['tags'][project_tag_ostype] | default('unknown')}}"
+        - "{{item.tags.ostype | default('unknowns')}}"
+        - "{{item['tags'][project_tag_ostype] | default('unknowns')}}"
+        - "{{ 'newnodes' if (item.tags.newnode|d()|bool) else 'all'}}"
+      ansible_ssh_user: ec2-user
+      remote_user: ec2-user
+      ansible_ssh_private_key_file: "{{item['key_name']}}"
+      key_name: "{{item['key_name']}}"
+      state: "{{item['state']}}"
+      internaldns: "{{item.tags.internaldns | default(item.private_dns_name)}}"
+      instance_id: "{{ item.id }}"
+      region: "{{item['region']}}"
+      public_dns_name: "{{item['public_dns_name']}}"
+      private_dns_name: "{{item['private_dns_name']}}"
+      private_ip_address: "{{item['private_ip_address']}}"
+      public_ip_address: "{{item['public_ip_address']}}"
+      placement: "{{item['placement']['zone']}}"
+      image_id: "{{item['image_id']}}"
+      ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+    with_items: "{{ec2_facts['instances']}}"
+    tags:
+      - create_inventory
+      - must
+
+  - add_host:
+      name: "{{item.public_dns_name}}"
+      groups: "{{item.tags.AnsibleGroup}}"
+    with_items: "{{ec2_facts['instances']}}"
+    tags:
+      - create_inventory
+      - must
+
+  - name: debug hostvars
+    debug:
+      var: hostvars
+      verbosity: 2
 
 - name: Configure local ssh config for bastion proxy use
   include: "{{ ANSIBLE_REPO_PATH }}/cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
-  when: ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') in groups
-
-
+  when: groups['bastions']
 
 - name: wait_for_connection for all non-windows machines and set hostname
   hosts:
-    - "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}:!{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_ostype_windows') | replace('-', '_') }}"
+    - all:!windows
   vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
+      - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+      - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   gather_facts: false
   any_errors_fatal: true
   ignore_errors: false
@@ -109,26 +176,36 @@
   tasks:
     - name: wait for linux host to be available
       wait_for_connection:
-    - name: Set hostname based on ec2_tag_internaldns
+    - name: Set hostname based on tag_internaldns
       hostname:
-        name: "{{ec2_tag_internaldns}}"
-      when: ec2_tag_internaldns is defined
+        name: "{{hostvars[inventory_hostname].internaldns}}"
+      when: hostvars[inventory_hostname].internaldns is defined
+    - stat:
+        path: /etc/cloud/cloud.cfg
+      register: cloud_cfg_file
 
+    - name: disable updating hostname in /etc/cloud/cloud.cfg
+      lineinfile:
+        dest: /etc/cloud/cloud.cfg
+        regexp: 'update_hostname$'
+        line: '# - update_hostname'
+        backup: yes
+      when: cloud_cfg_file.stat.exists
+      tags: disable_cloud_cfg_hostname
 
 - name: Set facts for Windows hosts if any exist and wait_for_connection
   gather_facts: false
   hosts:
-    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_ostype_windows') | replace('-', '_') }}"
+    - windows
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
   tasks:
     - name: set facts for remote access
       set_fact:
         ansible_become: false
         ansible_connection: winrm
-        ansible_host: "{{ ec2_public_dns_name }}"
+        ansible_host: "{{ public_dns_name }}"
         ansible_password: "{{ windows_password | default(hostvars['localhost'].generated_windows_password) }}"
         ansible_port: 5986
         ansible_user: Administrator

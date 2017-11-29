@@ -1,5 +1,6 @@
 #!/bin/bash
-
+echo { }
+exit 0 
 # This script is a wrapper for ec2.py. The purpose is to avoid HTTP 400 from AWS as we run several
 # deployments simultaneously.
 # It follows the recommandations from: http://docs.aws.amazon.com/general/latest/gr/api-retries.html

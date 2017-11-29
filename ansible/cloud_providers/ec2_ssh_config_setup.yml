@@ -9,20 +9,28 @@
   tags:
     - create_ssh_config
   tasks:
-  #- debug:
-  #   var: "{{hostvars}}"
+  - debug:
+      var: groups['bastions'].0
   - name: Store bastion hostname as a fact
     set_fact:
-      bastion_hostname: "{{ hostvars[ groups[ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') ].0 ]['ec2_public_dns_name'] }}"
+      bastion_hostname: "{{groups['bastions'].0 }}"
+      # This is where the ssh_config file will be created, this file is used to
+      # define the communication method to all the hosts in the deployment
+      ansible_ssh_config: "{{ ANSIBLE_REPO_PATH }}/workdir/{{ env_type }}_{{ guid }}_ssh_conf"
 
-  - name: Create empty local ssh config as defined by deploy_local_ssh_config_location
+  - name: delete local ssh config, start fresh
     file:
-      dest: "{{ ANSIBLE_REPO_PATH }}/workdir/{{ env_type }}_{{ guid }}_ssh_conf"
+      dest: "{{ ansible_ssh_config }}"
+      state: absent
+
+  - name: Create empty local ssh config
+    file:
+      dest: "{{ ansible_ssh_config }}"
       state: touch
 
   - name: Add bastion proxy config to workdir ssh config file
     blockinfile:
-      dest: "{{ ANSIBLE_REPO_PATH }}/workdir/{{ env_type }}_{{ guid }}_ssh_conf"
+      dest: "{{ ansible_ssh_config }}"
       marker: "##### {mark} ADDED BASTION PROXY HOST {{ env_type }}-{{ guid }} ######"
       content: |
           Host {{ bastion_hostname }}
@@ -31,7 +39,7 @@
             IdentitiesOnly yes
             User {{ remote_user }}
             ControlMaster auto
-            ControlPath /tmp/%h-%r
+            ControlPath /tmp/{{ guid }}-%h-%r
             ControlPersist 5m
             StrictHostKeyChecking no
     tags:
@@ -39,16 +47,29 @@
 
   - name: Add all hosts to workdir ssh config file
     blockinfile:
-      dest: "{{ ANSIBLE_REPO_PATH }}/workdir/{{ env_type }}_{{ guid }}_ssh_conf"
+      dest: "{{ ansible_ssh_config }}"
       marker: "##### {mark} ADDED Node Proxy Config  {{ item }} {{ env_type }}-{{ guid }} ######"
       block: |
-          Host {{ item }}
-            Hostname {{ item }}
+          Host {{ item }} {{  hostvars[item].public_ip_address | default('') }}
+            Hostname {{ hostvars[item].private_dns_name | default(item) }}
             User {{ remote_user }}
             IdentityFile ~/.ssh/{{ key_name }}.pem
-            ProxyCommand ssh {{ remote_user }}@{{ bastion_hostname }} -W %h:%p
+            ProxyCommand ssh -F {{ ansible_ssh_config }} {{ bastion_hostname }} -W %h:%p
             StrictHostKeyChecking no
-    with_items:
-      - "{{ groups[('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_')] }}"
+    when: item != bastion_hostname
+    with_items: "{{ groups['all'] }}"
     tags:
       - bastion_proxy_config_hosts
+
+- name: Set ssh extra args for all hosts, use ssh_config just created
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  tags:
+    - step001
+    - ssh_args
+  tasks:
+    - name: add -F option ansible_ssh_extra_args
+      set_fact:
+        ansible_ssh_extra_args: "{{ ansible_ssh_extra_args }} -F {{ hostvars['localhost'].ansible_ssh_config }}"
