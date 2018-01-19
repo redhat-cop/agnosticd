@@ -5,7 +5,7 @@
 
 - name: Create project for workload
   shell: "oc new-project {{ocp_project}}"
-
+  ignore_errors: true
 - name: Make sure we go back do default project
   shell: "oc project default"
 
@@ -13,10 +13,12 @@
   shell: "oc create sa enmasse-admin -n {{ocp_project}}"
 
 - name: Add permissions for viewing OpenShift resources to default user
-  shell: "oc policy add-role-to-user view system:serviceaccount:{{ocp_project}}:default"
+  shell: "oc policy add-role-to-user view system:serviceaccount:{{ocp_project}}:default -n {{ocp_project}}"
 
 - name: Add permissions for editing OpenShift resources to admin SA
-  shell: "oc policy add-role-to-user edit system:serviceaccount:{{ocp_project}}:enmasse-admin"
+  shell: "oc policy add-role-to-user edit system:serviceaccount:{{ocp_project}}:enmasse-admin -n {{ocp_project}}"
+
+########## create_self_signed_cert "oc" "address-controller.${NAMESPACE}.svc.cluster.local" "address-controller-cert"
 
 - name: Create self-signed certificate for address-controller.{{ocp_project}}.svc.cluster.local
   shell: "openssl req -new -x509 -batch -nodes -days 11000 -out /tmp/{{guid}}-cert.crt -keyout /tmp/{{guid}}-key.orig -subj \"/O=io.enmasse/CN=address-controller.{{ocp_project}}.svc.cluster.local\""
@@ -27,29 +29,63 @@
 - name: save tlskey as fact
   shell: "base64 -w 0 /tmp/{{guid}}-key"
   register: tlskey
-- name:
-  shell: base64 -w 0 /tmp/{{guid}}-cert.crt
+- name: save tlscert as fact
+  shell: "base64 -w 0 /tmp/{{guid}}-cert.crt"
   register: tlscrt
 
-- name: create tls secret
+- name: create tls secret file
   copy:
-    dest: /tmp/{{guid}}-tls-secret
+    dest: "/tmp/{{guid}}-tls-secret"
     content: |
       {
-    "apiVersion": "v1",
-    "kind": "Secret",
-    "metadata": {
-        "name": "address-controller-cert"
-    },
-    "type": "kubernetes.io/tls",
-    "data": {
-        "tls.key": "{{tlskey}}",
-        "tls.crt": "{{tlscrt}}"
-    }
-    }
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+          "name": "address-controller-cert"
+      },
+      "type": "kubernetes.io/tls",
+      "data": {
+          "tls.key": "{{tlskey.stdout}}",
+          "tls.crt": "{{tlscrt.stdout}}"
+      }
+      }
 
-- name: create tls secret
+- name: create tls secret object
   shell: "oc create -f /tmp/{{guid}}-tls-secret -n {{ocp_project}}"
+
+####### create_self_signed_cert "oc" "none-authservice.${NAMESPACE}.svc.cluster.local" "none-authservice-cert"
+- name: Create self-signed certificate for none-authservice.{{ocp_project}}.svc.cluster.local
+  shell: "openssl req -new -x509 -batch -nodes -days 11000 -out /tmp/{{guid}}auth-cert.crt -keyout /tmp/{{guid}}auth-key.orig -subj \"/O=io.enmasse/CN=none-authservice.{{ocp_project}}.svc.cluster.local\""
+
+- name: "Convert from PKCS#1 to PKCS#8"
+  shell: "openssl pkcs8 -topk8 -inform pem -in /tmp/{{guid}}auth-key.orig -outform pem -nocrypt -out /tmp/{{guid}}auth-key"
+
+- name: save tlskey as fact
+  shell: "base64 -w 0 /tmp/{{guid}}auth-key"
+  register: tlskeyauth
+- name: save tlscert as fact
+  shell: "base64 -w 0 /tmp/{{guid}}auth-cert.crt"
+  register: tlscrtauth
+
+- name: create tls secret file
+  copy:
+    dest: "/tmp/{{guid}}auth-tls-secret"
+    content: |
+      {
+      "apiVersion": "v1",
+      "kind": "Secret",
+      "metadata": {
+          "name": "none-authservice-cert"
+      },
+      "type": "kubernetes.io/tls",
+      "data": {
+          "tls.key": "{{tlskeyauth.stdout}}",
+          "tls.crt": "{{tlscrtauth.stdout}}"
+      }
+      }
+
+- name: create tls secret object
+  shell: "oc create -f /tmp/{{guid}}auth-tls-secret -n {{ocp_project}}"
 
 
 - name: Copy non autheservice file
@@ -63,17 +99,20 @@
   template:
     src: "enmasse.yaml.j2"
     dest: /tmp/{{guid}}-enmasse-template.yaml
-- name: Create none authservice
+
+
+- name: Create enmasse template
   shell: "oc create -f /tmp/{{guid}}-enmasse-template.yaml -n {{ocp_project}} "
 
 
-- name: create fact
-    payload: "{ \\\"kind\\\":\\\"AddressSpace\\\", \\\"apiVersion\\\": \\\"enmasse.io/v1\\\", \\\"metadata\\\": { \\\"name\\\": \\\"default\\\", \\\"namespace\\\": \\\"${ocp_project}\\\" }, \\\"spec\\\": { \\\"type\\\": \\\"standard\\\" } }"
+- name: create payload fact
+  set_fact:
+    payload: "{ kind: AddressSpace , apiVersion: 'enmasse.io/v1', metadata: { name: default, namespace: {{ocp_project}} }, spec: { type: standard } }"
 
 
 - name: Create configmap
   copy:
-    dest: /tmp/{{guid}}-configmap.json
+    dest: "/tmp/{{guid}}-configmap.json"
     content: |
       {
       "apiVersion": "v1",
@@ -88,10 +127,6 @@
       "config.json": "{{payload}}"
       }
       }
-
-
-
-#create_self_signed_cert "oc" "address-controller.{{ocp_project}}.svc.cluster.local" "address-controller-cert"
 
 
 - name: Give ocp_username access to ocp_project
