@@ -57,6 +57,7 @@ case $2 in
             -e "key_name=${KEYNAME}" \
             -e "cloud_provider=${CLOUDPROVIDER}" \
             -e "aws_region=${REGION}" \
+            -e "azure_region=${REGION}" \
             -e "HostedZoneId=${HOSTZONEID}" \
             -e "install_ipa_client=${INSTALL_IPA_CLIENT}" \
             -e "software_to_deploy=${SOFTWARE_TO_DEPLOY}" \
@@ -75,8 +76,10 @@ case $2 in
             -e "env_type=${ENVTYPE}"  \
             -e "cloud_provider=${CLOUDPROVIDER}" \
             -e "aws_region=${REGION}"  \
+            -e "azure_region=${REGION}"  \
             -e "HostedZoneId=${HOSTZONEID}"  \
             -e "key_name=${KEYNAME}"  \
+            ${ENVTYPE_ARGS[@]} \
             "$@"
         ;;
 
@@ -91,6 +94,7 @@ case $2 in
             -e "key_name=${KEYNAME}" \
             -e "cloud_provider=${CLOUDPROVIDER}" \
             -e "aws_region=${REGION}" \
+            -e "azure_region=${REGION}"  \
             -e "HostedZoneId=${HOSTZONEID}" \
             -e "install_ipa_client=${INSTALL_IPA_CLIENT}" \
             -e "software_to_deploy=${SOFTWARE_TO_DEPLOY}" \

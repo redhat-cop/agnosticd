@@ -1,0 +1,260 @@
+---
+- name: Step 001 Deploy Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - step001
+    - deploy_infrastructure
+  environment:
+    AZURE_CLIENT_ID: "{{azure_service_principal}}"
+    AZURE_TENANT: "{{azure_tenant}}"
+    AZURE_SECRET: "{{azure_password}}"
+    AZURE_SUBSCRIPTION_ID: "{{azure_subscription_id}}"
+    # AZURE_CONFIG_DIR: create a specific config dir for this stack to allow concurrent access
+    AZURE_CONFIG_DIR: "/tmp/.azure-{{project_tag}}"
+  tasks:
+    - name: Ensure az is installed
+      command: which az
+      register: az_result
+
+    - name: Fail if az not available
+      fail:
+        msg: you need azure-cli installed
+      when: az_result|failed
+
+    - set_fact:
+        stack_tag: "{{env_type | replace('-', '_')}}_{{guid}}"
+      tags:
+        - create_inventory
+        - must
+
+    - set_fact:
+        t_dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
+        params_dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{project_tag}}-cloud_template_parameters.json"
+      tags:
+        - azure_infrastructure_deployment
+        - validate_azure_template
+        - gen_azure_template
+
+    - name: Azure Generate Resource manager template
+      template:
+        src: "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.j2"
+        dest: "{{t_dest}}"
+      tags:
+        - azure_infrastructure_deployment
+        - validate_azure_template
+        - gen_azure_template
+
+    # use command line 'az' to validate template and deploy
+    - name: Login to Azure
+      command: az login --service-principal -u {{azure_service_principal}} -p {{azure_password}} --tenant {{azure_tenant}}
+      tags:
+        - validate_azure_template
+        - create_inventory
+        - must
+
+    - name: Create the resource group
+      tags:
+        - azure_infrastructure_deployment
+        - validate_azure_template
+      command: az group create --name "{{project_tag}}" --location "{{azure_region}}"
+
+    - name: Get SSH public key
+      set_fact:
+        ssh_key: "~/.ssh/{{key_name}}.pem"
+        ssh_key_data: "{{lookup('file', '~/.ssh/{{key_name}}.pub')}}"
+      tags:
+        - validate_azure_template
+
+    - name: Build parameter file
+      copy:
+        content: |
+          {
+            "adminUsername": { "value": "{{remote_user}}" },
+            "sshKeyData": { "value": "{{ssh_key_data}}"},
+            "DNSZone": { "value": "{{HostedZoneId}}"},
+            "guid": { "value": "{{guid}}"},
+          }
+        dest: "{{params_dest}}"
+      tags:
+        - azure_infrastructure_deployment
+        - validate_azure_template
+
+    - name: Validate arm template
+      command: az group deployment validate --template-file {{t_dest}} --resource-group {{project_tag}} --parameters @{{params_dest}}
+      changed_when: false
+      tags:
+        - azure_infrastructure_deployment
+        - validate_azure_template
+
+    - name: ARM Group deployment create
+      command: az group deployment create --template-file {{t_dest}} --resource-group {{project_tag}} --parameters @{{params_dest}}
+      register: az_deploy
+      tags:
+        - azure_infrastructure_deployment
+
+    - debug:
+        var: az_deploy
+        verbosity: 2
+      tags:
+        - azure_infrastructure_deployment
+
+    - name: Fetch DNS zone NS entries
+      azure_rm_dnsrecordset_facts:
+        zone_name: "{{guid}}.{{HostedZoneId}}"
+        resource_group: "{{project_tag}}"
+        record_type: NS
+        relative_name: '@'
+      register: subzone_ns
+      tags:
+        - azure_infrastructure_deployment
+
+    - debug:
+        var: subzone_ns
+        verbosity: 2
+      tags:
+        - azure_infrastructure_deployment
+
+    - name: Add delegation for NS to the main DNSZone
+      azure_rm_dnsrecordset:
+        resource_group: "{{az_dnszone_resource_group|default('dns')}}"
+        relative_name: "{{guid}}"
+        zone_name: "{{HostedZoneId}}"
+        record_type: NS
+        state: present
+        records: "{{subzone_ns | json_query('ansible_facts.azure_dnsrecordset[0].properties.NSRecords[*].{entry: nsdname}')}}"
+      tags:
+        - azure_infrastructure_deployment
+
+    - name: Get list of VMs
+      command: az vm list -g "{{project_tag}}" --show-details
+      register: result_list
+      tags:
+        - create_inventory
+        - must
+
+    - name: Translate JSON output from 'az vm list' to ansible variable
+      set_fact:
+        vm_list: "{{ result_list.stdout | from_json }}"
+      tags:
+        - create_inventory
+        - must
+
+    - debug:
+        var: vm_list
+        verbosity: 2
+      tags:
+        - create_inventory
+        - must
+
+    - name: Build inventory
+      add_host:
+        name: "{{item.name}}"
+        shortname: "{{item.name}}"
+        groups:
+          - "tag_Project_{{stack_tag}}"
+          - "tag_{{stack_tag}}_{{item.tags.AnsibleGroup | default('unknowns')}}"
+          - "tag_{{stack_tag}}_ostype_{{item.tags.ostype | default('unknown')}}"
+          - "{{item.tags.ostype | default('unknowns')}}"
+          - "{{ 'newnodes' if (item.tags.newnode|d()|bool) else 'all'}}"
+        ansible_ssh_user: "{{ remote_user }}"
+        remote_user: "{{ remote_user | d('azure') }}"
+        ansible_ssh_private_key_file: "{{ssh_key}}"
+        key_name: "{{key_name}}"
+        state: "{{item.powerState|d('unknown')}}"
+        internaldns: "{{item.tags.internaldns | default(item.name)}}"
+        instance_id: "{{ item.vmId | d('unknown')}}"
+        region: "{{azure_region}}"
+        public_dns_name: "{{item.fqdns}}"
+        private_dns_name: "{{item.tags.internaldns|d(item.name)}}"
+        private_ip_address: "{{item.privateIps}}"
+        public_ip_address: "{{item.publicIps}}"
+        placement: "{{item.zones}}"
+        image_id: "{{item.storageProfile.osDisk.image|d('unknown')}}"
+        ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+      with_items: "{{vm_list}}"
+      tags:
+        - create_inventory
+        - must
+
+    # AnsibleGroup tag can have several comma-separated values. Ex: activedirectories,windows
+    - add_host:
+        name: "{{item.name}}"
+        groups: "{{item.tags.AnsibleGroup}}"
+      with_items: "{{vm_list}}"
+      tags:
+        - create_inventory
+        - must
+
+    - name: debug hostvars
+      debug:
+        var: hostvars
+        verbosity: 2
+
+- name: Configure local ssh config for bastion proxy use
+  include: "{{ANSIBLE_REPO_PATH}}/cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
+  when: groups['bastions']
+
+- name: wait_for_connection for all non-windows machines and set hostname
+  hosts:
+    - all:!windows:!network
+  vars_files:
+      - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_vars.yml"
+      - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_secret_vars.yml"
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  become: true
+  tags:
+    - step001
+    - wait_ssh
+    - set_hostname
+  tasks:
+    - name: wait for linux host to be available
+      wait_for_connection:
+
+    - name: Set hostname based on tag_internaldns
+      hostname:
+        name: "{{hostvars[inventory_hostname].internaldns}}"
+      when: hostvars[inventory_hostname].internaldns is defined
+
+    - stat:
+        path: /etc/cloud/cloud.cfg
+      register: cloud_cfg_file
+
+    - name: disable updating hostname in /etc/cloud/cloud.cfg
+      lineinfile:
+        dest: /etc/cloud/cloud.cfg
+        regexp: 'update_hostname$'
+        line: '# - update_hostname'
+        backup: yes
+      when: cloud_cfg_file.stat.exists
+      tags: disable_cloud_cfg_hostname
+
+- name: Set facts for Windows hosts if any exist and wait_for_connection
+  gather_facts: false
+  hosts:
+    - windows
+  vars_files:
+    - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_secret_vars.yml"
+  tasks:
+    - name: set facts for remote access
+      set_fact:
+        ansible_become: false
+        ansible_connection: winrm
+        ansible_host: "{{ public_dns_name }}"
+        ansible_password: "{{ windows_password | default(hostvars['localhost'].generated_windows_password) }}"
+        ansible_port: 5986
+        ansible_user: Administrator
+        ansible_ssh_user: Administrator
+        ansible_winrm_server_cert_validation: ignore
+
+    - name: wait for windows host to be available
+      wait_for_connection:
+        timeout: 900
