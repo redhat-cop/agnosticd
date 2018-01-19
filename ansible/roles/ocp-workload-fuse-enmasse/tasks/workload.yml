@@ -10,40 +10,89 @@
   shell: "oc project default"
 
 - name: Create service account for address controller
-  shell: "oc create sa enmasse-admin -n $NAMESPACE"
+  shell: "oc create sa enmasse-admin -n {{ocp_project}}"
 
 - name: Add permissions for viewing OpenShift resources to default user
   shell: "oc policy add-role-to-user view system:serviceaccount:{{ocp_project}}:default"
 
-- name:
-  shell: "oc policy add-role-to-user edit system:serviceaccount:{{ocp_project}}:enmasse-admin"
-
 - name: Add permissions for editing OpenShift resources to admin SA
   shell: "oc policy add-role-to-user edit system:serviceaccount:{{ocp_project}}:enmasse-admin"
 
-- name: Create none authservice
-  shell: "oc process -f $NONE_TEMPLATE | oc create -n $NAMESPACE -f -"
+- name: Create self-signed certificate for address-controller.{{ocp_project}}.svc.cluster.local
+  shell: "openssl req -new -x509 -batch -nodes -days 11000 -out /tmp/{{guid}}-cert.crt -keyout /tmp/{{guid}}-key.orig -subj \"/O=io.enmasse/CN=address-controller.{{ocp_project}}.svc.cluster.local\""
 
-- name: Instantiate EnMasse template
-  shell: "oc process -f $ENMASSE_TEMPLATE $TEMPLATE_PARAMS | oc create -n $NAMESPACE -f -"
+- name: "Convert from PKCS#1 to PKCS#8"
+  shell: "openssl pkcs8 -topk8 -inform pem -in /tmp/{{guid}}-key.orig -outform pem -nocrypt -out /tmp/{{guid}}-key"
+
+- name: save tlskey as fact
+  shell: "base64 -w 0 /tmp/{{guid}}-key"
+  register: tlskey
+- name:
+  shell: base64 -w 0 /tmp/{{guid}}-cert.crt
+  register: tlscrt
+
+- name: create tls secret
+  copy:
+    dest: /tmp/{{guid}}-tls-secret
+    content: |
+      {
+    "apiVersion": "v1",
+    "kind": "Secret",
+    "metadata": {
+        "name": "address-controller-cert"
+    },
+    "type": "kubernetes.io/tls",
+    "data": {
+        "tls.key": "{{tlskey}}",
+        "tls.crt": "{{tlscrt}}"
+    }
+    }
+
+- name: create tls secret
+  shell: "oc create -f /tmp/{{guid}}-tls-secret -n {{ocp_project}}"
+
+
+- name: Copy non autheservice file
+  template:
+    src: "noauth.json.j2"
+    dest: /tmp/{{guid}}-noauth-template.json
+- name: Create none authservice
+  shell: "oc create -f /tmp/{{guid}}-noauth-template.json -n {{ocp_project}} "
+
+- name: Copy enmasse template
+  template:
+    src: "enmasse.yaml.j2"
+    dest: /tmp/{{guid}}-enmasse-template.yaml
+- name: Create none authservice
+  shell: "oc create -f /tmp/{{guid}}-enmasse-template.yaml -n {{ocp_project}} "
+
+
+- name: create fact
+    payload: "{ \\\"kind\\\":\\\"AddressSpace\\\", \\\"apiVersion\\\": \\\"enmasse.io/v1\\\", \\\"metadata\\\": { \\\"name\\\": \\\"default\\\", \\\"namespace\\\": \\\"${ocp_project}\\\" }, \\\"spec\\\": { \\\"type\\\": \\\"standard\\\" } }"
+
+
+- name: Create configmap
+  copy:
+    dest: /tmp/{{guid}}-configmap.json
+    content: |
+      {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "address-space-default",
+        "labels": {
+            "type": "address-space"
+        }
+      },
+      "data": {
+      "config.json": "{{payload}}"
+      }
+      }
+
 
 
 #create_self_signed_cert "oc" "address-controller.{{ocp_project}}.svc.cluster.local" "address-controller-cert"
-#create_self_signed_cert "oc" "none-authservice.{{ocp_project}}.svc.cluster.local" "none-authservice-cert"
 
-- name: Create serviceaccount-as-oauthclient
-  shell: "oc create -f https://raw.githubusercontent.com/syndesisio/syndesis/master/app/deploy/support/serviceaccount-as-oauthclient-restricted.yml -n {{ocp_project}}
-"
-
-- name: Create workload template
-  shell: "oc create -f https://raw.githubusercontent.com/syndesisio/syndesis/master/app/deploy/syndesis-restricted.yml -n {{ocp_project}}
-"
-
-- name: Create the workload app
-  shell: |
-      oc new-app syndesis-restricted -p ROUTE_HOSTNAME=fuse.{{ocp_project}}.{{ocp_apps_domain}} \
-      -p OPENSHIFT_PROJECT={{ocp_project}} \
-      -p OPENSHIFT_OAUTH_CLIENT_SECRET=$(oc sa get-token syndesis-oauth-client -n {{ocp_project}}) -n {{ocp_project}}
 
 - name: Give ocp_username access to ocp_project
   shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"
