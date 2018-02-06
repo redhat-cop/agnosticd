@@ -6,6 +6,10 @@ A brief description of the role goes here.
 Requirements
 ------------
 
+
+Request Let's Encrypt Wildcard Certificates for the Cluster Make sure to import the intermediate
+certificate ([letsencrypt.org/certs/fakeleintermediatex1.pem](https://letsencrypt.org/certs/fakeleintermediatex1.pem)) into your browser to accept all newly created certificates.
+
 Any pre-requisites that may not be covered by Ansible itself or the role should be mentioned here. For instance, if the role uses the EC2 module, it may be a good idea to mention in this section that the boto package is required.
 
 Role Variables
