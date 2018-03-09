@@ -1,6 +1,6 @@
 ---
 - name: Step 00xxxxx post software
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_support') | replace('-', '_') }}"
+  hosts: support
   gather_facts: False
   become: yes
   vars_files:
@@ -12,7 +12,7 @@
       shell: "chmod -R 777 /srv/nfs/user-vols"
 
 - name: Step 00xxxxx post software
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+  hosts: bastions
   gather_facts: False
   become: yes
   vars_files:
@@ -20,10 +20,7 @@
   tasks:
     - name: get nfs Hostname
       set_fact:
-        nfs_host: "{{item}}"
-      with_items:
-        - "{{groups['tag_AnsibleGroup_support']}}"
-      when: '"{{env_type}}-{{guid}}" in hostvars[item].{{cloud_provider}}_tag_Project'
+        nfs_host: "{{ groups['support']|sort|first }}"
 
     - set_fact:
         pv_size: '10Gi'
@@ -35,6 +32,7 @@
         src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/pvs.j2"
         dest: "/root/pvs-{{ env_type }}-{{ guid }}.yml"
       tags: [ gen_pv_file ]
+      when: pv_list.0 is defined
 
     - set_fact:
         pv_size: "{{user_vols_size}}"
@@ -50,12 +48,18 @@
       tags:
         - gen_user_vol_pv
 
-    - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
 
-    - shell: 'oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
+    - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
+      tags:
+        - create_user_pv
+      when: pv_list.0 is defined
+
+    - shell: 'oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
+      tags:
+        - create_user_pv
 
 - name: Configure Bastion for CF integration
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+  hosts: bastions
   become: yes
   gather_facts: False
   vars_files:
@@ -83,8 +87,15 @@
       group: opentlc-mgr
       recurse: yes
 
+  # sssd bug, fixed by restart
+  - name: restart sssd
+    service:
+      name: sssd
+      state: restarted
+    when: install_ipa_client
+
 - name: env-specific infrastructure
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
+  hosts: masters
   become: yes
   gather_facts: False
   vars_files:
@@ -93,13 +104,18 @@
     - env-specific
     - env-specific_infra
   tasks:
+    - name: Command to enable the wildcard routes in the OCP cluster for 3scale
+      shell: "oc set env dc/router ROUTER_ALLOW_WILDCARD_ROUTES=true -n default"
+
     - name: Give administrative user cluster-admin privileges
       command: "oc adm policy add-cluster-role-to-user cluster-admin {{ admin_user }}"
 
     - name: Check for admin_project project
       command: "oc get project {{admin_project}}"
       register: result
+      changed_when: false
       ignore_errors: true
+
     - name: Create admin_project project
       command: "oc adm new-project {{admin_project}} --admin {{admin_user}} --node-selector='env=infra'"
       when: result | failed
@@ -114,32 +130,40 @@
     - name: Add capabilities within anyuid which is not really ideal
       command: "oc patch scc/anyuid --patch '{\"requiredDropCapabilities\":[\"MKNOD\",\"SYS_CHROOT\"]}'"
 
+    - name: Set Node Selector to empty for project openshift-template-service-broker
+      shell: oc annotate namespace openshift-template-service-broker openshift.io/node-selector="" --overwrite
+      ignore_errors: true
+      when:
+      - osrelease | version_compare('3.7', '>=')
 
 - name: Remove all users from self-provisioners group
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
+  hosts: masters[0]
   become: yes
   gather_facts: False
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tags: [ env-specific, remove_self_provisioners ]
   tasks:
+  - name: Set clusterRoleBinding auto-update to false
+    command: oc annotate -n default --overwrite clusterrolebinding.rbac self-provisioners rbac.authorization.kubernetes.io/autoupdate=false
+    when: remove_self_provisioners
 
   - name: Remove system:authenticated from self-provisioner role
     shell: "oadm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
     ignore_errors: true
     when: remove_self_provisioners
+
   - name: create our own OPENTLC-PROJECT-PROVISIONERS
     shell: "oadm groups new OPENTLC-PROJECT-PROVISIONERS"
     ignore_errors: true
     when: remove_self_provisioners
+
   - name: allow OPENTLC-PROJECT-PROVISIONERS members to provision their own projects
     shell: "oadm policy add-cluster-role-to-group self-provisioner OPENTLC-PROJECT-PROVISIONERS"
     when: remove_self_provisioners
 
-
-
 - name: Project Request Template
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
+  hosts: masters
   gather_facts: False
   become: yes
   vars_files:
@@ -148,7 +172,6 @@
     - env-specific
     - project_request
   tasks:
-
     - name: Copy project request template to master
       copy:
         src: ./files/project-template.yml
@@ -162,7 +185,6 @@
     - name: Create project request template in default project
       shell: "oc create -f /root/project-template.yml -n default || oc replace -f /root/project-template.yml -n default"
       when: request_template | failed
-
 
     - name: Update master config file to use project request template
       lineinfile:
@@ -179,15 +201,24 @@
         replace: "projectRequestMessage: '{{project_request_message}}'"
         backup: yes
 
+    - name: Restart master service
+      service:
+        name: atomic-openshift-master-api
+        state: restarted
+      when:
+      - master_config.changed
+      - osrelease | version_compare('3.7', '>=')
 
     - name: Restart master service
       service:
         name: atomic-openshift-master
         state: restarted
-      when: master_config.changed
+      when:
+      - master_config.changed
+      - osrelease | version_compare('3.7', '<')
 
 - name: node admin configs
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_node') | replace('-', '_') }}"
+  hosts: nodes
   gather_facts: False
   become: yes
   vars_files:
@@ -196,33 +227,87 @@
     - env-specific
     - env_specific_images
   tasks:
-
     - name: 'Pull image'
       command: "docker pull {{ item }}"
       with_items: '{{ env_specific_images }}'
+      when: env_specific_images.0 is defined
+
+- name: Import jenkins images for OCP 3.7
+  hosts: masters[0]
+  become: yes
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - env_specific_images
+  tasks:
+  - name: tag jenkins
+    command: oc tag --source=docker registry.access.redhat.com/openshift3/jenkins-2-rhel7:v3.7 openshift/jenkins:v3.7 -n openshift
+    when: osrelease | version_compare('3.7', '>=')
+    ignore_errors: true
+
+  - name: tag jenkins
+    command: oc tag openshift/jenkins:v3.7 openshift/jenkins:latest -n openshift
+    register: octag_result
+    when: osrelease | version_compare('3.7', '>=')
+    retries: 5
+    delay: 2
+    until: octag_result|succeeded
+    ignore_errors: true
+
+- name: Fix NFS PV Recycling for OCP 3.7.9
+  gather_facts: False
+  become: yes
+  hosts: nodes
+  tasks:
+    - name: Pull ose-recycler Image
+      command: docker pull registry.access.redhat.com/openshift3/ose-recycler:latest
+      when: osrelease | version_compare('3.7.9', 'eq')
+
+    - name: Tag ose-recycler Image
+      command: "docker tag registry.access.redhat.com/openshift3/ose-recycler:latest registry.access.redhat.com/openshift3/ose-recycler:v{{ osrelease }}"
+      when: osrelease | version_compare('3.7.9', 'eq')
+
+# Set up Prometheus/Node Exporter/Alertmanager/Grafana
+# on the OpenShift Cluster
+- name: Install Prometheus and Grafana
+  gather_facts: False
+  become: yes
+  hosts:
+    - nodes
+    - infranodes
+    - masters
+    - bastions
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  roles:
+    - role: "{{ ANSIBLE_REPO_PATH }}/roles/openshift-prometheus"
+      when: install_prometheus
+  tags:
+    - prometheus
 
 - name: Install Nexus
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
+  hosts: masters
   gather_facts: False
   become: yes
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   run_once: true
   roles:
-    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/nexus2-container", desired_project: "{{admin_project}}" }
+    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/nexus-container", desired_project: "{{admin_project}}", nexus_version: "3" }
   tags:
     - env-specific
     - install_nexus
 
 - name: Zabbix for masters
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
+  hosts: masters
   gather_facts: true
-
   become: yes
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
   vars:
     zabbix_auto_registration_keyword: OCP Master
   roles:
@@ -237,20 +322,18 @@
     - install_zabbix
 
 - name: Zabbix for nodes
-
   hosts:
-    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_node') | replace('-', '_') }}"
-    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_infranode') | replace('-', '_') }}"
+    - nodes
+    - infranodes
   gather_facts: true
   become: yes
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
   vars:
     zabbix_auto_registration_keyword: OCP Node
-    zabbix_token: "{{ hostvars[groups[('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_')][0]].zabbix_token }}"
-    hawkular_route: "{{ hostvars[groups[('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_')][0]].hawkular_route }}"
+    zabbix_token: "{{ hostvars[groups['masters'][0]].zabbix_token }}"
+    hawkular_route: "{{ hostvars[groups['masters'][0]].hawkular_route }}"
   roles:
     - role: "{{ ANSIBLE_REPO_PATH }}/roles/zabbix-client"
       when: install_zabbix
@@ -262,14 +345,13 @@
 
 - name: Zabbix for all other hosts (bastion, support, ...)
   hosts:
-    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
-    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_support') | replace('-', '_') }}"
+    - bastions
+    - support
   gather_facts: true
   become: yes
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/ssh_vars.yml"
   vars:
     zabbix_auto_registration_keyword: OCP Host
   roles:
@@ -295,7 +377,7 @@
 
 - name: Gather facts
   hosts:
-  - "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
+  - all
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
@@ -306,6 +388,7 @@
 - name: Generate reports
   hosts: localhost
   connection: local
+  become: false
 
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
@@ -313,7 +396,7 @@
   tags:
     - ocp_report
   vars:
-    env_all_hosts: "{{ groups[('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_')] }}"
+    env_all_hosts: all
   tasks:
     - name: get repo version used to deploy
       command: git rev-parse HEAD
