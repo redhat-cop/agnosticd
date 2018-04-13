@@ -10,7 +10,6 @@
 # use_subscription_manager: false
 # use_own_repos: false
 
-
 ###### VARIABLES YOU SHOULD CONFIGURE FOR YOUR DEPLOYEMNT
 ###### OR PASS as "-e" args to ansible-playbook command
 
@@ -26,6 +25,9 @@ update_packages: true
 ## guid is the deployment unique identifier, it will be appended to all tags,
 ## files and anything that identifies this environment from another "just like it"
 guid: defaultguid
+
+# This var is used to identify stack (cloudformation, azure resourcegroup, ...)
+project_tag: "{{ env_type }}-{{ guid }}"
 
 zabbix_host: 23.246.247.58
 
@@ -46,7 +48,6 @@ ocp_report: false
 install_ipa_client: false
 remove_self_provisioners: false
 install_lets_encrypt_certificates: false
-install_ansible_service_broker: false
 # you can also use: allow_all, htpasswd, ldap
 install_idm: ldap
 idm_ca_url: http://ipa.opentlc.com/ipa/config/ca.crt
@@ -56,6 +57,8 @@ repo_version: "3.9"
 
 docker_version: "{{ '1.12.6' if repo_version | version_compare('3.9', '<')  else '1.13.1' }}"
 docker_device: /dev/xvdb
+# For m5.4xlarge instance types use the following:
+#docker_device: /dev/nvme1n1
 
 ### If you want a Key Pair name created and injected into the hosts,
 # set `set_env_authorized_key` to true and set the keyname in `env_authorized_key`
@@ -72,6 +75,18 @@ tower_run: false
 
 admin_user: opentlc-mgr
 admin_project: "ocp-workshop"
+
+### Azure 
+
+# Create a dedicated resourceGroup for this deployment
+az_destroy_method: resource_group
+az_resource_group: "{{ project_tag }}"
+
+# you can operate differently: if you share on resourceGroup for all you deployments,
+# you can specify a different resourceGroup and method:
+#az_destroy_method: deployment
+#az_resource_group: my-shared-resource-group
+#az_storage_account_type: Premium_LRS
 
 ### AWS EC2 Environment settings
 
@@ -105,7 +120,6 @@ support_instance_count: "{{ 3 if install_glusterfs|bool else 1 }}"
 # scaleup
 new_node_instance_count: 0
 
-
 ###### VARIABLES YOU SHOULD ***NOT*** CONFIGURE FOR YOUR DEPLOYEMNT
 
 ## This might get removed
@@ -116,7 +130,7 @@ env_specific_images:
 
 #### Vars for the OpenShift Ansible hosts file
 master_api_port: 443
-ovs_plugin: "subnet" # This can also be set to: "multitenant"
+ovs_plugin: "subnet" # This can also be set to: "multitenant" or "networkpolicy"
 multi_tenant_setting: "os_sdn_network_plugin_name='redhat/openshift-ovs-{{ovs_plugin}}'"
 master_lb_dns: "master.{{subdomain_base}}"
 
@@ -126,7 +140,7 @@ cloudapps_suffix: 'apps.{{subdomain_base}}'
 openshift_master_ldap_ca_file: 'openshift_master_ldap_ca_file=/root/ca.crt'
 ## TODO: This should be registered as a variable. Awk for os verions (OCP).
 ## yum info openshift...
-osrelease: 3.7.14
+osrelease: 3.9.14
 openshift_master_overwrite_named_certificates: true
 timeout: 60
 
@@ -147,12 +161,19 @@ common_packages:
   - at
   - sysstat
   - strace
+  - net-tools
+  - iptables-services
+  - bridge-utils
+  - kexec-tools
+  - sos
+  - psacct
 
 rhel_repos:
   - rhel-7-server-rpms
   - rhel-7-server-extras-rpms
   - rhel-7-server-ose-{{repo_version}}-rpms
   - rhel-7-fast-datapath-rpms
+  - rhel-7-server-ansible-2.4-rpms
 
 # use_subscription_manager: false
 # use_own_repos: true
@@ -167,11 +188,6 @@ nfs_size: 200
 
 nfs_shares:
   - user-vols
-#  - nexus
-#   - es-storage
-#   - jenkins
-#   - nexus2
-
 
 ocp_pvs:
 #   - es-storage
@@ -184,18 +200,17 @@ user_vols_size: 10Gi
 
 cache_images:
   - "registry.access.redhat.com/jboss-eap-7/eap70-openshift:latest"
-  - "registry.access.redhat.com/openshift3/jenkins-2-rhel7:v3.7"
-  - "registry.access.redhat.com/openshift3/jenkins-slave-maven-rhel7:v3.7"
+  - "registry.access.redhat.com/openshift3/jenkins-2-rhel7:v{{ repo_version }}"
+  - "registry.access.redhat.com/openshift3/jenkins-slave-maven-rhel7:v{{ repo_version }}"
 
 ### CLOUDFORMATIONS vars
-
-project_tag: "{{ env_type }}-{{ guid }}"
 
 create_internal_dns_entries: true
 zone_internal_dns: "{{guid}}.internal."
 chomped_zone_internal_dns: "{{guid}}.internal"
 zone_public_dns: "{{subdomain_base}}."
-cloudapps_dns: '*.apps.{{subdomain_base}}.'
+cloudapps_record: '*.apps'
+cloudapps_dns: '{{cloudapps_record}}.{{subdomain_base}}.'
 
 master_public_dns: "master.{{subdomain_base}}."
 bastion_public_dns: "bastion.{{subdomain_base}}."
@@ -228,7 +243,6 @@ dopt_domain_name: "{{ aws_region }}.compute.internal"
 rtb_public_name_tag: "{{subdomain_base}}-public"
 rtb_private_name_tag: "{{subdomain_base}}-private"
 
-
 cf_template_description: "{{ env_type }}-{{ guid }} template "
 
 rootfs_size_node: 50
@@ -237,12 +251,6 @@ rootfs_size_master: 50
 rootfs_size_bastion: 20
 rootfs_size_support: 20
 
-rootfs_type_node: standard
-rootfs_type_infranode: standard
-rootfs_type_master: standard
-rootfs_type_bastion: standard
-rootfs_type_support: standard
-
 instances:
   - name: "bastion"
     count: 1
@@ -250,92 +258,101 @@ instances:
     public_dns: true
     dns_loadbalancer: true
     flavor:
-      "ec2": "{{bastion_instance_type}}"
+      ec2: "{{bastion_instance_type}}"
+      azure: "{{bastion_instance_type}}"
     tags:
       - key: "AnsibleGroup"
         value: "bastions"
       - key: "ostype"
         value: "linux"
     rootfs_size: "{{ rootfs_size_bastion }}"
-    rootfs_type: "{{ rootfs_type_bastion }}"
 
   - name: "master"
     count: "{{master_instance_count}}"
     public_dns: true
     dns_loadbalancer: true
     flavor:
-      "ec2": "{{master_instance_type}}"
+      ec2: "{{master_instance_type}}"
+      azure: "{{master_instance_type}}"
     tags:
       - key: "AnsibleGroup"
         value: "masters"
       - key: "ostype"
         value: "linux"
     rootfs_size: "{{ rootfs_size_master }}"
-    rootfs_type: "{{ rootfs_type_master }}"
     volumes:
       - device_name: "{{docker_device}}"
-        volume_size: 20
+        volume_size: "{{master_docker_size|default(docker_size)|default('20')}}"
         volume_type: gp2
+        purpose: docker
+        lun: 0
 
   - name: "node"
     count: "{{node_instance_count}}"
     public_dns: false
     dns_loadbalancer: false
     flavor:
-      "ec2": "{{node_instance_type}}"
+      ec2: "{{node_instance_type}}"
+      azure: "{{node_instance_type}}"
     tags:
       - key: "AnsibleGroup"
         value: "nodes"
       - key: "ostype"
         value: "linux"
     rootfs_size: "{{ rootfs_size_node }}"
-    rootfs_type: "{{ rootfs_type_node }}"
     volumes:
       - device_name: "{{docker_device}}"
-        volume_size: 100
+        volume_size: "{{node_docker_size|d(docker_size)|d('100')}}"
         volume_type: gp2
+        purpose: docker
+        lun: 0
 
   - name: "infranode"
     count: "{{infranode_instance_count}}"
     public_dns: true
     dns_loadbalancer: true
     flavor:
-      "ec2": "{{infranode_instance_type}}"
+      ec2: "{{infranode_instance_type}}"
+      azure: "{{infranode_instance_type}}"
     tags:
       - key: "AnsibleGroup"
         value: "infranodes"
       - key: "ostype"
         value: "linux"
     rootfs_size: "{{ rootfs_size_infranode }}"
-    rootfs_type: "{{ rootfs_type_infranode }}"
     volumes:
       - device_name: "{{docker_device}}"
-        volume_size: 50
+        volume_size: "{{infranode_docker_size|d(docker_size)|d('50')}}"
         volume_type: gp2
+        purpose: docker
+        lun: 0
 
   - name: "support"
     count: "{{support_instance_count}}"
     public_dns: false
     dns_loadbalancer: false
     flavor:
-      "ec2": "{{support_instance_type}}"
+      ec2: "{{support_instance_type}}"
+      azure: "{{support_instance_type}}"
     tags:
       - key: "AnsibleGroup"
         value: "{{ 'support,glusterfs,nodes' if install_glusterfs|bool else 'support' }}"
       - key: "ostype"
         value: "linux"
     rootfs_size: "{{ rootfs_size_support }}"
-    rootfs_type: "{{ rootfs_type_support }}"
     volumes:
-      - device_name: "{{nfs_pvs}}"
-        volume_size: "{{nfs_size}}"
-        volume_type: gp2
-        purpose: nfs
       - device_name: "{{docker_device}}"
-        volume_size: 20
+        volume_size: "{{support_docker_size|d(docker_size)|d('50')}}"
         volume_type: gp2
         purpose: docker
+        lun: 0
       - device_name: "{{glusterfs_device_name}}"
         volume_size: "{{glusterfs_device_size}}"
         volume_type: gp2
         purpose: glusterfs
+        lun: 1
+      - device_name: "{{nfs_pvs}}"
+        volume_size: "{{nfs_size}}"
+        volume_type: gp2
+        purpose: nfs
+        lun: 2

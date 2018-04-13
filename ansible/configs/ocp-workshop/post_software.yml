@@ -33,8 +33,6 @@
         dest: "/root/pvs-{{ env_type }}-{{ guid }}.yml"
       tags: [ gen_pv_file ]
       when: pv_list.0 is defined
-      vars:
-        nfs_host: "{{hostvars[nfs_host].internaldns}}.{{chomped_zone_internal_dns}}"
 
     - set_fact:
         pv_size: "{{user_vols_size}}"
@@ -49,8 +47,6 @@
         dest: "/root/userpvs-{{ env_type }}-{{ guid }}.yml"
       tags:
         - gen_user_vol_pv
-      vars:
-        nfs_host: "{{hostvars[nfs_host].internaldns}}.{{chomped_zone_internal_dns}}"
 
 
     - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
@@ -140,20 +136,6 @@
       when:
       - osrelease | version_compare('3.7', '>=')
 
-    - name: Re-deploy the Ansible Service Broker ETCD pod
-      shell: oc rollout latest asb-etcd -n openshift-ansible-service-broker
-      ignore_errors: true
-      when:
-      - osrelease | version_compare('3.7', '>=')
-      - install_ansible_service_broker == true
-
-    - name: Re-deploy the Ansible Service Broker pod
-      shell: oc rollout latest asb -n openshift-ansible-service-broker
-      ignore_errors: true
-      when:
-      - osrelease | version_compare('3.7', '>=')
-      - install_ansible_service_broker == true
-
 - name: Remove all users from self-provisioners group
   hosts: masters[0]
   become: yes
@@ -162,6 +144,10 @@
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tags: [ env-specific, remove_self_provisioners ]
   tasks:
+  - name: Set clusterRoleBinding auto-update to false
+    command: oc annotate -n default --overwrite clusterrolebinding.rbac self-provisioners rbac.authorization.kubernetes.io/autoupdate=false
+    when: remove_self_provisioners
+
   - name: Remove system:authenticated from self-provisioner role
     shell: "oadm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
     ignore_errors: true
@@ -246,7 +232,7 @@
       with_items: '{{ env_specific_images }}'
       when: env_specific_images.0 is defined
 
-- name: Import jenkins images for OCP 3.7
+- name: Import jenkins images for OCP 3.7 and newer
   hosts: masters[0]
   become: yes
   gather_facts: False
@@ -257,12 +243,12 @@
     - env_specific_images
   tasks:
   - name: tag jenkins
-    command: oc tag --source=docker registry.access.redhat.com/openshift3/jenkins-2-rhel7:v3.7 openshift/jenkins:v3.7 -n openshift
+    command: oc tag --source=docker registry.access.redhat.com/openshift3/jenkins-2-rhel7:v{{ repo_version }} openshift/jenkins:v{{ repo_version }} -n openshift
     when: osrelease | version_compare('3.7', '>=')
     ignore_errors: true
 
   - name: tag jenkins
-    command: oc tag openshift/jenkins:v3.7 openshift/jenkins:latest -n openshift
+    command: oc tag openshift/jenkins:v{{ repo_version }} openshift/jenkins:latest -n openshift
     register: octag_result
     when: osrelease | version_compare('3.7', '>=')
     retries: 5
@@ -270,18 +256,18 @@
     until: octag_result|succeeded
     ignore_errors: true
 
-- name: Fix NFS PV Recycling for OCP 3.7.9
+- name: Fix NFS PV Recycling for OCP 3.7 and newer
   gather_facts: False
   become: yes
   hosts: nodes
   tasks:
     - name: Pull ose-recycler Image
       command: docker pull registry.access.redhat.com/openshift3/ose-recycler:latest
-      when: osrelease | version_compare('3.7.9', 'eq')
+      when: osrelease | version_compare('3.7', '>=')
 
     - name: Tag ose-recycler Image
       command: "docker tag registry.access.redhat.com/openshift3/ose-recycler:latest registry.access.redhat.com/openshift3/ose-recycler:v{{ osrelease }}"
-      when: osrelease | version_compare('3.7.9', 'eq')
+      when: osrelease | version_compare('3.7', '>=')
 
 # Set up Prometheus/Node Exporter/Alertmanager/Grafana
 # on the OpenShift Cluster
@@ -423,9 +409,13 @@
         aws_access_key: "{{ aws_access_key_id }}"
         aws_secret_key: "{{ aws_secret_access_key }}"
         region: "{{ aws_region }}"
-      when: ocp_report
+      when:
+        - ocp_report
+        - cloud_provider == 'ec2'
     - name: Generate report
       template:
         src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/ocp_report.adoc.j2"
         dest: "{{ ANSIBLE_REPO_PATH }}/workdir/ocp_report_{{ env_type }}-{{ guid }}.adoc"
-      when: ocp_report
+      when:
+        - ocp_report
+        - cloud_provider == 'ec2'

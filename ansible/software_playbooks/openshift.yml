@@ -11,13 +11,23 @@
   tags:
     - generate_ansible_hosts_file
   tasks:
-    - name: generate ansible hosts file
+    - name: generate ansible hosts file for 3.7 and earlier
       template:
         src: "../configs/{{ env_type }}/files/hosts_template.j2"
         dest: "../workdir/hosts-{{ env_type }}-{{ guid }}"
-
+      when: 
+        - osrelease | version_compare('3.9', '<')
+    - name: generate ansible hosts file for 3.9 and later
+      template:
+        src: "../configs/{{ env_type }}/files/hosts_template.{{ osrelease }}.j2"
+        dest: "../workdir/hosts-{{ env_type }}-{{ guid }}"
+      when:
+        - osrelease | version_compare('3.9', '>=')
+       
 - name: Step 00xxxxx bastion preparation for OpenShift deployment
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+  hosts:
+    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+    - bastions
   become: true
   gather_facts: False
   vars_files:
@@ -53,7 +63,9 @@
       when: 'install_idm is defined and install_idm == "htpasswd"'
 
 - name: Configuring openshift-provisioner
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+  hosts:
+    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+    - bastions
   gather_facts: False
   become: yes
   vars_files:
@@ -74,10 +86,26 @@
     - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_node') | replace('-', '_') }}"
     - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_master') | replace('-', '_') }}"
     - nodes
+    - infranodes
+    - masters
   vars_files:
     - "../configs/{{ env_type }}/env_vars.yml"
   roles:
     - "../roles/openshift-node"
+  tags:
+    - openshift_node_tasks
+
+- name: Configuring glusterfs nodes
+  gather_facts: False
+  become: yes
+
+  hosts:
+    - support
+  vars_files:
+    - "../configs/{{ env_type }}/env_vars.yml"
+  roles:
+    - role: "../roles/openshift-node"
+      when: install_glusterfs|d(false)|bool
   tags:
     - openshift_node_tasks
 
@@ -86,8 +114,9 @@
 - name: Configuring Nfs Host
   gather_facts: False
   become: yes
+  order: sorted
   hosts:
-    - "{{ groups['support']|sort|first }}"
+    - support
     - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_support') | replace('-', '_') }}"
   vars_files:
     - "../configs/{{ env_type }}/env_vars.yml"
@@ -96,12 +125,31 @@
   tags:
     - nfs_tasks
 
+- name: Fix NetworkManager on Azure
+  gather_facts: False
+  become: yes
+  hosts:
+    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+    - bastions
+  vars_files:
+    - "../configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - installing_openshift
+  tasks:
+    ### FIX Networkmanager on Azure
+    # TODO: retry without this
+    - name: Run NetworkManager byo playbook
+      command: ansible-playbook /usr/share/ansible/openshift-ansible/playbooks/byo/openshift-node/network_manager.yml
+      when: cloud_provider == 'azure'
+
 ######################### Run OpenShift Installer
 
 - name: Run OpenShift Installer
   gather_facts: False
   become: yes
-  hosts: "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+  hosts:
+    - "{{ ('tag_' ~ env_type ~ '_' ~ guid ~ '_bastion') | replace('-', '_') }}"
+    - bastions
   vars_files:
     - "../configs/{{ env_type }}/env_vars.yml"
   tags:
@@ -127,34 +175,120 @@
         version: "release-{{ocp_release}}"
       when: clone_openshift_ansible|d(false)|bool
 
-    - name: run ansible-playbook -i /etc/ansible/hosts /root/openshift-ansible/playbooks/byo/config.yml
+    - name: run ansible-playbook -i /etc/ansible/hosts /root/openshift-ansible/playbooks/byo/config.yml (3.7 and earlier)
       shell: "ansible-playbook -i /etc/ansible/hosts /root/openshift-ansible/playbooks/byo/config.yml"
       register: openshift_install_log
       tags:
         - openshift_installer
       ignore_errors: true
-      when: clone_openshift_ansible|d(false)|bool
-
-    - name: run ansible-playbook -i /etc/ansible/hosts /usr/share/ansible/openshift-ansible/playbooks/byo/config.yml
+      when:
+        - clone_openshift_ansible|d(false)|bool
+        - osrelease | version_compare('3.9', '<')
+  
+    - name: run ansible-playbook -i /etc/ansible/hosts /usr/share/ansible/openshift-ansible/playbooks/byo/config.yml (3.7 and earlier)
       shell: "ansible-playbook -i /etc/ansible/hosts /usr/share/ansible/openshift-ansible/playbooks/byo/config.yml"
       register: openshift_install_log
       tags:
         - openshift_installer
       ignore_errors: true
-      when: not clone_openshift_ansible|d(false)|bool
+      when:
+        - not clone_openshift_ansible|d(false)|bool
+        - osrelease | version_compare('3.9', '<')
 
-    - name: Fetch ansible.log
+    - name: Fetch ansible.log (3.7 and earlier)
       fetch:
         src: /root/ansible.log
         dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{project_tag}}.bastion.ansible.log"
         flat: true
       tags:
         - openshift_installer
-
-    - name: report Byo Playbook error
+      when:
+        - osrelease | version_compare('3.9', '<')
+  
+    - name: report Byo Playbook error (3.7 and earlier)
       fail:
         msg: "FAIL {{ project_tag }} byo/config failed"
-      when: openshift_install_log|failed
+      when: 
+        - openshift_install_log is failed
+        - osrelease | version_compare('3.9', '<')
+      tags:
+        - openshift_installer
+
+    - name: run ansible-playbook -i /etc/ansible/hosts /root/openshift-ansible/playbooks/prerequisites.yml (3.9 and later)
+      shell: "ansible-playbook -i /etc/ansible/hosts /root/openshift-ansible/playbooks/prerequisites.yml"
+      register: openshift_install_log
+      tags:
+        - openshift_installer
+      ignore_errors: true
+      when:
+        - clone_openshift_ansible|d(false)|bool
+        - osrelease | version_compare('3.9', '>=')
+
+    - name: run ansible-playbook -i /etc/ansible/hosts /usr/share/ansible/openshift-ansible/playbooks/prerequisites.yml (3.9 and later)
+      shell: "ansible-playbook -i /etc/ansible/hosts /usr/share/ansible/openshift-ansible/playbooks/prerequisites.yml"
+      register: openshift_install_log
+      tags:
+        - openshift_installer
+      ignore_errors: true
+      when:
+        - not clone_openshift_ansible|d(false)|bool
+        - osrelease | version_compare('3.9', '>=')
+
+    - name: Fetch ansible.log for prerequisites run (3.9 and later)
+      fetch:
+        src: /root/ansible.log
+        dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{project_tag}}.bastion.ansible.prerequisites.log"
+        flat: true
+      tags:
+        - openshift_installer
+      when:
+        - osrelease | version_compare('3.9', '>=')
+    
+    - name: report Prerequisites Playbook error (3.9 and later)
+      fail:
+        msg: "FAIL {{ project_tag }} prerequisites failed"
+      when:
+        - openshift_install_log|failed
+        - osrelease | version_compare('3.9', '>=')
+      tags:
+        - openshift_installer
+    
+    - name: run ansible-playbook -i /etc/ansible/hosts /root/openshift-ansible/playbooks/deploy_cluster.yml (3.9 and later)
+      shell: "ansible-playbook -i /etc/ansible/hosts /root/openshift-ansible/playbooks/deploy_cluster.yml"
+      register: openshift_install_log
+      tags:
+        - openshift_installer
+      ignore_errors: true
+      when:
+        - clone_openshift_ansible|d(false)|bool
+        - osrelease | version_compare('3.9', '>=')
+
+    - name: run ansible-playbook -i /etc/ansible/hosts /usr/share/ansible/openshift-ansible/playbooks/deploy_cluster.yml (3.9 and later)
+      shell: "ansible-playbook -i /etc/ansible/hosts /usr/share/ansible/openshift-ansible/playbooks/deploy_cluster.yml"
+      register: openshift_install_log
+      tags:
+        - openshift_installer
+      ignore_errors: true
+      when:
+        - not clone_openshift_ansible|d(false)|bool
+        - osrelease | version_compare('3.9', '>=')
+
+    - name: Fetch ansible.log for deploy_cluster run (3.9 and later)
+      fetch:
+        src: /root/ansible.log
+        dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{project_tag}}.bastion.ansible.deploy_cluster.log"
+        flat: true
+      tags:
+        - openshift_installer
+      when:
+        - osrelease | version_compare('3.9', '>=')
+    
+    - name: report deploy_cluster Playbook error (3.9 and later)
+      fail:
+        msg: "FAIL {{ project_tag }} deploy_cluster failed"
+      when:
+        - openshift_install_log|failed
+        - osrelease | version_compare('3.9', '>=')
       tags:
         - openshift_installer
 
