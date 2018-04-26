@@ -129,6 +129,7 @@
 
     - name: Add capabilities within anyuid which is not really ideal
       command: "oc patch scc/anyuid --patch '{\"requiredDropCapabilities\":[\"MKNOD\",\"SYS_CHROOT\"]}'"
+      ignore_errors: true
 
     - name: Set Node Selector to empty for project openshift-template-service-broker
       shell: oc annotate namespace openshift-template-service-broker openshift.io/node-selector="" --overwrite
@@ -272,6 +273,51 @@
     - name: Tag ose-recycler Image
       command: "docker tag registry.access.redhat.com/openshift3/ose-recycler:latest registry.access.redhat.com/openshift3/ose-recycler:v{{ osrelease }}"
       when: osrelease | version_compare('3.7', '>=')
+
+- name: Fix CRI-O Garbage Collection DaemonSet for OCP 3.9 and newer
+  gather_facts: False
+  become: yes
+  hosts: masters[0]
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: Patch dockergc DaemonSet
+      shell: "oc patch daemonset dockergc --patch='\"spec\": { \"template\": { \"spec\": { \"containers\": [ { \"command\": [ \"/usr/bin/oc\" ], \"name\": \"dockergc\" } ] } } }' -n default"
+      ignore_errors: true
+      when:
+        - osrelease | version_compare('3.9', '>=')
+        - container_runtime == "cri-o"
+    - name: Redeploy dockergc DaemonSet pods
+      shell: "oc delete pod $(oc get pods -n default|grep dockergc|awk -c '{print $1}') -n default"
+      when:
+        - osrelease | version_compare('3.9', '>=')
+        - container_runtime == "cri-o"
+
+# Install OpenWhisk into project openwhisk
+- name: Install OpenWhisk
+  gather_facts: False
+  become: yes
+  hosts: masters[0]
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: Check if 'openwhisk' project exists
+      command: "oc get project openwhisk"
+      register: openwhisk_exists
+      changed_when: false
+      ignore_errors: true
+      when:
+        - install_openwhisk
+    - name: Create 'openwhisk' project
+      command: "oc new-project openwhisk"
+      when:
+      - openwhisk_exists | failed
+      - install_openwhisk
+    - name: Deploy OpenWhisk
+      shell: "oc process -f https://raw.githubusercontent.com/projectodd/openwhisk-openshift/master/persistent-template.yml|oc create -f - -n openwhisk"
+      when:
+      - openwhisk_exists | failed
+      - install_openwhisk
 
 # Set up Prometheus/Node Exporter/Alertmanager/Grafana
 # on the OpenShift Cluster
