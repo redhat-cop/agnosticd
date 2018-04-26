@@ -1,77 +1,98 @@
 ---
-- set_fact:
-    my_user: "{{ item }}"
+- name: per user
+  become: true
+  block:
+    - set_fact:
+        my_user: "{{ item }}"
 
-- name: per_user {{my_user}} Tasks Started
-  debug:
-    msg: "per_user {{my_user}} Tasks - Started"
+    - name: per_user {{my_user}} Tasks Started
+      debug:
+        msg: "per_user {{my_user}} Tasks - Started"
 
-# Create user project and make him admin
-- name: Create workshop user's project for user "{{ my_user }}"
-  shell: oc adm new-project "{{ my_user }}"
-  ignore_errors: yes
+    # Create user project and make him admin
+    - name: check if workshop user's project for user "{{ my_user }}" exists
+      shell: "{{ openshift_cli }} get project {{ my_user }}"
+      register: user_project
+      ignore_errors: true
+      changed_when: false
+      tags: always
 
-- name: Annotate the project as requested by user for user "{{ my_user }}"
-  shell: "oc annotate namespace {{my_user}} openshift.io/requester={{my_user}} --overwrite"
-  ignore_errors: yes
+    - name: Create workshop user's project for user "{{ my_user }}"
+      command: "{{ openshift_cli }} adm new-project {{ my_user }}"
+      when: user_project is failed
+      tags: always
 
-- name: Award admin permission for user "{{ my_user }}"
-  shell: oc adm policy add-role-to-user admin "{{ my_user }}" -n "{{ my_user }}"
+    - name: Annotate the project as requested by user for user "{{ my_user }}"
+      command: "{{ openshift_cli }} annotate namespace {{my_user}} openshift.io/requester={{my_user}} --overwrite"
+      tags: always
 
-# Create cluster quota for the user to prevent abuse
-- name: Create user Quota - clusterresourcequota
-  shell: |
-        oc create clusterquota clusterquota-"{{ my_user }}" \
-        --project-annotation-selector=openshift.io/requester="{{ my_user }}" \
-        --hard requests.cpu="{{quota_requests_cpu}}" \
-        --hard limits.cpu="{{quota_limits_cpu}}"  \
-        --hard requests.memory="{{quota_requests_memory}}" \
-        --hard limits.memory="{{quota_limits_memory}}" \
-        --hard configmaps="{{quota_configmaps}}" \
-        --hard pods="{{quota_pods}}" \
-        --hard persistentvolumeclaims="{{quota_persistentvolumeclaims}}"  \
-        --hard services="{{quota_services}}" \
-        --hard secrets="{{quota_secrets}}" \
-        --hard requests.storage="{{quota_requests_storage}}"
-  ignore_errors: true
+    - name: Award admin permission for user "{{ my_user }}"
+      command: "{{ openshift_cli }} adm policy add-role-to-user admin {{ my_user }} -n {{ my_user }}"
+      tags: always
 
-# Clone required project in Gogs
-#
+    # Create cluster quota for the user to prevent abuse
+    - name: Create user Quota definition - clusterresourcequota
+      shell: >
+            {{ openshift_cli }} create clusterquota clusterquota-"{{my_user}}"
+            --project-annotation-selector=openshift.io/requester="{{my_user}}"
+            --hard requests.cpu="{{quota_requests_cpu}}"
+            --hard limits.cpu="{{quota_limits_cpu}}" 
+            --hard requests.memory="{{quota_requests_memory}}"
+            --hard limits.memory="{{quota_limits_memory}}"
+            --hard configmaps="{{quota_configmaps}}"
+            --hard pods="{{quota_pods}}"
+            --hard persistentvolumeclaims="{{quota_persistentvolumeclaims}}"
+            --hard services="{{quota_services}}"
+            --hard secrets="{{quota_secrets}}"
+            --hard requests.storage="{{quota_requests_storage}}"
+            --dry-run -o yaml > clusterquota-{{ my_user }}.yml
+      args:
+        chdir: "{{ git_dir.path }}"
+      tags: always
 
-- name: check if repository exists in git for user "{{ my_user }}"
-  uri:
-    url: http://{{ gogs_hostname }}/api/v1/repos/{{ my_user }}/{{ reponame_local }}
-    user: "{{ my_user }}"
-    password: "{{ user_gogs_password }}"
-    force_basic_auth: true
-    status_code: 200,404
-  register: repo_result  
-  tags: gogs
+    - name: Apply user Quota - clusterresourcequota
+      command: "{{ openshift_cli }} apply -f clusterquota-{{ my_user }}.yml"
+      args:
+        chdir: "{{ git_dir.path }}"
+      tags: always
 
-- name: create git repository for user "{{ my_user }}"
-  uri:
-    url: http://{{ gogs_hostname }}/api/v1/user/repos
-    method: POST
-    body: '{"name": "{{ reponame_local }}", "private": false}'
-    body_format: json
-    user: "{{ my_user }}"
-    password: "{{ user_gogs_password }}"
-    status_code: 200,201
-    force_basic_auth: true
-  when: repo_result.status != 200
-  tags: gogs
+    # Clone required project in Gogs
+    #
 
-- name: push catalog to git repository in Gogs for user "{{ my_user }}"
-  shell: |
-    git remote add {{ my_user }} http://{{ my_user }}:{{ user_gogs_password }}@{{ gogs_hostname }}/{{ my_user }}/{{ reponame_local }}.git
-    git config --local user.email "{{ my_user }}@example.com"
-    git config --local user.name "{{ my_user }}"
-    git push -f --all {{ my_user }}
-  args:
-    chdir: "{{ git_dir.path }}/{{ reponame }}"
-  when: repo_result.status != 200
-  tags: gogs
+    - name: check if repository exists in git for user "{{ my_user }}"
+      uri:
+        url: http://{{ gogs_hostname }}/api/v1/repos/{{ my_user }}/{{ reponame_local }}
+        user: "{{ my_user }}"
+        password: "{{ user_gogs_password }}"
+        force_basic_auth: true
+        status_code: 200,404
+      register: repo_result
+      tags: gogs
 
-- name: per_user {{my_user}} Tasks Complete
-  debug:
-    msg: "per_user {{my_user}} Tasks - Completed"
+    - name: create git repository for user "{{ my_user }}"
+      uri:
+        url: http://{{ gogs_hostname }}/api/v1/user/repos
+        method: POST
+        body: '{"name": "{{ reponame_local }}", "private": false}'
+        body_format: json
+        user: "{{ my_user }}"
+        password: "{{ user_gogs_password }}"
+        status_code: 200,201
+        force_basic_auth: true
+      when: repo_result.status != 200
+      tags: gogs
+
+    - name: push catalog to git repository in Gogs for user "{{ my_user }}"
+      shell: |
+        git remote add {{ my_user }} http://{{ my_user }}:{{ user_gogs_password }}@{{ gogs_hostname }}/{{ my_user }}/{{ reponame_local }}.git
+        git config --local user.email "{{ my_user }}@example.com"
+        git config --local user.name "{{ my_user }}"
+        git push -f --all {{ my_user }}
+      args:
+        chdir: "{{ git_dir.path }}/{{ reponame }}"
+      when: repo_result.status != 200
+      tags: gogs
+
+    - name: per_user {{my_user}} Tasks Complete
+      debug:
+        msg: "per_user {{my_user}} Tasks - Completed"
