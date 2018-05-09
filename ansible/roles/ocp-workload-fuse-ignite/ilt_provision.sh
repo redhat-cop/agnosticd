@@ -40,7 +40,7 @@ function help() {
 function login() {
 
     echo -en "\nHOST_GUID=$HOST_GUID\n" >> $LOG_FILE
-    oc login https://master.$HOST_GUID.openshift.opentlc.com -u opentlc-mgr -p r3dh4t1! >> $LOG_FILE
+    oc login https://master.$HOST_GUID.openshift.opentlc.com -u opentlc-mgr -p r3dh4t1!
 }
 
 

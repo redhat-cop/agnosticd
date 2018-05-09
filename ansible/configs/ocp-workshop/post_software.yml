@@ -13,6 +13,7 @@
 
 - name: Step 00xxxxx post software
   hosts: bastions
+  run_once: true
   gather_facts: False
   become: yes
   vars_files:
@@ -47,7 +48,6 @@
         dest: "/root/userpvs-{{ env_type }}-{{ guid }}.yml"
       tags:
         - gen_user_vol_pv
-
 
     - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
       tags:
@@ -96,6 +96,7 @@
 
 - name: env-specific infrastructure
   hosts: masters
+  run_once: true
   become: yes
   gather_facts: False
   vars_files:
@@ -129,6 +130,7 @@
 
     - name: Add capabilities within anyuid which is not really ideal
       command: "oc patch scc/anyuid --patch '{\"requiredDropCapabilities\":[\"MKNOD\",\"SYS_CHROOT\"]}'"
+      ignore_errors: true
 
     - name: Set Node Selector to empty for project openshift-template-service-broker
       shell: oc annotate namespace openshift-template-service-broker openshift.io/node-selector="" --overwrite
@@ -137,7 +139,8 @@
       - osrelease | version_compare('3.7', '>=')
 
 - name: Remove all users from self-provisioners group
-  hosts: masters[0]
+  hosts: masters
+  run_once: true
   become: yes
   gather_facts: False
   vars_files:
@@ -233,7 +236,8 @@
       when: env_specific_images.0 is defined
 
 - name: Import jenkins images for OCP 3.7 and newer
-  hosts: masters[0]
+  hosts: masters
+  run_once: true
   become: yes
   gather_facts: False
   vars_files:
@@ -259,15 +263,59 @@
 - name: Fix NFS PV Recycling for OCP 3.7 and newer
   gather_facts: False
   become: yes
-  hosts: nodes
+  hosts:
+    - nodes
+    - infranodes
+    - masters
   tasks:
     - name: Pull ose-recycler Image
       command: docker pull registry.access.redhat.com/openshift3/ose-recycler:latest
+      register: pullr
+      retries: 5
+      delay: 10
+      until: pullr|succeeded
       when: osrelease | version_compare('3.7', '>=')
 
     - name: Tag ose-recycler Image
       command: "docker tag registry.access.redhat.com/openshift3/ose-recycler:latest registry.access.redhat.com/openshift3/ose-recycler:v{{ osrelease }}"
       when: osrelease | version_compare('3.7', '>=')
+
+- name: Fix CRI-O Garbage Collection DaemonSet for OCP 3.9 and newer
+  gather_facts: False
+  become: yes
+  hosts: masters
+  run_once: true
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: Patch dockergc DaemonSet
+      shell: "oc patch daemonset dockergc --patch='\"spec\": { \"template\": { \"spec\": { \"containers\": [ { \"command\": [ \"/usr/bin/oc\" ], \"name\": \"dockergc\" } ] } } }' -n default"
+      ignore_errors: true
+      when:
+        - osrelease | version_compare('3.9', '>=')
+        - container_runtime == "cri-o"
+    - name: Redeploy dockergc DaemonSet pods
+      shell: "oc delete pod $(oc get pods -n default|grep dockergc|awk -c '{print $1}') -n default"
+      when:
+        - osrelease | version_compare('3.9', '>=')
+        - container_runtime == "cri-o"
+
+# Install OpenWhisk
+- name: Install OpenWhisk
+  hosts: masters
+  run_once: true
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - install_openwhisk
+  tasks:
+  - import_role:
+      name: "{{ ANSIBLE_REPO_PATH }}/roles/install-openwhisk"
+    when:
+      - install_openwhisk|bool
 
 # Set up Prometheus/Node Exporter/Alertmanager/Grafana
 # on the OpenShift Cluster
@@ -282,24 +330,41 @@
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-  roles:
-    - role: "{{ ANSIBLE_REPO_PATH }}/roles/openshift-prometheus"
-      when: install_prometheus
   tags:
-    - prometheus
-
+    - install_prometheus
+  tasks:
+  - import_role:
+      name: "{{ ANSIBLE_REPO_PATH }}/roles/install-prometheus"
+    when: install_prometheus|bool
+  
 - name: Install Nexus
   hosts: masters
+  run_once: true
   gather_facts: False
   become: yes
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  run_once: true
   roles:
-    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/nexus-container", desired_project: "{{admin_project}}", nexus_version: "3" }
+    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/install-nexus", desired_project: "{{admin_project}}", nexus_version: "3" }
   tags:
     - env-specific
     - install_nexus
+
+- name: Install AWS Broker
+  hosts: masters
+  run_once: true
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - install_aws_broker
+  tasks:
+  - import_role:
+      name: "{{ ANSIBLE_REPO_PATH }}/roles/install-aws-broker"
+    when:
+      - install_aws_broker|bool
 
 - name: Zabbix for masters
   hosts: masters
