@@ -5,7 +5,7 @@ set -eo pipefail
 ORIG=$(cd $(dirname $0); cd ..; pwd)
 ansible_path=${ORIG}/ansible
 
-for i in ${ORIG}/tests/scenarii/*.yaml; do
+for i in ${ORIG}/tests/scenarii/*.{yaml,yml}; do
     config=$(basename "${i}")
 
     env_type=$(egrep ^env_type: ${i}|cut -d' ' -f 2)
