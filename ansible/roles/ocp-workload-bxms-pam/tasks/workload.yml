@@ -9,88 +9,75 @@
 - name: Make sure we go back to default project
   shell: "oc project default"
 
-- name: Initialize the project template
-  shell: "oc create -f https://raw.githubusercontent.com/gpe-mw-training/bxms_decision_mgmt_foundations_lab/master/resources/ng-mortgage-bpmsuite70-full-mysql.yaml -n {{ocp_project}}"
+- name: Initialize the project templates, {{pam_template_yml}}
+  shell: "oc create -f {{pam_template_yml}} -n {{ocp_project}}"
+- shell: "oc create -f {{pam_secrets_yml}} -n {{ocp_project}}"
 
 - name: Prep local filesystem for temp files
   file:
     path: "/tmp/{{guid}}"
     state: directory
 
-- name: Create a keystore 
+- name: Copy pam imagestream using the following tag,  {{pam_tag}}
+  template:
+    src: templates/rhpam70-image-streams.yaml
+    dest: /tmp/{{guid}}/rhpam70-image-streams.yaml
+- name: Load pam imagestream
+  shell: "oc create -f /tmp/{{guid}}/rhpam70-image-streams.yaml -n {{ocp_project}}"
+
+- name: Load pam secret, {{kserver_app_secret}}
   shell: |
-      keytool -genkey \
-      -keyalg RSA \
-      -alias selfsigned \
-      -keystore /tmp/{{guid}}/keystore.jks \
-      -validity 360 \
-      -keysize 2048 \
-      -alias jboss \
-      -storepass rhtgpte \
-      -keypass rhtgpte \
-      -dname CN={{ocp_username}},OU=gpte,O=redhat.com,L=Raleigh,S=NC,C=US
-
-
-- name: Configure a service account that is loaded with the previously created secret
-  shell: oc create serviceaccount bpmsuite-service-account -n {{ocp_project}}
-- shell: oc policy add-role-to-user view system:serviceaccount:{{ocp_project}}:bpmsuite-service-account
-- shell: oc secrets new bpmsuite-app-secret /tmp/{{guid}}/keystore.jks -n {{ocp_project}}
-- shell: oc secrets link bpmsuite-service-account bpmsuite-app-secret -n {{ocp_project}}
-
-- name: Pull down JBoss CLI commands that enable the undertow component of the execution server with CORS
-  get_url: 
-    url: https://raw.githubusercontent.com/gpe-mw-training/bxms_decision_mgmt_foundations_lab/master/resources/undertow-cors.cli
-    dest: "/tmp/{{guid}}/undertow-cors.cli"
-
-- name: Create a configmap of JBoss CLI commands that enable the undertow component of the execution server with CORS.
-  shell: "oc create configmap undertow-cors --from-file=/tmp/{{guid}}/undertow-cors.cli -n {{ocp_project}}"
-
-- name: Initialize OCP resources from the project template
+      oc new-app --template={{pam_secrets_template_name}} \
+      -p SECRET_NAME={{kserver_app_secret}} \
+      -n {{ocp_project}}
+- name: Load pam secret, {{bcentral_app_secret}}
   shell: |
-      oc new-app --name=ba-demo -n {{ocp_project}} --template=ng-mortgage-bpmsuite70-full-mysql \
-      -p IMAGE_STREAM_NAMESPACE=openshift \
-      -p HTTPS_PASSWORD=rhtgpte \
-      -p KIE_ADMIN_PWD=admin \
-      -p APPLICATION_NAME=gpte > /tmp/{{guid}}/gpte-ba-demo.txt
+      oc new-app --template={{pam_secrets_template_name}} \
+      -p SECRET_NAME={{bcentral_app_secret}} \
+      -n {{ocp_project}}
 
-- include: ./wait_for_build.yml
-  static: no
-  vars:
-    build_to_wait:
-      - gpte-custom-execserv
-      - gpte-ng-mortgages
+- name: Initialize OCP resources from the project template using app_name = {{app_name}}
+  shell: |
+      oc new-app --name=pam-lab -n {{ocp_project}} --template={{pam_template_name}} \
+      -p IMAGE_STREAM_NAMESPACE={{ocp_project}} \
+      -p KIE_ADMIN_PWD={{kie_admin_passwd}} \
+      -p MAVEN_REPO_URL={{MAVEN_REPO_URL}} \
+      -p APPLICATION_NAME={{app_name}} \
+      -p BUSINESS_CENTRAL_HTTPS_SECRET={{bcentral_app_secret}} \
+      -p KIE_SERVER_HTTPS_SECRET={{kserver_app_secret}} \
+      -n {{ocp_project}} > /tmp/{{guid}}/gpte-pam-lab.txt
 
-- name: resume mysql RDBMS
-  shell: oc rollout resume dc/gpte-mysql -n {{ocp_project}}
+- name: resume {{app_name}}-rhpamcentr
+  shell: oc rollout resume dc/{{app_name}}-rhpamcentr -n {{ocp_project}}
 - include: ./wait_for_deploy.yml
   static: no
   vars:
     pod_to_wait:
-      - gpte-mysql
+      - "{{app_name}}-rhpamcentr"
 
-- name: resume gpte-execserv
-  shell: oc rollout resume dc/gpte-execserv -n {{ocp_project}}
+#- name: resume {{app_name}}-postgresql
+#  shell: oc rollout resume dc/{{app_name}}-postgresql-1 dc/{{app_name}}-postgresql-2 -n {{ocp_project}}
+#- include: ./wait_for_deploy.yml
+#  static: no
+#  vars:
+#    pod_to_wait:
+#      - {{app_name}}-postgresql-1
+
+- name: resume {{app_name}}-kieserver
+  shell: oc rollout resume dc/{{app_name}}-kieserver -n {{ocp_project}}
 - include: ./wait_for_deploy.yml
   static: no
   vars:
     pod_to_wait:
-      - gpte-execserv
+      - "{{app_name}}-kieserver"
 
-- name: resume gpte-buscentr
-  shell: oc rollout resume dc/gpte-buscentr -n {{ocp_project}}
-- include: ./wait_for_deploy.yml
-  static: no
-  vars:
-    pod_to_wait:
-      - gpte-buscentr
-
-- name: resume gpte-ng-mortgages
-  shell: oc rollout resume dc/gpte-ng-mortgages -n {{ocp_project}}
-- include: ./wait_for_deploy.yml
-  static: no
-  vars:
-    pod_to_wait:
-      - gpte-ng-mortgages
+#- name: resume {{app_name}}-smartrouter
+#  shell: oc rollout resume dc/{{app_name}}-smartrouter -n {{ocp_project}}
+#- include: ./wait_for_deploy.yml
+#  static: no
+#  vars:
+#    pod_to_wait:
+#      - {{app_name}}-smartrouter
 
 - name: Annotate the empty project as requested by user
   shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
