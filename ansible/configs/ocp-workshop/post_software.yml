@@ -18,6 +18,8 @@
   become: yes
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  roles:
+    - role: "{{ ANSIBLE_REPO_PATH }}/roles/openshift-ansible-broker"
   tasks:
     - name: get nfs Hostname
       set_fact:
@@ -58,6 +60,42 @@
       tags:
         - create_user_pv
 
+- name: For CNS change default storage class to glusterfs-storage
+  hosts: masters
+  run_once: true
+  become: yes
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - env-specific_infra
+    - storage-class
+  tasks:
+    - when:
+        - osrelease is version_compare('3.9.27', '>=')
+        - install_glusterfs|bool
+      block:
+      - name: Set glusterfs-storage class to default
+        command: >
+          oc patch storageclass glusterfs-storage
+          -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "true"}}}'
+        register: changesc_r
+        failed_when:
+          - changesc_r.stdout.find('storageclass "glusterfs-storage" not patched') == -1 
+          - changesc_r.rc != 0
+        changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage" patched') != -1
+
+      - name: Remove default from glusterfs-storage-block class
+        register: changesc_r
+        changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage-block" patched') != -1
+        failed_when:
+          - changesc_r.stdout.find('storageclass "glusterfs-storage-block" not patched') == -1 
+          - changesc_r.rc != 0
+        command: >
+          oc patch storageclass glusterfs-storage-block
+          -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "false"}}}'
+
 - name: Configure Bastion for CF integration
   hosts: bastions
   become: yes
@@ -93,6 +131,10 @@
         name: sssd
         state: restarted
       when: install_ipa_client
+      register: sssd_restart_result
+      retries: 6
+      delay: 10
+      until: sssd_restart_result is succeeded
 
 - name: env-specific infrastructure
   hosts: masters
@@ -292,12 +334,14 @@
       shell: "oc patch daemonset dockergc --patch='\"spec\": { \"template\": { \"spec\": { \"containers\": [ { \"command\": [ \"/usr/bin/oc\" ], \"name\": \"dockergc\" } ] } } }' -n default"
       ignore_errors: true
       when:
-        - osrelease | version_compare('3.9', '>=')
+        - osrelease | version_compare('3.9.0', '>=')
+        - osrelease | version_compare('3.9.25', '<=')
         - container_runtime == "cri-o"
     - name: Redeploy dockergc DaemonSet pods
       shell: "oc delete pod $(oc get pods -n default|grep dockergc|awk -c '{print $1}') -n default"
       when:
-        - osrelease | version_compare('3.9', '>=')
+        - osrelease | version_compare('3.9.0', '>=')
+        - osrelease | version_compare('3.9.25', '<=')
         - container_runtime == "cri-o"
 
 # Install OpenWhisk
