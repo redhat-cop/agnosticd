@@ -2,7 +2,7 @@
 
 END_PROJECT_NUM=1
 START_PROJECT_NUM=1
-WORKLOAD="ocp-workload-fuse-ignite"
+WORKLOAD="ocp-workload-bxms-dm"
 LOG_FILE=/tmp/$WORKLOAD
 
 for var in $@
@@ -45,6 +45,11 @@ function login() {
     oc login https://master.$HOST_GUID.openshift.opentlc.com -u opentlc-mgr -p r3dh4t1!
 }
 
+function initializeOpenshift() {
+
+    oc create -f https://raw.githubusercontent.com/jboss-container-images/rhdm-7-openshift-image/ose-v1.4.8-1/rhdm70-image-streams.yaml -n openshift
+}
+
 
 function executeLoop() {
 
@@ -66,11 +71,6 @@ function executeAnsible() {
     # NOTE:  Ensure you have ssh'd (as $SSH_USERNMAE) into the bastion node of your OCP cluster environment at $TARGET_HOST and logged in using opentlc-mgr account:
     #           oc login https://master.$HOST_GUID.openshift.opentlc.com -u opentlc-mgr
 
-    POSTGRESQL_MEMORY_LIMIT=512Mi
-    PROMETHEUS_MEMORY_LIMIT=255Mi
-    META_MEMORY_LIMIT=1Gi
-    SERVER_MEMORY_LIMIT=2Gi
-    PROJECT_PREFIX=fi
 
     GUID=$PROJECT_PREFIX$GUID
 
@@ -84,11 +84,7 @@ function executeAnsible() {
                     -e"ocp_workload=${WORKLOAD}" \
                     -e"guid=${GUID}" \
                     -e"ocp_user_needs_quota=true" \
-                    -e"ocp_domain=$HOST_GUID.openshift.opentlc.com" \
-                    -e"POSTGRESQL_MEMORY_LIMIT=$POSTGRESQL_MEMORY_LIMIT" \
-                    -e"PROMETHEUS_MEMORY_LIMIT=$PROMETHEUS_MEMORY_LIMIT" \
-                    -e"META_MEMORY_LIMIT=$META_MEMORY_LIMIT" \
-                    -e"SERVER_MEMORY_LIMIT=$SERVER_MEMORY_LIMIT" \
+                    -e"ocp_apps_domain=apps.${HOST_GUID}.openshift.opentlc.com" \
                     -e"ACTION=create" >> $LOG_FILE
     then
         echo -en "\n\n*** Error provisioning where GUID = $GUID\n\n " >> $LOG_FILE
@@ -99,5 +95,6 @@ function executeAnsible() {
 
 ensurePreReqs
 login
+initializeOpenshift
 executeLoop
 
