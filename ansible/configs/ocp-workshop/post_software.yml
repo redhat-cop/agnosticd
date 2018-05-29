@@ -13,10 +13,13 @@
 
 - name: Step 00xxxxx post software
   hosts: bastions
+  run_once: true
   gather_facts: False
   become: yes
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  roles:
+    - role: "{{ ANSIBLE_REPO_PATH }}/roles/openshift-ansible-broker"
   tasks:
     - name: get nfs Hostname
       set_fact:
@@ -48,7 +51,6 @@
       tags:
         - gen_user_vol_pv
 
-
     - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
       tags:
         - create_user_pv
@@ -57,6 +59,42 @@
     - shell: 'oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
       tags:
         - create_user_pv
+
+- name: For CNS change default storage class to glusterfs-storage
+  hosts: masters
+  run_once: true
+  become: yes
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - env-specific_infra
+    - storage-class
+  tasks:
+    - when:
+        - osrelease is version_compare('3.9.27', '>=')
+        - install_glusterfs|bool
+      block:
+      - name: Set glusterfs-storage class to default
+        command: >
+          oc patch storageclass glusterfs-storage
+          -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "true"}}}'
+        register: changesc_r
+        failed_when:
+          - changesc_r.stdout.find('storageclass "glusterfs-storage" not patched') == -1 
+          - changesc_r.rc != 0
+        changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage" patched') != -1
+
+      - name: Remove default from glusterfs-storage-block class
+        register: changesc_r
+        changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage-block" patched') != -1
+        failed_when:
+          - changesc_r.stdout.find('storageclass "glusterfs-storage-block" not patched') == -1 
+          - changesc_r.rc != 0
+        command: >
+          oc patch storageclass glusterfs-storage-block
+          -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "false"}}}'
 
 - name: Configure Bastion for CF integration
   hosts: bastions
@@ -75,27 +113,21 @@
       when: install_opentlc_integration
       no_log: yes
   tasks:
-  - name: Copy /root/.kube to ~opentlc-mgr/
-    command: "cp -rf /root/.kube /home/opentlc-mgr/"
-    when: install_opentlc_integration == true
+    - name: Copy /root/.kube to ~opentlc-mgr/
+      command: "cp -rf /root/.kube /home/opentlc-mgr/"
+      when: install_opentlc_integration == true
 
-  - name: set permission for .kube
-    when: install_opentlc_integration == true
-    file:
-      path: /home/opentlc-mgr/.kube
-      owner: opentlc-mgr
-      group: opentlc-mgr
-      recurse: yes
-
-  # sssd bug, fixed by restart
-  - name: restart sssd
-    service:
-      name: sssd
-      state: restarted
-    when: install_ipa_client
+    - name: set permission for .kube
+      when: install_opentlc_integration == true
+      file:
+        path: /home/opentlc-mgr/.kube
+        owner: opentlc-mgr
+        group: opentlc-mgr
+        recurse: yes
 
 - name: env-specific infrastructure
   hosts: masters
+  run_once: true
   become: yes
   gather_facts: False
   vars_files:
@@ -135,33 +167,34 @@
       shell: oc annotate namespace openshift-template-service-broker openshift.io/node-selector="" --overwrite
       ignore_errors: true
       when:
-      - osrelease | version_compare('3.7', '>=')
+        - osrelease | version_compare('3.7', '>=')
 
 - name: Remove all users from self-provisioners group
-  hosts: masters[0]
+  hosts: masters
+  run_once: true
   become: yes
   gather_facts: False
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tags: [ env-specific, remove_self_provisioners ]
   tasks:
-  - name: Set clusterRoleBinding auto-update to false
-    command: oc annotate -n default --overwrite clusterrolebinding.rbac self-provisioners rbac.authorization.kubernetes.io/autoupdate=false
-    when: remove_self_provisioners
+    - name: Set clusterRoleBinding auto-update to false
+      command: oc annotate -n default --overwrite clusterrolebinding.rbac self-provisioners rbac.authorization.kubernetes.io/autoupdate=false
+      when: remove_self_provisioners
 
-  - name: Remove system:authenticated from self-provisioner role
-    shell: "oadm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
-    ignore_errors: true
-    when: remove_self_provisioners
+    - name: Remove system:authenticated from self-provisioner role
+      shell: "oadm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
+      ignore_errors: true
+      when: remove_self_provisioners
 
-  - name: create our own OPENTLC-PROJECT-PROVISIONERS
-    shell: "oadm groups new OPENTLC-PROJECT-PROVISIONERS"
-    ignore_errors: true
-    when: remove_self_provisioners
+    - name: create our own OPENTLC-PROJECT-PROVISIONERS
+      shell: "oadm groups new OPENTLC-PROJECT-PROVISIONERS"
+      ignore_errors: true
+      when: remove_self_provisioners
 
-  - name: allow OPENTLC-PROJECT-PROVISIONERS members to provision their own projects
-    shell: "oadm policy add-cluster-role-to-group self-provisioner OPENTLC-PROJECT-PROVISIONERS"
-    when: remove_self_provisioners
+    - name: allow OPENTLC-PROJECT-PROVISIONERS members to provision their own projects
+      shell: "oadm policy add-cluster-role-to-group self-provisioner OPENTLC-PROJECT-PROVISIONERS"
+      when: remove_self_provisioners
 
 - name: Project Request Template
   hosts: masters
@@ -207,16 +240,16 @@
         name: atomic-openshift-master-api
         state: restarted
       when:
-      - master_config.changed
-      - osrelease | version_compare('3.7', '>=')
+        - master_config.changed
+        - osrelease | version_compare('3.7', '>=')
 
     - name: Restart master service
       service:
         name: atomic-openshift-master
         state: restarted
       when:
-      - master_config.changed
-      - osrelease | version_compare('3.7', '<')
+        - master_config.changed
+        - osrelease | version_compare('3.7', '<')
 
 - name: node admin configs
   hosts: nodes
@@ -234,7 +267,8 @@
       when: env_specific_images.0 is defined
 
 - name: Import jenkins images for OCP 3.7 and newer
-  hosts: masters[0]
+  hosts: masters
+  run_once: true
   become: yes
   gather_facts: False
   vars_files:
@@ -243,24 +277,27 @@
     - env-specific
     - env_specific_images
   tasks:
-  - name: tag jenkins
-    command: oc tag --source=docker registry.access.redhat.com/openshift3/jenkins-2-rhel7:v{{ repo_version }} openshift/jenkins:v{{ repo_version }} -n openshift
-    when: osrelease | version_compare('3.7', '>=')
-    ignore_errors: true
+    - name: tag jenkins
+      command: oc tag --source=docker registry.access.redhat.com/openshift3/jenkins-2-rhel7:v{{ repo_version }} openshift/jenkins:v{{ repo_version }} -n openshift
+      when: osrelease | version_compare('3.7', '>=')
+      ignore_errors: true
 
-  - name: tag jenkins
-    command: oc tag openshift/jenkins:v{{ repo_version }} openshift/jenkins:latest -n openshift
-    register: octag_result
-    when: osrelease | version_compare('3.7', '>=')
-    retries: 5
-    delay: 2
-    until: octag_result|succeeded
-    ignore_errors: true
+    - name: tag jenkins
+      command: oc tag openshift/jenkins:v{{ repo_version }} openshift/jenkins:latest -n openshift
+      register: octag_result
+      when: osrelease | version_compare('3.7', '>=')
+      retries: 5
+      delay: 2
+      until: octag_result|succeeded
+      ignore_errors: true
 
 - name: Fix NFS PV Recycling for OCP 3.7 and newer
   gather_facts: False
   become: yes
-  hosts: nodes
+  hosts:
+    - nodes
+    - infranodes
+    - masters
   tasks:
     - name: Pull ose-recycler Image
       command: docker pull registry.access.redhat.com/openshift3/ose-recycler:latest
@@ -271,13 +308,16 @@
       when: osrelease | version_compare('3.7', '>=')
 
     - name: Tag ose-recycler Image
-      command: "docker tag registry.access.redhat.com/openshift3/ose-recycler:latest registry.access.redhat.com/openshift3/ose-recycler:v{{ osrelease }}"
+      command: >
+        docker tag registry.access.redhat.com/openshift3/ose-recycler:latest
+        registry.access.redhat.com/openshift3/ose-recycler:v{{ osrelease }}
       when: osrelease | version_compare('3.7', '>=')
 
 - name: Fix CRI-O Garbage Collection DaemonSet for OCP 3.9 and newer
   gather_facts: False
   become: yes
-  hosts: masters[0]
+  hosts: masters
+  run_once: true
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tasks:
@@ -285,39 +325,32 @@
       shell: "oc patch daemonset dockergc --patch='\"spec\": { \"template\": { \"spec\": { \"containers\": [ { \"command\": [ \"/usr/bin/oc\" ], \"name\": \"dockergc\" } ] } } }' -n default"
       ignore_errors: true
       when:
-        - osrelease | version_compare('3.9', '>=')
+        - osrelease | version_compare('3.9.0', '>=')
+        - osrelease | version_compare('3.9.25', '<=')
         - container_runtime == "cri-o"
     - name: Redeploy dockergc DaemonSet pods
       shell: "oc delete pod $(oc get pods -n default|grep dockergc|awk -c '{print $1}') -n default"
       when:
-        - osrelease | version_compare('3.9', '>=')
+        - osrelease | version_compare('3.9.0', '>=')
+        - osrelease | version_compare('3.9.25', '<=')
         - container_runtime == "cri-o"
 
-# Install OpenWhisk into project openwhisk
+# Install OpenWhisk
 - name: Install OpenWhisk
+  hosts: masters
+  run_once: true
   gather_facts: False
   become: yes
-  hosts: masters[0]
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - install_openwhisk
   tasks:
-    - name: Check if 'openwhisk' project exists
-      command: "oc get project openwhisk"
-      register: openwhisk_exists
-      changed_when: false
-      ignore_errors: true
-      when:
-        - install_openwhisk
-    - name: Create 'openwhisk' project
-      command: "oc new-project openwhisk"
-      when:
-      - openwhisk_exists | failed
-      - install_openwhisk
-    - name: Deploy OpenWhisk
-      shell: "oc process -f https://raw.githubusercontent.com/projectodd/openwhisk-openshift/master/persistent-template.yml|oc create -f - -n openwhisk"
-      when:
-      - openwhisk_exists | failed
-      - install_openwhisk
+  - import_role:
+      name: "{{ ANSIBLE_REPO_PATH }}/roles/install-openwhisk"
+    when:
+      - install_openwhisk|bool
 
 # Set up Prometheus/Node Exporter/Alertmanager/Grafana
 # on the OpenShift Cluster
@@ -332,24 +365,41 @@
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-  roles:
-    - role: "{{ ANSIBLE_REPO_PATH }}/roles/openshift-prometheus"
-      when: install_prometheus
   tags:
-    - prometheus
+    - install_prometheus
+  tasks:
+    - import_role:
+        name: "{{ ANSIBLE_REPO_PATH }}/roles/install-prometheus"
+      when: install_prometheus|bool
 
 - name: Install Nexus
   hosts: masters
+  run_once: true
   gather_facts: False
   become: yes
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  run_once: true
   roles:
-    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/nexus-container", desired_project: "{{admin_project}}", nexus_version: "3" }
+    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/install-nexus", desired_project: "{{admin_project}}", nexus_version: "3" }
   tags:
     - env-specific
     - install_nexus
+
+- name: Install AWS Broker
+  hosts: masters
+  run_once: true
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - install_aws_broker
+  tasks:
+    - import_role:
+        name: "{{ ANSIBLE_REPO_PATH }}/roles/install-aws-broker"
+      when:
+        - install_aws_broker|bool
 
 - name: Zabbix for masters
   hosts: masters
@@ -411,6 +461,63 @@
     - env-specific
     - install_zabbix
 
+- name: Run diagnostics from master
+  hosts: masters
+  become: yes
+  gather_facts: False
+  run_once: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tasks:
+    # start supporting this only for OCP >= 3.9
+    - when: osrelease is version_compare('3.9', '>=')
+      block:
+        # this command should return 0 (no error)
+        - name: Run oc adm diagnostics
+          shell: oc adm diagnostics > /tmp/diagnostics.log
+          register: r_diag
+          retries: 2
+          until: r_diag is succeeded
+          ignore_errors: true
+
+        - name: Ensure /tmp/openshift exist
+          file:
+            path: /tmp/openshift
+            state: directory
+
+        # oc adm diagnostics logs everything in /tmp/openshift
+        - name: Create an archive of diagnostics output logs
+          archive:
+            path:
+              - /tmp/openshift
+              - /tmp/diagnostics.log
+            dest: /tmp/diagnostics.tar.gz
+
+        - name: Fetch the diagnostic archive and logs
+          fetch:
+            src: /tmp/diagnostics.tar.gz
+            dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{project_tag}}_diagnostics.tar.gz"
+            flat: true
+
+        - name: Report diagnostics failure
+          fail:
+            msg: "FAIL {{ project_tag }} Diagnostics"
+          when: r_diag is failed
+
+- name: Configure IPA on bastion
+  hosts: bastions
+  become: yes
+  gather_facts: False
+  run_once: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tasks:
+    - import_role:
+        name: "{{ ANSIBLE_REPO_PATH }}/roles/bastion-opentlc-ipa"
+      when: install_ipa_client|bool
+
 - name: PostSoftware flight-check
   hosts: localhost
   connection: local
@@ -427,7 +534,7 @@
 
 - name: Gather facts
   hosts:
-  - all
+    - all
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
