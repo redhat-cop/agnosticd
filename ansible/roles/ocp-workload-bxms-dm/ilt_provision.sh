@@ -86,6 +86,7 @@ function executeAnsible() {
                     -e"ocp_user_needs_quota=true" \
                     -e"ocp_apps_domain=apps.${HOST_GUID}.openshift.opentlc.com" \
                     -e"ACTION=create" >> $LOG_FILE
+    if [ $? -ne 0 ];
     then
         echo -en "\n\n*** Error provisioning where GUID = $GUID\n\n " >> $LOG_FILE
         echo -en "\n\n*** Error provisioning where GUID = $GUID\n\n "

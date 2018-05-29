@@ -90,6 +90,7 @@ function executeAnsible() {
                     -e"META_MEMORY_LIMIT=$META_MEMORY_LIMIT" \
                     -e"SERVER_MEMORY_LIMIT=$SERVER_MEMORY_LIMIT" \
                     -e"ACTION=create" >> $LOG_FILE
+    if [ $? -ne 0 ];
     then
         echo -en "\n\n*** Error provisioning where GUID = $GUID\n\n " >> $LOG_FILE
         echo -en "\n\n*** Error provisioning where GUID = $GUID\n\n "
