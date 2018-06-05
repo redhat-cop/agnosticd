@@ -2,7 +2,7 @@
 
 END_PROJECT_NUM=1
 START_PROJECT_NUM=1
-WORKLOAD="ocp-workload-bxms-pam"
+WORKLOAD="ocp-workload-bxms-dm"
 LOG_FILE=/tmp/$WORKLOAD
 
 for var in $@
@@ -43,6 +43,11 @@ function login() {
 
     echo -en "\nHOST_GUID=$HOST_GUID\n" >> $LOG_FILE
     oc login https://master.$HOST_GUID.openshift.opentlc.com -u opentlc-mgr -p r3dh4t1!
+}
+
+function initializeOpenshift() {
+
+    oc create -f https://raw.githubusercontent.com/jboss-container-images/rhdm-7-openshift-image/ose-v1.4.8-1/rhdm70-image-streams.yaml -n openshift
 }
 
 
@@ -87,11 +92,10 @@ function executeAnsible() {
         echo -en "\n\n*** Error provisioning where GUID = $GUID\n\n "
         exit 1;
     fi
-
-
 }
 
 ensurePreReqs
 login
+initializeOpenshift
 executeLoop
 
