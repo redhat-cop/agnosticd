@@ -2,7 +2,7 @@
 
 END_PROJECT_NUM=1
 START_PROJECT_NUM=1
-WORKLOAD="ocp-workload-bxms-dm"
+WORKLOAD="ocp-workload-fuse-on-ocp"
 LOG_FILE=/tmp/$WORKLOAD
 
 for var in $@
@@ -45,11 +45,6 @@ function login() {
     oc login https://master.$HOST_GUID.openshift.opentlc.com -u opentlc-mgr -p r3dh4t1!
 }
 
-function initializeOpenshift() {
-
-    oc create -f https://raw.githubusercontent.com/jboss-container-images/rhdm-7-openshift-image/ose-v1.4.8-1/rhdm70-image-streams.yaml -n openshift
-}
-
 
 function executeLoop() {
 
@@ -71,6 +66,7 @@ function executeAnsible() {
     # NOTE:  Ensure you have ssh'd (as $SSH_USERNMAE) into the bastion node of your OCP cluster environment at $TARGET_HOST and logged in using opentlc-mgr account:
     #           oc login https://master.$HOST_GUID.openshift.opentlc.com -u opentlc-mgr
 
+    PROJECT_PREFIX=fuseocp
 
     GUID=$PROJECT_PREFIX$GUID
 
@@ -84,7 +80,7 @@ function executeAnsible() {
                     -e"ocp_workload=${WORKLOAD}" \
                     -e"guid=${GUID}" \
                     -e"ocp_user_needs_quota=true" \
-                    -e"ocp_apps_domain=apps.${HOST_GUID}.openshift.opentlc.com" \
+                    -e"ocp_domain=$HOST_GUID.openshift.opentlc.com" \
                     -e"ACTION=create" >> $LOG_FILE
     if [ $? -ne 0 ];
     then
@@ -96,6 +92,5 @@ function executeAnsible() {
 
 ensurePreReqs
 login
-initializeOpenshift
 executeLoop
 
