@@ -9,7 +9,18 @@
     name: "ipa-client"
     state: present
 
-- name: Register bastion with IPA using host password
+- name: Register bastion with IPA using host password (first try)
+  command: >
+    /usr/sbin/ipa-client-install --domain=OPENTLC.COM
+    -w '{{ipa_host_password}}'
+    -N -U --mkhomedir --no-dns-sshfp
+    --hostname={{bastion_public_dns_chomped}}
+    {{ipa_additional_options|d('')}}
+  when: ipa_host_password is defined
+  register: ipa_r1
+  ignore_errors: yes
+
+- name: Retry to register bastion with IPA using host password
   shell: >
     /usr/sbin/ipa-client-install --uninstall;
     rm -f /var/lib/ipa-client/sysrestore.state;
@@ -18,13 +29,29 @@
     -N -U --mkhomedir --no-dns-sshfp
     --hostname={{bastion_public_dns_chomped}}
     {{ipa_additional_options|d('')}}
-  when: ipa_host_password is defined
+  when:
+    - ipa_host_password is defined
+    - ipa_r1 is failed
   register: ipa_r
   until:
     - ipa_r is succeeded
   retries: 5
 
-- name: Register bastion with IPA using OpenTLC admin creds
+- name: Register bastion with IPA using OpenTLC admin creds (first try)
+  command: >
+    /usr/sbin/ipa-client-install --domain=OPENTLC.COM
+    -p {{ipa_kerberos_user}} -w '{{ipa_kerberos_password}}'
+    -N -U --mkhomedir --no-dns-sshfp
+    --hostname={{bastion_public_dns_chomped}}
+    {{ipa_additional_options|d('')}}
+  when:
+    - ipa_host_password is not defined
+    - ipa_kerberos_user is defined
+    - ipa_kerberos_password is defined
+  register: ipa_r1
+  ignore_errors: yes
+
+- name: Retry to register bastion with IPA using OpenTLC admin creds
   shell: >
     /usr/sbin/ipa-client-install --uninstall;
     rm -f /var/lib/ipa-client/sysrestore.state;
@@ -37,11 +64,25 @@
     - ipa_host_password is not defined
     - ipa_kerberos_user is defined
     - ipa_kerberos_password is defined
+    - ipa_r1 is failed
   register: ipa_r
   until: ipa_r is succeeded
   retries: 5
 
-- name: copy over ipa_optimize.sh script
+- name: Create an archive of the ipa-client-* logs
+  archive:
+    path:
+      - /var/log/ipa-client*
+    dest: /tmp/ipa-client-logs.tar.gz
+
+- name: Fetch the ipa-client-logs archive
+  fetch:
+    src: /tmp/ipa-client-logs.tar.gz
+    dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{project_tag}}_ipa-client-logs.tar.gz"
+    flat: true
+  ignore_errors: yes
+
+- name: Copy over ipa_optimize.sh script
   copy:
     src: "{{ role_path }}/files/ipa_optimize.sh"
     dest: /opt/ipa_optimize.sh
@@ -59,16 +100,10 @@
     validate: '/usr/sbin/visudo -cf %s'
   register: result
   retries: 20
-  until: result | succeeded
-  ignore_errors: yes
-
-- name: report error
-  fail:
-    msg: Unable to update sudoers.d/opentlc-sudoers
-  when: not result|succeeded
+  until: result is succeeded
 
 # sssd bug, fixed by restart
-- name: restart sssd
+- name: Restart sssd
   service:
     name: sssd
     state: restarted
