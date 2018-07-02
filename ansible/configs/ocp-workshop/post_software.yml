@@ -18,6 +18,8 @@
   become: yes
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  roles:
+    - role: "{{ ANSIBLE_REPO_PATH }}/roles/openshift-ansible-broker"
   tasks:
     - name: get nfs Hostname
       set_fact:
@@ -58,6 +60,42 @@
       tags:
         - create_user_pv
 
+- name: For CNS change default storage class to glusterfs-storage
+  hosts: masters
+  run_once: true
+  become: yes
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - env-specific_infra
+    - storage-class
+  tasks:
+    - when:
+        - osrelease is version_compare('3.9.27', '>=')
+        - install_glusterfs|bool
+      block:
+      - name: Set glusterfs-storage class to default
+        command: >
+          oc patch storageclass glusterfs-storage
+          -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "true"}}}'
+        register: changesc_r
+        failed_when:
+          - changesc_r.stdout.find('storageclass "glusterfs-storage" not patched') == -1 
+          - changesc_r.rc != 0
+        changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage" patched') != -1
+
+      - name: Remove default from glusterfs-storage-block class
+        register: changesc_r
+        changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage-block" patched') != -1
+        failed_when:
+          - changesc_r.stdout.find('storageclass "glusterfs-storage-block" not patched') == -1 
+          - changesc_r.rc != 0
+        command: >
+          oc patch storageclass glusterfs-storage-block
+          -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "false"}}}'
+
 - name: Configure Bastion for CF integration
   hosts: bastions
   become: yes
@@ -86,17 +124,6 @@
         owner: opentlc-mgr
         group: opentlc-mgr
         recurse: yes
-
-    # sssd bug, fixed by restart
-    - name: restart sssd
-      service:
-        name: sssd
-        state: restarted
-      when: install_ipa_client
-      register: sssd_restart_result
-      retries: 6
-      delay: 10
-      until: sssd_restart_result is succeeded
 
 - name: env-specific infrastructure
   hosts: masters
@@ -140,7 +167,7 @@
       shell: oc annotate namespace openshift-template-service-broker openshift.io/node-selector="" --overwrite
       ignore_errors: true
       when:
-        - osrelease | version_compare('3.7', '>=')
+        - osrelease is version_compare('3.7', '>=')
 
 - name: Remove all users from self-provisioners group
   hosts: masters
@@ -151,23 +178,21 @@
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tags: [ env-specific, remove_self_provisioners ]
   tasks:
-    - name: Set clusterRoleBinding auto-update to false
-      command: oc annotate -n default --overwrite clusterrolebinding.rbac self-provisioners rbac.authorization.kubernetes.io/autoupdate=false
-      when: remove_self_provisioners
+    - when: remove_self_provisioners|bool
+      block:
+      - name: Set clusterRoleBinding auto-update to false
+        command: oc annotate -n default --overwrite clusterrolebinding.rbac self-provisioners rbac.authorization.kubernetes.io/autoupdate=false
 
-    - name: Remove system:authenticated from self-provisioner role
-      shell: "oadm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
-      ignore_errors: true
-      when: remove_self_provisioners
+      - name: Remove system:authenticated from self-provisioner role
+        command: "oadm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
+        ignore_errors: true
 
-    - name: create our own OPENTLC-PROJECT-PROVISIONERS
-      shell: "oadm groups new OPENTLC-PROJECT-PROVISIONERS"
-      ignore_errors: true
-      when: remove_self_provisioners
+      - name: create our own OPENTLC-PROJECT-PROVISIONERS
+        command: "oadm groups new OPENTLC-PROJECT-PROVISIONERS"
+        ignore_errors: true
 
-    - name: allow OPENTLC-PROJECT-PROVISIONERS members to provision their own projects
-      shell: "oadm policy add-cluster-role-to-group self-provisioner OPENTLC-PROJECT-PROVISIONERS"
-      when: remove_self_provisioners
+      - name: allow OPENTLC-PROJECT-PROVISIONERS members to provision their own projects
+        command: "oadm policy add-cluster-role-to-group self-provisioner OPENTLC-PROJECT-PROVISIONERS"
 
 - name: Project Request Template
   hosts: masters
@@ -281,7 +306,9 @@
       when: osrelease | version_compare('3.7', '>=')
 
     - name: Tag ose-recycler Image
-      command: "docker tag registry.access.redhat.com/openshift3/ose-recycler:latest registry.access.redhat.com/openshift3/ose-recycler:v{{ osrelease }}"
+      command: >
+        docker tag registry.access.redhat.com/openshift3/ose-recycler:latest
+        registry.access.redhat.com/openshift3/ose-recycler:v{{ osrelease }}
       when: osrelease | version_compare('3.7', '>=')
 
 - name: Fix CRI-O Garbage Collection DaemonSet for OCP 3.9 and newer
@@ -296,12 +323,14 @@
       shell: "oc patch daemonset dockergc --patch='\"spec\": { \"template\": { \"spec\": { \"containers\": [ { \"command\": [ \"/usr/bin/oc\" ], \"name\": \"dockergc\" } ] } } }' -n default"
       ignore_errors: true
       when:
-        - osrelease | version_compare('3.9', '>=')
+        - osrelease | version_compare('3.9.0', '>=')
+        - osrelease | version_compare('3.9.25', '<=')
         - container_runtime == "cri-o"
     - name: Redeploy dockergc DaemonSet pods
       shell: "oc delete pod $(oc get pods -n default|grep dockergc|awk -c '{print $1}') -n default"
       when:
-        - osrelease | version_compare('3.9', '>=')
+        - osrelease | version_compare('3.9.0', '>=')
+        - osrelease | version_compare('3.9.25', '<=')
         - container_runtime == "cri-o"
 
 # Install OpenWhisk
@@ -429,6 +458,65 @@
   tags:
     - env-specific
     - install_zabbix
+
+- name: Run diagnostics from master
+  hosts: masters
+  become: yes
+  gather_facts: False
+  run_once: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tasks:
+    # start supporting this only for OCP >= 3.9
+    - when:
+        - osrelease is version_compare('3.9', '>=')
+        - run_ocp_diagnostics|d(true)| bool
+      block:
+        # this command should return 0 (no error)
+        - name: Run oc adm diagnostics
+          shell: oc adm diagnostics > /tmp/diagnostics.log
+          register: r_diag
+          retries: 2
+          until: r_diag is succeeded
+          ignore_errors: true
+
+        - name: Ensure /tmp/openshift exist
+          file:
+            path: /tmp/openshift
+            state: directory
+
+        # oc adm diagnostics logs everything in /tmp/openshift
+        - name: Create an archive of diagnostics output logs
+          archive:
+            path:
+              - /tmp/openshift
+              - /tmp/diagnostics.log
+            dest: /tmp/diagnostics.tar.gz
+
+        - name: Fetch the diagnostic archive and logs
+          fetch:
+            src: /tmp/diagnostics.tar.gz
+            dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{project_tag}}_diagnostics.tar.gz"
+            flat: true
+
+        - name: Report diagnostics failure
+          fail:
+            msg: "FAIL {{ project_tag }} Diagnostics"
+          when: r_diag is failed
+
+- name: Configure IPA on bastion
+  hosts: bastions
+  become: yes
+  gather_facts: False
+  run_once: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tasks:
+    - import_role:
+        name: "{{ ANSIBLE_REPO_PATH }}/roles/bastion-opentlc-ipa"
+      when: install_ipa_client|bool
 
 - name: PostSoftware flight-check
   hosts: localhost
