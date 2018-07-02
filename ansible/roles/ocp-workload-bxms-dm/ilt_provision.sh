@@ -35,7 +35,7 @@ function help() {
     echo -en "\n\t--START_PROJECT_NUM=*     OPTIONAL: specify # of first OCP project to provision (defult = 1))"
     echo -en "\n\t--END_PROJECT_NUM=*       OPTIONAL: specify # of OCP projects to provision (defualt = 1))"
     echo -en "\n\t-h                        this help manual"
-    echo -en "\n\n\nExample:                ./roles/$WORKLOAD/ilt_provision.sh --HOST_GUID=dev37 --START_PROJECT_NUM=1 --END_PROJECT_NUM=1\n\n"
+    echo -en "\n\n\nExample:                ./roles/$WORKLOAD/ilt_provision.sh --HOST_GUID=dev39 --START_PROJECT_NUM=1 --END_PROJECT_NUM=1\n\n"
 }
 
 
