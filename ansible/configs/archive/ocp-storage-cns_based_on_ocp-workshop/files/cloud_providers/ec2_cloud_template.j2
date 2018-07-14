@@ -23,9 +23,9 @@ Mappings:
       {% endif %}
     us-west-2:
       {% if osrelease | version_compare('3.9.25', '>=') %}
-      RHELAMI: ami-223f945a
+      RHELAMI: ami-28e07e50
       {% else %}
-      RHELAMI: ami-9fa343e7
+      RHELAMI: ami-223f945a
       {% endif %}
     eu-west-1:
       {% if osrelease | version_compare('3.9.25', '>=') %}
@@ -75,7 +75,6 @@ Mappings:
       {% else %}
       RHELAMI: ami-a789ffcb
       {% endif %}
-  
   DNSMapping:
     us-east-1:
       domain: "us-east-1.compute.internal"
@@ -211,6 +210,21 @@ Resources:
       HostedZoneConfig:
         Comment: "Created By ansible agnostic deployer"
 
+  CerttestDNS:
+      Type: AWS::Route53::RecordSetGroup
+      DependsOn:
+        - master1EIP
+      Properties:
+        HostedZoneId: "{{HostedZoneId}}"
+        RecordSets:
+          - Name: "{{certtest_public_dns}}"
+            Type: A
+            TTL: 10
+            ResourceRecords:
+              - Fn::GetAtt:
+                  - master1
+                  - PublicIp
+
   CloudDNS:
     Type: AWS::Route53::RecordSetGroup
     DependsOn:
@@ -284,6 +298,12 @@ Resources:
         - Key: internaldns
           Value: {{instance['name']}}{{loop.index}}.{{chomped_zone_internal_dns}}
 {% endif %}
+{% if instance['name'] == 'node' %}
+{% if c > (node_instance_count|int) - (new_node_instance_count|int) %}
+        - Key: newnode
+          Value: true
+{% endif %}
+{% endif %}
         - Key: "owner"
           Value: "{{ email | default('unknownuser') }}"
         - Key: "Project"
@@ -298,7 +318,10 @@ Resources:
         - DeviceName: "/dev/sda1"
           Ebs:
             VolumeSize: {{ instance['rootfs_size'] | default('50') }}
-{% for vol in instance['volumes']|default([]) %}
+{% for vol in instance['volumes']|default([]) if
+  (vol.purpose|d('') == 'glusterfs' and install_glusterfs|bool)
+  or (vol.purpose|d('') == 'nfs' and install_nfs|bool)
+  or vol.purpose|d('') not in ['glusterfs', 'nfs'] %}
         - DeviceName: "{{ vol['device_name'] }}"
           Ebs:
             VolumeType: "{{ vol['volume_type'] | d('gp2') }}"
@@ -354,8 +377,123 @@ Resources:
 {% endfor %}
 {% endfor %}
 
+  Route53User:
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - PolicyName: Route53Access
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: route53domains:*
+                Resource: "*"
+              - Effect: Allow
+                Action: route53:*
+                Resource: "*"
+
+  Route53UserAccessKey:
+      DependsOn: Route53User
+      Type: AWS::IAM::AccessKey
+      Properties:
+        UserName:
+          Ref: Route53User
+
+  RegistryS3:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: "{{ env_type }}-{{ guid }}"
+      Tags:
+        - Key: Name
+          Value: "s3-{{ env_type }}-{{ guid }}"
+        - Key: Project
+          Value: "{{project_tag}}"
+        - Key: owner
+          Value: "{{ email | default('unknown')}}"
+
+  S3User:
+    Type: AWS::IAM::User
+    DependsOn:
+      - RegistryS3
+    Properties:
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: s3:ListAllMyBuckets
+                Resource: "*"
+              - Effect: Allow
+                Action: "s3:*"
+                Resource:
+                  Fn::Join:
+                    - ""
+                    - - "arn:aws:s3:::"
+                      - Ref: RegistryS3
+                      - "/*"
+
+  S3UserAccessKey:
+      Type: AWS::IAM::AccessKey
+      DependsOn:
+        - S3User
+      Properties:
+        UserName:
+          Ref: S3User
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn:
+      - RegistryS3
+    Properties:
+      PolicyDocument:
+        Id: Give registry access to user
+        Statement:
+          - Sid: AllAccess
+            Action:
+              - "s3:*"
+            Effect: Allow
+            Resource:
+              Fn::Join:
+                - ""
+                - - "arn:aws:s3:::"
+                  - Ref: RegistryS3
+            Principal:
+              AWS:
+                Fn::GetAtt:
+                  - S3User
+                  - Arn
+      Bucket:
+        Ref: RegistryS3
+
 Outputs:
   Route53internalzoneOutput:
     Description: The ID of the internal route 53 zone
     Value:
       Ref: zoneinternalidns
+  S3User:
+    Value:
+      Ref: S3User
+    Description: IAM User for RegistryS3
+  S3UserAccessKey:
+    Value:
+      Ref: S3UserAccessKey
+    Description: IAM User for RegistryS3
+  S3UserSecretAccessKey:
+    Value:
+      Fn::GetAtt:
+        - S3UserAccessKey
+        - SecretAccessKey
+    Description: IAM User for RegistryS3
+  Route53User:
+    Value:
+      Ref: Route53User
+    Description: IAM User for Route53 (Let's Encrypt)
+  Route53UserAccessKey:
+    Value:
+      Ref: Route53UserAccessKey
+    Description: IAM User for Route53 (Let's Encrypt)
+  Route53UserSecretAccessKey:
+    Value:
+      Fn::GetAtt:
+        - Route53UserAccessKey
+        - SecretAccessKey
+    Description: IAM User for Route53 (Let's Encrypt)
