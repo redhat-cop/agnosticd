@@ -25,8 +25,8 @@ $OC new-project "${project}"
 
 $OC new-app cakephp-mysql-persistent -n "${project}"
 
-$OC rollout status dc/mysql -w -n "${project}"
 $OC rollout status dc/cakephp-mysql-persistent -w -n "${project}"
+$OC rollout status dc/mysql -w -n "${project}"
 
 route=$(oc get route -l template=cakephp-mysql-persistent  --no-headers -n "${project}"\
             |awk '{print $2}')
