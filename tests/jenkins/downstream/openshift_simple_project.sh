@@ -14,7 +14,7 @@ export password
 
 
 config=${username}.${RANDOM}.config
-OC="oc --config $config --insecure-skip-tls-verify=true"
+OC="oc --config $config --insecure-skip-tls-verify=true --request-timeout=0"
 
 $OC login "${1}" --username="${username}" --password="${password}"
 
