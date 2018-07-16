@@ -14,7 +14,7 @@ export password
 
 
 config=${username}.${RANDOM}.config
-OC="oc --config $config --insecure-skip-tls-verify=true"
+OC="oc --config $config --insecure-skip-tls-verify=true --request-timeout=0"
 
 $OC login "${1}" --username="${username}" --password="${password}"
 
@@ -25,10 +25,10 @@ $OC new-project "${project}"
 
 $OC new-app cakephp-mysql-persistent -n "${project}"
 
-$OC rollout status dc/mysql -w -n "${project}"
 $OC rollout status dc/cakephp-mysql-persistent -w -n "${project}"
+$OC rollout status dc/mysql -w -n "${project}"
 
-route=$(oc get route -l template=cakephp-mysql-persistent  --no-headers -n "${project}"\
+route=$($OC get route -l template=cakephp-mysql-persistent  --no-headers -n "${project}"\
             |awk '{print $2}')
 
 curl -k -s "http://${route}" \
