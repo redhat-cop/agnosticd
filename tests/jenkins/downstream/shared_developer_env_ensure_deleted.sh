@@ -19,4 +19,11 @@ $OC login "${1}" --username="${username}" --password="${password}"
 
 n_projects=$($OC get projects --no-headers|wc -l)
 
+if [ "$n_projects" -gt 0 ]; then
+    # wait a little longer before retrying
+    sleep ${2:-120}
+    n_projects=$($OC get projects --no-headers|wc -l)
+fi
+
+# ensure it's 0
 [ "${n_projects}" -lt 1 ]

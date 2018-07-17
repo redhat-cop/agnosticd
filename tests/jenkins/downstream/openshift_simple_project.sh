@@ -31,5 +31,6 @@ $OC rollout status dc/mysql -w -n "${project}"
 route=$($OC get route -l template=cakephp-mysql-persistent  --no-headers -n "${project}"\
             |awk '{print $2}')
 
+sleep 5
 curl -k -s "http://${route}" \
     |grep 'Welcome to your CakePHP application on OpenShift'
