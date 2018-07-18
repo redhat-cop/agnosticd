@@ -24,6 +24,11 @@ pipeline {
                 name: 'confirm_before_delete'
         )
     }
+
+    options {
+        buildDiscarder(logRotator(daysToKeepStr: '30'))
+    }
+
     stages {
         stage('order from CF') {
             environment {
