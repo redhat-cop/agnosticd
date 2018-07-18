@@ -109,6 +109,9 @@ pipeline {
         }
 
         stage('Create simple project with PV') {
+            options {
+                timeout(time: 20, unit: 'MINUTES')
+            }
             environment {
                 credentials = credentials("${opentlc_creds}")
             }
