@@ -25,6 +25,8 @@ $OC new-project "${project}"
 
 $OC new-app cakephp-mysql-persistent -n "${project}"
 
+sleep 120
+
 $OC rollout status dc/cakephp-mysql-persistent -w -n "${project}"
 $OC rollout status dc/mysql -w -n "${project}"
 
