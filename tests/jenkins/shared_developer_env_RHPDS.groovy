@@ -8,6 +8,7 @@ def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
 def notification_email = 'gucore@redhat.com'
+def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // state variables
 def guid=''
@@ -141,7 +142,7 @@ pipeline {
             }
             post {
                 failure {
-                    withCredentials([usernameColonPassword(credentialsId: "${imap_creds}", variable: 'credentials')]) {
+                    withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
                         mail(
                             subject: "${env.JOB_NAME} (${env.BUILD_NUMBER}) failed retiring for GUID=${guid}",
                             body: "It appears that ${env.BUILD_URL} is failing, somebody should do something about that.\nMake sure GUID ${guid} is destroyed.",
@@ -150,7 +151,7 @@ pipeline {
                             from: credentials.split(':')[0]
                         )
                     }
-                    withCredentials([string(credentialsId: '5d28935e-f7ca-4b11-8b8e-d7a7161a013a', variable: 'HOOK_URL')]) {
+                    withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
                         sh(
                             """
                             curl -H 'Content-Type: application/json' \
@@ -167,7 +168,7 @@ pipeline {
                 git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
-                withCredentials([usernameColonPassword(credentialsId: "${imap_creds}", variable: 'credentials')]) {
+                withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
                     sh """./tests/jenkins/downstream/poll_email.py \
                         --guid ${guid} \
                         --timeout 20 \
@@ -178,7 +179,7 @@ pipeline {
         }
         stage('Ensure projects are deleted') {
             steps {
-                withCredentials([usernameColonPassword(credentialsId: "${opentlc_creds}", variable: 'credentials')]) {
+                withCredentials([usernameColonPassword(credentialsId: opentlc_creds, variable: 'credentials')]) {
                     sh "./tests/jenkins/downstream/shared_developer_env_ensure_deleted.sh '${openshift_location}'"
                 }
             }
@@ -191,8 +192,8 @@ pipeline {
             /* retire in case of failure */
             withCredentials(
                 [
-                    usernameColonPassword(credentialsId: "${opentlc_creds}", variable: 'credentials'),
-                    usernameColonPassword(credentialsId: "${opentlc_admin_creds}", variable: 'admin_credentials')
+                    usernameColonPassword(credentialsId: opentlc_creds, variable: 'credentials'),
+                    usernameColonPassword(credentialsId: opentlc_admin_creds, variable: 'admin_credentials')
                 ]
             ) {
                 sh """
@@ -201,7 +202,7 @@ pipeline {
                 """
             }
 
-            withCredentials([usernameColonPassword(credentialsId: "${imap_creds}", variable: 'credentials')]) {
+            withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
                 mail(
                     subject: "${env.JOB_NAME} (${env.BUILD_NUMBER}) failed GUID=${guid}",
                     body: "It appears that ${env.BUILD_URL} is failing, somebody should do something about that.",
@@ -210,7 +211,7 @@ pipeline {
                     from: credentials.split(':')[0]
               )
             }
-            withCredentials([string(credentialsId: '5d28935e-f7ca-4b11-8b8e-d7a7161a013a', variable: 'HOOK_URL')]) {
+            withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
                 sh(
                     """
                       curl -H 'Content-Type: application/json' \
@@ -221,7 +222,7 @@ pipeline {
             }
         }
         fixed {
-            withCredentials([string(credentialsId: '5d28935e-f7ca-4b11-8b8e-d7a7161a013a', variable: 'HOOK_URL')]) {
+            withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
                 sh(
                     """
                       curl -H 'Content-Type: application/json' \
