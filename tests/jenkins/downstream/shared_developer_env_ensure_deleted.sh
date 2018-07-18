@@ -27,3 +27,16 @@ fi
 
 # ensure it's 0
 [ "${n_projects}" -lt 1 ]
+
+# User should not be able to create projects at this point
+set +e
+p=test-failed-creation-${RANDOM}
+$OC new-project ${p}
+ret=$?
+set -e
+
+if [ "${ret}" = 0 ]; then
+    $OC delete project ${p}
+    echo "ERROR: user can still create projects" >&2
+    exit 2
+fi
