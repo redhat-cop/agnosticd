@@ -1,0 +1,75 @@
+---
+- name: define ocp_project
+  set_fact:
+    ocp_project: "iot-demo-{{guid}}"
+
+- name: Create project for IoT Demo
+  shell: |
+         oc new-project {{ocp_project}} \
+         --display-name="IoT Demo - {{guid}}" \
+         --description="Industry 4.0 IoT Demo"
+  ignore_errors: true
+
+- name: "Label namespace"
+  command: "oc label namespace {{ocp_project}} AAD='{{guid}}'"
+
+- name: Add anyuser
+  shell: "oc adm policy add-scc-to-user anyuid -z default -n {{ocp_project}}"
+
+- name: Add Quay Image Pull Secret for Eurotech Images
+  shell: "oc create -f /tmp/{{guid}}/redhat-iot-rhpds-secret.yml -n {{ocp_project}}"
+
+- name: Add MariaDB Secret
+  shell: "oc create secret generic ec-db --from-literal=name=ecdb --from-literal=username=redhat --from-literal=password=RedHat123 -n {{ocp_project}}"
+
+- name: Ensure dir exists
+  file:
+    path: /tmp/{{guid}}/certs/
+    state: directory
+
+- name: Generate Self Signed Certs
+  command: >
+    openssl req -new
+      -x509
+      -nodes
+      -days {{ item.days | default(3650) }}
+      -subj "/C={{ item.country | default('') }}/ST={{ item.state | default('') }}/L={{ item.city | default('') }}/O={{ item.organization | default('') }}/OU={{ item.unit | default('') }}/CN={{ item.name }}/emailAddress={{ item.email | default('') }}"
+      -newkey rsa:2048
+      -keyout /tmp/{{guid}}/certs/key.pem
+      -out /tmp/{{guid}}/certs/cert.pem
+  args:
+    creates: /tmp/{{guid}}/certs/*.pem
+  with_items: "{{ openssl_self_signed }}"
+
+- name: Add Self Signed Certs
+  shell: "oc create secret generic ec-crt --from-file=crt=/tmp/{{guid}}/certs/cert.pem --from-file=key=/tmp/{{guid}}/certs/key.pem --from-file=ca=/tmp/{{guid}}/certs/cert.pem -n {{ocp_project}}"
+
+# -f /tmp/{{guid}}/mariadb.yaml
+- name: Deploy MariaDB
+  shell: "oc new-app -e MYSQL_USER=redhat -e MYSQL_PASSWORD=RedHat123 -e MYSQL_DATABASE=ecdb -e MYSQL_LOWER_CASE_TABLE_NAMES=1 -e NAMESPACE=openshift -e VOLUME_CAPACITY=1Gi -e MARIADB_VERSION=10.2 mariadb:10.2 -n {{ocp_project}}"
+
+- name: Deploy Elasticsearch
+  shell: "oc new-app -e 'ES_JAVA_OPTS=-Des.cluster.name=kapua-datastore -Des.http.cors.enabled=true -Des.http.cors.allow-origin=* -Xms256m -Xmx256m' elasticsearch:5.4 -n {{ocp_project}}"
+
+- name: Deploy EC Broker
+  shell: "oc new-app -f /tmp/{{guid}}/broker.yml -p IMAGE_VERSION=5.0.0 -p NAMESPACE={{ocp_project}} -p EC_SECRET_DB=ec-db -p DISABLE_SSL=true -n {{ocp_project}}"
+
+- name: Deploy EC Console
+  shell: "oc new-app -f /tmp/{{guid}}/console.yml -p 'IMAGE_VERSION=5.0.0' -p 'NAMESPACE={{ocp_project}}' -p 'EC_SECRET_DB=ec-db' -n {{ocp_project}}"
+
+- name: Deploy EC API
+  shell: "oc new-app -f /tmp/{{guid}}/api.yml -p 'IMAGE_VERSION=5.0.0' -p 'NAMESPACE={{ocp_project}}' -p 'EC_SECRET_DB=ec-db' -n {{ocp_project}}"
+
+- name: Print Console URL
+  debug:
+    msg: "EC Console is running at http://ec-console-{{ocp_project}}.{{ocp_apps_domain}}"
+
+- name: Print MQTT Broker URL
+  debug:
+    msg: "EC Broker is running at: mqtt://ec-broker-mqtt.{{ocp_project}}.{{ocp_apps_domain}}:1883"
+
+- name: Annotate the completed project as requested by user
+  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
+
+- name: Give user access to the completed project
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"
