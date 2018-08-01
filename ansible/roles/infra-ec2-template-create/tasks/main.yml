@@ -11,13 +11,14 @@
   # environment:
   #   AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
   #   AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
-  #   AWS_DEFAULT_REGION: "{{aws_region}}"
+  #   AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
   cloudformation:
     aws_access_key: "{{ aws_access_key_id }}"
     aws_secret_key: "{{ aws_secret_access_key }}"
     stack_name: "{{ project_tag }}"
     state: "present"
-    region: "{{ aws_region | default(region) | default('us-east-1')}}"
+    region: "{{ aws_region_final | d(aws_region) | d(region) | d('us-east-1')}}"
+    # rollback is unreliable, it can make this task hang forever.
     disable_rollback: true
     template: "{{ANSIBLE_REPO_PATH}}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
     tags: "{{ cf_tags | combine(cloud_tags_final)}}"
@@ -38,15 +39,44 @@
   tags: provision_cf_template
   when: not cloudformation_out is succeeded
 
-- name: report Cloudformation error
-  fail:
-    msg: "FAIL {{ project_tag }} Create Cloudformation"
-  when: not cloudformation_out is succeeded
-  tags:
-    - provision_cf_template
-
 - name: debug cloudformation
   debug:
     var: cloudformation_out
     verbosity: 2
   tags: provision_cf_template
+
+- name: Destroy cloudformation template if failed
+  cloudformation:
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    stack_name: "{{project_tag}}"
+    state: "absent"
+    region: "{{aws_region_final|d(aws_region)}}"
+    disable_rollback: false
+    tags:
+      Stack: "project {{env_type}}-{{ guid }}"
+  tags:
+    - destroying
+    - destroy_cf_deployment
+    - destroy_cloud_deployment
+  register: cloudformation_destroy_result
+  until: cloudformation_destroy_result|succeeded
+  retries: 5
+  delay: 10
+  ignore_errors: true
+  when: cloudformation_out is failed
+
+- name: report Cloudformation error
+  fail:
+    msg: "FAIL {{ project_tag }} Destroy Cloudformation"
+  when: cloudformation_destroy_result is failed
+  tags:
+    - destroying
+    - destroy_cf_deployment
+    - destroy_cloud_deployment
+
+- name: Save aws_region into aws_region_final
+  set_fact:
+    aws_region_final: "{{aws_region}}"
+  when: cloudformation_out is succeeded
+
