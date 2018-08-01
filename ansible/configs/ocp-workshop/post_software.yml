@@ -87,7 +87,6 @@
           - changesc_r.stdout.find('storageclass "glusterfs-storage" not patched') == -1 
           - changesc_r.rc != 0
         changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage" patched') != -1
-
       - name: Remove default from glusterfs-storage-block class
         register: changesc_r
         changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage-block" patched') != -1
@@ -170,6 +169,7 @@
       ignore_errors: true
       when:
         - osrelease is version_compare('3.7', '>=')
+        - osrelease is version_compare('3.10', '<')
 
 - name: Remove all users from self-provisioners group
   hosts: masters
@@ -186,15 +186,15 @@
         command: oc annotate -n default --overwrite clusterrolebinding.rbac self-provisioners rbac.authorization.kubernetes.io/autoupdate=false
 
       - name: Remove system:authenticated from self-provisioner role
-        command: "oadm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
+        command: "oc adm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
         ignore_errors: true
 
       - name: create our own OPENTLC-PROJECT-PROVISIONERS
-        command: "oadm groups new OPENTLC-PROJECT-PROVISIONERS"
+        command: "oc adm groups new OPENTLC-PROJECT-PROVISIONERS"
         ignore_errors: true
 
       - name: allow OPENTLC-PROJECT-PROVISIONERS members to provision their own projects
-        command: "oadm policy add-cluster-role-to-group self-provisioner OPENTLC-PROJECT-PROVISIONERS"
+        command: "oc adm policy add-cluster-role-to-group self-provisioner OPENTLC-PROJECT-PROVISIONERS"
 
 - name: Project Request Template
   hosts: masters
@@ -235,7 +235,15 @@
         replace: "projectRequestMessage: '{{project_request_message}}'"
         backup: yes
 
-    - name: Restart master service
+    - name: Restart master service (Pre 3.7)
+      service:
+        name: atomic-openshift-master
+        state: restarted
+      when:
+        - master_config.changed
+        - osrelease | version_compare('3.7', '<')
+
+    - name: Restart master API service (3.7 - 3.9)
       service:
         name: atomic-openshift-master-api
         state: restarted
@@ -244,14 +252,11 @@
         - osrelease | version_compare('3.7', '>=')
         - osrelease | version_compare('3.10', '<')
 
-    - name: Restart master service
-      service:
-        name: atomic-openshift-master
-        state: restarted
+    - name: Restart master API Pods (3.10+)
+      command: /usr/local/bin/master-restart api
       when:
         - master_config.changed
-        - osrelease | version_compare('3.7', '<')
-        - osrelease | version_compare('3.10', '<')
+        - osrelease | version_compare('3.10', '>=')
 
 - name: node admin configs
   hosts: nodes
@@ -281,7 +286,7 @@
   tasks:
     - name: tag jenkins
       command: oc tag --source=docker registry.access.redhat.com/openshift3/jenkins-2-rhel7:v{{ repo_version }} openshift/jenkins:v{{ repo_version }} -n openshift
-      when: osrelease | version_compare('3.7', '>=')
+      when: osrelease version_compare('3.7', '>=')
       ignore_errors: true
 
     - name: tag jenkins
@@ -307,15 +312,19 @@
       retries: 5
       delay: 10
       until: pullr|succeeded
-      when: osrelease | version_compare('3.7', '>=')
+      when:
+      - osrelease | version_compare('3.7', '>=')
+      - install_nfs|bool
 
     - name: Tag ose-recycler Image
       command: >
         docker tag registry.access.redhat.com/openshift3/ose-recycler:latest
         registry.access.redhat.com/openshift3/ose-recycler:v{{ osrelease }}
-      when: osrelease | version_compare('3.7', '>=')
+      when:
+      - osrelease | version_compare('3.7', '>=')
+      - install_nfs|bool
 
-- name: Fix CRI-O Garbage Collection DaemonSet for OCP 3.9 and newer
+- name: Fix CRI-O Garbage Collection DaemonSet for OCP 3.9 (up to 3.9.25)
   gather_facts: False
   become: yes
   hosts: masters
@@ -390,16 +399,54 @@
   tags:
     - install_prometheus
   tasks:
-    - shell: "ansible-playbook -i /etc/ansible/hosts ansible-playbook -i /etc/ansible/hosts /usr/share/ansible/openshift-ansible/playbooks/openshift-grafana/config.yml"
-      when:
+    - when:
       - install_prometheus|bool
       - osrelease is versionCompare("3.10", ">=")
-    - shell: "oc policy add-role-to-user admin {{admin_user}} -n openshift-grafana"
-      when:
+    block:
+      - shell: "ansible-playbook -i /etc/ansible/hosts ansible-playbook -i /etc/ansible/hosts /usr/share/ansible/openshift-ansible/playbooks/openshift-grafana/config.yml"
+      - shell: "oc policy add-role-to-user admin {{admin_user}} -n openshift-grafana"
+
+# Update Firewall Rules for Node Exporter to work
+# (3.10 and onwards)
+- name: Update Firewall on all nodes for Node Exporter (3.10+)
+  gather_facts: False
+  become: yes
+  hosts:
+    - nodes
+    - infranodes
+    - masters
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - install_prometheus
+  tasks:
+    - when:
       - install_prometheus|bool
       - osrelease is versionCompare("3.10", ">=")
-
-
+    block:
+      # Node Exporters on all Nodes liston on port 9100.
+      # Open Firewall Port 9100 for future sessions by adding
+      # the rule to the iptables file.
+      - name: Open Firewall port 9100 for future sessions
+        lineinfile:
+          dest: /etc/sysconfig/iptables
+          insertafter: '-A FORWARD -j REJECT --reject-with icmp-host-prohibited'
+          line: '-A OS_FIREWALL_ALLOW -p tcp -m state --state NEW -m tcp --dport 9100 -j ACCEPT'
+          state: present
+      # Open Firewall Port 9100 for current session by adding
+      # the rule to the current iptables configuration. We won't
+      # need to restart the iptables service - which will ensure
+      # all OpenShift rules stay in place.
+      - name: Open Firewall Port 9100 for current session
+        iptables:
+          action: insert
+          protocol: tcp
+          destination_port: 9100
+          state: present
+          chain: OS_FIREWALL_ALLOW
+          jump: ACCEPT
+    
 - name: Install Nexus
   hosts: masters
   run_once: true
