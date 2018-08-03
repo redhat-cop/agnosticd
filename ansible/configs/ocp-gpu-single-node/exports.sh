@@ -1,11 +1,9 @@
 export REGION=us-east-1
 export KEYNAME=roadshow
-export GUID=testocpworkshop1
 export ENVTYPE="ocp-gpu-single-node"
 export CLOUDPROVIDER=ec2
 export HOSTZONEID='ZNQ5TMIG603EU'
 export BASESUFFIX='.openshiftdemos.com'
-export REPO_VERSION=3.6
 export DEPLOYER_REPO_PATH=`pwd`
 
 ansible-playbook main.yml  -e "guid=${GUID}" -e "env_type=${ENVTYPE}" \
