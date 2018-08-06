@@ -3,21 +3,21 @@ startTenant={{start_tenant}}
 endTenant={{end_tenant}}
 
 master_access_token={{master_access_token}}
-new_tenant_passwd=admin
+tenantAdminPasswd={{tenantAdminPasswd}}
 create_tenant_url=https://{{ocp_project}}-master-admin.{{ocp_apps_domain}}/master/api/providers.xml
 output_dir={{tenant_output_dir}}
-access_token_mapping_file=$output_dir/access_token_mapping_file.txt
+user_info_file=$output_dir/user_info_file.txt
 log_file=$output_dir/tenant_provisioning.log
 
 function createAndActivateTenants() {
 
     echo -en "\n\nCreating tenants $startTenant through $endTenant  \n" > $log_file
-    echo -en "userId        access_token\n\n" > $access_token_mapping_file
+    echo -en "OCP user id\tOCP user passwd\t3scale admin URL\tAPI admin Id\tAPI admin passwd\tAPI admin access token\n\t\t\t\t\t" > $user_info_file
     
 
     for i in $(seq ${startTenant} ${endTenant}) ; do
         orgName=user$i-3scale;
-        userId=user$i;
+        tenantAdminId=user$i;
         output_file=$orgName-tenant-signup.xml
   
        # 1) Create tenant 
@@ -25,9 +25,9 @@ function createAndActivateTenants() {
             -X POST \
             -d access_token=$master_access_token \
             -d org_name=$orgName \
-            -d username=$userId \
-            -d email=$userId%40{{ocp_apps_domain}} \
-            -d password=$new_tenant_passwd \
+            -d username=$tenantAdminId \
+            -d password=$tenantAdminPasswd \
+            -d email=$tenantAdminId%40{{ocp_apps_domain}} \
             $create_tenant_url > $output_dir/$output_file
 
         if [ $? -ne 0 ];then
@@ -37,7 +37,7 @@ function createAndActivateTenants() {
 
 
         # 2) Retrieve access_token
-        eval access_token=\"`xmlstarlet sel -t -m '//access_token' -v 'value' -n $output_dir/$output_file`\"
+        eval tenant_access_token=\"`xmlstarlet sel -t -m '//access_token' -v 'value' -n $output_dir/$output_file`\"
         if [ $? -ne 0 ];then
             echo -en "\n *** ERROR: 2" >> $log_file
             exit 1;
@@ -73,14 +73,14 @@ function createAndActivateTenants() {
             exit 1;
         fi
 
-        echo -en "\ncreated tenant with orgName= $orgName. \n\tOutput file at: $output_dir/$output_file  \n\taccess_token = $access_token \n" >> $log_file
+        echo -en "\ncreated tenant with orgName= $orgName. \n\tOutput file at: $output_dir/$output_file  \n\ttenant_access_token = $tenant_access_token \n" >> $log_file
 
-        echo -en "\n$userId   $access_token" >> $access_token_mapping_file
+        echo -en "\nuser$i\t{{ocp_user_passwd}}\t$orgName-admin.{{ocp_apps_domain}}\t$tenantAdminId\t$tenantAdminPasswd\t$tenant_access_token" >> $user_info_file
     done;
 
-    echo -en "\n" >> $access_token_mapping_file
+    echo -en "\n" >> $user_info_file
 
-    echo -en "\n\n\naccess_token_mapping_file available at: $access_token_mapping_file \n" >> $log_file
+    echo -en "\n\n\nuser_info_file available at: $user_info_file \n" >> $log_file
 
 }
 
