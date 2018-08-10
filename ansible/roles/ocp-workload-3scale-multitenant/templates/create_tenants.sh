@@ -67,7 +67,7 @@ function createAndActivateTenants() {
 
 
         # 4) Create corresponding route
-        oc create route edge $orgName-provider --service=system-provider --hostname=$orgName-admin.{{ocp_apps_domain}}
+        oc create route edge $orgName-provider --service=system-provider --hostname=$orgName-admin.{{ocp_apps_domain}} -n {{ocp_project}}
         if [ $? -ne 0 ];then
             echo -en "\n *** ERROR: 5" >> $log_file
             exit 1;
