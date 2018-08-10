@@ -44,7 +44,7 @@ function createAndActivateTenants() {
         fi
 
 
-        # 3)  activate new user
+        # 3)  determine URL to activate new user
         eval account_id=\"`xmlstarlet sel -t -m '//account' -v 'id' -n $output_dir/$output_file`\"
         eval user_id=\"`xmlstarlet sel -t -m '///user[state = "pending"]' -v 'id' -n $output_dir/$output_file`\"
         echo -en "\nactivating new user. account_id = $account_id. user_id = $user_id \n" >> $log_file
@@ -55,6 +55,7 @@ function createAndActivateTenants() {
         fi
 
 
+        # 4)  activate new user
         echo -en "\n\n" >> $output_dir/$output_file
         curl -k \
              -X PUT \
