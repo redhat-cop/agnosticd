@@ -1,3 +1,5 @@
+# loops from {{start_tenant}} to {{end_tenant}} to create 3scale tenants.
+# Each user is given tenant admin rights to their corresponding tenant.
 
 startTenant={{start_tenant}}
 endTenant={{end_tenant}}
@@ -66,11 +68,15 @@ function createAndActivateTenants() {
             exit 1;
         fi
 
+        # 5) Give user view access to 3scale project.
+        #    Assumes use of the following user name convention:   user[1-100]
+        oc adm policy add-role-to-user view user$i -n {{ocp_project}}
 
-        # 4) Create corresponding route
+
+        # 6) Create corresponding route on 3scale AMP system-provider service
         oc create route edge $orgName-provider --service=system-provider --hostname=$orgName-admin.{{ocp_apps_domain}} -n {{ocp_project}}
         if [ $? -ne 0 ];then
-            echo -en "\n *** ERROR: 5" >> $log_file
+            echo -en "\n *** ERROR: 6" >> $log_file
             exit 1;
         fi
 
