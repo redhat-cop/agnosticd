@@ -1,0 +1,105 @@
+---
+
+- name: Verify Storage Type
+  fail:
+    msg: "Invalid Database Type. 'database_type' must be 'postgresql' or 'mysql'"
+  when: database_type not in ["postgresql","mysql"]
+
+- name: Set PostgreSQL Facts
+  set_fact:
+    quay_db_uri: "{{ postgresql_db_uri }}"
+  when: database_type == "postgresql"
+
+- name: Set MySQL Facts
+  set_fact:
+    quay_db_uri: "{{ mysql_db_uri }}"
+  when: database_type == "mysql"
+
+- name: Include Container Credentials
+  include_tasks: container_credentials.yml
+  when: (quay_registry_server | trim != "") and ((quay_registry_auth | trim != "") or (quay_registry_email | trim != ""))
+
+- name: Configure Storage Directories
+  file:
+    state: directory
+    owner: root
+    group: root
+    mode: g+rw
+    path: "{{ item }}"
+  with_items:
+    - "{{ quay_config_dir }}"
+    - "{{ quay_storage_dir }}"
+
+- name: Include systemd configurations
+  include_tasks: configure_systemd.yml
+
+- name: Create SSL Certificates
+  block:
+    - name: Create Temporary SSL Directory
+      command: mktemp -d /tmp/quay-ssl-XXXXXXX
+      register: ssl_remote_tmp_dir
+      delegate_to: "{{ groups['quay_enterprise'][0] }}"
+
+    - name: Create SSL Certificate
+      command: openssl req -nodes -x509 -newkey rsa:4096 -keyout {{ ssl_remote_tmp_dir.stdout }}/ssl.key -out {{ ssl_remote_tmp_dir.stdout }}/ssl.cert -subj "/C={{ quay_ssl_generate_country }}/ST={{ quay_ssl_generate_state }}/L={{ quay_ssl_generate_city }}/O={{ quay_ssl_generate_organization }}/OU={{ quay_ssl_generate_organizational_unit }}/CN={{ quay_ssl_generate_hostname }}" -days {{ quay_ssl_generate_days_validity }}
+      delegate_to: "{{ groups['quay_enterprise'][0] }}"
+
+    # - name: Create Local Temporary Directory
+    #   command: mktemp -d /tmp/quay-ssl-XXXXXXX
+    #   register: ssl_local_tmp_dir
+    #   delegate_to: localhost
+
+    - name: Fetch SSL Certifictes
+      fetch:
+        src:  "{{ ssl_remote_tmp_dir.stdout }}/{{ item }}"
+        dest: "/tmp/{{ item  }}"
+        flat: true
+        fail_on_missing: yes
+      delegate_to: "{{ groups['quay_enterprise'][0] }}"
+      with_items:
+        - ssl.key
+        - ssl.cert
+
+    - name: Set Fact for Custom SSL Certificates
+      set_fact:
+        quay_ssl_cert_file: "/tmp/ssl.cert"
+        quay_ssl_key_file: "/tmp/ssl.key"
+
+    - name: Delete Remote SSL Certificates
+      file:
+        state: absent
+        path: "{{ ssl_remote_tmp_dir.stdout }}"
+      delegate_to: "{{ groups['quay_enterprise'][0] }}"
+
+- name: Copy SSL Certificates
+  copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+  notify: Restart quay service
+  with_items:
+    - { src: "{{ quay_ssl_key_file }}", dest: "{{ quay_config_dir }}/ssl.key" }
+    - { src: "{{ quay_ssl_cert_file }}", dest: "{{ quay_config_dir }}/ssl.cert" }
+
+# - name: Delete Local Temporary SSL Directory
+#   file:
+#     state: absent
+#     path: "/tmp"
+#   delegate_to: localhost
+
+- name: Check if quay configuration exists
+  stat:
+    path: "{{ quay_config_dir }}/config.yaml"
+  register: quay_config_stat_result
+
+- name: Setup initial quay configuration file
+  template:
+    src: config.yaml.j2
+    dest: "{{ quay_config_dir }}/config.yaml"
+    owner: root
+    group: root
+    mode: g+rw
+  notify: Restart quay service
+  when: not quay_config_stat_result.stat.exists
+
+- name: Include firewall tasks
+  include_tasks: firewall.yml

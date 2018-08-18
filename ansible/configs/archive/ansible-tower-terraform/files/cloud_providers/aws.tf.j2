@@ -1,0 +1,211 @@
+# LAUNCH TOWER IN AMAZON EC2 (Public Tower Image)
+# ------------------------------------------------
+# EC2 Region  Location      AMI TYPE  AMI ID    
+# us-east-1   N. Virginia   PV        ami-a86614bf
+# us-west-1   N. California PV        ami-cdd79aad
+# us-west-2   Oregon        PV        ami-028f5e62
+
+#----------------------------------------------
+# Variables
+#----------------------------------------------
+variable "aws_access_key" {}
+variable "aws_secret_key" {}
+variable "security_group" { default = "{{ workshop_prefix }}-ansible-tower-sg" }
+variable "keypair" { default = "{{ workshop_prefix }}-tower" }
+variable "node_instance_type" { default = "t2.medium" }  # c4.large
+variable "aws_region" { default = "us-east-1" }
+variable "ebs_root_block_size" { default = "50" }
+variable "aws_node_ami" { default = "ami-c998b6b2" }     # US-EAST-1 RHEL 7.4
+variable "number_tower_nodes" { default = "{{ number_tower_nodes }}" }
+variable "number_nodes" { default = "{{ number_nodes }}" }
+#----------------------------------------------
+# API Keys
+#----------------------------------------------
+provider "aws" {
+    access_key = "${var.aws_access_key}"
+    secret_key = "${var.aws_secret_key}"
+    region     = "${var.aws_region}"
+}
+#----------------------------------------------
+# VPC
+#----------------------------------------------
+# Main VPC that will contain everything.
+resource "aws_vpc" "main" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+ 
+  tags { 
+    Name = "{{ workshop_prefix }}-ansible-tower-vpc" 
+  }
+}
+
+# The public subnet is where resources connected to the internet will go
+resource "aws_subnet" "public" {
+    vpc_id                  = "${aws_vpc.main.id}"
+    cidr_block              = "10.0.2.0/24"
+    map_public_ip_on_launch = true
+    tags { Name = "{{ workshop_prefix }}-ansible-tower-public-subnet" }
+}
+
+# Internet accessible route table + gateway for the public subnet
+resource "aws_internet_gateway" "public" {
+  vpc_id = "${aws_vpc.main.id}"
+  tags { Name = "{{ workshop_prefix }}-ansible-tower-igw" }
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = "${aws_vpc.main.id}"
+  route {
+      cidr_block = "0.0.0.0/0"
+      gateway_id = "${aws_internet_gateway.public.id}"
+  }
+  tags { Name = "{{ workshop_prefix }}-ansible-tower-public-rt" }
+}
+
+resource "aws_route_table_association" "public" {
+  subnet_id      = "${aws_subnet.public.id}"
+  route_table_id = "${aws_route_table.public.id}"
+}
+
+#----------------------------------------------
+# Security Group
+#----------------------------------------------
+resource "aws_security_group" "ansible-tower-sg" {
+  name   = "{{ workshop_prefix }}-ansible-tower-sg"
+  vpc_id = "${aws_vpc.main.id}"
+
+  egress {
+    protocol    = -1
+    from_port   = 0
+    to_port     = 0
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    protocol    = "tcp"
+    from_port   = 443
+    to_port     = 443
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    protocol    = "tcp"
+    from_port   = 80
+    to_port     = 80
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    protocol    = "tcp"
+    from_port   = 8443
+    to_port     = 8443
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    protocol    = "tcp"
+    from_port   = 22
+    to_port     = 22
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    protocol    = "tcp"
+    from_port   = 5000
+    to_port     = 5000
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    protocol    = "tcp"
+    from_port   = 8888
+    to_port     = 8888
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+   ingress {
+    protocol    = "tcp"
+    from_port   = 9090
+    to_port     = 9090
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+#----------------------------------------------
+# DNS
+#----------------------------------------------
+resource "aws_route53_record" "tower-node" {
+  # same number of records as instances
+  count = "${var.number_tower_nodes}"
+  zone_id = "{{ zone_id }}"                       
+  name = "{{ workshop_prefix }}.tower.${count.index}.{{ domain_name }}"
+  type = "A"
+  ttl = "300"
+  # matches up record N to instance N
+  records = ["${element(aws_instance.tower-node.*.public_ip, count.index)}"]
+}
+
+resource "aws_route53_record" "nodes" {
+  # same number of records as instances
+  count = "${var.number_nodes}"
+  zone_id = "{{ zone_id }}"                       
+  name = "{{ workshop_prefix }}.node.${count.index}.{{ domain_name }}"
+  type = "A"
+  ttl = "300"
+  # matches up record N to instance N
+  records = ["${element(aws_instance.node.*.public_ip, count.index)}"]
+}
+
+#----------------------------------------------
+# AMI : Tower Node
+#----------------------------------------------
+resource "aws_instance" "tower-node" {
+    count             = "${var.number_tower_nodes}"
+    ami               = "${var.aws_node_ami}"
+    instance_type     = "${var.node_instance_type}"
+    subnet_id         = "${aws_subnet.public.id}"
+    key_name          = "${var.keypair}"
+    security_groups   = [ "${aws_security_group.ansible-tower-sg.id}" ]
+
+    root_block_device = {
+      volume_type     = "gp2"
+      volume_size     = "${var.ebs_root_block_size}"
+    }
+    tags {
+        Name     = "{{ workshop_prefix }}-tower-${count.index}"
+        Role     = "{{ workshop_prefix }}-tower"
+        Workshop = "{{ workshop_prefix }}"
+        sshUser  = "ec2-user"
+        Index    = "${count.index}"
+
+    }
+}
+
+#----------------------------------------------
+# AMI : Generic Node
+#----------------------------------------------
+resource "aws_instance" "node" {
+    count             = "${var.number_nodes}"
+    ami               = "${var.aws_node_ami}"
+    instance_type     = "${var.node_instance_type}"
+    subnet_id         = "${aws_subnet.public.id}"
+    key_name          = "${var.keypair}"
+    security_groups   = [ "${aws_security_group.ansible-tower-sg.id}" ]
+
+	  root_block_device = {
+      volume_type     = "gp2"
+      volume_size     = "${var.ebs_root_block_size}"
+	  }
+    tags {
+        Name     = "{{ workshop_prefix }}-node-${count.index}"
+        Role     = "{{ workshop_prefix }}-node"
+        Workshop = "{{ workshop_prefix }}"
+        sshUser  = "ec2-user"
+        Index    = "${count.index}"
+
+    }
+}
+
+
+

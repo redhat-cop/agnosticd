@@ -1,0 +1,211 @@
+---
+- name: Wait until RH SSO API is available
+  uri:
+    url: https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}
+    method: HEAD
+    follow_redirects: safe
+    validate_certs: no
+  register: wait_sso_result
+  until: wait_sso_result|succeeded
+  ignore_errors: yes
+  retries: 15
+  delay: 60
+
+- name: Get SSO token
+  shell: "curl --insecure -X POST 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/realms/master/protocol/openid-connect/token' \
+  -H 'Content-Type: application/x-www-form-urlencoded' -d 'username=keyadmin' -d 'password=keypassword' -d 'grant_type=password' -d 'client_id=admin-cli'"
+  register: token_text
+
+- set_fact: TKN={{ (token_text.stdout | from_json).access_token }}
+
+- debug: var=TKN
+
+- name: Get Insurance realm
+  uri:
+    url: 'https://raw.githubusercontent.com/jbossdemocentral/3scale-security-oidc-demo/master/support/templates/insurance-realm.json'
+    return_content: yes
+  register: get_realm
+
+- debug: var=get_realm.content
+
+- name: Create Insurance Realm
+  uri:
+    url: 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms'
+    method: POST
+    body: "{{get_realm.content}}"
+    body_format: json
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer {{TKN}}"
+    return_content: yes
+    validate_certs: no
+    status_code: 201
+
+- name: Get id for client 'real-management'
+  shell: "curl --insecure 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients' \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
+  register: clients_text
+
+- set_fact: IdClient={{ (clients_text.stdout | from_json | json_query(query)) }}
+  vars:
+    query: "[?clientId=='realm-management'] | [0].id"
+
+- debug: var=IdClient
+
+- name: Get id for service account '3scale-admin'
+  shell: "curl --insecure 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients/1/service-account-user' \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
+  register: users_text
+
+- set_fact: IdUser={{ (users_text.stdout | from_json).id }}
+
+- debug: var=IdUser
+
+- name: Get id for role 'manage-clients'
+  shell: "curl --insecure 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/users/{{IdUser}}/role-mappings/clients/{{IdClient}}/available' \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
+  register: roles_text
+
+- set_fact: IdRole={{ (roles_text.stdout | from_json | json_query(query)) }}
+  vars:
+    query: "[?name=='manage-clients']"
+
+- debug: var=IdRole
+
+- name: Add role 'manage-clients' to service account
+  shell: "curl --insecure -X POST 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/users/{{IdUser}}/role-mappings/clients/{{IdClient}}' \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}' -d '{{IdRole | to_json}}'"
+  register: outcome_text
+
+- name: Get client secret
+  shell: "curl --insecure 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients/1/client-secret' \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
+  register: secret_text
+
+- set_fact: client_secret={{ (secret_text.stdout | from_json).value }}
+
+- debug: var=client_secret
+
+- name: Get the admin access_token
+  shell: "oc get dc system-app -o jsonpath='{.spec.template.spec.containers[?(@.name==\"system-provider\")].env[?(@.name==\"ADMIN_ACCESS_TOKEN\")].value}' -n {{ threescale_project }}"
+  register: env_text
+
+- set_fact: access_token="{{ env_text.stdout }}"
+
+- debug: msg="access_token is {{ access_token }}"
+
+- name: Wait until 3scale API is available
+  uri:
+    url: https://3scale-admin.{{guid}}.{{ocp_apps_domain}}
+    method: HEAD
+    validate_certs: no
+  register: wait_threescale_result
+  until: wait_threescale_result|succeeded
+  ignore_errors: yes
+  retries: 10
+  delay: 60
+
+- name: Create backend service
+  uri:
+    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services.xml"
+    method: POST
+    return_content: yes
+    headers:
+      Content-Type: "application/x-www-form-urlencoded"
+    body: "access_token={{access_token}}&name=Accident+Report+API&deployment_option=hosted&backend_version=1&system_name=accidentalert"
+    validate_certs: no
+    status_code: 201
+  register: create_svc_result
+
+- debug: var=create_svc_result
+
+- name: Update backend service (workaround for oidc bug)
+  uri:
+    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services/3.xml"
+    method: PUT
+    return_content: yes
+    headers:
+      Content-Type: "application/x-www-form-urlencoded"
+    body: "access_token={{access_token}}&backend_version=oidc"
+    validate_certs: no
+
+- name: Create application plan
+  uri:
+    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services/3/application_plans.xml"
+    method: POST
+    return_content: yes
+    headers:
+      Content-Type: "application/x-www-form-urlencoded"
+    body: "access_token={{access_token}}&name=Law+Enforcement&system_name=lawenforcement&state=published"
+    validate_certs: no
+    status_code: 201
+  register: create_plan_result
+
+- debug: var=create_plan_result
+
+- name: Config backend service proxy
+  uri:
+    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services/3/proxy.xml"
+    method: PATCH
+    return_content: yes
+    headers:
+      Content-Type: "application/x-www-form-urlencoded"
+    body: "access_token={{access_token}}&endpoint={{ ('https://accidentalert-production.amp.' + guid + '.' + ocp_apps_domain + ':443') | urlencode }}\
+    &api_backend={{ ('http://accidentalert-backend-' + service_project + '.' +  ocp_apps_domain + ':80') | urlencode }}\
+    &sandbox_endpoint={{ ('https://accidentalert-staging.amp.' + guid + '.' + ocp_apps_domain + ':443') | urlencode }}\
+    &oidc_issuer_endpoint={{ ('http://3scale-admin:' + client_secret + '@sso-' + sso_project + '.' + ocp_apps_domain + '/auth/realms/insurance') | urlencode }}"
+    validate_certs: no
+
+- name: Create the accidentalert-ui application
+  uri:
+    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/accounts/3/applications.xml"
+    method: POST
+    return_content: yes
+    headers:
+      Content-Type: "application/x-www-form-urlencoded"
+    body: "access_token={{access_token}}&plan_id=9&name=Accident+Report+App\
+    &description=Accident+Alert+Web+App&application_id=accidentalert-ui\
+    &redirect_url=http%3A%2F%2Fwww-accidentalert-{{guid}}.{{ocp_apps_domain}}%2F%2A"
+    validate_certs: no
+    status_code: 201
+  register: create_app_result
+
+- debug: var=create_app_result
+
+- name: Get SSO token
+  shell: "curl --insecure -X POST 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/realms/master/protocol/openid-connect/token' \
+  -H 'Content-Type: application/x-www-form-urlencoded' -d 'username=keyadmin' -d 'password=keypassword' -d 'grant_type=password' -d 'client_id=admin-cli'"
+  register: token2_text
+
+- set_fact: TKN2={{ (token2_text.stdout | from_json).access_token }}
+
+- name: Get id for client 'accidentalert-ui'
+  uri:
+    url: 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients'
+    return_content: yes
+    headers:
+      Authorization: 'Bearer {{TKN2}}'
+    validate_certs: no
+  register: client_text
+
+- set_fact: IdClientApp={{ (client_text.content | from_json | json_query(query)) }}
+  vars:
+    query: "[?clientId=='accidentalert-ui'] | [0].id"
+
+- debug: var=IdClientApp
+
+- name: Update the rh sso app
+  uri:
+    url: "https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients/{{IdClientApp}}"
+    method: PUT
+    return_content: yes
+    headers:
+      Content-Type: "application/json"
+      Authorization: 'Bearer {{TKN2}}'
+    body: '{ "clientId": "accidentalert-ui", "publicClient" : "true" }'
+    body_format: json
+    validate_certs: no
+    status_code: 204
+  register: update_app_result
+
+- debug: var=update_app_result
