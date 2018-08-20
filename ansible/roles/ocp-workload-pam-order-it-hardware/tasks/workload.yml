@@ -18,8 +18,59 @@
 #- name: Set project limit LimitRange
 #  shell: "oc create -f /tmp/{{guid}}//limit-range.yaml -n {{ocp_project}}"
 
-- name: Import ImageStreams
-  shell: "oc create -f https://raw.githubusercontent.com/jboss-openshift/application-templates/master/openjdk/openjdk18-image-stream.json -n {{ocp_project}}"
+- name: Import ImageStreams OpenJDK
+  shell: "oc create -f {{openjdk_imagestreams_yml}} -n {{ocp_project}}"
+
+- name: Import ImageStreams PAM
+  shell: "oc create -f {{pam_imagestreams_yml}} -n {{ocp_project}}"
+
+- name: Import PAM Authoring template
+  shell: "oc create -f {{pam_template_yml}} -n {{ocp_project}}"
+
+- name: Create Secrets Business Central
+  shell: oc process -f {{pam_secrets_template_yml}} -p SECRET_NAME=businesscentral-app-secret | oc create -f - -n {{ocp_project}}
+
+- name: Create Secrets KIE-server
+  shell: oc process -f {{pam_secrets_template_yml}} -p SECRET_NAME=kieserver-app-secret | oc create -f - -n {{ocp_project}}
+
+- name: Create Service Account Business Central
+  shell: oc create serviceaccount businesscentral-service-account - -n {{ocp_project}}
+
+- name: Create Service Account KIE Server
+  shell: oc create serviceaccount kieserver-service-account -n {{ocp_project}}
+
+- name: Link secrets and service account Business Central
+  shell: oc secrets link --for=mount businesscentral-service-account businesscentral-app-secret -n {{ocp_project}}
+
+- name: Link secrets and service account KIE-server
+  shell: oc secrets link --for=mount kieserver-service-account kieserver-app-secret -n {{ocp_project}}
+
+- name: Create ConfigMap Business Central
+  shell: oc create configmap rhpam-bc-setup-config-map --from-file=/tmp/{{guid}}/bc-clone-git-repository.sh,/tmp/{{guid}}/provision-properties-static.sh -n {{ocp_project}}
+
+- name: Create PAM7 Authoring environment
+  shell: |
+          oc new-app --template=rhpam70-authoring \
+            -p APPLICATION_NAME="rhpam-dev" \
+            -p KIE_ADMIN_USER="adminUser" \
+            -p KIE_ADMIN_PWD="test1234!" \
+            -p KIE_SERVER_CONTROLLER_USER="controllerUser" \
+            -p KIE_SERVER_CONTROLLER_PWD="test1234!" \
+            -p KIE_SERVER_USER="executionUser" \
+            -p KIE_SERVER_PWD="test1234!" \
+            -p BUSINESS_CENTRAL_HTTPS_SECRET="businesscentral-app-secret" \
+            -p KIE_SERVER_HTTPS_SECRET="kieserver-app-secret" \
+            -p MAVEN_REPO_URL="http://nexus:8081/content/groups/public/" \
+            -p MAVEN_REPO_USERNAME="deployment" \
+            -p MAVEN_REPO_PASSWORD="deployment123" \
+            -p BUSINESS_CENTRAL_MEMORY_LIMIT="2Gi" \
+            -p IMAGE_STREAM_NAMESPACE={{ocp_project}} -n {{ocp_project}}
+
+- name: "Add ConfigMap as Volume to Business Central DC"
+  shell: oc volume dc/rhpam-dev-rhpamcentr --add --name=config-volume --configmap-name=rhpam-bc-setup-config-map --mount-path=/tmp/config-files
+
+- name: "Add BC deployment hook."
+  shell: oc set deployment-hook dc/rhpam-dev-rhpamcentr --post -c rhpam-dev-rhpamcentr -e BC_URL="http://rhpam-dev-rhpamcentr:8080" -v config-volume --failure-policy=abort -- /bin/bash /tmp/config-files/bc-clone-git-repository.sh
 
 #- name: "Create secrets and service accounts"
 #  shell: "oc process -f /tmp/{{guid}}/secrets-and-accounts.yaml | oc create -n {{ocp_project}} -f  -"
@@ -31,14 +82,14 @@
   shell: |
           oc new-app java:8~https://github.com/DuncanDoyle/order-it-hw-app \
             -e JAVA_OPTIONS="-Dorg.kie.server.repo=/data -Dorg.jbpm.document.storage=/data/docs -Dspring.profiles.active=openshift-no-controller" \
-            -e KIE_MAVEN_REPO_USER=kieserver \
-            -e KIE_MAVEN_REPO_PASSWORD=kieserver1! \
-            -e KIE_MAVEN_REPO=http://192.168.100.4:8080/kie-wb/maven2 -n {{ocp_project}}
+            -e KIE_MAVEN_REPO_USER=executionUser \
+            -e KIE_MAVEN_REPO_PASSWORD=test1234! \
+            -e KIE_MAVEN_REPO=http://rhpam-dev-rhpamcentr:8080/business-central/maven2 -n {{ocp_project}}
 
-- name: "Create ConfigMap"
+- name: "Create ConfigMap Order IT Hardware App"
   shell: "oc create configmap order-it-hw-app-config-map --from-file=/tmp/{{guid}}/settings.xml -n {{ocp_project}}"
 
-- name: "Add ConfigMap as Volume to DC"
+- name: "Add ConfigMap as Volume to Order IT Hardware App DC"
   shell: "oc volume dc/order-it-hw-app --add -m /opt/jboss/.m2 -t configmap --configmap-name=order-it-hw-app-config-map -n {{ocp_project}}"
 
 - name: "Add Data Persistent Volume"
@@ -95,6 +146,8 @@
   vars:
     pod_to_wait:
       - order-it-hw-app
+      - rhpam-dev-rhpamcentr
+      - rhpam-dev-kieserver
 
 #- name: "Start build of BPM Process application"
 #  shell: "oc start-build co"
