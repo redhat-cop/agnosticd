@@ -80,6 +80,13 @@ function createAndActivateTenants() {
             exit 1;
         fi
 
+        # 7) Create corresponding route on 3scale AMP system-developer service
+        oc create route edge $orgName-developer --service=system-developer --hostname=$orgName-3scale.{{ocp_apps_domain}} -n {{ocp_project}}
+        if [ $? -ne 0 ];then
+            echo -en "\n *** ERROR: 6" >> $log_file
+            exit 1;
+        fi
+
         echo -en "\ncreated tenant with orgName= $orgName. \n\tOutput file at: $output_dir/$output_file  \n\ttenant_access_token = $tenant_access_token \n" >> $log_file
 
         echo -en "\nuser$i\t{{ocp_user_passwd}}\t$orgName-admin.{{ocp_apps_domain}}\t$tenantAdminId\t$tenantAdminPasswd\t$tenant_access_token" >> $user_info_file
