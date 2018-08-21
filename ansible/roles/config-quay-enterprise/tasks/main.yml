@@ -2,18 +2,27 @@
 
 - name: Verify Storage Type
   fail:
-    msg: "Invalid Database Type. 'database_type' must be 'postgresql' or 'mysql'"
-  when: database_type not in ["postgresql","mysql"]
+    msg: "Invalid Database Type. 'quay_database_type' must be 'postgres' or 'mysql'"
+  when: quay_database_type not in ["postgresql","mysql"]
+
+- name: Verify Clair Endpoint
+  fail:
+    msg: Clar Endpoint Must Be Specified
+  when: quay_clair_enable is defined and quay_clair_enable|bool and (quay_clair_endpoint is not defined or quay_clair_endpoint|trim == "")
 
 - name: Set PostgreSQL Facts
   set_fact:
     quay_db_uri: "{{ postgresql_db_uri }}"
-  when: database_type == "postgresql"
+  when: quay_database_type == "postgresql"
 
 - name: Set MySQL Facts
   set_fact:
     quay_db_uri: "{{ mysql_db_uri }}"
-  when: database_type == "mysql"
+  when: quay_database_type == "mysql"
+
+- name: Set HTTP Protocol
+  set_fact:
+    quay_http_protocol: "{{ (quay_ssl_enable|bool)| ternary('https','http') }}"
 
 - name: Include Container Credentials
   include_tasks: container_credentials.yml
@@ -33,63 +42,78 @@
 - name: Include systemd configurations
   include_tasks: configure_systemd.yml
 
+- name: Set SSL Facts
+  set_fact:
+    quay_ssl_enable: "{{ quay_ssl_enable }}"
+
+- name: Set Fact for Custom SSL Certificates
+  set_fact:
+    quay_ssl_cert_file: "{{ quay_ssl_cert_file }}"
+    quay_ssl_key_file: "{{ quay_ssl_key_file }}"
+  when: quay_ssl_enable|bool and (quay_ssl_key_file is defined and quay_ssl_key_file|trim != "" and quay_ssl_cert_file is defined and quay_ssl_cert_file|trim != "")
+
 - name: Create SSL Certificates
   block:
     - name: Create Temporary SSL Directory
       command: mktemp -d /tmp/quay-ssl-XXXXXXX
-      register: ssl_remote_tmp_dir
+      register: quay_ssl_remote_tmp_dir_mktemp
       delegate_to: "{{ groups['quay_enterprise'][0] }}"
+      when: quay_ssl_remote_tmp_dir is undefined and quay_ssl_remote_tmp_dir|trim == ""
+
+    - name: Set Fact for Remote SSL Directory
+      set_fact:
+        quay_ssl_remote_tmp_dir: "{{ quay_ssl_remote_tmp_dir if quay_ssl_remote_tmp_dir is defined and quay_ssl_remote_tmp_dir|trim == '' else quay_ssl_remote_tmp_dir_mktemp.stdout }}"
+      when: quay_ssl_remote_tmp_dir is undefined and quay_ssl_remote_tmp_dir|trim == ""
 
     - name: Create SSL Certificate
-      command: openssl req -nodes -x509 -newkey rsa:4096 -keyout {{ ssl_remote_tmp_dir.stdout }}/ssl.key -out {{ ssl_remote_tmp_dir.stdout }}/ssl.cert -subj "/C={{ quay_ssl_generate_country }}/ST={{ quay_ssl_generate_state }}/L={{ quay_ssl_generate_city }}/O={{ quay_ssl_generate_organization }}/OU={{ quay_ssl_generate_organizational_unit }}/CN={{ quay_ssl_generate_hostname }}" -days {{ quay_ssl_generate_days_validity }}
+      command: openssl req -nodes -x509 -newkey rsa:4096 -keyout {{ quay_ssl_remote_tmp_dir }}/ssl.key -out {{ quay_ssl_remote_tmp_dir }}/ssl.cert -subj "/C={{ quay_ssl_generate_country }}/ST={{ quay_ssl_generate_state }}/L={{ quay_ssl_generate_city }}/O={{ quay_ssl_generate_organization }}/OU={{ quay_ssl_generate_organizational_unit }}/CN={{ quay_server_hostname }}" -days {{ quay_ssl_generate_days_validity }}
       delegate_to: "{{ groups['quay_enterprise'][0] }}"
-
-    # - name: Create Local Temporary Directory
-    #   command: mktemp -d /tmp/quay-ssl-XXXXXXX
-    #   register: ssl_local_tmp_dir
-    #   delegate_to: localhost
 
     - name: Fetch SSL Certifictes
       fetch:
-        src:  "{{ ssl_remote_tmp_dir.stdout }}/{{ item }}"
-        dest: "/tmp/{{ item  }}"
+        src:  "{{ item.src }}"
+        dest: "{{ item.dest }}"
         flat: true
         fail_on_missing: yes
       delegate_to: "{{ groups['quay_enterprise'][0] }}"
+      run_once: true
       with_items:
-        - ssl.key
-        - ssl.cert
-
-    - name: Set Fact for Custom SSL Certificates
-      set_fact:
-        quay_ssl_cert_file: "/tmp/ssl.cert"
-        quay_ssl_key_file: "/tmp/ssl.key"
+        - { src: "{{ quay_ssl_remote_tmp_dir }}/ssl.key", dest: "{{ quay_ssl_local_tmp_dir }}/ssl.key" }
+        - { src: "{{ quay_ssl_remote_tmp_dir }}/ssl.cert", dest: "{{ quay_ssl_local_tmp_dir }}/ssl.cert" }
 
     - name: Delete Remote SSL Certificates
       file:
         state: absent
-        path: "{{ ssl_remote_tmp_dir.stdout }}"
+        path: "{{ quay_ssl_remote_tmp_dir }}"
       delegate_to: "{{ groups['quay_enterprise'][0] }}"
+
+    - name: Set Fact for Custom SSL Certificates
+      set_fact:
+        quay_ssl_cert_file: "{{ quay_ssl_local_tmp_dir }}/ssl.cert"
+        quay_ssl_key_file: "{{ quay_ssl_local_tmp_dir }}/ssl.key"
+  when: quay_ssl_enable|bool and (quay_ssl_key_file is not defined or quay_ssl_key_file|trim == "" or quay_ssl_cert_file is not defined or quay_ssl_cert_file|trim == "")
 
 - name: Copy SSL Certificates
   copy:
     src: "{{ item.src }}"
     dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: g+rw
   notify: Restart quay service
   with_items:
     - { src: "{{ quay_ssl_key_file }}", dest: "{{ quay_config_dir }}/ssl.key" }
     - { src: "{{ quay_ssl_cert_file }}", dest: "{{ quay_config_dir }}/ssl.cert" }
+  when: quay_ssl_enable|bool
 
-# - name: Delete Local Temporary SSL Directory
-#   file:
-#     state: absent
-#     path: "/tmp"
-#   delegate_to: localhost
-
-- name: Check if quay configuration exists
+- name: Check if Quay configuration exists
   stat:
     path: "{{ quay_config_dir }}/config.yaml"
   register: quay_config_stat_result
+
+- name: Configure BitTorrent Pepper Value
+  set_fact:
+    bittorrent_filename_pepper: "{{ 'hostname' | to_uuid | upper }}"
 
 - name: Setup initial quay configuration file
   template:
@@ -103,3 +127,7 @@
 
 - name: Include firewall tasks
   include_tasks: firewall.yml
+
+- name: Setup Initial User and Configuration
+  include_tasks: complete_setup.yml
+  when: not quay_config_stat_result.stat.exists and quay_superuser_username is defined and quay_superuser_username|trim != "" and quay_superuser_password is defined and quay_superuser_password|trim != "" and quay_superuser_email is defined and quay_superuser_email|trim != ""

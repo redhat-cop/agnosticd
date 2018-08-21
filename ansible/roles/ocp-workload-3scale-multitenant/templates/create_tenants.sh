@@ -18,7 +18,7 @@ function createAndActivateTenants() {
     
 
     for i in $(seq ${startTenant} ${endTenant}) ; do
-        orgName=user$i-3scale;
+        orgName=user$i-3scale-mt;
         tenantAdminId=user$i;
         output_file=$orgName-tenant-signup.xml
   
