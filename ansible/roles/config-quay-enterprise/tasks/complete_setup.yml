@@ -1,0 +1,63 @@
+---
+
+- name: Configure Setup Process on 1st Quay Host
+  block:
+    - name: Set Setup Output File Location
+      set_fact:
+        tmp_setup_file_location: /tmp/quay
+
+    - name: Restart Quay
+      systemd:
+        name: "{{ quay_service }}"
+        enabled: yes
+        state: restarted
+        daemon_reload: yes
+
+    - name: Hit Quay Setup Endpoint
+      uri:
+        url: "{{ quay_http_protocol }}://{{ quay_server_hostname }}/setup/"
+        validate_certs: no
+        method: GET
+        return_content: yes
+      register: uri_setup
+      until: uri_setup.status == 200
+      retries: 30
+      delay: 10
+    - name: Write file
+      copy:
+        content: "{{ uri_setup.content }}"
+        dest: "{{ tmp_setup_file_location }}"
+    - name: Extract csrf token
+      shell: cat /tmp/quay | grep "__token" | awk -F\' '{print $(NF-1)}'
+      register: token
+    - name: Create Superuser
+      uri:
+        url:  "{{ quay_http_protocol }}://{{ quay_server_hostname }}/api/v1/superuser/config/createsuperuser?_csrf_token={{ token.stdout | urlencode }}"
+        validate_certs: no
+        method: POST
+        body_format: json
+        body:
+          username: "{{ quay_superuser_username }}"
+          email: "{{ quay_superuser_email }}"
+          password: "{{ quay_superuser_password }}"
+        headers:
+          Cookie: "{{ uri_setup.set_cookie }}"
+
+    - name: Delete Temporary Setup File
+      file:
+        state: absent
+        path: "{{ tmp_setup_file_location }}"
+  when: inventory_hostname == groups['quay_enterprise'][0]
+
+- name: Set setup_complete Fact
+  set_fact:
+    quay_setup_complete: True
+
+- name: Setup initial quay configuration file
+  template:
+    src: config.yaml.j2
+    dest: "{{ quay_config_dir }}/config.yaml"
+    owner: root
+    group: root
+    mode: g+rw
+  notify: Restart quay service

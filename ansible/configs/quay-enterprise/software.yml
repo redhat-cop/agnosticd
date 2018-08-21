@@ -5,7 +5,6 @@
   become: false
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   tasks:
     - debug:
         msg: "Software tasks started"
@@ -15,40 +14,33 @@
   tasks:
     - name: Validate Required Group Configuration
       fail:
-        msg: "'database', 'redis' and 'quay_enterprise' groups must be specified"
+        msg: "'quay_database', 'redis' and 'quay_enterprise' groups must be specified"
       when:
-        - "'redis' not in groups or groups['redis']| length == 0 or 'database' not in groups or groups['database']| length == 0 or 'quay_enterprise' not in groups or groups['quay_enterprise']| length == 0"
+        - "'redis' not in groups or groups['redis']| length == 0 or 'quay_database' not in groups or groups['quay_database']| length == 0 or 'quay_enterprise' not in groups or groups['quay_enterprise']| length == 0"
+    - name: Validate Required Clair Group Configuration
+      fail:
+        msg: "'clair' and 'clair_database' groups must be defined when quay_clair_enable=True"
+      when:
+        - quay_clair_enable|d(False)|bool
+        - "'clair' not in groups or groups['clair']|length == 0 or 'clair_database' not in groups or groups['clair_database']|length == 0"
 
 - name: Set up Node Software (Docker)
-  hosts: bastions
+  hosts:
+    - all_vms
   gather_facts: false
   become: true
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   roles:
     - ../../roles/host-ocp-node
 
-- name: Install and Configure Database
-  hosts: database
+- name: Install and Configure Quay Database
+  hosts: quay_database
   gather_facts: false
   become: true
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   tasks:
-    - name: Install MySQL
-      include_role:
-        name: ../../roles/config-mysql
-      vars:
-        mode: containerized
-        mysql_username: "{{ database_username }}"
-        mysql_password: "{{ database_password }}"
-        mysql_root_username: "{{ database_admin_username }}"
-        mysql_root_password: "{{ database_admin_password }}"
-        mysql_database: "{{ database_name }}"
-      when: database_type == "mysql"
-
     - name: Install and Configure PostgreSQL
       block:
         - name: Install PostgreSQL
@@ -56,34 +48,37 @@
             name: ../../roles/config-postgresql
           vars:
             mode: containerized
-            postgresql_username: "{{ database_username }}"
-            postgresql_password: "{{ database_password }}"
-            postgresql_admin_user: "{{ database_admin_username }}"
-            postgresql_admin_password: "{{ database_admin_password }}"
-            postgresql_database: "{{ database_name }}"
+            postgresql_name: "{{ qe_quay_database_service_name|d('postgresql-quay') }}"
+            postgresql_username: "{{ qe_quay_database_username }}"
+            postgresql_password: "{{ qe_quay_database_password }}"
+            postgresql_admin_user: "{{ qe_quay_database_admin_username }}"
+            postgresql_admin_password: "{{ qe_quay_database_admin_password }}"
+            postgresql_port: "{{ qe_quay_database_port|d('5432') }}"
+            postgresql_database: "{{ qe_quay_database_name }}"
         
         - name: Flush Handlers
           meta: flush_handlers
 
-        - name: Locate PostgreSQL Container
-          command: docker ps --filter=name=postgresql.service -q
-          register: postgresql_container
-
         - name: Sleep to give PostgreSQL a chance to finish starting up
           pause:
             seconds: 10
+
+        - name: Locate PostgreSQL Container
+          command: docker ps --filter=name="{{ qe_quay_database_service_name | default('postgresql-quay') }}" -q
+          register: postgresql_container
           
         - name: Configure PostgreSQL
-          shell: docker exec -i {{ postgresql_container.stdout }} /bin/bash -c 'PGPASSWORD={{ database_admin_password }} psql {{ database_name }} -c "CREATE EXTENSION pg_trgm;"'
+          shell: docker exec -i {{ postgresql_container.stdout }} /bin/bash -c 'PGPASSWORD={{ qe_quay_database_admin_password }} psql {{ qe_quay_database_name }} -c "CREATE EXTENSION pg_trgm;"'
           register: shell_result
           failed_when:
             - shell_result.rc != 0
             - "'already exists' not in shell_result.stderr"
-      when: database_type == "postgresql"
 
 - name: Install Redis
   hosts: redis
   become: true
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tasks:
     - name: Install Redis
       include_role:
@@ -103,9 +98,64 @@
       include_role:
         name: ../../roles/config-quay-enterprise
       vars:
-        quay_ssl_generate_hostname: "{{ quay_hostname }}.{{subdomain_base}}"
-        database_host: "{{ hostvars[groups['database'][0]]['ansible_eth0']['ipv4']['address'] }}"
-        redis_host: "{{ hostvars[groups['redis'][0]]['ansible_eth0']['ipv4']['address'] }}"
+        # Commented out variables need to be set in env_vars.yml
+        quay_database_type: "postgresql"
+        quay_database_username: "{{ qe_quay_database_username }}"
+        quay_database_password: "{{ qe_quay_database_password }}"
+        quay_database_name: "{{ qe_quay_database_name }}"
+        quay_database_port: "{{ qe_quay_database_port }}|d(5432)"
+        quay_database_host: "{{ qe_quay_database_host }}"
+        redis_host: "{{ qe_quay_hostname }}"
+        quay_server_hostname: "{{ qe_quay_hostname }}.{{subdomain_base}}"
+        quay_clair_enable: "{{ (groups['clair']| length > 0) | ternary('True','False') }}"
+        quay_clair_endpoint: "http://{{qe_quay_clair_hostname}}.{{ guid }}.internal:6060"
+      tags:
+        - install_quay
+
+- name: Install and Configure Clair Database
+  hosts: clair_database
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: Install and Configure PostgreSQL for Clair
+      block:
+        - name: Install PostgreSQL for Clair
+          include_role:
+            name: ../../roles/config-postgresql
+          vars:
+            mode: containerized
+            postgresql_name: "{{ qe_quay_clair_database_service_name|d('postgresql-clair') }}"
+            postgresql_username: "{{ qe_clair_database_username }}"
+            postgresql_password: "{{ qe_clair_database_password }}"
+            postgresql_host_port: "{{ qe_clair_database_port|d('5433') }}"
+            postgresql_admin_user: "{{ qe_clair_database_admin_username }}"
+            postgresql_admin_password: "{{ qe_clair_database_admin_password }}"
+            postgresql_database: "{{ qe_clair_database_name }}"
+          when: groups['clair_database']| length > 0
+
+- name: Install Clair
+  hosts: clair
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tasks:
+    - name: Gather facts from machine
+      setup:
+      with_items:
+        - "{{ groups['quay_enterprise'] }}"
+    - name: Install Clair
+      include_role:
+        name: ../../roles/config-clair
+      vars:
+        database_host: "{{ qe_quay_clair_hostname }}"
+        quay_enterprise_address: "{{ (qe_quay_ssl_enable|bool)| ternary('https','http') }}://{{ qe_quay_hostname }}.{{ subdomain_base }}"
+        clair_ssl_trust_configure: "{{ qe_quay_ssl_enable|d(False)|bool }}"
+        clair_ssl_trust_src_file: "{{ qe_quay_ssl_cert_file }}"
+        postgresql_username: "{{ qe_clair_database_username }}"
+        postgresql_password: "{{ qe_clair_database_password }}"
+        postgresql_port: "{{ qe_clair_database_port | default('5433') }}"
+      when:
+        - quay_clair_enable|d(False)|bool
 
 - name: Software flight-check
   hosts: localhost
