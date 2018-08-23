@@ -1,6 +1,11 @@
 # loops from {{start_tenant}} to {{end_tenant}} to create 3scale tenants.
 # Each user is given tenant admin rights to their corresponding tenant.
 
+# TO-DOs :
+#   1)  Configure smtp configmap to enable outbound emails from AMP
+#   2)  Convert this entire shell script to ansible (rather than just being invoked by Ansible)
+
+
 startTenant={{start_tenant}}
 endTenant={{end_tenant}}
 
