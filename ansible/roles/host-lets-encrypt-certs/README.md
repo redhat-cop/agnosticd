@@ -31,12 +31,15 @@ Role Variables
 *acme_remote_dir*: "/root"
   The directoroy on the remote host in which to install acme.sh
 
-*acme_local_cache_cert_file*: "/tmp/ssl.cert"
-*acme_local_cache_key_file*: "/tmp/ssl.key"
-*acme_local_cache_ca_file*: "/tmp/ca.crt"
+*acme_cache_cert_file*: "/tmp/ssl.cert"
+*acme_cache_key_file*: "/tmp/ssl.key"
+*acme_cache_ca_file*: "/tmp/ssl_ca.cer"
+*acme_archive_file*: /tmp/acme.tar.gz"
   Local (to the host ansible is running on) cache of certificates
   Prevents re-requesting certificates for later runs of the playbook
-  when the domains haven't changed
+  when the domains haven't changed. acme.tar.gz will contain the entire
+  .acme.sh directory so that it can be restored for future runs on new machines
+  with the same domain names.
 
 *acme_production*: False
   Use the Production Let's Encrypt Server. Leave to False for testing runs
