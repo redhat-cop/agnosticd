@@ -1,6 +1,11 @@
 # loops from {{start_tenant}} to {{end_tenant}} to create 3scale tenants.
 # Each user is given tenant admin rights to their corresponding tenant.
 
+# TO-DOs :
+#   1)  Configure smtp configmap to enable outbound emails from AMP
+#   2)  Convert this entire shell script to ansible (rather than just being invoked by Ansible)
+
+
 startTenant={{start_tenant}}
 endTenant={{end_tenant}}
 
@@ -75,6 +80,13 @@ function createAndActivateTenants() {
 
         # 6) Create corresponding route on 3scale AMP system-provider service
         oc create route edge $orgName-provider --service=system-provider --hostname=$orgName-admin.{{ocp_apps_domain}} -n {{ocp_project}}
+        if [ $? -ne 0 ];then
+            echo -en "\n *** ERROR: 6" >> $log_file
+            exit 1;
+        fi
+
+        # 7) Create corresponding route on 3scale AMP system-developer service
+        oc create route edge $orgName-developer --service=system-developer --hostname=$orgName-3scale.{{ocp_apps_domain}} -n {{ocp_project}}
         if [ $? -ne 0 ];then
             echo -en "\n *** ERROR: 6" >> $log_file
             exit 1;
