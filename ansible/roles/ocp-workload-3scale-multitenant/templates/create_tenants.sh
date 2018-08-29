@@ -97,7 +97,11 @@ function createAndActivateTenants() {
             echo -en "\nwill create gateways\n" >> $log_file
 
             # 8) Create OCP project for GWs
-            oc new-project {{ocp_username}}-gw --admin={{ocp_username}}
+            oc adm new-project $tenantAdminId-gw --admin=$tenantAdminId  --description=$tenantAdminId-gw >> $log_file
+            if [ $? -ne 0 ];then
+                    echo -en "\n *** ERROR: 8" >> $log_file
+                    exit 1;
+            fi
 
             THREESCALE_PORTAL_ENDPOINT=https://$tenant_access_token@$orgName-admin.{{ocp_apps_domain}}
 
@@ -110,7 +114,7 @@ function createAndActivateTenants() {
                --param WILDCARD_DOMAIN=$OCP_WILDCARD_DOMAIN \
                --param THREESCALE_DEPLOYMENT_ENV=sandbox \
                --param APICAST_CONFIGURATION_LOADER=lazy \
-               -n {{ocp_username}}-gw > $log_file
+               -n $tenantAdminId-gw >> $log_file
                 if [ $? -ne 0 ];then
                     echo -en "\n *** ERROR: 9" >> $log_file
                     exit 1;
@@ -125,9 +129,9 @@ function createAndActivateTenants() {
                --param WILDCARD_DOMAIN=$OCP_WILDCARD_DOMAIN \
                --param THREESCALE_DEPLOYMENT_ENV=production \
                --param APICAST_CONFIGURATION_LOADER=lazy \
-               -n {{ocp_username}}-gw > $log_file
+               -n $tenantAdminId-gw >> $log_file
                 if [ $? -ne 0 ];then
-                    echo -en "\n *** ERROR: 9" >> $log_file
+                    echo -en "\n *** ERROR: 10" >> $log_file
                     exit 1;
                 fi
         fi
