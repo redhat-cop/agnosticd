@@ -5,7 +5,6 @@
 #   1)  Configure smtp configmap to enable outbound emails from AMP
 #   2)  Convert this entire shell script to ansible (rather than just being invoked by Ansible)
 
-
 startTenant={{start_tenant}}
 endTenant={{end_tenant}}
 
@@ -15,11 +14,12 @@ create_tenant_url=https://{{ocp_project}}-master-admin.{{ocp_apps_domain}}/maste
 output_dir={{tenant_output_dir}}
 user_info_file=$output_dir/user_info_file.txt
 log_file=$output_dir/tenant_provisioning.log
+createGWs={{create_gws_with_each_tenant}}
 
 function createAndActivateTenants() {
 
     echo -en "\n\nCreating tenants $startTenant through $endTenant  \n" > $log_file
-    echo -en "OCP user id\tOCP user passwd\t3scale admin URL\tAPI admin Id\tAPI admin passwd\tAPI admin access token\n\t\t\t\t\t" > $user_info_file
+    echo -en "GUID\tOCP user id\tOCP user passwd\t3scale admin URL\tAPI admin Id\tAPI admin passwd\tAPI admin access token\n\t\t\t\t\t" > $user_info_file
     
 
     for i in $(seq ${startTenant} ${endTenant}) ; do
@@ -50,6 +50,7 @@ function createAndActivateTenants() {
             exit 1;
         fi
 
+        # 2.1) TO-DO :   Is there also a Provider API key that should be retrieved ???
 
         # 3)  determine URL to activate new user
         eval account_id=\"`xmlstarlet sel -t -m '//account' -v 'id' -n $output_dir/$output_file`\"
@@ -60,7 +61,6 @@ function createAndActivateTenants() {
             echo -en "\n *** ERROR: 3" >> $log_file
             exit 1;
         fi
-
 
         # 4)  activate new user
         echo -en "\n\n" >> $output_dir/$output_file
@@ -92,9 +92,53 @@ function createAndActivateTenants() {
             exit 1;
         fi
 
+
+        if [ "x$createGWs" == "xtrue" ];then
+            echo -en "\nwill create gateways\n" >> $log_file
+
+            # 8) Create OCP project for GWs
+            oc adm new-project $tenantAdminId-gw --admin=$tenantAdminId  --description=$tenantAdminId-gw >> $log_file
+            if [ $? -ne 0 ];then
+                    echo -en "\n *** ERROR: 8" >> $log_file
+                    exit 1;
+            fi
+
+            THREESCALE_PORTAL_ENDPOINT=https://$tenant_access_token@$orgName-admin.{{ocp_apps_domain}}
+
+            # 9) Create staging gateway
+            oc new-app \
+               -f $HOME/lab/3scale-apicast.yml \
+               --param THREESCALE_PORTAL_ENDPOINT=$THREESCALE_PORTAL_ENDPOINT \
+               --param APP_NAME=stage-apicast \
+               --param ROUTE_NAME=$orgName-mt-stage-generic \
+               --param WILDCARD_DOMAIN=$OCP_WILDCARD_DOMAIN \
+               --param THREESCALE_DEPLOYMENT_ENV=sandbox \
+               --param APICAST_CONFIGURATION_LOADER=lazy \
+               -n $tenantAdminId-gw >> $log_file
+                if [ $? -ne 0 ];then
+                    echo -en "\n *** ERROR: 9" >> $log_file
+                    exit 1;
+                fi
+
+            # 10) Create production gateway
+            oc new-app \
+               -f $HOME/lab/3scale-apicast.yml \
+               --param THREESCALE_PORTAL_ENDPOINT=$THREESCALE_PORTAL_ENDPOINT \
+               --param APP_NAME=prod-apicast \
+               --param ROUTE_NAME=$orgName-mt-prod-generic \
+               --param WILDCARD_DOMAIN=$OCP_WILDCARD_DOMAIN \
+               --param THREESCALE_DEPLOYMENT_ENV=production \
+               --param APICAST_CONFIGURATION_LOADER=lazy \
+               -n $tenantAdminId-gw >> $log_file
+                if [ $? -ne 0 ];then
+                    echo -en "\n *** ERROR: 10" >> $log_file
+                    exit 1;
+                fi
+        fi
+
         echo -en "\ncreated tenant with orgName= $orgName. \n\tOutput file at: $output_dir/$output_file  \n\ttenant_access_token = $tenant_access_token \n" >> $log_file
 
-        echo -en "\nuser$i\t{{ocp_user_passwd}}\t$orgName-admin.{{ocp_apps_domain}}\t$tenantAdminId\t$tenantAdminPasswd\t$tenant_access_token" >> $user_info_file
+        echo -en "\n$i\tuser$i\t{{ocp_user_passwd}}\t$orgName-admin.{{ocp_apps_domain}}\t$tenantAdminId\t$tenantAdminPasswd\t$tenant_access_token" >> $user_info_file
     done;
 
     echo -en "\n" >> $user_info_file
