@@ -11,16 +11,24 @@ endTenant={{end_tenant}}
 master_access_token={{master_access_token}}
 tenantAdminPasswd={{tenantAdminPasswd}}
 create_tenant_url=https://{{ocp_project}}-master-admin.{{ocp_apps_domain}}/master/api/providers.xml
+delete_tenant_url=https://{{ocp_project}}-master-admin.{{ocp_apps_domain}}/master/api/providers.xml
 output_dir={{tenant_output_dir}}
-user_info_file=$output_dir/user_info_file.txt
-log_file=$output_dir/tenant_provisioning.log
+user_info_file=$output_dir/{{tenant_provisioning_results_file}}
+log_file=$output_dir/{{tenant_provisioning_log_file}}
 createGWs={{create_gws_with_each_tenant}}
+
+create_tenants={{create_tenants}}
+
+function prep() {
+    mkdir -p $output_dir
+}
 
 function createAndActivateTenants() {
 
     echo -en "\n\nCreating tenants $startTenant through $endTenant  \n" > $log_file
     echo -en "GUID\tOCP user id\tOCP user passwd\t3scale admin URL\tAPI admin Id\tAPI admin passwd\tAPI admin access token\n\t\t\t\t\t" > $user_info_file
     
+    curl -o $output_dir/3scale-apicast.yml https://raw.githubusercontent.com/gpe-mw-training/3scale_onpremise_implementation_labs/master/resources/rhte/3scale-apicast.yml
 
     for i in $(seq ${startTenant} ${endTenant}) ; do
         orgName=user$i-3scale-mt;
@@ -105,9 +113,10 @@ function createAndActivateTenants() {
 
             THREESCALE_PORTAL_ENDPOINT=https://$tenant_access_token@$orgName-admin.{{ocp_apps_domain}}
 
+
             # 9) Create staging gateway
             oc new-app \
-               -f $HOME/lab/3scale-apicast.yml \
+               -f $output_dir/3scale-apicast.yml \
                --param THREESCALE_PORTAL_ENDPOINT=$THREESCALE_PORTAL_ENDPOINT \
                --param APP_NAME=stage-apicast \
                --param ROUTE_NAME=$orgName-mt-stage-generic \
@@ -122,7 +131,7 @@ function createAndActivateTenants() {
 
             # 10) Create production gateway
             oc new-app \
-               -f $HOME/lab/3scale-apicast.yml \
+               -f $output_dir/3scale-apicast.yml \
                --param THREESCALE_PORTAL_ENDPOINT=$THREESCALE_PORTAL_ENDPOINT \
                --param APP_NAME=prod-apicast \
                --param ROUTE_NAME=$orgName-mt-prod-generic \
@@ -147,5 +156,35 @@ function createAndActivateTenants() {
 
 }
 
-mkdir -p $output_dir
-createAndActivateTenants
+function deleteTenants() {
+
+    echo -en "\n\nDeleting tenants $startTenant through $endTenant  \n" > $log_file
+
+    for i in $(seq ${startTenant} ${endTenant}) ; do
+        orgName=user$i-3scale-mt;
+        tenantAdminId=user$i;
+
+        #1) delete tenant project
+        oc adm new-project $tenantAdminId-gw >> $log_file
+
+        #2) delete routes
+        oc delete route $orgName-provider -n {{ocp_project}} >> $log_file
+        oc delete route $orgName-developer -n {{ocp_project}} >> $log_file
+
+        #3) delete tenant in 3scale API Manager
+        curl -k  \
+            -X DELETE \
+            -d access_token=$master_access_token \
+            -d org_name=$orgName \
+            $delete_tenant_url >> $log_file
+
+    done
+
+}
+
+prep
+if [ "x$create_tenants" == "xtrue"  ]; then 
+    createAndActivateTenants
+else
+    deleteTenants
+fi
