@@ -13,8 +13,8 @@ tenantAdminPasswd={{tenantAdminPasswd}}
 create_tenant_url=https://{{ocp_project}}-master-admin.{{ocp_apps_domain}}/master/api/providers.xml
 delete_tenant_url=https://{{ocp_project}}-master-admin.{{ocp_apps_domain}}/master/api/providers.xml
 output_dir={{tenant_output_dir}}
-user_info_file=$output_dir/user_info_file.txt
-log_file=$output_dir/tenant_provisioning.log
+user_info_file=$output_dir/{{tenant_provisioning_results_file}}
+log_file=$output_dir/{{tenant_provisioning_log_file}}
 createGWs={{create_gws_with_each_tenant}}
 
 create_tenants={{create_tenants}}
