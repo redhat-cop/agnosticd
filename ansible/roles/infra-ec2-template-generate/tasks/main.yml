@@ -24,9 +24,55 @@
     - gen_cf_template
     - minify_template
 
+
+
+######################### Copy CF Template to S3 if too big
+- name: Stat CloudFormation template
+  stat:
+    path: "{{ANSIBLE_REPO_PATH}}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
+  register: stat_template
+  tags:
+    - aws_infrastructure_deployment
+    - gen_cf_template
+
+- when:
+    stat_template.stat.size > 51200
+  tags:
+    - aws_infrastructure_deployment
+    - gen_cf_template
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  block:
+    - name: Get user name
+      command: aws iam get-user
+      register: rget_user
+      ignore_errors: yes
+
+    # Bucket name must be globally unique. Use the userID to define the bucketname.
+    # Otherwise when we use the code in another account it fails because the bucket
+    # already exists.
+    - set_fact:
+        aws_account_user: "{{rget_user.stdout|from_json|json_query('User.UserId')}}"
+      ignore_errors: yes
+
+    - set_fact:
+        bucket_templates: "cloudformation-templates-{{aws_account_user|default('user')|lower}}"
+
+    - name: Create bucket
+      s3_bucket:
+        name: "{{bucket_templates}}"
+    - name: Copy Template to S3
+      aws_s3:
+        bucket: "{{bucket_templates}}"
+        object: "{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
+        src: "{{ANSIBLE_REPO_PATH}}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
+        mode: put
+
 ######################### Validate CF Template
 
-- name: validate cloudformation template
+- name: validate cloudformation template (local)
   environment:
     AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
     AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
@@ -42,5 +88,24 @@
   tags:
     - aws_infrastructure_deployment
     - validate_cf_template
+  when: stat_template.stat.size <= 51200
+
+- name: validate cloudformation template (S3)
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  command: >-
+    aws cloudformation validate-template
+    --region {{ aws_region_final | d(aws_region) | default(region) | default('us-east-1')}}
+    --template-url https://s3.amazonaws.com/{{bucket_templates}}/{{env_type}}.{{guid}}.{{cloud_provider}}_cloud_template
+  changed_when: false
+  register: cloudformation_validation
+  until: cloudformation_validation is succeeded
+  delay: 20
+  tags:
+    - aws_infrastructure_deployment
+    - validate_cf_template
+  when: stat_template.stat.size > 51200
 
 ######################### Launch CF Template
