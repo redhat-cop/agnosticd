@@ -94,7 +94,7 @@ function createAndActivateTenants() {
         fi
 
         # 7) Create corresponding route on 3scale AMP system-developer service
-        oc create route edge $orgName-developer --service=system-developer --hostname=$orgName-3scale.{{ocp_apps_domain}} -n {{ocp_project}}
+        oc create route edge $orgName-developer --service=system-developer --hostname=$orgName.{{ocp_apps_domain}} -n {{ocp_project}}
         if [ $? -ne 0 ];then
             echo -en "\n *** ERROR: 6" >> $log_file
             exit 1;
