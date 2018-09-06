@@ -1,0 +1,146 @@
+---
+- name: Step 00xxxxx post software
+  hosts: bastions
+  become: yes
+  gather_facts: False
+  vars_files:
+  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  tasks:
+  - debug:
+    msg: "Post-Software Steps starting"
+
+  - name: Set hostname fact
+    set_fact:
+      hostname: "{{ ansible_hostname}}.{{subdomain_base}}"
+  - name: Set hostname
+    hostname:
+      name: "{{ hostname }}"
+  - name: Make hostname permanent
+    command: "echo {{ hostname }} > /etc/hostname"
+  - name: Ensure software is installed
+    yum:
+      name: "{{ item }}"
+      state: latest
+    with_items:
+    - git
+    - vim
+    - ansible
+    - docker
+  - name: Copy docker registries.conf file
+    copy:
+      src: ./files/registries.conf
+      dest: /etc/containers/registries.conf
+      mode: 0644
+      owner: root
+      group: root
+  - name: Restart docker
+    systemd:
+      name: docker
+      state: restarted
+  - name: Install AAD
+    git:
+      repo: https://github.com/sborenst/ansible_agnostic_deployer
+      clone: yes
+      dest: "/root/ansible_agnostic_deployer"
+      version: "development"
+
+  - name: Set OpenShift root config directory
+    set_fact:
+      ocp_root: "/var/lib/openshift"
+
+  - name: Ensure OpenShift config directory exists
+    file:
+      path: "{{ ocp_root }}"
+      state: directory
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Ensure OpenShift config subdirectories exists for OCP 3.9
+    file:
+      path: "{{ item }}"
+      state: directory
+      owner: root
+      group: root
+      mode: 0775
+    with_items:
+    - "{{ ocp_root }}/config"
+    - "{{ ocp_root }}/data"
+    - "{{ ocp_root }}/pv"
+    - "{{ ocp_root }}/volumes"
+    when:
+    - osrelease is version_compare("3.10", "<")
+
+  - name: Create oc_cluster system service
+    template:
+      src: ./files/oc-cluster.service.j2
+      dest: "/usr/lib/systemd/system/oc-cluster.service"
+
+  - name: Enable and start oc-cluster system service
+    systemd:
+      name: oc-cluster
+      enabled: yes
+      state: started
+    register: r_systemd
+    ignore_errors: yes
+
+  # there is a bug that happens sometimes (1/100),
+  # the service is in fail state. Reboot fixes the issue.
+  - name: Restart VM in case of Service Start failure
+    when: r_systemd is failed
+    block:
+      - name: Reboot VM
+        command: shutdown -r now
+        ignore_errors: yes
+
+      - name: wait for linux host to be available (retry)
+        wait_for_connection:
+          delay: 60
+          timeout: 200
+
+      - ping:
+        register: rping
+        retries: 3
+        delay: 10
+        until: rping is succeeded
+
+      - name: Retry to enable and start oc-cluster system service
+        systemd:
+          name: oc-cluster
+          enabled: yes
+          state: started
+
+  - name: Wait for oc-cluster to be up and running
+    wait_for:
+      host: "{{ hostname }}"
+      port: 8443
+      sleep: 2
+  - name: Check if cluster is already set up
+    stat:
+      path: /root/.setupcomplete
+    register: occluster_setup
+  - name: Setup and configure oc cluster
+    when: not occluster_setup.stat.exists
+    block:
+    - name: Login as system:admin
+      shell: "oc login -u system:admin"
+    - name: Deploy workloads into cluster
+      shell: 'ansible-playbook -i localhost, -c local /root/ansible_agnostic_deployer/ansible/configs/ocp-workloads/ocp-workload.yml -e"ANSIBLE_REPO_PATH=/root/ansible_agnostic_deployer/ansible" -e"ocp_username=developer" -e"ocp_workload={{ item }}" -e"guid=a1001" -e"ocp_user_needs_quota=false" -e"ocp_domain=https://{{ hostname }}:8443"  -e"ACTION=create"'
+      chdir: /root/ansible_agnostic_deployer
+      with_items: "{{ student_workloads.split(',')|list }}"
+    - name: Touch setup file
+      command: touch /root/.setupcomplete
+
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+  - post_flight_check
+  tasks:
+  - debug:
+      msg: "Post-Software checks completed successfully"

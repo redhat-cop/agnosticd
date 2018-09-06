@@ -9,6 +9,77 @@
     - step002
     - post_infrastructure
   tasks:
+    - environment:
+        AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+        AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+        AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+      when:
+        - "'clientvms' in groups"
+        - groups['clientvms'] | length > 0
+        - cloudformation_out_final.stack_outputs.AutoScalingGroupClientVM is defined
+      block:
+      - name: test cloudformation_out_final
+        debug:
+          var: cloudformation_out_final
+          verbosity: 2
+
+      - name: Deactivate autoscaling
+        command: >-
+          aws autoscaling suspend-processes --auto-scaling-group-name
+          {{cloudformation_out_final.stack_outputs.AutoScalingGroupClientVM}}
+
+      - name: Write down autoscaling name
+        copy:
+          dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{ env_type }}.{{ guid }}.AutoScalingGroupClientVM"
+          content: "{{cloudformation_out_final.stack_outputs.AutoScalingGroupClientVM}}"
+
+      - name: Allocate and associate an EIP to the clientVMs
+        ec2_eip:
+          device_id: "{{hostvars[item].instance_id}}"
+          release_on_disassociation: yes
+        with_items: "{{groups['clientvms']}}"
+        register: eips
+
+      # reimport roles to update inventory, since publicIP changed 
+      - name: Run infra-ec2-create-inventory Role
+        import_role:
+          name: "{{ ANSIBLE_REPO_PATH }}/roles/infra-ec2-create-inventory"
+      - name: Run Common SSH Config Generator Role
+        import_role:
+          name: "{{ANSIBLE_REPO_PATH}}/roles/infra-common-ssh-config-generate"
+
+      - name: Create DNS record for each clientVM
+        route53:
+          hosted_zone_id: "{{HostedZoneId}}"
+          zone: "{{subdomain_base}}"
+          record: "clientvm{{idx + 1}}.{{subdomain_base}}"
+          state: present
+          type: A
+          ttl: 90
+          value: "{{hostvars[item].public_ip_address}}"
+        with_items: "{{groups['clientvms']}}"
+        loop_control:
+          index_var: idx
+          pause: 2
+
+      - name: Rename instance
+        ec2_tag:
+          state: present
+          resource: "{{hostvars[item].instance_id}}"
+          tags:
+            Name: "clientvm{{idx + 1}}"
+        with_items: "{{groups['clientvms']}}"
+        loop_control:
+          index_var: idx
+
+      - name: Set hostname
+        become: yes
+        hostname:
+          name: "clientvm{{idx + 1}}"
+        delegate_to: "{{item}}"
+        with_items: "{{groups['clientvms']}}"
+        loop_control:
+          index_var: idx
 
     - name: Job Template to launch a Job Template with update on launch inventory set
       uri:
@@ -69,7 +140,7 @@
           ** Route53User secret key: {{ route53user_secret_access_key }}
       when: route53user_access_key is defined
 
-  
+
 - name: Detect and map data disks (support) for Azure
   hosts: support
   become: true

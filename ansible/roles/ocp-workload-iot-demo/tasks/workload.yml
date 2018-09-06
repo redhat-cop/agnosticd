@@ -3,6 +3,46 @@
   set_fact:
     ocp_project: "iot-demo-{{guid}}"
 
+- name: Check for open MQTT port
+  block:
+    - name: Wait for port and loop
+      wait_for:
+        host: ec-broker-mqtt.{{ocp_project}}.{{ocp_apps_domain}}
+        port: "{{ item }}"
+        state: started
+        delay: 0
+        connect_timeout: 2
+        timeout: 3
+      loop: "{{ range(31883, 31992, 1)|list }}"
+      when: (portcheck is undefined) or (portcheck.failed == false)
+      register: portcheck
+  rescue:    
+    - set_fact:
+        mqtt_port: "{{ portcheck.results|selectattr('failed', 'defined')|selectattr('failed')|map(attribute='item')|first}}"
+    - debug: msg="MQTT Port Assignment is {{ mqtt_port }}"
+    # Use to force fail on rescue since we short circuit the failure by handling in rescue
+    #- command: /bin/false
+
+- name: Check for open MQTTS port
+  block:
+    - name: Wait for port and loop
+      wait_for:
+        host: ec-broker-mqtt.{{ocp_project}}.{{ocp_apps_domain}}
+        port: "{{ item }}"
+        state: started
+        delay: 0
+        connect_timeout: 2
+        timeout: 3
+      loop: "{{ range(31993, 32102, 1)|list }}"
+      when: (portcheck2 is undefined) or (portcheck2.failed == false)
+      register: portcheck2      
+  rescue:    
+    - set_fact:
+        mqtts_port: "{{ portcheck2.results|selectattr('failed', 'defined')|selectattr('failed')|map(attribute='item')|first}}"
+    - debug: msg="MQTTS Port Assignment is {{ mqtts_port }}"
+    # Use to force fail on rescue since we short circuit the failure by handling in rescue
+    #- command: /bin/false
+
 - name: Create project for IoT Demo
   shell: |
          oc new-project {{ocp_project}} \
@@ -52,7 +92,7 @@
   shell: "oc new-app -e 'ES_JAVA_OPTS=-Des.cluster.name=kapua-datastore -Des.http.cors.enabled=true -Des.http.cors.allow-origin=* -Xms256m -Xmx256m' elasticsearch:5.4 -n {{ocp_project}}"
 
 - name: Deploy EC Broker
-  shell: "oc new-app -f /tmp/{{guid}}/broker.yml -p IMAGE_VERSION=5.0.0 -p NAMESPACE={{ocp_project}} -p EC_SECRET_DB=ec-db -p DISABLE_SSL=true -n {{ocp_project}}"
+  shell: "oc new-app -f /tmp/{{guid}}/broker.yml -p 'MQTT_NODE_PORT={{mqtt_port}}' -p 'MQTTS_NODE_PORT={{mqtts_port}}' -p IMAGE_VERSION=5.0.0 -p NAMESPACE={{ocp_project}} -p EC_SECRET_DB=ec-db -p DISABLE_SSL=true -n {{ocp_project}}"
 
 - name: Deploy EC Console
   shell: "oc new-app -f /tmp/{{guid}}/console.yml -p 'IMAGE_VERSION=5.0.0' -p 'NAMESPACE={{ocp_project}}' -p 'EC_SECRET_DB=ec-db' -n {{ocp_project}}"
@@ -60,13 +100,38 @@
 - name: Deploy EC API
   shell: "oc new-app -f /tmp/{{guid}}/api.yml -p 'IMAGE_VERSION=5.0.0' -p 'NAMESPACE={{ocp_project}}' -p 'EC_SECRET_DB=ec-db' -n {{ocp_project}}"
 
+- name: Print Dashboard URL
+  debug:
+    msg: "user.info: Dashboard: http://dashboard-{{ocp_project}}.{{ocp_apps_domain}}"
+
 - name: Print Console URL
   debug:
-    msg: "EC Console is running at http://ec-console-{{ocp_project}}.{{ocp_apps_domain}}"
+    msg: "user.info: EC Console: http://ec-console-{{ocp_project}}.{{ocp_apps_domain}}"
 
 - name: Print MQTT Broker URL
   debug:
-    msg: "EC Broker is running at: mqtt://ec-broker-mqtt.{{ocp_project}}.{{ocp_apps_domain}}:1883"
+    msg: "user.info: EC Broker MQTT: mqtt://ec-broker-mqtt.{{ocp_project}}.{{ocp_apps_domain}}:{{mqtt_port}}"
+
+# Not used yet, disable until it is relevant
+#- name: Print MQTTS Broker URL
+#  debug:
+#    msg: "user.info: EC Broker MQTTS: mqtt://ec-broker-mqtts.{{ocp_project}}.{{ocp_apps_domain}}:{{mqtts_port}}"
+
+- name: Deploy Dashboard Proxy and JDG
+  shell: "oc new-app -f /tmp/{{guid}}/dashboard-proxy.yml -p 'BROKER_USERNAME=ec-sys' -p 'BROKER_PASSWORD=ec-password'"
+
+- name: Deploy Dashboard App
+  shell: "oc new-app -f /tmp/{{guid}}/dashboard.yml -p 'BROKER_HOSTNAME=ec-broker-ws-{{ocp_project}}' -p 'BROKER_PASSWORD=ec-password' -p 'BROKER_USERNAME=ec-sys' -p 'DASHBOARD_PROXY_HOSTNAME=dashboard-proxy-{{ocp_project}}'"
+
+- name: Deploy virtual gateway
+  shell: "oc new-app quay.io/redhat-iot/kura-emulator:latest"
+
+- name: Print Kura Virtual Gateway URL
+  debug:
+    msg: "user.info: Kura Virtual Gateway: http://kura-emulator-{{ocp_project}}.{{ocp_apps_domain}}"
+
+- name: Expose virtual gateway web ui
+  shell: "oc expose svc/kura-emulator"
 
 - name: Annotate the completed project as requested by user
   shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
