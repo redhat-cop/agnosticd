@@ -36,3 +36,23 @@ Author Information
 ------------------
 
 An optional section for the role authors to include contact information, or a website (HTML is not allowed).
+
+
+----
+HOST_GUID=dev39
+TARGET_HOST="bastion.$HOST_GUID.openshift.opentlc.com"
+SSH_USERNAME="xxxx"
+SSH_PRIVATE_KEY="xxxx"
+
+WORKLOAD="ocp-client-vm"
+
+# a TARGET_HOST is specified in the command line, without using an inventory file
+ansible-playbook -i ${TARGET_HOST}, ./configs/ocp-workloads/ocp-workload.yml \
+                 -e"ansible_ssh_private_key_file=~/.ssh/${SSH_PRIVATE_KEY}" \
+                 -e"ansible_ssh_user=${SSH_USERNAME}" \
+                    -e"ANSIBLE_REPO_PATH=`pwd`" \
+                    -e"ocp_workload=${WORKLOAD}" \
+                    -e"ACTION=create"
+
+----
+
