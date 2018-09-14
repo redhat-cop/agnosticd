@@ -1,38 +1,236 @@
 ---
-- name: define ocp_project
-  set_fact:
-    ocp_project: "{{lab_name}}-{{guid}}"
 
-- name: "Create project for workload {{ocp_project}}"
-  shell: "oc new-project {{ocp_project}}"
+# ####### Start of Project Definitions  ############## #
+
+- name: define OCP Project for Decision Manager
+  set_fact:
+    rhdm_ocp_project: "rhdm-{{lab_name}}-{{guid}}"
+
+- name: define OCP Project for RH-SSO
+  set_fact:
+    rhsso_ocp_project: "rhsso-{{lab_name}}-{{guid}}"
+
+- name: define OCP Project for Fuse Online
+  set_fact:
+    fuseonline_ocp_project: "fuseonline-{{lab_name}}-{{guid}}"
+
+- name: define OCP Project for NodeJS
+  set_fact:
+    nodejs_ocp_project: "nodejs-{{lab_name}}-{{guid}}"
+
+# ####### End of Project Definitions ############## #
+
+# ####### Start of Installation of Decision Manager  ############## #
+
+- name: check if Decision Manager is deployed
+  shell: "oc get project {{rhdm_ocp_project}}"
+  register: rhdm_project_result
+  ignore_errors: true
+  changed_when: false
+
+- name: "Create project {{rhdm_ocp_project}}"
+  shell: "oc new-project {{rhdm_ocp_project}} --display-name={{rhdm_ocp_project}}" --description="Insurance Quote Rules engine decision manager."
+  when: rhdm_project_result has failed
 
 - name: "Label namespace"
-  command: "oc label namespace {{ocp_project}} AAD='{{guid}}'"
+  command: "oc label namespace {{rhdm_ocp_project}} AAD='{{guid}}'"
+  when: rhdm_project_result has failed
 
-- name: Make sure we go back to default project
+- name: Make sure we go back do default project
   shell: "oc project default"
+  when: rhdm_project_result has failed
 
-
-
-# #######      lab specific tasks   ############## #
-
-# Components:
-#   1) Mongodb (use replica set .... 1 replica is sufficient)
-#   2) AMQ Streaming (Kafka with Zookeeper)
-#   3) Red Hat's Apache Spark  ( https://radanalytics.io/projects )
-#   4) JDG 
-#   5) Decision Manager (KIE-Server, maybe Decision Central ? )
-#   6) other ???
-
-####################################################
-
-
+- name: Add the view role to the default service account
+  shell: "oc policy add-role-to-user view -z default -n {{rhdm_ocp_project}}"
+  when: rhdm_project_result has failed
 
 - name: Annotate the empty project as requested by user
-  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
+  shell: "oc annotate namespace {{rhdm_ocp_project}} openshift.io/requester={{rhdm_ocp_project}} --overwrite"
+  when: rhdm_project_result has failed
 
 - name: Give ocp_username access to ocp_project; user = {{ocp_username}}
-  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"
+  shell: "oc policy add-role-to-user admin {{rhdm_ocp_project}} -n {{rhdm_ocp_project}}"
+  when: rhdm_project_result has failed
+
+- name: Create Template for {{rhdm_ocp_project}}
+  shell: oc create -f {{rhdm_template_yml}} -n openshift
+  when: rhdm_project_result has failed
+
+- name: Create project 'rhdm'
+  shell: oc project rhdm
+  when: rhdm_project_result has failed
+
+- name: Create app 'rhdm'
+  shell: oc new-app  --name=quoting --template rhdm70-kieserver-basic-s2i  --param=APPLICATION_NAME=$APPLICATION_NAME  --param=KIE_ADMIN_USER=$KIE_ADMIN_USER --param=KIE_ADMIN_PWD=$KIE_ADMIN_PWD --param=KIE_SERVER_USER=$KIE_SERVER_USER --param=KIE_SERVER_PWD=$KIE_SERVER_PWD --param=KIE_SERVER_CONTAINER_DEPLOYMENT=$KIE_SERVER_CONTAINER_DEPLOYMENT --param=SOURCE_REPOSITORY_URL=$SOURCE_REPOSITORY_URL --param=SOURCE_REPOSITORY_REF=$SOURCE_REPOSITORY_REF --param=CONTEXT_DIR=$CONTEXT_DIR
+  when: rhdm_project_result has failed
+
+# ####### End of Installation of Decision Manager  ############## #
+
+# ###### Start of Installation of Fuse Online ##########
+
+- name: check if Fuse Online is deployed
+  shell: "oc get project {{fuseonline_ocp_project}}"
+  register: fuseonline_project_result
+  ignore_errors: true
+  changed_when: false
+
+- name: "Create project {{fuseonline_ocp_project}}"
+  shell: "oc new-project {{fuseonline_ocp_project}} --display-name={{fuseonline_ocp_project}}"
+  when: fuseonline_project_result has failed
+
+- name: "Label namespace"
+  command: "oc label namespace {{fuseonline_ocp_project}} AAD='{{guid}}'"
+  when: fuseonline_project_result has failed
+
+- name: Make sure we go back do default project
+  shell: "oc project default"
+  when: fuseonline_project_result has failed
+
+- name: Create serviceaccount-as-oauthclient
+  shell: "oc create -f {{syndesisio_sa_yml}} -n {{fuseonline_ocp_project}}"
+  when: fuseonline_project_result has failed
+
+- name: Create syndesisio template; {{syndesisio_template_yml}}
+  shell: "oc create -f {{syndesisio_template_yml}} -n {{fuseonline_ocp_project}}"
+  when: fuseonline_project_result has failed
+
+- name: delete temp dir if it exists
+  file:
+      path: /tmp/{{fuseonline_ocp_project}}
+      state: absent
+- file:
+      path: /tmp/{{fuseonline_ocp_project}}
+      state: directory
+  when: fuseonline_project_result has failed
+
+- name: Load fuse-ignite-is
+  shell: "oc create -f {{ fuse_ignite_is_yaml }} -n {{fuseonline_ocp_project}}"
+  when: fuseonline_project_result has failed
+
+- name: Create the Fuse Online app
+  shell: |
+      oc new-app {{ignite_template_name}} \
+      -p ROUTE_HOSTNAME=fuse.{{ocp_project}}.{{ocp_apps_domain}} \
+      -p OPENSHIFT_MASTER=https://master.{{ocp_domain}} \
+      -p OPENSHIFT_PROJECT={{fuseonline_cp_project}} \
+      -p POSTGRESQL_MEMORY_LIMIT={{POSTGRESQL_MEMORY_LIMIT}} \
+      -p PROMETHEUS_MEMORY_LIMIT={{PROMETHEUS_MEMORY_LIMIT}} \
+      -p META_MEMORY_LIMIT={{META_MEMORY_LIMIT}} \
+      -p SERVER_MEMORY_LIMIT={{SERVER_MEMORY_LIMIT}} \
+      -p OPENSHIFT_OAUTH_CLIENT_SECRET=$(oc sa get-token syndesis-oauth-client -n {{fuseonline_ocp_project}}) \
+      -p MAX_INTEGRATIONS_PER_USER={{MAX_INTEGRATIONS_PER_USER}} \
+      -p IMAGE_STREAM_NAMESPACE={{fuseonline_ocp_project}} \
+      -n {{fuseonline_ocp_project}}
+  when: fuseonline_project_result has failed
+
+- name: resume syndesis oauthproxy and db
+  shell: oc rollout resume dc/syndesis-oauthproxy dc/syndesis-db -n {{fuseonline_ocp_project}}
+- include_tasks: ./wait_for_deploy.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - syndesis-oauthproxy
+      - syndesis-db
+  when: fuseonline_project_result has failed
+
+- name: Scale up broker-amq
+  shell: |
+      oc scale dc/broker-amq --replicas=1 -n {{fuseonline_ocp_project}}
+- name: resume broker-amq
+  shell: oc rollout resume dc/broker-amq -n {{fuseonline_ocp_project}}
+- include_tasks: ./wait_for_deploy.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - "broker-amq"
+  when: fuseonline_project_result has failed
+
+- name: resume syndesis-meta
+  shell: oc rollout resume dc/syndesis-meta -n {{fuseonline_ocp_project}}
+- include_tasks: ./wait_for_deploy.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - syndesis-meta
+  when: fuseonline_project_result has failed
+
+- name: resume syndesis-server
+  shell: oc rollout resume dc/syndesis-server -n {{fuseonline_ocp_project}}
+- include_tasks: ./wait_for_deploy.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - syndesis-server
+  when: fuseonline_project_result has failed
+
+- name: resume syndesis-ui
+  shell: oc rollout resume dc/syndesis-ui -n {{fuseonline_ocp_project}}
+- include_tasks: ./wait_for_deploy.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - syndesis-ui
+  when: fuseonline_project_result has failed
+
+- name: resume syndesis-prometheus
+  shell: oc rollout resume dc/syndesis-prometheus -n {{fuseonline_ocp_project}}
+- include_tasks: ./wait_for_deploy.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - syndesis-prometheus
+  when: fuseonline_project_result has failed
+
+- name: resume todo
+  shell: oc rollout resume dc/todo -n {{ocp_project}}
+- include_tasks: ./wait_for_deploy.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - todo
+  when: fuseonline_project_result has failed
+
+- name: Add the view role to the default service account
+  shell: "oc policy add-role-to-user view -z default -n {{fuseonline_ocp_project}}"
+  when: fuseonline_project_result has failed
+
+- name: Annotate the empty project as requested by user
+  shell: "oc annotate namespace {{fuseonline_ocp_project}} openshift.io/requester={{fuseonline_ocp_project}} --overwrite"
+  when: fuseonline_project_result has failed
+
+- name: Give ocp_username access to ocp_project; user = {{ocp_username}}
+  shell: "oc policy add-role-to-user admin {{fuseonline_ocp_project}} -n {{fuseonline_ocp_project}}"
+  when: fuseonline_project_result has failed
+
+# ###### End of Installation of Fuse Online ##########
+
+# ###### Start of Installation of NodeJS ##########
+
+- name: Create NodeJS template
+  shell: oc create -f {{nodejs_template_yml}} -n openshift
+
+- name: check if NodeJS is deployed
+  shell: "oc get project {{nodejs_ocp_project}}"
+  register: nodejs_project_result
+  ignore_errors: true
+  changed_when: false
+
+- name: "Create project {{nodejs_ocp_project}}"
+  shell: "oc new-project {{nodejs_ocp_project}} --display-name={{nodejs_ocp_project}}"
+  when: nodejs_project_result has failed
+
+#- name: Create NodeJS project
+#  shell: oc adm new-project $tenantId-nodejs --admin=$tenantId  --description=$tenantId
+
+- name: "Label namespace"
+  command: "oc label namespace {{nodejs_ocp_project}} AAD='{{guid}}'"
+  when: nodejs_project_result has failed
+
+- name: Make sure we go back do default project
+  shell: "oc project default"
+  when: nodejs_project_result has failed
+
+# ###### End of Installation of NodeJS ##########
 
 - name: workload Tasks Complete
   debug:
