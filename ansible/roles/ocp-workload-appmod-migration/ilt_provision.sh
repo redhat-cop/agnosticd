@@ -5,10 +5,11 @@ START_PROJECT_NUM=1
 WORKLOAD="ocp-workload-appmod-migration"
 LOG_FILE=/tmp/$WORKLOAD
 
+HOST_GUID=`oc whoami --show-server | cut -d'.' -f2`
+
 for var in $@
 do
     case "$var" in
-        --HOST_GUID=*) HOST_GUID=`echo $var | cut -f2 -d\=` ;;
         --START_PROJECT_NUM=*) START_PROJECT_NUM=`echo $var | cut -f2 -d\=` ;;
         --END_PROJECT_NUM=*) END_PROJECT_NUM=`echo $var | cut -f2 -d\=` ;;
         -h) HELP=true ;;
@@ -17,12 +18,6 @@ do
 done
 
 function ensurePreReqs() {
-    if [ "x$HOST_GUID" == "x" ]; then
-            echo -en "must pass parameter: --HOST_GUID=<ocp host GUID> . \n\n"
-            help
-            exit 1;
-    fi
-
     LOG_FILE=$LOG_FILE-$HOST_GUID-$START_PROJECT_NUM-$END_PROJECT_NUM.log
     echo -en "starting\n\n" > $LOG_FILE
 
@@ -31,11 +26,10 @@ function ensurePreReqs() {
 
 function help() {
     echo -en "\n\nOPTIONS:";
-    echo -en "\n\t--HOST_GUID=*             REQUIRED: specify GUID of target OCP environment)"
     echo -en "\n\t--START_PROJECT_NUM=*     OPTIONAL: specify # of first OCP project to provision (defult = 1))"
     echo -en "\n\t--END_PROJECT_NUM=*       OPTIONAL: specify # of OCP projects to provision (defualt = 1))"
     echo -en "\n\t-h                        this help manual"
-    echo -en "\n\n\nExample:                ./roles/$WORKLOAD/ilt_provision.sh --HOST_GUID=dev39 --START_PROJECT_NUM=1 --END_PROJECT_NUM=1\n\n"
+    echo -en "\n\n\nExample:                ./roles/$WORKLOAD/ilt_provision.sh --START_PROJECT_NUM=1 --END_PROJECT_NUM=1\n\n"
 }
 
 
@@ -71,7 +65,6 @@ function executeAnsibleViaLocalhost() {
                     -e"ocp_workload=${WORKLOAD}" \
                     -e"guid=${GUID}" \
                     -e"ocp_user_needs_quota=true" \
-                    -e"ocp_domain=$HOST_GUID.openshift.opentlc.com" \
                     -e"ACTION=create" >> $LOG_FILE
     if [ $? -ne 0 ];
     then
