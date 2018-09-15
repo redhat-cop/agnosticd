@@ -165,7 +165,7 @@ function deleteTenants() {
         tenantAdminId=user$i;
 
         #1) delete tenant project
-        oc adm new-project $tenantAdminId-gw >> $log_file
+        oc delete project $tenantAdminId-gw >> $log_file
 
         #2) delete routes
         oc delete route $orgName-provider -n {{ocp_project}} >> $log_file
