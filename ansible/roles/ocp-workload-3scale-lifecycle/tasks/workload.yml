@@ -1,7 +1,5 @@
 ---
 
-#TODO: RHSSO Creation
-
 - name: check if user is cluster admin
   shell: "oc get project default"
   register: default_project_result
@@ -9,7 +7,7 @@
   changed_when: false
 
 - fail:
-    msg: "User does not have cluster-admin rights to install Apicurio and Microcks"
+    msg: "User does not have cluster-admin rights to install software"
   when: default_project_result is failed
 
 # ####### Start of Installation of Apicurio Studio, Microcks and RHSSO  ############## #
@@ -40,9 +38,35 @@
   shell: "oc annotate namespace {{rhdm_ocp_project}} openshift.io/requester={{labinfra_ocp_project}} --overwrite"
   when: labinfra_project_result is failed
 
-- name: Give ocp_username access to ocp_project; user = {{ocp_username}}
+- name: Give ocp_username access to Lab Infra project; user = {{ocp_username}}
   shell: "oc policy add-role-to-user admin {{labinfra_ocp_project}} -n {{labinfra_ocp_project}}"
   when: labinfra_project_result is failed
+
+#RHSSO
+
+- name: Create SSO Service Account
+  shell: "oc create serviceaccount sso-service-account"
+  when: labinfra_project_result is failed
+
+- name: Give service account access to Lab Infra project
+  shell: "oc policy add-role-to-user view system:serviceaccount:lab-infra:sso-service-account"
+  when: labinfra_project_result is failed
+
+- name: Create RHSSO template
+  shell: "oc create -f {{apibiz_url}}/rhsso_template_yml -n {{labinfra_ocp_project}}"
+  when: labinfra_project_result is failed
+
+- name: Create RHSSO app
+  shell: "oc new-app --template=sso72-x509-mysql-persistent --param=SSO_ADMIN_USERNAME=$SSO_ADMIN_USERNAME --param=SSO_ADMIN_PASSWORD=$SSO_ADMIN_PASSWORD  --param=HOSTNAME_HTTP=$SSO_HOSTNAME_HTTP --param=HOSTNAME_HTTPS=$SSO_HOSTNAME_HTTPS -n {{labinfra_ocp_project}}"
+  when: labinfra_project_result is failed
+
+##  RH SSO Realms & OAuthClient
+
+- name: Process RHSSO Realm template
+  shell: "oc process -f {{rhsso_template_yml}}  --param=OPENSHIFT_MASTER=$OPENSHIFT_MASTER --param=KEYCLOAK_ROUTE_HOSTNAME=$KEYCLOAK_ROUTE_HOSTNAME --param=MICROCKS_ROUTE_HOSTNAME=$MICROCKS_ROUTE_HOSTNAME --param=APICURIO_UI_ROUTE_HOSTNAME=https://$APICURIO_UI_ROUTE --param=OPENSHIFT_OAUTH_CLIENT_NAME=$OPENSHIFT_OAUTH_CLIENT_NAME -n {{labinfra_ocp_project}}| oc create -f -"
+  when: labinfra_project_result is failed
+
+#Apicurio
 
 - name: Create Apicurio Studio template
   shell: "oc create -f {{apibiz_url}}/apicurio-template.yml -n {{labinfra_ocp_project}}"
@@ -52,6 +76,8 @@
   shell: "oc new-app --template=apicurio-studio --param=AUTH_ROUTE=http://$SSO_HOSTNAME_HTTP/auth --param=UI_ROUTE=$APICURIO_UI_ROUTE --param=API_ROUTE=$APICURIO_API_ROUTE --param=WS_ROUTE=$APICURIO_WS_ROUTE --param=API_JVM_MAX=2000m --param=API_MEM_LIMIT=3000Mi --param=WS_JVM_MAX=2000m --param=WS_MEM_LIMIT=2500Mi --param=UI_JVM_MAX=1800m --param=UI_MEM_LIMIT=2500Mi -n {{labinfra_ocp_project}}"
   when: labinfra_project_result is failed
 
+#Microcks
+
 - name: Create Microcks template
   shell: "oc create -f {{apibiz_url}}/microcks-persistent-no-keycloak-template.yml -n {{labinfra_ocp_project}}"
   when: labinfra_project_result is failed
@@ -60,4 +86,51 @@
   shell: "oc new-app --template=microcks-persistent-no-keycloak --param=APP_ROUTE_HOSTNAME=$MICROCKS_ROUTE_HOSTNAME --param=KEYCLOAK_ROUTE_HOSTNAME=$KEYCLOAK_ROUTE_HOSTNAME -n {{labinfra_ocp_project}}"
   when: labinfra_project_result is failed
 
-# ####### End of Installation of Apicurio Studio, Microcks and RHSSO  ############## #
+# ####### Start of Installation of Decision Manager  ############## #
+
+- name: check if Decision Manager is deployed
+  shell: "oc get project {{rhdm_ocp_project}}"
+  register: rhdm_project_result
+  ignore_errors: true
+  changed_when: false
+
+- name: "Create project {{rhdm_ocp_project}}"
+  shell: "oc new-project {{rhdm_ocp_project}} --display-name={{rhdm_ocp_project}} --description='Insurance Quote Rules engine decision manager.'"
+  when: rhdm_project_result is failed
+
+- name: "Label namespace"
+  command: "oc label namespace {{rhdm_ocp_project}} AAD='{{guid}}'"
+  when: rhdm_project_result is failed
+
+- name: Make sure we go back do default project
+  shell: "oc project default"
+  when: rhdm_project_result is failed
+
+- name: Add the view role to the default service account
+  shell: "oc policy add-role-to-user view -z default -n {{rhdm_ocp_project}}"
+  when: rhdm_project_result is failed
+
+- name: Annotate the empty project as requested by user
+  shell: "oc annotate namespace {{rhdm_ocp_project}} openshift.io/requester={{rhdm_ocp_project}} --overwrite"
+  when: rhdm_project_result is failed
+
+- name: Give ocp_username access to ocp_project; user = {{ocp_username}}
+  shell: "oc policy add-role-to-user admin {{rhdm_ocp_project}} -n {{rhdm_ocp_project}}"
+  when: rhdm_project_result is failed
+
+- name: Create Template for {{rhdm_ocp_project}}
+  shell: oc create -f {{rhdm_template_yml}} -n {{rhdm_ocp_project}}
+  when: rhdm_project_result is failed
+
+- name: Create project 'rhdm'
+  shell: oc project rhdm
+  when: rhdm_project_result is failed
+
+- name: Create app 'rhdm'
+  shell: oc new-app  --name=quoting --template rhdm70-kieserver-basic-s2i  --param=APPLICATION_NAME=$APPLICATION_NAME  --param=KIE_ADMIN_USER=$KIE_ADMIN_USER --param=KIE_ADMIN_PWD=$KIE_ADMIN_PWD --param=KIE_SERVER_USER=$KIE_SERVER_USER --param=KIE_SERVER_PWD=$KIE_SERVER_PWD --param=KIE_SERVER_CONTAINER_DEPLOYMENT=$KIE_SERVER_CONTAINER_DEPLOYMENT --param=SOURCE_REPOSITORY_URL=$SOURCE_REPOSITORY_URL --param=SOURCE_REPOSITORY_REF=$SOURCE_REPOSITORY_REF --param=CONTEXT_DIR=$CONTEXT_DIR
+  when: rhdm_project_result is failed
+
+# ####### End of Installation of Decision Manager  ############## #
+
+
+# ####### End of Installation of Apicurio Studio, Microcks, RHSSO and RHDM ############## #
