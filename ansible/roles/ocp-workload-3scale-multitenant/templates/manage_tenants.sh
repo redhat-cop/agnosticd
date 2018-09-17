@@ -120,7 +120,7 @@ function createAndActivateTenants() {
                --param THREESCALE_PORTAL_ENDPOINT=$THREESCALE_PORTAL_ENDPOINT \
                --param APP_NAME=stage-apicast \
                --param ROUTE_NAME=$orgName-mt-stage-generic \
-               --param WILDCARD_DOMAIN=$OCP_WILDCARD_DOMAIN \
+               --param WILDCARD_DOMAIN=apps.{{subdomain_base}} \
                --param THREESCALE_DEPLOYMENT_ENV=sandbox \
                --param APICAST_CONFIGURATION_LOADER=lazy \
                -n $tenantAdminId-gw >> $log_file
@@ -135,7 +135,7 @@ function createAndActivateTenants() {
                --param THREESCALE_PORTAL_ENDPOINT=$THREESCALE_PORTAL_ENDPOINT \
                --param APP_NAME=prod-apicast \
                --param ROUTE_NAME=$orgName-mt-prod-generic \
-               --param WILDCARD_DOMAIN=$OCP_WILDCARD_DOMAIN \
+               --param WILDCARD_DOMAIN=apps.{{subdomain_base}} \
                --param THREESCALE_DEPLOYMENT_ENV=production \
                --param APICAST_CONFIGURATION_LOADER=lazy \
                -n $tenantAdminId-gw >> $log_file
