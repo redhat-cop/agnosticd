@@ -66,43 +66,6 @@ function executeLoop() {
     done
 }
 
-# Execute Ansible using the oc client on remote bastion node of an OCP workshop environment
-function executeAnsibleViaBastion() {
-    TARGET_HOST="bastion.$HOST_GUID.openshift.opentlc.com"
-    SSH_USERNAME="jbride-redhat.com"
-    SSH_PRIVATE_KEY="id_ocp"
-
-    # NOTE:  Ensure you have ssh'd (as $SSH_USERNMAE) into the bastion node of your OCP cluster environment at $TARGET_HOST and logged in using opentlc-mgr account:
-    #           oc login https://master.$HOST_GUID.openshift.opentlc.com -u opentlc-mgr
-
-    GUID=$PROJECT_PREFIX$GUID
-
-    echo -en "\n\nexecuteAnsibleViaBastion():  Provisioning project with GUID = $GUID and OCP_USERNAME = $OCP_USERNAME\n" >> $LOG_FILE
-
-    ansible-playbook -i ${TARGET_HOST}, ./configs/ocp-workloads/ocp-workload.yml \
-                 -e"ansible_ssh_private_key_file=~/.ssh/${SSH_PRIVATE_KEY}" \
-                 -e"ansible_ssh_user=${SSH_USERNAME}" \
-                    -e"ANSIBLE_REPO_PATH=`pwd`" \
-                    -e"ocp_username=${OCP_USERNAME}" \
-                    -e"ocp_workload=${WORKLOAD}" \
-                    -e"guid=${GUID}" \
-                    -e"ocp_user_needs_quota=true" \
-                    -e"ocp_domain=$HOST_GUID.openshift.opentlc.com" \
-                    -e"POSTGRESQL_MEMORY_LIMIT=$POSTGRESQL_MEMORY_LIMIT" \
-                    -e"PROMETHEUS_MEMORY_LIMIT=$PROMETHEUS_MEMORY_LIMIT" \
-                    -e"META_MEMORY_LIMIT=$META_MEMORY_LIMIT" \
-                    -e"SERVER_MEMORY_LIMIT=$SERVER_MEMORY_LIMIT" \
-                    -e"ACTION=create" >> $LOG_FILE
-    if [ $? -ne 0 ];
-    then
-        echo -en "\n\n*** Error provisioning where GUID = $GUID\n\n " >> $LOG_FILE
-        echo -en "\n\n*** Error provisioning where GUID = $GUID\n\n "
-        exit 1;
-    fi
-
-}
-
-
 function executeAnsibleViaLocalhost() {
 
     GUID=$PROJECT_PREFIX$GUID
@@ -115,7 +78,6 @@ function executeAnsibleViaLocalhost() {
                     -e"ocp_workload=${WORKLOAD}" \
                     -e"guid=${GUID}" \
                     -e"ocp_user_needs_quota=true" \
-                    -e"ocp_domain=$HOST_GUID.openshift.opentlc.com" \
                     -e"POSTGRESQL_MEMORY_LIMIT=$POSTGRESQL_MEMORY_LIMIT" \
                     -e"PROMETHEUS_MEMORY_LIMIT=$PROMETHEUS_MEMORY_LIMIT" \
                     -e"META_MEMORY_LIMIT=$META_MEMORY_LIMIT" \

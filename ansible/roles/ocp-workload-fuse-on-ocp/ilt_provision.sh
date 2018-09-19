@@ -80,7 +80,6 @@ function executeAnsible() {
                     -e"ocp_workload=${WORKLOAD}" \
                     -e"guid=${GUID}" \
                     -e"ocp_user_needs_quota=true" \
-                    -e"ocp_domain=$HOST_GUID.openshift.opentlc.com" \
                     -e"ACTION=create" >> $LOG_FILE
     if [ $? -ne 0 ];
     then

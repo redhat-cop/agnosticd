@@ -5,7 +5,6 @@ END_PROJECT_NUM=1
 WORKLOAD="ocp-workload-rhte-mw-msa-orchestration"
 LOG_FILE=/tmp/$WORKLOAD
 HOST_GUID=`oc whoami --show-server | cut -d'.' -f 2`
-OCP_DOMAIN=$HOST_GUID.openshift.opentlc.com
 
 PATH_TO_AAD_ROOT=$TRAINING/gpte/ansible_agnostic_deployer/ansible
 
@@ -77,7 +76,6 @@ function executeAnsibleViaLocalhost() {
                     -e"ocp_workload=${WORKLOAD}" \
                     -e"guid=${GUID}" \
                     -e"ocp_user_needs_quota=True" \
-                    -e"ocp_domain=$OCP_DOMAIN" \
                     -e"ACTION=create" >> $LOG_FILE
 
     if [ $? -ne 0 ];
