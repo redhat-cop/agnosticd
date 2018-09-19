@@ -31,7 +31,7 @@ else
   echo "PAM 7 Business Central started."
 fi
 
-CREATE_SPACE_JSON="{ \"name\":\"$SPACE\", \"description\":null, \"projects\":[], \"owner\":\"pamAdmin\", \"defaultGroupId\":\"$DEFAULT_GROUPID\"}"
+CREATE_SPACE_JSON="{ \"name\":\"$SPACE\", \"description\":null, \"projects\":[], \"owner\":\"adminUser\", \"defaultGroupId\":\"$DEFAULT_GROUPID\"}"
 #Create a space
 STATUSCODE=$(curl -H "Accept: application/json" -H "Content-Type: application/json" -f -X POST  -d "$CREATE_SPACE_JSON" -u "adminUser:test1234!" --silent --output /dev/null --write-out "%{http_code}" "$BUSINESS_CENTRAL_REST_URL/spaces")
 
@@ -48,7 +48,7 @@ count=0
 created=false
 until [ $count -gt $STARTUP_WAIT ]
 do
-  curl -u pamAdmin:redhatpam1! --output /dev/null --silent --head --fail "$BUSINESS_CENTRAL_REST_URL/spaces/$SPACE"
+  curl -u adminUser:test1234! --output /dev/null --silent --head --fail "$BUSINESS_CENTRAL_REST_URL/spaces/$SPACE"
   if [ $? -eq 0 ] ; then
     echo "\nSpace created."
     created=true
@@ -64,7 +64,7 @@ sleep 3
 
 # Check if the project is already present. If it is, we simply skip cloning
 #Create a space
-curl -u pamAdmin:redhatpam1! --output /dev/null --silent --fail "$BUSINESS_CENTRAL_REST_URL/spaces/$SPACE/projects/$PROJECT_NAME"
+curl -u adminUser:test1234! --output /dev/null --silent --fail "$BUSINESS_CENTRAL_REST_URL/spaces/$SPACE/projects/$PROJECT_ID"
 if [ $? -ne 0 ] ; then
    echo "Cloning project.."
    # And clone the project into that space
