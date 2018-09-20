@@ -27,6 +27,12 @@ function createAndActivateTenants() {
 
     echo -en "\n\nCreating tenants $startTenant through $endTenant  \n" > $log_file
     echo -en "GUID\tOCP user id\tOCP user passwd\t3scale admin URL\tAPI admin Id\tAPI admin passwd\tAPI admin access token\n\t\t\t\t\t" > $user_info_file
+
+    which xmlstarlet
+    if [ $? -ne 0 ];then
+        echo -en "\n *** ERROR: 0  Need to install xmlstarlet utility" >> $log_file
+        exit 1;
+    fi
     
     curl -o $output_dir/3scale-apicast.yml https://raw.githubusercontent.com/gpe-mw-training/3scale_onpremise_implementation_labs/master/resources/rhte/3scale-apicast.yml
 
