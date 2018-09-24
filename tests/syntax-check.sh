@@ -13,7 +13,7 @@ for i in ${ORIG}/tests/scenarii/*.{yaml,yml}; do
     if [ -e "${ansible_path}/configs/${env_type}/hosts" ]; then
         inventory=(-i "${ansible_path}/configs/${env_type}/hosts")
     else
-        inventory=()
+        inventory=(-i "${ORIG}/tests/tox-inventory.txt")
     fi
 
     echo '############################'

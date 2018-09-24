@@ -169,6 +169,35 @@ class AADYamlLint(Command):
             print('yamllint issues found')
             raise SystemExit(1)
 
+class AADAnsiblePylint(PylintCommand):
+    ''' Class to override the default behavior of PylintCommand '''
+
+    # Reason: This method needs to be an instance method to conform to the
+    # overridden method's signature
+    # Status: permanently disabled
+    # pylint: disable=no-self-use
+    def find_all_modules(self):
+        ''' find all python files to test '''
+        exclude_dirs = ('.tox', 'test', 'tests', 'git')
+        modules = []
+        for match in find_files(os.getcwd(), exclude_dirs, None, r'\.py$'):
+            package = os.path.basename(match).replace('.py', '')
+            modules.append(('ansible_agnostic_deployer', package, match))
+        return modules
+
+    def get_finalized_command(self, cmd):
+        ''' override get_finalized_command to ensure we use our
+        find_all_modules method '''
+        if cmd == 'build_py':
+            return self
+
+    # Reason: This method needs to be an instance method to conform to the
+    # overridden method's signature
+    # Status: permanently disabled
+    # pylint: disable=no-self-use
+    def with_project_on_sys_path(self, func, func_args, func_kwargs):
+        ''' override behavior, since we don't need to build '''
+        return func(*func_args, **func_kwargs)
 
 class AADGenerateValidation(Command):
     ''' Command to run generated module validation'''
@@ -413,7 +442,7 @@ setup(
         'build_ext': UnsupportedCommand,
         'egg_info': UnsupportedCommand,
         'sdist': UnsupportedCommand,
-        'lint': PylintCommand,
+        'lint': AADAnsiblePylint,
         'yamllint': AADYamlLint,
         'generate_validation': AADGenerateValidation,
         'ansible_syntax': AADSyntaxCheck,
