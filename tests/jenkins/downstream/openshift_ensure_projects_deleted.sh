@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -xue -o pipefail
+set -ue -o pipefail
 
 : "${credentials:?"credentials not defined"}"
 
@@ -20,6 +20,7 @@ OC="oc --config $config --insecure-skip-tls-verify=true"
 
 $OC login "${1}" --username="${username}" --password="${password}"
 
+set +e
 n_projects=$($OC get projects --no-headers|grep "${guid}"|wc -l)
 
 if [ "$n_projects" -gt 0 ]; then
@@ -27,6 +28,6 @@ if [ "$n_projects" -gt 0 ]; then
     sleep 120
     n_projects=$($OC get projects --no-headers|grep "${guid}"|wc -l)
 fi
-
+set -e
 # ensure it's 0
 [ "${n_projects}" -lt 1 ]
