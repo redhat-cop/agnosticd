@@ -183,7 +183,7 @@ pipeline {
         stage('Ensure projects are deleted') {
             steps {
                 withCredentials([usernameColonPassword(credentialsId: opentlc_creds, variable: 'credentials')]) {
-                    sh "./tests/jenkins/downstream/shared_developer_env_ensure_deleted.sh '${openshift_location}'"
+                    sh "./tests/jenkins/downstream/openshift_ensure_projects_deleted.sh '${openshift_location}' '${guid}'"
                 }
             }
         }
