@@ -1,5 +1,5 @@
 # loops from {{start_realm}} to {{end_realm}} to create RH-SSO realms.
-# Each user is given realm admin rights to their corresponding RH-SSO realm.
+# Each user is given access to almost all functionality of their corresponding RH-SSO realm.
 
 # TO-DOs :
 #   1)  Convert this entire shell script to ansible (rather than just being invoked by Ansible)
@@ -29,7 +29,7 @@ function createAndActivateRealms() {
     echo -en "\n\nCreating realms $startRealm through $endRealm  \n" > $log_file
 
     for i in $(seq ${startRealm} ${endRealm}) ; do
-        realmId=user$i;
+        realmId=realm$i;
         output_file=$realmId-create.json
         echo -en "\n\n\n\n**** Creating realm: $realmId  \n" >> $log_file
 
@@ -69,7 +69,7 @@ function deleteRealms() {
     echo -en "\n\nDeleting realms $startRealm through $endRealm  \n" > $log_file
 
     for i in $(seq ${startRealm} ${endRealm}) ; do
-        realmId=user$i;
+        realmId=realm$i;
         echo -en "\n\n\n\n**** Delete realm: $realmId  \n" >> $log_file
         output_file=$realmId-delete.json
 
