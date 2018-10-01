@@ -74,9 +74,9 @@ def find_playbooks():
     all_playbooks = set()
     included_playbooks = set()
 
-    exclude_dirs = ('adhoc', 'tasks')
+    exclude_dirs = ('adhoc', 'tasks', 'archive')
     for yaml_file in find_files(
-            os.path.join(os.getcwd(), 'playbooks'),
+            os.path.join(os.getcwd(), 'notactivatedyet'),
             exclude_dirs, None, r'\.ya?ml$'):
         with open(yaml_file, 'r') as contents:
             for task in yaml.safe_load(contents) or {}:
@@ -391,7 +391,9 @@ class AADSyntaxCheck(Command):
                 tox_ansible_inv = os.environ['TOX_ANSIBLE_INV_PATH']
                 subprocess.check_output(
                     ['ansible-playbook', '-i', tox_ansible_inv,
-                     '--syntax-check', playbook, '-e', '@{}_extras'.format(tox_ansible_inv)]
+                     '--syntax-check', playbook, '-e', '@{}_extras'.format(tox_ansible_inv),
+                     '-e', 'ANSIBLE_REPO_PATH={}'.format(os.path.join(os.getcwd(), 'ansible'))]
+            ,
                 )
             except subprocess.CalledProcessError as cpe:
                 print('{}Execution failed: {}{}'.format(
