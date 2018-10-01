@@ -15,8 +15,8 @@ delete_realm_sub_url=https://sso-{{ocp_project}}.{{ocp_apps_domain}}/auth/admin/
 output_dir={{realm_output_dir}}
 log_file=$output_dir/{{realm_provisioning_log_file}}
 
-realmAdminUserId={{SSO_ADMIN_USERNAME}}
-realmAdminPasswd={{SSO_ADMIN_PASSWORD}}
+realmAdminUserId={{SSO_SITE_ADMIN_USERNAME}}
+realmAdminPasswd={{SSO_SITE_ADMIN_PASSWORD}}
 
 create_realms={{create_realms}}
 
