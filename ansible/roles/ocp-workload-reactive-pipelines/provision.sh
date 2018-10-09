@@ -42,7 +42,7 @@ function help() {
 function login() {
 
     echo -en "\nHOST_GUID=$HOST_GUID\n" >> $LOG_FILE
-    oc login https://master.$HOST_GUID.openshift.opentlc.com -u opentlc-mgr -p r3dh4t1!
+    oc login https://master.dev39.openshift.opentlc.com --token=cSQObvqEAo59kXrfzlNuzNJmuqBcKl-S_CTqV0kgB70
 }
 
 
@@ -53,7 +53,8 @@ function executeLoop() {
     for (( c=$START_PROJECT_NUM; c<=$END_PROJECT_NUM; c++ ))
     do
         GUID=$c
-        OCP_USERNAME=user$c
+        # OCP_USERNAME=user$c
+        OCP_USERNAME=vmaddali
         executeAnsible
     done
 }
@@ -73,14 +74,14 @@ function executeAnsible() {
     echo -en "\n\nexecuteAnsible():  Provisioning project with GUID = $GUID and OCP_USERNAME = $OCP_USERNAME\n" >> $LOG_FILE
 
     ansible-playbook -i ${TARGET_HOST}, ./configs/ocp-workloads/ocp-workload.yml \
-                 -e"ansible_ssh_private_key_file=~/.ssh/${SSH_PRIVATE_KEY}" \
-                 -e"ansible_ssh_user=${SSH_USERNAME}" \
-                    -e"ANSIBLE_REPO_PATH=`pwd`" \
-                    -e"ocp_username=${OCP_USERNAME}" \
-                    -e"ocp_workload=${WORKLOAD}" \
-                    -e"guid=${GUID}" \
-                    -e"ocp_user_needs_quota=true" \
-                    -e"ACTION=create" >> $LOG_FILE
+                 -e "ansible_ssh_private_key_file=~/.ssh/${SSH_PRIVATE_KEY}" \
+                 -e "ansible_ssh_user=${SSH_USERNAME}" \
+                    -e "ANSIBLE_REPO_PATH=`pwd`" \
+                    -e "ocp_username=${OCP_USERNAME}" \
+                    -e "ocp_workload=${WORKLOAD}" \
+                    -e "guid=${GUID}" \
+                    -e "ocp_user_needs_quota=true" \
+                    -e "ACTION=create"
     if [ $? -ne 0 ];
     then
         echo -en "\n\n*** Error provisioning where GUID = $GUID\n\n " >> $LOG_FILE
