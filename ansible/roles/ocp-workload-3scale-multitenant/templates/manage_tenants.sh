@@ -118,12 +118,14 @@ function createAndActivateTenants() {
             fi
 
             THREESCALE_PORTAL_ENDPOINT=https://$tenant_access_token@$orgName-admin.{{ocp_apps_domain}}
+            BACKEND_ENDPOINT_OVERRIDE=http://backend-listener.{{ocp_project}}:3000
 
 
             # 9) Create staging gateway
             oc new-app \
                -f $output_dir/3scale-apicast.yml \
                --param THREESCALE_PORTAL_ENDPOINT=$THREESCALE_PORTAL_ENDPOINT \
+               --param BACKEND_ENDPOINT_OVERRIDE=$BACKEND_ENDPOINT_OVERRIDE \
                --param APP_NAME=stage-apicast \
                --param ROUTE_NAME=$orgName-mt-stage-generic \
                --param WILDCARD_DOMAIN=apps.{{subdomain_base}} \
@@ -139,6 +141,7 @@ function createAndActivateTenants() {
             oc new-app \
                -f $output_dir/3scale-apicast.yml \
                --param THREESCALE_PORTAL_ENDPOINT=$THREESCALE_PORTAL_ENDPOINT \
+               --param BACKEND_ENDPOINT_OVERRIDE=$BACKEND_ENDPOINT_OVERRIDE \
                --param APP_NAME=prod-apicast \
                --param ROUTE_NAME=$orgName-mt-prod-generic \
                --param WILDCARD_DOMAIN=apps.{{subdomain_base}} \
