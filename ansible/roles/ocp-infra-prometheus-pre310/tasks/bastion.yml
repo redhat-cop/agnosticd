@@ -1,0 +1,54 @@
+# vim: set ft=ansible:
+- name: Label Infranodes with prometheus-host=true
+  shell: oc label node infranode1.{{ chomped_zone_internal_dns }} prometheus-host=true --overwrite
+# Check if there is already a prometheus project
+- name: Check for prometheus project
+  command: "oc get project prometheus"
+  register: prometheus_project_present
+  ignore_errors: true
+
+# Create the Prometheus Project if it's not there yet
+- name: Create Prometheus Project
+  shell: oc new-project prometheus --display-name="Prometheus Monitoring" && oc project default
+  when: prometheus_project_present | failed
+
+- name: Set Node Selectors to empty on Prometheus Project
+  shell: oc annotate namespace prometheus openshift.io/node-selector=""
+  when: prometheus_project_present | failed
+
+- name: Determine Router Password
+  shell: oc set env dc router -n default --list|grep STATS_PASSWORD|awk -F"=" '{print $2}'
+  when: prometheus_project_present | failed
+  register: router_password
+
+- name: Deploy Prometheus
+  shell: oc new-app -f https://raw.githubusercontent.com/wkulhanek/openshift-prometheus/{{ prometheus_tag }}/prometheus.yaml --param ROUTER_PASSWORD={{ router_password.stdout }} -n prometheus
+  when: prometheus_project_present | failed
+
+- name: Grant privileged SCC to Prometheus Service account
+  shell: oc adm policy add-scc-to-user privileged system:serviceaccount:prometheus:prometheus
+  when: prometheus_project_present | failed
+
+- name: Grant privileged SCC to default service account for Node Exporter
+  shell: oc adm policy add-scc-to-user privileged system:serviceaccount:prometheus:default
+  when: prometheus_project_present | failed
+
+- name: Deploy Node Exporter Daemon Set
+  shell: oc new-app -f https://raw.githubusercontent.com/wkulhanek/openshift-prometheus/{{ prometheus_tag }}/node-exporter/node-exporter.yaml -n prometheus
+  when: prometheus_project_present | failed
+
+- name: Deploy Alertmanager
+  shell: oc new-app -f https://raw.githubusercontent.com/wkulhanek/openshift-prometheus/{{ prometheus_tag }}/alertmanager/alertmanager.yaml --param "WEBHOOK_URL={{ webhook_url }}" -n prometheus
+  when: prometheus_project_present | failed
+
+- name: Move Alertmanager to an Infranode
+  command: "oc patch dc alertmanager --patch '{ \"spec\": { \"template\": { \"spec\": { \"nodeSelector\": { \"env\":\"infra\"}}}}}' -n prometheus"
+  when: prometheus_project_present | failed
+
+- name: Deploy Grafana
+  shell: oc new-app -f https://raw.githubusercontent.com/wkulhanek/docker-openshift-grafana/{{ grafana_tag }}/grafana.yaml -n prometheus
+  when: prometheus_project_present | failed
+
+- name: Move Grafana to an Infranode
+  command: "oc patch dc grafana --patch '{ \"spec\": { \"template\": { \"spec\": { \"nodeSelector\": { \"env\":\"infra\"}}}}}' -n prometheus"
+  when: prometheus_project_present | failed
