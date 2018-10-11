@@ -25,7 +25,7 @@
     - name: Fail if az not available
       fail:
         msg: you need azure-cli installed
-      when: az_result is failed
+      when: az_result|failed
 
     - set_fact:
         stack_tag: "{{env_type | replace('-', '_')}}_{{guid}}"
@@ -62,7 +62,7 @@
       tags:
         - azure_infrastructure_deployment
         - validate_azure_template
-      command: az group create --name "{{az_resource_group}}" --location "{{azure_region}}"
+      command: az group create --name "{{project_tag}}" --location "{{azure_region}}"
 
     - name: Get SSH public key
       set_fact:
@@ -70,8 +70,6 @@
         ssh_key_data: "{{lookup('file', '~/.ssh/{{key_name}}.pub')}}"
       tags:
         - validate_azure_template
-        - must
-        - create_inventory
 
     - name: Build parameter file
       copy:
@@ -88,19 +86,17 @@
         - validate_azure_template
 
     - name: Validate arm template
-      command: az group deployment validate --template-file {{t_dest}} --resource-group {{az_resource_group}} --parameters @{{params_dest}}
+      command: az group deployment validate --template-file {{t_dest}} --resource-group {{project_tag}} --parameters @{{params_dest}}
       changed_when: false
       tags:
         - azure_infrastructure_deployment
         - validate_azure_template
 
     - name: ARM Group deployment create
-      command: az group deployment create --name {{env_type}}.{{guid}} --template-file {{t_dest}} --resource-group {{az_resource_group}} --parameters @{{params_dest}}
+      command: az group deployment create --template-file {{t_dest}} --resource-group {{project_tag}} --parameters @{{params_dest}}
       register: az_deploy
       tags:
         - azure_infrastructure_deployment
-      until: az_deploy|succeeded
-      retries: 5
 
     - debug:
         var: az_deploy
@@ -111,7 +107,7 @@
     - name: Fetch DNS zone NS entries
       azure_rm_dnsrecordset_facts:
         zone_name: "{{guid}}.{{HostedZoneId}}"
-        resource_group: "{{az_resource_group}}"
+        resource_group: "{{project_tag}}"
         record_type: NS
         relative_name: '@'
       register: subzone_ns
@@ -136,8 +132,7 @@
         - azure_infrastructure_deployment
 
     - name: Get list of VMs
-      command: az vm list --resource-group "{{az_resource_group}}" --show-details
-      changed_when: false
+      command: az vm list -g "{{project_tag}}" --show-details
       register: result_list
       tags:
         - create_inventory
@@ -159,8 +154,8 @@
 
     - name: Build inventory
       add_host:
-        name: "{{item.osProfile.computerName|default(item.name)}}"
-        shortname: "{{item.tags.Name|default(item.name)}}"
+        name: "{{item.name}}"
+        shortname: "{{item.name}}"
         groups:
           - "tag_Project_{{stack_tag}}"
           - "tag_{{stack_tag}}_{{item.tags.AnsibleGroup | default('unknowns')}}"
@@ -172,10 +167,10 @@
         ansible_ssh_private_key_file: "{{ssh_key}}"
         key_name: "{{key_name}}"
         state: "{{item.powerState|d('unknown')}}"
-        internaldns: "{{item.tags.internaldns | d(item.osProfile.computerName) |d(item.name)}}"
+        internaldns: "{{item.tags.internaldns | default(item.name)}}"
         instance_id: "{{ item.vmId | d('unknown')}}"
         region: "{{azure_region}}"
-        public_dns_name: "{{item.fqdns|d(item.publicIps)|d('')}}"
+        public_dns_name: "{{item.fqdns}}"
         private_dns_name: "{{item.tags.internaldns|d(item.name)}}"
         private_ip_address: "{{item.privateIps}}"
         public_ip_address: "{{item.publicIps}}"
@@ -183,23 +178,15 @@
         image_id: "{{item.storageProfile.osDisk.image|d('unknown')}}"
         ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
       with_items: "{{vm_list}}"
-      when:
-        - item.tags is defined
-        - item.tags.Project is defined
-        - item.tags.Project == project_tag
-      loop_control:
-        label: "{{ item.name }}"
       tags:
         - create_inventory
         - must
 
     # AnsibleGroup tag can have several comma-separated values. Ex: activedirectories,windows
     - add_host:
-        name: "{{item.osProfile.computerName|default(item.name)}}"
+        name: "{{item.name}}"
         groups: "{{item.tags.AnsibleGroup}}"
       with_items: "{{vm_list}}"
-      loop_control:
-        label: "{{ item.name }}"
       tags:
         - create_inventory
         - must
@@ -210,19 +197,18 @@
         verbosity: 2
 
 - name: Configure local ssh config for bastion proxy use
-  import_playbook: "{{ANSIBLE_REPO_PATH}}/cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
+  include: "{{ANSIBLE_REPO_PATH}}/cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
   when: groups['bastions']
-  tags:
-    - must
-    - create_inventory
 
 - name: wait_for_connection for all non-windows machines and set hostname
   hosts:
     - all:!windows:!network
   vars_files:
-    - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_secret_vars.yml"
+      - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_vars.yml"
+      - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_secret_vars.yml"
   gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
   become: true
   tags:
     - step001
@@ -231,52 +217,13 @@
   tasks:
     - name: wait for linux host to be available
       wait_for_connection:
-        timeout: 300
-      register: rwait
-      ignore_errors: true
 
-    - name: restart instance if wait_for_connection failed
-      become: false
-      environment:
-        AZURE_CLIENT_ID: "{{azure_service_principal}}"
-        AZURE_TENANT: "{{azure_tenant}}"
-        AZURE_SECRET: "{{azure_password}}"
-        AZURE_SUBSCRIPTION_ID: "{{azure_subscription_id}}"
-        # AZURE_CONFIG_DIR: create a specific config dir for this stack to allow concurrent access
-        AZURE_CONFIG_DIR: "/tmp/.azure-{{project_tag}}"
-      command: "az vm restart --resource-group {{az_resource_group}} --name '{{inventory_hostname}}'"
-      delegate_to: localhost
-      when: rwait is failed
+    - name: Set hostname based on tag_internaldns
+      hostname:
+        name: "{{hostvars[inventory_hostname].internaldns}}"
+      when: hostvars[inventory_hostname].internaldns is defined
 
-    - name: wait for linux host to be available (retry)
-      wait_for_connection:
-      when: rwait is failed
-
-    - ping:
-      register: rping
-      retries: 3
-      delay: 10
-      until: rping is succeeded
-
-
-    # < get internal domain name for later use
-    - name: Get internal fqdn
-      command: domainname -d
-      register: internalfqdn_r
-      changed_when: false
-
-    - name: NetworkManager get active interface uuid
-      command: nmcli --get-values UUID connection show --active
-      register: result_active_uuid
-      changed_when: false
-
-    - name: set fact internal_azure_dns_suffix for later use
-      set_fact:
-        internal_azure_dns_suffix: "{{internalfqdn_r.stdout}}"
-        nm_active_connection: "{{result_active_uuid.stdout}}"
-
-    - name: Stat /etc/cloud/cloud.cf file
-      stat:
+    - stat:
         path: /etc/cloud/cloud.cfg
       register: cloud_cfg_file
 
@@ -288,13 +235,6 @@
         backup: yes
       when: cloud_cfg_file.stat.exists
       tags: disable_cloud_cfg_hostname
-
-    - name: Populate /etc/hosts
-      lineinfile:
-        dest: /etc/hosts
-        regexp: ' {{hostvars[item].internaldns}}$'
-        line: '{{hostvars[item].private_ip_address}} {{hostvars[item].internaldns}}'
-      with_items: "{{ groups['all'] }}"
 
 - name: Set facts for Windows hosts if any exist and wait_for_connection
   gather_facts: false
@@ -318,27 +258,3 @@
     - name: wait for windows host to be available
       wait_for_connection:
         timeout: 900
-        connect_timeout: 60
-        delay: 120
-      register: rwait
-      ignore_errors: true
-
-    - name: restart instance if wait_for_connection failed
-      become: false
-      environment:
-        AZURE_CLIENT_ID: "{{azure_service_principal}}"
-        AZURE_TENANT: "{{azure_tenant}}"
-        AZURE_SECRET: "{{azure_password}}"
-        AZURE_SUBSCRIPTION_ID: "{{azure_subscription_id}}"
-        # AZURE_CONFIG_DIR: create a specific config dir for this stack to allow concurrent access
-        AZURE_CONFIG_DIR: "/tmp/.azure-{{project_tag}}"
-      command: "az vm restart --resource-group {{az_resource_group}} --name '{{inventory_hostname}}'"
-      delegate_to: localhost
-      when: rwait is failed
-
-    - name: wait for windows host to be available (retry)
-      wait_for_connection:
-        timeout: 900
-        connect_timeout: 60
-        delay: 120
-      when: rwait is failed
