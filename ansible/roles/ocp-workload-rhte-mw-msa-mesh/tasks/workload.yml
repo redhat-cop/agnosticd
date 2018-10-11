@@ -1,0 +1,144 @@
+---
+- name: define user ocp_1_project
+  set_fact:
+    ocp_1_project: "{{ocp_username}}-{{lab_1_name}}"
+
+- name: define user ocp_2_project
+  set_fact:
+    ocp_2_project: "{{ocp_username}}-{{lab_2_name}}"
+
+
+- name: "Create project for workload {{ocp_1_project}}"
+  shell: "oc new-project {{ocp_1_project}} --display-name={{ocp_1_project}}"
+
+- name: "Create project for workload {{ocp_2_project}}"
+  shell: "oc new-project {{ocp_2_project}} --display-name={{ocp_2_project}}"
+
+- name: "Label namespace"
+  command: "oc label namespace {{ocp_1_project}} AAD='{{guid}}'"
+- command: "oc label namespace {{ocp_2_project}} AAD='{{guid}}'"
+
+- name: Make sure we go back to default project
+  shell: "oc project default"
+
+
+
+# #######       Istio Privildges for user       ######### #
+
+- name: Add edit access for user to istio-system namespace (for istioctl to be able to view istio config map )
+  shell: "oc adm policy add-role-to-user edit {{ocp_username}} -n istio-system"
+
+- name: Provide anyuid scc to default sa for namespaces 
+  shell: "oc adm policy add-scc-to-user privileged -z default -n {{ocp_1_project}} "
+- shell: "oc adm policy add-scc-to-user privileged -z default -n {{ocp_2_project}} "
+###########################################################
+
+
+
+
+# #######      Coolstore Catalog Service   ############## #
+- name: Add the view role to the default service account 
+  shell: "oc policy add-role-to-user view -z default -n {{ocp_1_project}}"
+
+
+- stat: path=/tmp/app-config.yaml
+  register: app_config_file
+- name: Copy catalog service configmap to known path
+  template:
+    src: templates/app-config.yaml
+    dest: /tmp/app-config.yaml
+  when: app_config_file.stat.exists == False
+
+- name: Load catalog service configmap
+  shell: "oc create configmap app-config --from-file=/tmp/app-config.yaml -n {{ocp_1_project}}" 
+
+
+- stat: path=/tmp/coolstore-catalog-mongodb-persistent.yaml
+  register: coolstore_file
+- name: Copy catalog service (with db) template to known path
+  template:
+    src: templates/coolstore-catalog-mongodb-persistent.yaml 
+    dest: /tmp/coolstore-catalog-mongodb-persistent.yaml
+  when: coolstore_file.stat.exists == False
+
+- name: Create catalog service
+  shell: |
+      oc new-app \
+      -f /tmp/coolstore-catalog-mongodb-persistent.yaml \
+      -p CATALOG_DB_USERNAME=mongo \
+      -p CATALOG_DB_PASSWORD=mongo \
+      -n {{ocp_1_project}} 
+
+- name: set fact
+  set_fact:
+    ocp_project: "{{ocp_1_project}}"
+
+- include_tasks: ./wait_for_dc.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - catalog-mongodb
+
+
+- name: resume catalog-service
+  shell: oc rollout resume deploy/catalog-service -n {{ocp_1_project}}
+- include_tasks: ./wait_for_deploy.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - catalog-service
+
+####################################################
+
+
+# ####      Coolstore Gateway Service       ###### #
+- name: Add the view role to the default service account 
+  shell: "oc policy add-role-to-user view -z default -n {{ocp_2_project}}"
+
+- stat: path=/tmp/coolstore-gateway.yaml
+  register: coolstore_gw_file
+- name: Copy catalog service (with db) template to known path
+  template:
+    src: templates/coolstore-gateway.yaml 
+    dest: /tmp/coolstore-gateway.yaml
+  when: coolstore_gw_file.stat.exists == False
+
+
+- name: Create gateway service
+  shell: |
+      oc new-app \
+      -f /tmp/coolstore-gateway.yaml \
+      -n {{ocp_2_project}} 
+
+
+
+
+# Don't resume:   student will manually do this as per lab instructions
+#- name: resume gateway service
+#  shell: "oc rollout resume deploy/gateway-service -n {{ocp_2_project}}"
+
+#- set_fact:
+#    ocp_project: "{{ocp_2_project}}"
+#- include_tasks: ./wait_for_deploy.yml
+#  static: no
+#  vars:
+#    pod_to_wait:
+#      - gateway-service
+
+###########################################################
+
+
+- name: Provide user with ability to impersonate system admin so as to be able to run istio commands
+  shell: "oc adm policy add-cluster-role-to-user sudoer {{ocp_username}} --as=system:admin"
+
+- name: Annotate the empty project as requested by user
+  shell: "oc annotate namespace {{ocp_1_project}} openshift.io/requester={{ocp_username}} --overwrite"
+- shell: "oc annotate namespace {{ocp_2_project}} openshift.io/requester={{ocp_username}} --overwrite"
+
+- name: Give ocp_username access to ocp_project; user = {{ocp_username}}
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_1_project}}"
+- shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_2_project}}"
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete

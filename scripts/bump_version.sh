@@ -4,7 +4,7 @@ usage() {
     echo "$0 [CONFIG] [STAGE]"
     echo
     echo "CONFIG: ALL | ocp-workshop | ocp-demo-lab | ans-tower-lab | ..."
-    echo "STAGE: test | prod"
+    echo "STAGE: test | prod | rhte"
 }
 
 if [ -z "${1}" ] || [ -z "${2}" ]; then

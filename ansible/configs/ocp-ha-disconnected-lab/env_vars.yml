@@ -4,7 +4,6 @@
 ## should just toss in group_vars/all.
 ### Also, we should probably just create a variable reference in the README.md
 ### For now, just tagging comments in line with configuration file.
-
 ###### VARIABLES YOU SHOULD CONFIGURE FOR YOUR DEPLOYEMNT
 ###### OR PASS as "-e" args to ansible-playbook command
 # #
@@ -18,7 +17,8 @@
 #
 # # This doesn't work
 # all: "tag_Project_opentlc_shared_{{guid}}"
-#
+
+reverse_proxy: true
 # # but maybe this is silly enough to work
 # #all: "tag_Project_opentlc_shared_{{guid}}:&tag_Project_opentlc_shared_{{guid}}"
 #rhn_pool_id_string: OpenShift Container Platform
@@ -38,7 +38,7 @@ config_nfs_uservols: "true"
 user_vols: 200
 user_vols_size: 4Gi
 master_api_port: 443
-osrelease: 3.7.9
+osrelease: 3.9.30
 openshift_master_overwrite_named_certificates: true
 deploy_openshift: true
 deploy_openshift_post: true
@@ -70,7 +70,7 @@ software_to_deploy: "openshift"
 #### OCP IMPLEMENATATION LAB
 ################################################################################
 
-repo_version: '3.7'
+repo_version: '3.9'
 cloudapps_dns: '*.apps.{{subdomain_base}}.'
 master_public_dns: "loadbalancer.{{subdomain_base}}."
 
@@ -139,19 +139,22 @@ tower_run: false
 #### Environment Sizing
 
 #bastion_instance_type: "t2.micro"
-bastion_instance_type: "t2.small"
+bastion_instance_type: "t2.large"
+
+isolated_instance_type: "t2.large"
+isolated_instance_count: 1
 
 support_instance_type: "t2.medium"
 support_instance_count: 1
 
 node_instance_type: "t2.large"
-node_instance_count: 2
+node_instance_count: 3
 
 infranode_instance_type: "t2.large"
-infranode_instance_count: 1
+infranode_instance_count: 2
 
 master_instance_type: "t2.large"
-master_instance_count: 1
+master_instance_count: 3
 
 loadbalancer_instance_count: 1
 loadbalancer_instance_type: "t2.small"
@@ -169,13 +172,13 @@ ansible_ssh_private_key_file: ~/.ssh/{{key_name}}.pem
 
 project_tag: "{{ env_type }}-{{ guid }}"
 
-docker_version: "1.12.6"
+docker_version: "{{ '1.12.6' if repo_version | version_compare('3.9', '<')  else '1.13.1' }}"
 docker_device: /dev/xvdb
 
-create_internal_dns_entries: true
+
 zone_internal_dns: "{{guid}}.internal."
 chomped_zone_internal_dns: "{{guid}}.internal"
-zone_public_dns: "{{subdomain_base}}."
+
 
 bastion_public_dns: "bastion.{{subdomain_base}}."
 bastion_public_dns_chomped: "bastion.{{subdomain_base}}"
@@ -214,57 +217,509 @@ rootfs_size_node: 50
 rootfs_size_infranode: 50
 rootfs_size_master: 50
 rootfs_size_bastion: 20
+rootfs_size_isolated: 20
 rootfs_size_support: 20
 rootfs_size_loadbalancer: 20
 
+
 security_groups:
-  - name: MasterSG
+  - name: LBSG
     rules:
-      - name: DNS TCP
-        description: "TCP Ports for DNS"
-        from_port: 53
-        to_port: 53
+      - name: LBHTTP
+        description: "HTTP for public"
+        from_port: 80
+        to_port: 80
         protocol: tcp
         cidr: "0.0.0.0/0"
-      - name: DNS UDP
-        description: "UDP Ports for DNS"
-        protocol: udp
-        from_port: 53
-        to_port: 53
-        cidr: "0.0.0.0/0"
-      - name:  SDN
-        description: "SDN Communication"
-        from_port: 4789
-        to_port: 4789
-        protocol: udp
-        cidr: "0.0.0.0/0"
-      - name: HTTPS Access
-        description: "HTTPS Access"
-        protocol: tcp
+        rule_type: Ingress
+      - name: LBHTTPS
+        description: "HTTPS for public"
         from_port: 443
         to_port: 443
-        cidr: "0.0.0.0/0"
-  - name: NodeSG
-    rules:
-      - name: Kubelet
-        description: "Kubelet for OC"
-        from_port: 10250
-        to_port: 10250
         protocol: tcp
         cidr: "0.0.0.0/0"
-      - name:  SDN
-        description: "SDN Communication"
-        from_port: 4789
-        to_port: 4789
+        rule_type: Ingress
+      - name: LBHTTPSALT
+        description: "Alt HTTPS for public"
+        from_port: 8443
+        to_port: 8443
+        protocol: tcp
         cidr: "0.0.0.0/0"
+        rule_type: Ingress
+      - name: LBSSH
+        description: "SSH from Bastion"
+        from_port: 22
+        to_port: 22
+        protocol: tcp
+        from_group: BastionSG
+        rule_type: Ingress
+      - name: LBEGRESStoAll
+        description: "Egress to Private"
+        from_port: 0
+        to_port: 65535
+        protocol: tcp
+        cidr: "192.168.2.0/24"
+        rule_type: Egress
+      - name: LBEGRESSIsolatedHTTP
+        description: "HTTP Egress Isolated"
+        from_port: 80
+        to_port: 80
+        protocol: tcp
+        from_group: ISOLATEDSG
+        rule_type: Egress
+  - name: BastionSG
+    rules:
+      - name: MoshPublic
+        description: "Public Mosh Access for bastions"
+        from_port: 60000
+        to_port: 60001
         protocol: udp
+        cidr: "0.0.0.0/0"
+        rule_type: Ingress
+      - name: SSHPublic
+        description: "Public Access for bastions"
+        from_port: 22
+        to_port: 22
+        protocol: tcp
+        cidr: "0.0.0.0/0"
+        rule_type: Ingress
+  - name: MasterSG
+    rules:
+      - name: HTTPS
+        description: "HTTPS from LB"
+        from_port: 443
+        to_port: 443
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Ingress
+      - name: HTTPSALT
+        description: "HTTPS 8443 LB"
+        from_port: 8443
+        to_port: 8443
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Ingress
+      - name: MasterSSH
+        description: "SSH from Bastion"
+        from_port: 22
+        to_port: 22
+        protocol: tcp
+        from_group: BastionSG
+        rule_type: Ingress
+      - name: MasterIngressPrivate
+        description: "Ingress Private"
+        from_port: 0
+        to_port: 65535
+        protocol: -1
+        cidr: "192.168.2.0/24"
+        rule_type: Ingress
+      - name: MasterEGRESSPrivate
+        description: "Egress Private"
+        from_port: 0
+        to_port: 65535
+        protocol: -1
+        cidr: "192.168.2.0/24"
+        rule_type: Egress
+      - name: MasterEGRESSIsolatedHTTPproxy
+        description: "HTTP Proxy Egress Isolated"
+        from_port: 8080
+        to_port: 8080
+        protocol: tcp
+        from_group: ISOLATEDSG
+        rule_type: Egress
+      - name: MasterEGRESSIsolatedHTTP
+        description: "HTTP Egress Isolated"
+        from_port: 80
+        to_port: 80
+        protocol: tcp
+        from_group: ISOLATEDSG
+        rule_type: Egress
+      - name: MasterEGRESSIsolatedREGISTRY
+        description: "Registry Egress Isolated"
+        from_port: 5000
+        to_port: 5000
+        protocol: tcp
+        from_group: ISOLATEDSG
+        rule_type: Egress
+      - name: MasterEGRESSLBHTTP
+        description: "HTTP Egress To LB"
+        from_port: 80
+        to_port: 80
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Egress
+      - name: MasterEGRESSLBHTTPS
+        description: "HTTPSEgress To LB"
+        from_port: 443
+        to_port: 443
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Egress
+  - name: InfraNodeSG
+    rules:
+      - name: InfraEGRESSIsolatedHTTP
+        description: "HTTP Egress Isolated"
+        from_port: 80
+        to_port: 80
+        protocol: tcp
+        from_group: ISOLATEDSG
+        rule_type: Egress
+      - name: InfraEGRESSIsolatedHTTPproxy
+        description: "HTTP Proxy Egress Isolated"
+        from_port: 8080
+        to_port: 8080
+        protocol: tcp
+        from_group: ISOLATEDSG
+        rule_type: Egress
+      - name: InfraEGRESSIsolatedREGISTRY
+        description: "HTTP Egress Isolated"
+        from_port: 5000
+        to_port: 5000
+        protocol: tcp
+        from_group: ISOLATEDSG
+        rule_type: Egress
+      - name: INFRASSH
+        description: "SSH from Bastion"
+        from_port: 22
+        to_port: 22
+        protocol: tcp
+        from_group: BastionSG
+        rule_type: Ingress
+      - name: InfraHTTPS
+        description: "HTTPS from LB"
+        from_port: 443
+        to_port: 443
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Ingress
+      - name: InfraHTTP
+        description: "HTTP from LB"
+        from_port: 80
+        to_port: 80
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Ingress
+      - name: INFRAIngressPrivate
+        description: "Ingress Private"
+        from_port: 0
+        to_port: 65535
+        protocol: -1
+        cidr: "192.168.2.0/24"
+        rule_type: Ingress
+      - name: INFRAEGRESSPrivate
+        description: "Egress Private"
+        from_port: 0
+        to_port: 65535
+        protocol: -1
+        cidr: "192.168.2.0/24"
+        rule_type: Egress
+      - name: InfraEGRESSLBHTTP
+        description: "HTTP Egress To LB"
+        from_port: 80
+        to_port: 80
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Egress
+      - name: InfraEGRESSLBHTTPSalt
+        description: "HTTPS8Egress To LB"
+        from_port: 8443
+        to_port: 8443
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Egress
+      - name: InfraEGRESSLBHTTPS
+        description: "HTTPSEgress To LB"
+        from_port: 443
+        to_port: 443
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Egress
+  - name: ISOLATEDSG
+    rules:
+      # - name: ISOLATEDSSH
+      #   description: "SSH from Bastion"
+      #   from_port: 22
+      #   to_port: 22
+      #   protocol: tcp
+      #   from_group: BastionSG
+      #   rule_type: Ingress
+      - name: ISOBASIngress
+        description: "Ingress Bastion"
+        from_port: 0
+        to_port: 65535
+        protocol: tcp
+        from_group: BastionSG
+        rule_type: Ingress
+      - name: ISOINFRAIngress
+        description: "Ingress from Infra"
+        from_port: 0
+        to_port: 65535
+        protocol: tcp
+        from_group: InfraNodeSG
+        rule_type: Ingress
+      - name: ISONODIngress
+        description: "Ingress from Node"
+        from_port: 0
+        to_port: 65535
+        protocol: tcp
+        from_group: NodeSG
+        rule_type: Ingress
+      - name: ISOLBIngress
+        description: "Ingress from loadbalancer"
+        from_port: 0
+        to_port: 65535
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Ingress
+      - name: ISOMasterIngress
+        description: "Ingress from master"
+        from_port: 0
+        to_port: 65535
+        protocol: tcp
+        from_group: MasterSG
+        rule_type: Ingress
+      - name: ISOSupportIngress
+        description: "Ingress from support"
+        from_port: 0
+        to_port: 65535
+        protocol: tcp
+        from_group: SUPPORTSG
+        rule_type: Ingress
+      - name: ISOBASIngressUDP
+        description: "Ingress UDP Bastion"
+        from_port: 0
+        to_port: 65535
+        protocol: udp
+        from_group: BastionSG
+        rule_type: Ingress
+      - name: ISOINFRAIngressUDP
+        description: "Ingress UDP from Infra"
+        from_port: 0
+        to_port: 65535
+        protocol: udp
+        from_group: InfraNodeSG
+        rule_type: Ingress
+      - name: ISONODIngressUDP
+        description: "Ingress UDP from Node"
+        from_port: 0
+        to_port: 65535
+        protocol: udp
+        from_group: NodeSG
+        rule_type: Ingress
+      - name: ISOLBIngressUDP
+        description: "Ingress UDP from loadbalancer"
+        from_port: 0
+        to_port: 65535
+        protocol: udp
+        from_group: LBSG
+        rule_type: Ingress
+      - name: ISOMasterIngressUDP
+        description: "Ingress UDP from master"
+        from_port: 0
+        to_port: 65535
+        protocol: udp
+        from_group: MasterSG
+        rule_type: Ingress
+      - name: ISOSupportIngressUDP
+        description: "Ingress UDP from support"
+        from_port: 0
+        to_port: 65535
+        protocol: udp
+        from_group: SUPPORTSG
+        rule_type: Ingress
+  - name: SUPPORTSG
+    rules:
+      - name: SUPPORTSSH
+        description: "SSH from Bastion"
+        from_port: 22
+        to_port: 22
+        protocol: tcp
+        from_group: BastionSG
+        rule_type: Ingress
+      - name: SUPPPORTIngress
+        description: "Support Private Ingress"
+        from_port: 0
+        to_port: 65535
+        protocol: -1
+        cidr: "192.168.2.0/24"
+        rule_type: Ingress
+      - name: SUPPPORTEGRESS
+        description: "Support Private Egress"
+        from_port: 0
+        to_port: 65535
+        protocol: -1
+        cidr: "192.168.2.0/24"
+        rule_type: Egress
+      - name: SupportEGRESSIsolatedHTTP
+        description: "HTTP Egress Isolated"
+        from_port: 80
+        to_port: 80
+        protocol: tcp
+        from_group: ISOLATEDSG
+        rule_type: Egress
+  - name: NodeSG
+    rules:
+      - name: NodeEGRESSIsolatedHTTP
+        description: "HTTP Egress Isolated"
+        from_port: 80
+        to_port: 80
+        protocol: tcp
+        from_group: ISOLATEDSG
+        rule_type: Egress
+      - name: NodeEGRESSIsolatedHTTPproxy
+        description: "HTTP Proxy Egress Isolated"
+        from_port: 8080
+        to_port: 8080
+        protocol: tcp
+        from_group: ISOLATEDSG
+        rule_type: Egress
+      - name: NodeEGRESSIsolatedREGISTRY
+        description: "HTTP Egress Isolated"
+        from_port: 5000
+        to_port: 5000
+        protocol: tcp
+        from_group: ISOLATEDSG
+        rule_type: Egress
+      - name: NODESSH
+        description: "SSH from Bastion"
+        from_port: 22
+        to_port: 22
+        protocol: tcp
+        from_group: BastionSG
+        rule_type: Ingress
+      - name: NodeIngressPrivate
+        description: "Ingress Private"
+        from_port: 0
+        to_port: 65535
+        protocol: -1
+        cidr: "192.168.2.0/24"
+        rule_type: Ingress
+      - name: NodeEGRESSPrivate
+        description: "Egress Private"
+        from_port: 0
+        to_port: 65535
+        protocol: -1
+        cidr: "192.168.2.0/24"
+        rule_type: Egress
+      - name: NodeEGRESSLBHTTP
+        description: "HTTP Egress To LB"
+        from_port: 80
+        to_port: 80
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Egress
+      - name: NodeEGRESSLBHTTPS
+        description: "HTTPSEgress To LB"
+        from_port: 443
+        to_port: 443
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Egress
+      - name: NodeEGRESSLBHTTPSAtl
+        description: "HTTPSAltEgress To LB"
+        from_port: 8443
+        to_port: 8443
+        protocol: tcp
+        from_group: LBSG
+        rule_type: Egress
+
+
+
+
+
+
+
+# security_groups:
+#   - name: PublicSG
+#     rules:
+#       - name: HTTP
+#         description: "Public Access for Infranode"
+#         from_port: 80
+#         to_port: 80
+#         protocol: tcp
+#         cidr: "0.0.0.0/0"
+#         rule_type: Ingress
+#       - name: HTTPS
+#         description: "Public Access for Infranode"
+#         from_port: 443
+#         to_port: 443
+#         protocol: tcp
+#         cidr: "0.0.0.0/0"
+#         rule_type: Ingress
+#       - name: SSHPublic
+#         description: "Public Access for Infranode"
+#         from_port: 22
+#         to_port: 22
+#         protocol: tcp
+#         cidr: "0.0.0.0/0"
+#         rule_type: Ingress
+#   - name: MasterSG
+#     rules:
+#       - name: DNSTCP
+#         description: "TCP Ports for DNS"
+#         from_port: 53
+#         to_port: 53
+#         protocol: tcp
+#         from_group: NodeSG
+#         rule_type: Ingress
+#       - name: DNSUDP
+#         description: "UDP Ports for DNS"
+#         protocol: udp
+#         from_port: 53
+#         to_port: 53
+#         from_group: NodeSG
+#         rule_type: Ingress
+#       - name:  SDN
+#         description: "SDN Communication"
+#         from_port: 4789
+#         to_port: 4789
+#         protocol: udp
+#         from_group: NodeSG
+#         rule_type: Ingress
+#       - name: HTTPSAccess
+#         description: "HTTPS Access"
+#         protocol: tcp
+#         from_port: 443
+#         to_port: 443
+#         cidr: "0.0.0.0/0"
+#         rule_type: Ingress
+#       - name: SSHPublic
+#         description: "Public Access for Infranode"
+#         from_port: 22
+#         to_port: 22
+#         protocol: tcp
+#         cidr: "0.0.0.0/0"
+#         rule_type: Ingress
+#   - name: NodeSG
+#     rules:
+#       - name: Kubelet
+#         description: "Kubelet for OC"
+#         from_port: 10250
+#         to_port: 10250
+#         protocol: tcp
+#         from_group: MasterSG
+#         rule_type: Ingress
+#       - name:  SDN
+#         description: "SDN Communication"
+#         from_port: 4789
+#         to_port: 4789
+#         from_group: MasterSG
+#         protocol: udp
+#         rule_type: Ingress
+#       - name: SSHPublic
+#         description: "Public Access for Infranode"
+#         from_port: 22
+#         to_port: 22
+#         protocol: tcp
+#         cidr: "0.0.0.0/0"
+#         rule_type: Ingress
 
 subnets:
   - name: PublicSubnet
-    cidr: "192.168.2.0/24"
+    cidr: "192.168.1.0/24"
     routing_table: true
   - name: PrivateSubnet
-    cidr: "192.168.1.0/24"
+    cidr: "192.168.2.0/24"
     routing_table: false # this could be wrong [sborenst]
 
 
@@ -282,7 +737,7 @@ instances:
       - key: "ostype"
         value: "linux"
     rootfs_size: "{{ rootfs_size_bastion }}"
-    security_group: "PublicSG"
+    security_group: "BastionSG"
     subnet: "PublicSubnet"
 
   - name: "loadbalancer"
@@ -297,7 +752,7 @@ instances:
       - key: "ostype"
         value: "linux"
     rootfs_size: "{{ rootfs_size_loadbalancer }}"
-    security_group: "PublicSG"
+    security_group: "LBSG"
     subnet: "PublicSubnet"
 
   - name: "master"
@@ -316,8 +771,8 @@ instances:
       - device_name: "{{docker_device}}"
         volume_size: 20
         volume_type: gp2
-    security_group: "PublicSG"
-    subnet: "PublicSubnet"
+    security_group: "MasterSG"
+    subnet: "PrivateSubnet"
 
   - name: "node"
     count: "{{node_instance_count}}"
@@ -335,8 +790,8 @@ instances:
       - device_name: "{{docker_device}}"
         volume_size: 100
         volume_type: gp2
-    security_group: "PublicSG"
-    subnet: "PublicSubnet"
+    security_group: "NodeSG"
+    subnet: "PrivateSubnet"
 
   - name: "infranode"
     count: "{{infranode_instance_count}}"
@@ -354,8 +809,8 @@ instances:
       - device_name: "{{docker_device}}"
         volume_size: 50
         volume_type: gp2
-    security_group: "PublicSG"
-    subnet: "PublicSubnet"
+    security_group: "InfraNodeSG"
+    subnet: "PrivateSubnet"
 
   - name: "support"
     count: "{{support_instance_count}}"
@@ -373,5 +828,24 @@ instances:
       - device_name: "{{nfs_pvs}}"
         volume_size: "{{nfs_size}}"
         volume_type: gp2
-    security_group: "PublicSG"
+    security_group: "SUPPORTSG"
+    subnet: "PrivateSubnet"
+
+  - name: "isolated"
+    count: "{{isolated_instance_count}}"
+    public_dns: false
+    dns_loadbalancer: false
+    flavor:
+      "ec2": "{{isolated_instance_type}}"
+    tags:
+      - key: "AnsibleGroup"
+        value: "isolated"
+      - key: "ostype"
+        value: "linux"
+    rootfs_size: "{{ rootfs_size_isolated }}"
+    volumes:
+      - device_name: "{{nfs_pvs}}"
+        volume_size: "{{nfs_size}}"
+        volume_type: gp2
+    security_group: "ISOLATEDSG"
     subnet: "PublicSubnet"

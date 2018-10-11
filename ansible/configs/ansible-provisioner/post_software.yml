@@ -17,16 +17,27 @@
   hosts: provisioners
   become: yes
   gather_facts: False
-  roles:
-    - role: "{{ ANSIBLE_REPO_PATH }}/roles/opentlc-integration"
-      when: install_opentlc_integration
-      no_log: yes
   vars_files:
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/mgr_users.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   tags: [ env-specific, cf_integration ]
   tasks:
+    - name: Configure IPA
+      import_role:
+        name: "{{ ANSIBLE_REPO_PATH }}/roles/bastion-opentlc-ipa"
+      when: install_ipa_client|bool
+      vars:
+        bastion_public_dns_chomped: "{{ inventory_hostname }}"
+
+    - name: Import opentlc-integration role
+      import_role:
+        name: "{{ ANSIBLE_REPO_PATH }}/roles/opentlc-integration"
+      when: install_opentlc_integration|bool
+      vars:
+        install_opentlc_smtp: true
+      no_log: yes
+
     - name: Install vim
       yum:
         name: vim
@@ -91,6 +102,22 @@
       with_items: "{{ mgr_users }}"
       no_log: yes
 
+    - name: Insert awscli credentials (list version)
+      blockinfile:
+        dest: "{{ item.home }}/.aws/credentials"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        content: |
+          [{{item.name}}]
+          aws_access_key_id = {{ item.aws_access_key_id }}
+          aws_secret_access_key = {{ item.aws_secret_access_key }}
+      when:
+        - item.aws_credentials is defined
+        - item.aws_credentials.aws_access_key_id is defined
+        - item.aws_credentials.aws_secret_access_key is defined
+      with_items: "{{ mgr_users }}"
+      no_log: yes
+
     - name: Copy boto.cfg file to /etc
       copy:
         src: "{{ ANSIBLE_REPO_PATH }}/inventory/boto.cfg"
@@ -105,40 +132,103 @@
       yum:
         name: lvm2
 
-    - lvg:
-        vg: "{{ storage_vg }}"
-        pvs: "{{ storage_pvs }}"
-      ignore_errors: true
+    # if we created the volume from a snapshot, do not run lvm commands
+    - when: srv_snapshot_id is not defined
+      block:
+      - lvg:
+          vg: "{{ storage_vg }}"
+          pvs: "{{ storage_pvs }}"
+        ignore_errors: true
 
-    - lvol:
-        vg: "{{ storage_vg }}"
-        lv: storagelv
-        size: 100%FREE
-      ignore_errors: true
+      - lvol:
+          vg: "{{ storage_vg }}"
+          lv: storagelv
+          size: 100%FREE
+        ignore_errors: true
 
-    - filesystem:
-        fstype: ext4
-        dev: "/dev/{{ storage_vg }}/storagelv"
-      ignore_errors: true
+      - filesystem:
+          fstype: ext4
+          dev: "/dev/{{ storage_vg }}/storagelv"
+        ignore_errors: true
 
-    - file:
-        path: "{{ storage_mount_path }}"
-        state: directory
-        mode: 0777
+      - file:
+          path: "{{ storage_mount_path }}"
+          state: directory
+          mode: 0777
+
+    - name: Activate LVM Volume Group
+      command: vgchange -ay
+      when: srv_snapshot_id is defined
 
     - selinux:
         policy: targeted
         state: permissive
 
-    - lineinfile:
-        dest: /etc/fstab
-        insertafter: EOF
-        line: "/dev/{{ storage_vg }}/storagelv {{ storage_mount_path}} ext4 defaults 0 0"
-        state: present
-      ignore_errors: true
+    - file:
+        path: "{{ storage_mount_path }}"
+        state: directory
 
-    - shell: "mkdir -p {{ storage_mount_path }} &&  mount {{ storage_mount_path }}"
-      ignore_errors: true
+    - name: Mount and create fstab
+      mount:
+        path: "{{ storage_mount_path }}"
+        src: "/dev/{{ storage_vg }}/storagelv"
+        fstype: ext4
+        state: mounted
+
+    - name: Install mosh
+      become: true
+      yum:
+        name: http://dl.fedoraproject.org/pub/epel/7/x86_64/Packages/m/mosh-1.3.0-1.el7.x86_64.rpm
+      ignore_errors: yes
+
+    - copy:
+        dest: /etc/yum.repos.d/azure-cli.repo
+        content: |
+          [azure-cli]
+          name=Azure CLI
+          baseurl=https://packages.microsoft.com/yumrepos/azure-cli
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://packages.microsoft.com/keys/microsoft.asc
+
+    - name: Install azure-cli
+      yum:
+        name: azure-cli
+
+    - name: install python azure module
+      pip:
+        name: ansible[azure]
+
+    - name: install httpd
+      yum:
+        name: "{{ item }}"
+      with_items:
+        - httpd
+        - mod_ssl
+      tags: httpd
+
+    - name: Generate a Self Signed OpenSSL certificate
+      command: >-
+        openssl req -x509 -nodes -days 3650
+        -newkey rsa:2048 -keyout {{ httpd_ssl_key }}
+        -out {{ httpd_ssl_cert }}
+        -subj '/CN={{provisioner_public_dns}}/O=Red Hat/C=US'
+      args:
+        creates: /etc/pki/tls/certs/admin.pem
+      tags: httpd
+
+    - name: add httpd repos.conf
+      template:
+        src: files/repos.conf.j2
+        dest: /etc/httpd/conf.d/repos.conf
+      tags: httpd
+
+    - name: Enable and start httpd
+      service:
+        name: httpd
+        enabled: yes
+        state: started
+      tags: httpd
 
 - name: Zabbix
   hosts: provisioners

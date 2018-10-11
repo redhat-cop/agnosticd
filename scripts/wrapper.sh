@@ -28,6 +28,7 @@ fi
 REGION=${REGION:-us-east-1}
 KEYNAME=${KEYNAME:-ocpkey}
 ENVTYPE=${ENVTYPE:-generic-example}
+PROFILE=${PROFILE:-default}
 CLOUDPROVIDER=${CLOUDPROVIDER:-ec2}
 if [ "$CLOUDPROVIDER" = "ec2" ]; then
     if [ -z "${HOSTZONEID}" ]; then
@@ -104,9 +105,9 @@ case $2 in
         ;;
 
     stop)
-        aws ec2 stop-instances --region $REGION --instance-ids $(aws ec2 describe-instances --filters "Name=tag:aws:cloudformation:stack-name,Values=${STACK_NAME}" --query Reservations[*].Instances[*].InstanceId --region $REGION --output text)
+        aws ec2 stop-instances --profile $PROFILE --region $REGION --instance-ids $(aws ec2 describe-instances --filters "Name=tag:aws:cloudformation:stack-name,Values=${STACK_NAME}" --query Reservations[*].Instances[*].InstanceId --profile $PROFILE --region $REGION --output text)
         ;;
     start)
-        aws ec2 start-instances --region $REGION --instance-ids `aws ec2 describe-instances --filters "Name=tag:aws:cloudformation:stack-name,Values=${STACK_NAME}" --query Reservations[*].Instances[*].InstanceId --region $REGION --output text`
+        aws ec2 start-instances --profile $PROFILE --region $REGION --instance-ids `aws ec2 describe-instances --filters "Name=tag:aws:cloudformation:stack-name,Values=${STACK_NAME}" --query Reservations[*].Instances[*].InstanceId --profile $PROFILE --region $REGION --output text`
         ;;
 esac
