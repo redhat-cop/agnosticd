@@ -16,6 +16,7 @@ for i in ${ORIG}/tests/scenarii/*.{yaml,yml}; do
         inventory=(-i "${ORIG}/tests/tox-inventory.txt")
     fi
 
+    echo
     echo '############################'
     echo "${config}"
     echo '############################'
