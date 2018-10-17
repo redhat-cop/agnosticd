@@ -67,7 +67,8 @@ def wait_email(pattern, time_window):
     while max_retries > 0:
         try:
             M.select('INBOX')
-            typ, data = M.search(None, '(UNSEEN HEADER Subject "%s")' % (guid))
+            # Add _COMPLETED here because gmail do not follow RFC and matches words, not substrings
+            typ, data = M.search(None, '(UNSEEN (OR HEADER Subject "%s" HEADER Subject "%s_COMPLETED"))' % (guid, guid))
             for num in data[0].split():
                 typ, data = M.fetch(num, '(RFC822)')
                 email_message = email.message_from_string(data[0][1])
