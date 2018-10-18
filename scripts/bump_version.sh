@@ -20,12 +20,12 @@ prompt_continue() {
     # call with a prompt string or use a default
     read -r -p "${1:-Continue? [Y/n]} " response
 
-    # to lower
-    response=${response,,}
-
     if [ -z "${response}" ]; then
         true
     else
+        # to lower
+        response=${response,,}
+
         case "${response}" in
             yes|y) true ;;
             *) false ;;
