@@ -21,11 +21,18 @@ def ssh_location = ''
 
 // Catalog items
 def choices = [
-    'OPENTLC OpenShift Labs / OpenShift 3.9 - Client VM',
-    'OPENTLC OpenShift Labs / OpenShift 3.7 - Client VM',
-    'OPENTLC OpenShift Labs / OpenShift 3.5 - Client VM',
-    'DevOps Deployment Testing / OCP 3.9 Client VM Testing',
-    'DevOps Deployment Development / DEV OCP 3.9 Client VM',
+    'OPENTLC OpenShift Labs / OpenShift - Client VM',
+    'DevOps Deployment Testing / OpenShift - Client VM - Testing',
+    'DevOps Deployment Development / DEV OpenShift - Client VM',
+].join("\n")
+
+def ocprelease_choice = [
+    '3.11.16',
+    '3.9.41',
+    '3.7.23',
+    '3.6.173.0.49',
+    '3.10.34',
+    '3.10.14',
 ].join("\n")
 
 
@@ -47,6 +54,11 @@ pipeline {
             description: 'Catalog item',
             name: 'catalog_item',
         )
+        choice(
+            choices: ocprelease_choice,
+            description: 'Catalog item',
+            name: 'ocprelease',
+        )
     }
 
     stages {
@@ -63,6 +75,7 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
+                    def ocprelease = params.ocprelease.trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -71,7 +84,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,quotacheck=t'
+                          -d 'check=t,quotacheck=t,ocprelease=${ocprelease}'
                         """
                     ).trim()
 
