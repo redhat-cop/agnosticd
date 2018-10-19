@@ -14,6 +14,9 @@ def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 // SSH key
 def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
 
+// Admin host ssh location is in a credential too
+def ssh_admin_host = 'admin-host-na'
+
 // state variables
 def guid=''
 def ssh_location = ''
@@ -226,6 +229,21 @@ pipeline {
                 export uri="${cf_uri}"
                 ./opentlc/delete_svc_guid.sh '${guid}'
                 """
+            }
+
+            /* Print ansible logs */
+            withCredentials([
+                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
+                sshUserPrivateKey(
+                    credentialsId: ssh_creds,
+                    keyFileVariable: 'ssh_key',
+                    usernameVariable: 'ssh_username')
+            ]) {
+                sh("""
+                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
+                    "cat deployer_logs/*${guid}*log" || true
+                """.trim()
+                )
             }
 
             withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
