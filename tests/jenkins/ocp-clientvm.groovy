@@ -21,9 +21,9 @@ def ssh_location = ''
 
 // Catalog items
 def choices = [
-    'OPENTLC OpenShift Labs / OpenShift - Client VM',
-    'DevOps Deployment Testing / OpenShift - Client VM - Testing',
-    'DevOps Deployment Development / DEV OpenShift - Client VM',
+    'OPENTLC OpenShift Labs / OpenShift Client VM',
+    'DevOps Deployment Testing / OpenShift Client VM - Testing',
+    'DevOps Deployment Development / DEV OpenShift Client VM',
 ].join("\n")
 
 def ocprelease_choice = [
