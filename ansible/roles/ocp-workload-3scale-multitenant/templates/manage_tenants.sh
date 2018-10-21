@@ -17,6 +17,9 @@ user_info_file=$output_dir/{{tenant_provisioning_results_file}}
 log_file=$output_dir/{{tenant_provisioning_log_file}}
 createGWs={{create_gws_with_each_tenant}}
 
+# When invoked from AAD config/rhte-oc-cluster-vms, the value is: developer
+ocp_username={{ocp_username}}
+
 create_tenants={{create_tenants}}
 
 function prep() {
@@ -116,6 +119,9 @@ function createAndActivateTenants() {
                     echo -en "\n *** ERROR: 8" >> $log_file
                     exit 1;
             fi
+
+            # Gateway project should be additionally owned by user passed by AAD config/rhte-oc-cluster-vms workload
+            oc adm policy add-user-to-role $ocp_username admin -n tenantAdminId-gw
 
             THREESCALE_PORTAL_ENDPOINT=https://$tenant_access_token@$orgName-admin.{{ocp_apps_domain}}
             BACKEND_ENDPOINT_OVERRIDE=http://backend-listener.{{ocp_project}}:3000
