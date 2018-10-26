@@ -121,7 +121,7 @@ function createAndActivateTenants() {
             fi
 
             # Gateway project should be additionally owned by user passed by AAD config/rhte-oc-cluster-vms workload
-            oc adm policy add-user-to-role $ocp_username admin -n tenantAdminId-gw
+            oc adm policy add-role-to-user admin $ocp_username -n $tenantAdminId-gw
 
             THREESCALE_PORTAL_ENDPOINT=https://$tenant_access_token@$orgName-admin.{{ocp_apps_domain}}
             BACKEND_ENDPOINT_OVERRIDE=http://backend-listener.{{ocp_project}}:3000
