@@ -38,6 +38,12 @@ def ocprelease_choice = [
     '3.10.14',
 ].join("\n")
 
+def region_choice = [
+    'na',
+    'emea',
+    'latam',
+    'apac',
+].join("\n")
 
 pipeline {
     agent any
@@ -62,6 +68,12 @@ pipeline {
             description: 'Catalog item',
             name: 'ocprelease',
         )
+
+        choice(
+            choices: region_choice,
+            description: 'Region',
+            name: 'region',
+        )
     }
 
     stages {
@@ -80,6 +92,7 @@ pipeline {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def ocprelease = params.ocprelease.trim()
+                    def region = params.region.trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -88,7 +101,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,quotacheck=t,ocprelease=${ocprelease},runtime=8,expiration=7,Region=na'
+                          -d 'check=t,quotacheck=t,ocprelease=${ocprelease},runtime=8,expiration=7,region=${region}'
                         """
                     ).trim()
 
