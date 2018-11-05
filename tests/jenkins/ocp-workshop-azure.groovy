@@ -2,7 +2,7 @@
 // CloudForms
 def opentlc_creds = 'b93d2da4-c2b7-45b5-bf3b-ee2c08c6368e'
 def opentlc_admin_creds = '73b84287-8feb-478a-b1f2-345fd0a1af47'
-def cf_uri = 'https://rhpds.opentlc.com'
+def cf_uri = 'https://rhpds.redhat.com'
 def cf_group = 'rhpds-access-cicd'
 // IMAP
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
