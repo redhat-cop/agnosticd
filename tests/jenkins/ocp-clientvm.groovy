@@ -69,6 +69,7 @@ pipeline {
             environment {
                 uri = "${cf_uri}"
                 credentials = credentials("${opentlc_creds}")
+                CURLOPT = "-k"
             }
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
