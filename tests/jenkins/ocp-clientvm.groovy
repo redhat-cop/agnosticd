@@ -26,7 +26,7 @@ def ssh_location = ''
 def choices = [
     'OPENTLC OpenShift Labs / OpenShift Client VM',
     'DevOps Deployment Testing / OpenShift Client VM - Testing',
-    'DevOps Deployment Development / DEV OpenShift Client VM',
+    'DevOps Team Development / DEV OpenShift Client VM',
 ].join("\n")
 
 def ocprelease_choice = [
