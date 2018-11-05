@@ -87,7 +87,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,quotacheck=t,ocprelease=${ocprelease}'
+                          -d 'check=t,quotacheck=t,ocprelease=${ocprelease},runtime=8,expiration=7'
                         """
                     ).trim()
 
