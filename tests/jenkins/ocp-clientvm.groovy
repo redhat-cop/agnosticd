@@ -182,6 +182,7 @@ pipeline {
                 uri = "${cf_uri}"
                 credentials = credentials("${opentlc_creds}")
                 admin_credentials = credentials("${opentlc_admin_creds}")
+                CURLOPT = '-k'
             }
             /* This step uses the delete_svc_guid.sh script to retire
              the service from CloudForms */
@@ -240,6 +241,7 @@ pipeline {
                 ]
             ) {
                 sh """
+                export CURLOPT='-k'
                 export uri="${cf_uri}"
                 ./opentlc/delete_svc_guid.sh '${guid}'
                 """
