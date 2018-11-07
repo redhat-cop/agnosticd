@@ -1,0 +1,165 @@
+# Deploy the Dynamic NFS Provisioner
+# Needs to be run on a Master Host
+#
+# Source for all K8s objects below:
+#   https://github.com/kubernetes-incubator/external-storage/tree/master/nfs-client/deploy
+---
+
+# - name: Ensure that pip is installed
+#   easy_install:
+#     state: present
+#     name: pip
+
+# - name: Ensure that OpenShift Python Client is installed (pre-req for k8s module)
+#   pip:
+#     state: latest
+#     name: openshift
+
+- name: Create NFS Provisioner Project
+  k8s:
+    state: present
+    api_version: v1
+    kind: Namespace
+    name: "{{ nfs_provisioner_project }}"
+
+- name: Create Service Account
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: nfs-client-provisioner
+        namespace: "{{ nfs_provisioner_project }}"
+
+- name: Create RBAC ClusterRole
+  k8s:
+    state: present
+    definition:
+      kind: ClusterRole
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: nfs-client-provisioner-runner
+      rules:
+        - apiGroups: [""]
+          resources: ["persistentvolumes"]
+          verbs: ["get", "list", "watch", "create", "delete"]
+        - apiGroups: [""]
+          resources: ["persistentvolumeclaims"]
+          verbs: ["get", "list", "watch", "update"]
+        - apiGroups: ["storage.k8s.io"]
+          resources: ["storageclasses"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: [""]
+          resources: ["events"]
+          verbs: ["create", "update", "patch"]
+
+- name: Create RBAC ClusterRoleBinding
+  k8s:
+    state: present
+    definition:
+      kind: ClusterRoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: run-nfs-client-provisioner
+      subjects:
+        - kind: ServiceAccount
+          name: nfs-client-provisioner
+          namespace: nfs-provisioner
+      roleRef:
+        kind: ClusterRole
+        name: nfs-client-provisioner-runner
+        apiGroup: rbac.authorization.k8s.io
+
+- name: Create RBAC Role
+  k8s:
+    state: present
+    definition:
+      kind: Role
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: leader-locking-nfs-client-provisioner
+        namespace: "{{ nfs_provisioner_project }}"
+      rules:
+        - apiGroups: [""]
+          resources: ["endpoints"]
+          verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+- name: Create RBAC RoleBinding
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: leader-locking-nfs-client-provisioner
+        namespace: "{{ nfs_provisioner_project }}"
+      subjects:
+        - kind: ServiceAccount
+          name: nfs-client-provisioner
+          namespace: "{{ nfs_provisioner_project }}"
+      roleRef:
+        kind: Role
+        name: leader-locking-nfs-client-provisioner
+        apiGroup: rbac.authorization.k8s.io
+
+- name: Create SCC for Service Account nfs-client-provisioner
+  shell: "oc adm policy add-scc-to-user hostmount-anyuid system:serviceaccount:{{ nfs_provisioner_project}}:nfs-client-provisioner"
+
+- name: Create Deployment for nfs-provisioner
+  k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: nfs-client-provisioner
+        namespace: "{{ nfs_provisioner_project }}"
+      spec:
+        replicas: 1
+        strategy:
+          type: Recreate
+        selector:
+          matchLabels:
+            app: nfs-client-provisioner
+        template:
+          metadata:
+            labels:
+              app: nfs-client-provisioner
+          spec:
+            serviceAccountName: nfs-client-provisioner
+            containers:
+              - name: nfs-client-provisioner
+                image: quay.io/external_storage/nfs-client-provisioner:latest
+                volumeMounts:
+                  - name: nfs-client-root
+                    mountPath: /persistentvolumes
+                env:
+                  - name: PROVISIONER_NAME
+                    value: nfs-storage
+                  - name: NFS_SERVER
+                    value: "{{ nfs_provisioner_nfs_server_hostname }}"
+                  - name: NFS_PATH
+                    value: "{{ nfs_provisioner_server_directory }}"
+            volumes:
+              - name: nfs-client-root
+                nfs:
+                  server: "{{ nfs_provisioner_nfs_server_hostname }}"
+                  path: "{{ nfs_provisioner_server_directory }}"
+
+- name: Create storage class 
+  k8s:
+    state: present
+    definition:
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "{{ nfs_provisioner_storage_class_is_default }}"
+        name: managed-nfs-storage
+      parameters:
+        archiveOnDelete: "{{ nfs_provisioner_storage_class_archiveOnDelete }}"
+      provisioner: nfs-storage
+      reclaimPolicy: Delete
+      volumeBindingMode: Immediate
+  
