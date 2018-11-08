@@ -15,7 +15,7 @@ search_images() {
 }
 
 #for region in us-east-1
-for region in $(aws ec2 describe-regions --query "Regions[].RegionName" --output text)
+for region in $(aws ec2 describe-regions --query "Regions[].RegionName" --output text --region us-east-1)
 do
     echo "${region}:"
     echo -n "  RHEL75GOLD: "
