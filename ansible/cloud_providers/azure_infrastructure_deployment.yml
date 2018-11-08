@@ -19,6 +19,8 @@
     AZURE_CONFIG_DIR: "/tmp/.azure-{{project_tag}}"
   tasks:
     - name: Ensure az is installed
+      environment:
+        PATH: /usr/bin
       command: which az
       register: az_result
 
@@ -52,17 +54,24 @@
 
     # use command line 'az' to validate template and deploy
     - name: Login to Azure
-      command: az login --service-principal -u {{azure_service_principal}} -p {{azure_password}} --tenant {{azure_tenant}}
+      command: >-
+        az login --service-principal
+        -u {{azure_service_principal}}
+        -p {{azure_password}}
+        --tenant {{azure_tenant}}
+      environment:
+        PATH: /usr/bin
       tags:
         - validate_azure_template
         - create_inventory
         - must
-
     - name: Create the resource group
       tags:
         - azure_infrastructure_deployment
         - validate_azure_template
-      command: az group create --name "{{az_resource_group}}" --location "{{azure_region}}"
+      azure_rm_resourcegroup:
+        name: "{{ az_resource_group }}"
+        location: "{{ azure_region }}"
 
     - name: Get SSH public key
       set_fact:
@@ -88,19 +97,53 @@
         - validate_azure_template
 
     - name: Validate arm template
-      command: az group deployment validate --template-file {{t_dest}} --resource-group {{az_resource_group}} --parameters @{{params_dest}}
+      environment:
+        PATH: /usr/bin
+      command: >-
+        az group deployment validate
+        --template-file {{t_dest}}
+        --resource-group {{az_resource_group}}
+        --parameters @{{params_dest}}
       changed_when: false
       tags:
         - azure_infrastructure_deployment
         - validate_azure_template
 
     - name: ARM Group deployment create
-      command: az group deployment create --name {{env_type}}.{{guid}} --template-file {{t_dest}} --resource-group {{az_resource_group}} --parameters @{{params_dest}}
+      environment:
+        PATH: /usr/bin
+      command: >-
+        az group deployment create
+        --name {{env_type}}.{{guid}}
+        --template-file {{t_dest}}
+        --resource-group {{az_resource_group}}
+        --parameters @{{params_dest}}
       register: az_deploy
       tags:
         - azure_infrastructure_deployment
-      until: az_deploy|succeeded
-      retries: 5
+        - az_rm_deploy
+      until: az_deploy is succeeded
+      retries: 0
+
+    # I tried to use the 'azure_rm_deployment' ansible module instead of the azure-cli,
+    # but this does not work for large templates.
+    # Also, module is marked as 'preview' so let's use the cli for now.
+    # Commented for later use:
+    #
+    #   azure_rm_deployment:
+    #     deployment_name: "{{env_type}}.{{guid}}"
+    #     resource_group_name: "{{az_resource_group}}"
+    #     location: "{{ azure_region }}"
+    #     template: "{{ lookup('file', t_dest) }}"
+    #     parameters:
+    #       adminUsername:
+    #         value: "{{remote_user}}"
+    #       sshKeyData:
+    #         value: "{{ssh_key_data}}"
+    #       DNSZone:
+    #         value: "{{HostedZoneId}}"
+    #       guid:
+    #         value: "{{guid}}"
 
     - debug:
         var: az_deploy
@@ -131,12 +174,17 @@
         zone_name: "{{HostedZoneId}}"
         record_type: NS
         state: present
-        records: "{{subzone_ns | json_query('ansible_facts.azure_dnsrecordset[0].properties.NSRecords[*].{entry: nsdname}')}}"
+        records: "{{ subzone_ns | json_query('ansible_facts.azure_dnsrecordset[0].properties.NSRecords[*].{entry: nsdname}') }}"
       tags:
         - azure_infrastructure_deployment
 
+    # use '--show-details' feature from the cli, it groups instances and their public IPs.
+    # It saves us API calls.
     - name: Get list of VMs
       command: az vm list --resource-group "{{az_resource_group}}" --show-details
+      # specify path to use azure-cli from system and not from python virtualenv
+      environment:
+        PATH: /usr/bin
       changed_when: false
       register: result_list
       tags:
@@ -182,6 +230,7 @@
         placement: "{{item.zones}}"
         image_id: "{{item.storageProfile.osDisk.image|d('unknown')}}"
         ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+        instance_canonical_name: "{{ item.tags.canonical_name }}"
       with_items: "{{vm_list}}"
       when:
         - item.tags is defined
@@ -210,7 +259,7 @@
         verbosity: 2
 
 - name: Configure local ssh config for bastion proxy use
-  include: "{{ANSIBLE_REPO_PATH}}/cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
+  import_playbook: "{{ANSIBLE_REPO_PATH}}/cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
   when: groups['bastions']
   tags:
     - must
@@ -342,3 +391,31 @@
         connect_timeout: 60
         delay: 120
       when: rwait is failed
+
+- name: Detect and map data disks for Azure
+  hosts: all
+  become: true
+  gather_facts: false
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tasks:
+    - when: instances is defined
+      block:
+        - name: Map Azure disks using LUN.
+          include_role:
+            name: "{{ ANSIBLE_REPO_PATH }}/roles/infra-azure-disk-map"
+          vars:
+            disk_map_device:
+              name: "{{ item.name }}"
+              lun: "{{ index }}"
+          when: item.enable|d(true)
+          loop_control:
+            index_var: index
+          loop: >-
+            {{ instances
+            | json_query("
+                [?name == '" + instance_canonical_name + "']
+                | [].volumes[]
+              ")
+            }}

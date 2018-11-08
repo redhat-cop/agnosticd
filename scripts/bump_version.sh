@@ -20,12 +20,12 @@ prompt_continue() {
     # call with a prompt string or use a default
     read -r -p "${1:-Continue? [Y/n]} " response
 
-    # to lower
-    response=${response,,}
-
     if [ -z "${response}" ]; then
         true
     else
+        # to lower
+        response=${response,,}
+
         case "${response}" in
             yes|y) true ;;
             *) false ;;
@@ -49,13 +49,15 @@ for config in ${configs}; do
     last=$(git tag -l|grep ${config}-${stage} |sort -V|tail -n 1|egrep -o '[0-9]+\.[0-9]+$')
     if [ -z "${last}" ]; then
         echo "INFO: no version found for ${config}, skipping"
-        continue
+        echo "Do you want to create it ?"
+        prompt_continue || continue
+
+        next_tag=${config}-${stage}-0.1
+    else
+        major=$(echo $last|egrep -o '^[0-9]+')
+        minor=$(echo $last|egrep -o '[0-9]+$')
+        next_tag=${config}-${stage}-${major}.$(( minor + 1))
     fi
-
-    major=$(echo $last|egrep -o '^[0-9]+')
-    minor=$(echo $last|egrep -o '[0-9]+$')
-
-    next_tag=${config}-${stage}-${major}.$(( minor + 1))
 
     echo "will now perform 'git tag ${next_tag}'"
     prompt_continue || continue

@@ -17,6 +17,9 @@ user_info_file=$output_dir/{{tenant_provisioning_results_file}}
 log_file=$output_dir/{{tenant_provisioning_log_file}}
 createGWs={{create_gws_with_each_tenant}}
 
+# When invoked from AAD config/rhte-oc-cluster-vms, the value is: developer
+ocp_username={{ocp_username}}
+
 create_tenants={{create_tenants}}
 
 function prep() {
@@ -27,6 +30,12 @@ function createAndActivateTenants() {
 
     echo -en "\n\nCreating tenants $startTenant through $endTenant  \n" > $log_file
     echo -en "GUID\tOCP user id\tOCP user passwd\t3scale admin URL\tAPI admin Id\tAPI admin passwd\tAPI admin access token\n\t\t\t\t\t" > $user_info_file
+
+    which xmlstarlet
+    if [ $? -ne 0 ];then
+        echo -en "\n *** ERROR: 0  Need to install xmlstarlet utility" >> $log_file
+        exit 1;
+    fi
     
     curl -o $output_dir/3scale-apicast.yml https://raw.githubusercontent.com/gpe-mw-training/3scale_onpremise_implementation_labs/master/resources/rhte/3scale-apicast.yml
 
@@ -111,13 +120,18 @@ function createAndActivateTenants() {
                     exit 1;
             fi
 
+            # Gateway project should be additionally owned by user passed by AAD config/rhte-oc-cluster-vms workload
+            oc adm policy add-role-to-user admin $ocp_username -n $tenantAdminId-gw
+
             THREESCALE_PORTAL_ENDPOINT=https://$tenant_access_token@$orgName-admin.{{ocp_apps_domain}}
+            BACKEND_ENDPOINT_OVERRIDE=http://backend-listener.{{ocp_project}}:3000
 
 
             # 9) Create staging gateway
             oc new-app \
                -f $output_dir/3scale-apicast.yml \
                --param THREESCALE_PORTAL_ENDPOINT=$THREESCALE_PORTAL_ENDPOINT \
+               --param BACKEND_ENDPOINT_OVERRIDE=$BACKEND_ENDPOINT_OVERRIDE \
                --param APP_NAME=stage-apicast \
                --param ROUTE_NAME=$orgName-mt-stage-generic \
                --param WILDCARD_DOMAIN=apps.{{subdomain_base}} \
@@ -133,6 +147,7 @@ function createAndActivateTenants() {
             oc new-app \
                -f $output_dir/3scale-apicast.yml \
                --param THREESCALE_PORTAL_ENDPOINT=$THREESCALE_PORTAL_ENDPOINT \
+               --param BACKEND_ENDPOINT_OVERRIDE=$BACKEND_ENDPOINT_OVERRIDE \
                --param APP_NAME=prod-apicast \
                --param ROUTE_NAME=$orgName-mt-prod-generic \
                --param WILDCARD_DOMAIN=apps.{{subdomain_base}} \
