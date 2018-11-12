@@ -31,7 +31,7 @@ do
     search_images 309956199498 'RHEL-7.4*' true
 
     echo -n "  WIN2012R2: "
-    search_images 801119661308 'Windows_Server-2012-R2*' true
+    search_images 801119661308 'Windows_Server-2012-R2_RTM-English-64Bit-Base*' true
 done
 
 # For azure
