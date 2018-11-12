@@ -19,6 +19,8 @@ from yamllint.config import YamlLintConfig
 from yamllint.cli import Format
 from yamllint import linter
 
+rootdir = os.path.join(os.getcwd(), '../..')
+
 
 def find_files(base_dir, exclude_dirs, include_dirs, file_regex):
     ''' find files matching file_regex '''
@@ -76,7 +78,7 @@ def find_playbooks():
 
     exclude_dirs = ('adhoc', 'tasks', 'archive')
     for yaml_file in find_files(
-            os.path.join(os.getcwd(), 'notactivatedyet'),
+            os.path.join(rootdir, 'notactivatedyet'),
             exclude_dirs, None, r'\.ya?ml$'):
         with open(yaml_file, 'r') as contents:
             for task in yaml.safe_load(contents) or {}:
@@ -151,7 +153,7 @@ class AADYamlLint(Command):
         else:
             format_method = Format.standard_color
 
-        for yaml_file in find_files(os.getcwd(), self.excludes, None, r'\.ya?ml$'):
+        for yaml_file in find_files(rootdir, self.excludes, None, r'\.ya?ml$'):
             first = True
             with open(yaml_file, 'r') as contents:
                 for problem in linter.run(contents, config):
@@ -180,7 +182,7 @@ class AADAnsiblePylint(PylintCommand):
         ''' find all python files to test '''
         exclude_dirs = ('.tox', 'test', 'tests', 'git')
         modules = []
-        for match in find_files(os.getcwd(), exclude_dirs, None, r'\.py$'):
+        for match in find_files(rootdir, exclude_dirs, None, r'\.py$'):
             package = os.path.basename(match).replace('.py', '')
             modules.append(('ansible_agnostic_deployer', package, match))
         return modules
@@ -320,7 +322,7 @@ class AADSyntaxCheck(Command):
         print('Ansible Deprecation Checks')
         exclude_dirs = ('adhoc', '.tox', 'archive')
         for yaml_file in find_files(
-                os.getcwd(), exclude_dirs, None, r'\.ya?ml$'):
+                rootdir, exclude_dirs, None, r'\.ya?ml$'):
             with open(yaml_file, 'r') as contents:
                 yaml_contents = yaml.safe_load(contents)
                 if not isinstance(yaml_contents, list):
@@ -392,7 +394,7 @@ class AADSyntaxCheck(Command):
                 subprocess.check_output(
                     ['ansible-playbook', '-i', tox_ansible_inv,
                      '--syntax-check', playbook, '-e', '@{}_extras'.format(tox_ansible_inv),
-                     '-e', 'ANSIBLE_REPO_PATH={}'.format(os.path.join(os.getcwd(), 'ansible'))]
+                     '-e', 'ANSIBLE_REPO_PATH={}'.format(os.path.join(rootdir, 'ansible'))]
             ,
                 )
             except subprocess.CalledProcessError as cpe:

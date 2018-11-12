@@ -2,10 +2,11 @@
 
 set -eo pipefail
 
-ORIG=$(cd $(dirname $0); cd ..; pwd)
+ORIG=$(cd $(dirname $0); cd ../..; pwd)
 ansible_path=${ORIG}/ansible
+static=${ORIG}/tests/static
 
-for i in ${ORIG}/tests/scenarii/*.{yaml,yml}; do
+for i in ${static}/scenarii/*.{yaml,yml}; do
     config=$(basename "${i}")
 
     env_type=$(egrep ^env_type: ${i}|cut -d' ' -f 2)
@@ -13,7 +14,7 @@ for i in ${ORIG}/tests/scenarii/*.{yaml,yml}; do
     if [ -e "${ansible_path}/configs/${env_type}/hosts" ]; then
         inventory=(-i "${ansible_path}/configs/${env_type}/hosts")
     else
-        inventory=(-i "${ORIG}/tests/tox-inventory.txt")
+        inventory=(-i "${static}/tox-inventory.txt")
     fi
 
     echo
@@ -25,12 +26,12 @@ for i in ${ORIG}/tests/scenarii/*.{yaml,yml}; do
                      --list-tasks \
                      "${inventory[@]}" \
                      -e ANSIBLE_REPO_PATH=${ansible_path} \
-                     ${ORIG}/ansible/main.yml \
+                     ${ansible_path}/main.yml \
                      -e @${i}
     ansible-playbook --syntax-check \
                      --list-tasks \
                      "${inventory[@]}" \
                      -e ANSIBLE_REPO_PATH=${ansible_path} \
-                     ${ORIG}/ansible/destroy.yml \
+                     ${ansible_path}/destroy.yml \
                      -e @${i}
 done
