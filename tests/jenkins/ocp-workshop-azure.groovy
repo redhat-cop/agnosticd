@@ -34,10 +34,8 @@ def ocprelease_choice = [
 ].join("\n")
 
 def region_choice = [
-    'na',
-    'emea',
-    'apac',
-    'latam',
+    'azure_eastus',
+    'azure_westus',
 ].join("\n")
 
 pipeline {
