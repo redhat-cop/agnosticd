@@ -36,8 +36,6 @@ def ocprelease_choice = [
     '3.10.14',
     '3.9.41',
     '3.9.31',
-    '3.7.23',
-    '3.6.173.0.49',
 ].join("\n")
 
 def region_choice = [
