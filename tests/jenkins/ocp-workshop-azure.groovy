@@ -246,7 +246,7 @@ pipeline {
             ]) {
                 sh("""
                     ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
-                    "cat deployer_logs/*${guid}*log" || true
+                    "find deployer_logs -name '*${guid}*log' | xargs cat"
                 """.trim()
                 )
             }
