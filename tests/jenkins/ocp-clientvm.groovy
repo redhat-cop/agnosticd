@@ -25,17 +25,19 @@ def ssh_location = ''
 // Catalog items
 def choices = [
     'OPENTLC OpenShift Labs / OpenShift Client VM',
+    'OPENTLC OpenShift Labs / OpenShift 3.9 - Client VM',
     'DevOps Deployment Testing / OpenShift Client VM - Testing',
     'DevOps Team Development / DEV OpenShift Client VM',
 ].join("\n")
 
 def ocprelease_choice = [
     '3.11.16',
-    '3.9.41',
-    '3.7.23',
-    '3.6.173.0.49',
     '3.10.34',
     '3.10.14',
+    '3.9.41',
+    '3.9.31',
+    '3.7.23',
+    '3.6.173.0.49',
 ].join("\n")
 
 def region_choice = [
@@ -81,7 +83,6 @@ pipeline {
             environment {
                 uri = "${cf_uri}"
                 credentials = credentials("${opentlc_creds}")
-                CURLOPT = "-k"
             }
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
@@ -182,7 +183,6 @@ pipeline {
                 uri = "${cf_uri}"
                 credentials = credentials("${opentlc_creds}")
                 admin_credentials = credentials("${opentlc_admin_creds}")
-                CURLOPT = '-k'
             }
             /* This step uses the delete_svc_guid.sh script to retire
              the service from CloudForms */
@@ -241,7 +241,6 @@ pipeline {
                 ]
             ) {
                 sh """
-                export CURLOPT='-k'
                 export uri="${cf_uri}"
                 ./opentlc/delete_svc_guid.sh '${guid}'
                 """
