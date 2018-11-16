@@ -50,7 +50,7 @@ pipeline {
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
             steps {
-                git 'https://github.com/fridim/cloudforms-oob'
+                git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
@@ -139,7 +139,7 @@ pipeline {
             /* This step uses the delete_svc_guid.sh script to retire
              the service from CloudForms */
             steps {
-                git 'https://github.com/fridim/cloudforms-oob'
+                git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 sh "./opentlc/delete_svc_guid.sh '${guid}'"
             }
@@ -191,7 +191,7 @@ pipeline {
 
     post {
         failure {
-            git 'https://github.com/fridim/cloudforms-oob'
+            git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
             /* retire in case of failure */
             withCredentials(
                 [
