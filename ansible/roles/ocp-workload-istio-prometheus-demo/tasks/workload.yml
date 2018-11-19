@@ -1,0 +1,159 @@
+---
+
+- name: check if user is cluster admin
+  shell: "oc get project default"
+  register: default_project_result
+  ignore_errors: true
+  changed_when: false
+
+- fail:
+    msg: "User does not have cluster-admin rights to install Istio"
+  when: default_project_result is failed
+
+- name: define user ocp_operator_project
+  set_fact:
+    ocp_projects: "istio-operator"
+
+- name: Parse Git Repo into Vars
+  set_fact:
+    git_user: "{{ git_repo | regex_search(regexp,'\\2') }}"
+    git_repo_short: "{{ git_repo | regex_search(regexp,'\\3') }}"
+  vars:
+    regexp: '^https:\/\/(.*)\/(.*)\/(.*)\.git'
+
+- debug:
+    var: git_repo_short
+
+- debug:
+    var: git_user
+
+- name: Make sure we go back to default project
+  shell: "oc project default"
+
+
+
+# #######         Istio Control Plane      ############## #
+
+- name: Determine if istio-operator namespace already exists.  Provision istio operator once per OCP cluster
+  command: "oc get projects -o name"
+  register: ocp_projects
+  changed_when: false
+
+- name: Create istio-operator project
+  command: "oc new-project istio-operator"
+  when: '"project.project.openshift.io/" ~ "istio-operator" not in ocp_projects.stdout_lines'
+
+- name: Provision Istio Operator
+  shell:  "oc new-app -f https://raw.githubusercontent.com/Maistra/openshift-ansible/{{istio_maistra_branch}}/istio/istio_{{istio_community_or_product_images}}_operator_template.yaml --param=OPENSHIFT_ISTIO_MASTER_PUBLIC_URL={{master_public_url}}"
+  when: '"project.project.openshift.io/" ~ "istio-operator" not in ocp_projects.stdout_lines'
+
+- name: wait for istio operator to initialize
+  shell: "oc get deployment istio-operator -o jsonpath='{.status.availableReplicas}' -n istio-operator"
+  register: istio_operator_replicas
+  until: istio_operator_replicas.stdout == "1"
+  retries: "30"
+  delay: "30"
+
+- name: Wait for Istio Operator to initialize
+  shell: "oc logs $(oc get pods -n istio-operator -l name=istio-operator -o=jsonpath='{.items[0].metadata.name}') -n istio-operator |grep 'Watching resource istio'"
+  register: istio_operator_logs
+  until: istio_operator_logs != ""
+  retries: "30"
+  delay: "10"
+  ignore_errors: true
+
+- name: Copy istio-installation template to known path
+  template:
+    src: templates/istio-installation.yaml.j2
+    dest: /tmp/istio-installation.yaml
+  when: '"project.project.openshift.io/" ~ "istio-operator" not in ocp_projects.stdout_lines'
+
+- name: Deploy Istio Control Plane
+  shell: "oc create -n istio-operator -f /tmp/istio-installation.yaml"
+  when: '"project.project.openshift.io/" ~ "istio-system" not in ocp_projects.stdout_lines'
+
+- name: wait for istio sidecar-injector to initialize
+  shell: "oc get deployment istio-sidecar-injector -o jsonpath='{.status.availableReplicas}' -n istio-system"
+  register: sidecar_injector_replicas
+  until: sidecar_injector_replicas.stdout == "1"
+  retries: "30"
+  delay: "30"
+
+########## Setup Hello-World Projects ############
+- name: Create Hello World CI/CD Project
+  shell: |
+    oc new-project {{ocp_project_name}}-cicd --display-name='{{ocp_project_display_name}} CI/CD'
+    oc process -f https://raw.githubusercontent.com/{{git_user[0]}}/{{git_repo_short[0]}}/{{git_branch}}/k8s/production/cicd-project-template.yaml -p SOURCE_REPOSITORY_URL={{git_repo}} -p BRANCH={{git_branch}} -p APP_SUBDOMAIN={{ocp_apps_domain}} | oc create -f-
+
+#- name: Create ConfigMap in the cicd project
+#  shell: "oc create configmap istio-app-subdomain --from-literal=subdomain={{ocp_apps_domain}}"
+#
+#- name: Create Hello-World Build Config
+#  shell: "oc new-build --name=hello-world {{hello_world_git_repo}} --strategy=docker"
+#
+#- name: Create Hello-World Pipeline
+#  shell: "oc new-build --name=hello-world-pipeline {{hello_world_git_repo}} --strategy=pipeline"
+#
+- name: Create Hello World Application Project
+  shell: |
+    oc new-project {{ocp_project_name}}-prod --display-name='{{ocp_project_display_name}} Production'
+    oc process -f https://raw.githubusercontent.com/{{git_user[0]}}/{{git_repo_short[0]}}/{{git_branch}}/k8s/production/hello-world-project-template.yaml | oc create -f-
+
+- name: Setup Service Account Access
+  shell: |
+    oc adm policy add-scc-to-user anyuid -z default -n {{ocp_project_name}}-prod
+    oc adm policy add-scc-to-user privileged -z default -n {{ocp_project_name}}-prod
+    oc policy add-role-to-user edit system:serviceaccount:{{ocp_project_name}}-cicd:jenkins -n {{ocp_project_name}}-prod
+#
+#- name: Create Image Stream
+#  shell: "oc create is hello-world"
+#
+#- name: Deploy Production Deployment Config
+#  shell: oc create dc hello-world-production --image=hello-world
+#
+#- name: Deploy Canary Deployment Config
+#  shell: oc create dc hello-world-canary --image=hello-world
+#
+
+#- name: wait for Jenkins to initialize
+#  shell: "oc get deployment jenkins-ephemeral -o jsonpath='{.status.availableReplicas}' -n monitoring-demo-cicd"
+#  register: jenkins_replicas
+#  until: jenkins_replicas.stdout == "1"
+#  retries: "30"
+#  delay: "30"
+
+#- name: Start Pipeline
+#  shell: oc start-build hello-world-pipeline -n monitoring-demo-cicd
+
+#- name: Deploy
+
+#- name: Create limitrange because Istio deploys are not pre-configured with limits and requests
+#  template:
+#    src: templates/limitrange.yaml.j2
+#    dest: /tmp/{{ocp_project}}_limitrange.yaml
+#- shell: |
+#    oc create -f /tmp/{{ocp_project}}_limitrange.yaml -n {{ocp_project}}
+
+#- name: Expose routes
+#  shell: |
+#      oc expose svc istio-ingressgateway -n istio-system && \
+#      oc expose svc servicegraph -n istio-system && \
+#      oc expose svc grafana -n istio-system && \
+#      oc expose svc prometheus -n istio-system && \
+#      oc expose svc tracing -n istio-system
+#  when: '"projects/" ~ "istio-system" not in oc_projects.stdout_lines'
+#
+############################################################
+#
+#- name: "Label namespace"
+#  command: "oc label namespace {{ocp_project}} AAD='{{lab_name}}'"
+#
+#- name: Annotate the empty project as requested by user
+#  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{admin_username}} --overwrite"
+#
+#- name: Give admin_username access to ocp_project; user = {{admin_username}}
+#  shell: "oc policy add-role-to-user admin {{admin_username}} -n {{ocp_project}}"
+#
+#- name: workload Tasks Complete
+#  debug:
+#    msg: workload Tasks Complete
