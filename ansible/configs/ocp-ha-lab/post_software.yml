@@ -14,6 +14,10 @@
       template:
         src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/labs_hosts_template.{{ osrelease }}.j2"
         dest: "{{ ANSIBLE_REPO_PATH }}/workdir/labs_hosts-{{ env_type }}-{{ guid }}"
+    - name: Generate /etc/ansible/hosts file with homework8 inv template
+      template:
+        src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/hosts_homework8_template.{{ osrelease }}.j2"
+        dest: "{{ ANSIBLE_REPO_PATH }}/workdir/hosts_homework8-{{ env_type }}-{{ guid }}"
 
 - name: Run openshift host provision on the bastion
   gather_facts: False
@@ -61,6 +65,14 @@
         src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/prometheus_alerts_rules.yml"
         dest: /root/prometheus_alerts_rules.yml
 
+    - name: Copy over homework8 hosts file, lab version
+      copy:
+        backup: no
+        src: "{{ ANSIBLE_REPO_PATH }}/workdir/hosts_homework8-{{ env_type }}-{{ guid }}"
+        dest: /etc/ansible/hosts
+      tags:
+        - overwrite_hosts_with_hosts_homework8
+
     - name: Copy over ansible hosts file, lab version
       copy:
         backup: no
@@ -85,10 +97,10 @@
       template:
         src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/pvs.j2"
         dest: "/root/pvs-{{ env_type }}-{{ guid }}.yml"
-      tags: [ gen_pv_file ]
       when: pv_list.0 is defined
       tags:
         - openshift_nfs_config
+        - gen_pv_file
     - set_fact:
         pv_size: "{{user_vols_size}}"
         persistentVolumeReclaimPolicy: Recycle
@@ -106,11 +118,10 @@
         - openshift_nfs_config
 
     - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
-      tags:
-        - create_user_pv
       when: pv_list.0 is defined
       tags:
         - openshift_nfs_config
+        - create_user_pv
 
     - shell: 'oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
       tags:
@@ -120,6 +131,82 @@
     - import_role:
         name: "{{ ANSIBLE_REPO_PATH }}/roles/bastion-opentlc-ipa"
       when: install_ipa_client|bool
+
+- name: Step dev tools
+  hosts: bastions
+  gather_facts: False
+  become: yes
+  tags:
+    - devops_tools
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+
+  tasks:
+  - name: Add epel-release repo
+    yum:
+      name: https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+
+  - name: vim8 repo exists?
+    stat:
+      path: /etc/yum.repos.d/lantw44-vim8-epel-7.repo
+    register: vim8_repo
+
+  - name: install Vim8 repo
+    get_url:
+      url: https://copr.fedorainfracloud.org/coprs/lantw44/vim-latest/repo/epel-7/lantw44-vim-latest-epel-7.repo
+      dest: /etc/yum.repos.d/lantw44-vim-latest-epel-7.repo
+    when: not vim8_repo.stat.exists
+
+  - name: install vim8 packages
+    yum:
+      name: "{{ packages }}"
+      state: latest
+      update_cache: true
+    vars:
+      packages:
+        - vim-minimal
+        - vim-common
+        - vim-enhanced
+        - yamllint
+
+  - name: create vimrc path
+    file:
+      path: /root/.vim
+      state: directory
+
+  - name: get Judds vimrc
+    get_url:
+      url: https://raw.githubusercontent.com/newgoliath/vim/master/home/.vim/vimrc
+      dest: /root/.vim/vimrc2
+      backup: true
+
+  - name: prep vim plugins
+    shell: |
+      git clone https://github.com/VundleVim/Vundle.vim.git \
+      ~/.vim/bundle/Vundle.vim
+      vim +PluginInstall +qall &>/dev/null
+      #        tmux -c 'vim "+Tmuxline airline" "+qall"'
+      #tmux -c 'vim "+TmuxlineSnapshot .vim/tmux.line" "+qall"'
+
+  - name: Install mosh
+    yum:
+      name: mosh
+
+  - name: Open UDP Ports 60001 - 60010 for Mosh
+    iptables:
+      action: insert
+      protocol: udp
+      destination_port: "60001:600059"
+      state: present
+      chain: INPUT
+      jump: ACCEPT
+
+  - name: Open iptables Mosh firewall ports for future sessions
+    lineinfile:
+      insertbefore: "-A INPUT -p tcp -m state --state NEW -m tcp --dport 22 -j ACCEPT"
+      state: present
+      dest: /etc/sysconfig/iptables
+      line: "-A INPUT -p udp -m multiport --dports 60001:60005 -j ACCEPT"
 
 - name: PostSoftware flight-check
   hosts: localhost

@@ -39,7 +39,7 @@ pipeline {
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
             steps {
-                git 'https://github.com/fridim/cloudforms-oob'
+                git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 script {
                     guid = sh(
@@ -47,8 +47,8 @@ pipeline {
                         script: '''
                           ./opentlc/order_svc_guid.sh \
                           -c "OpenShift Demos" \
-                          -i "OpenShift 3.9 Shared Demo Environment" \
-                          -d "check=t,quotacheck=t"
+                          -i "OpenShift 3.11 Shared Environment (TEST)" \
+                          -d "check=t,quotacheck=t,runtime=8,expiration=7,nodes=1,region=global_gpte"
                         '''
                     ).trim()
 
@@ -139,7 +139,7 @@ pipeline {
             /* This step uses the delete_svc_guid.sh script to retire
              the service from CloudForms */
             steps {
-                git 'https://github.com/fridim/cloudforms-oob'
+                git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 sh "./opentlc/delete_svc_guid.sh '${guid}'"
             }
@@ -191,7 +191,7 @@ pipeline {
 
     post {
         failure {
-            git 'https://github.com/fridim/cloudforms-oob'
+            git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
             /* retire in case of failure */
             withCredentials(
                 [

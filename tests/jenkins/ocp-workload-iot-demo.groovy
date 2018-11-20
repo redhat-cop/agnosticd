@@ -1,0 +1,1 @@
+../../ansible/roles/ocp-workload-iot-demo/integration_tests.groovy

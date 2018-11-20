@@ -14,6 +14,9 @@ def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 // SSH key
 def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
 
+// Admin host ssh location is in a credential too
+def ssh_admin_host = 'admin-host-na'
+
 // state variables
 def guid=''
 def ssh_location = ''
@@ -21,13 +24,26 @@ def ssh_location = ''
 
 // Catalog items
 def choices = [
+    'OPENTLC OpenShift Labs / OpenShift Client VM',
     'OPENTLC OpenShift Labs / OpenShift 3.9 - Client VM',
-    'OPENTLC OpenShift Labs / OpenShift 3.7 - Client VM',
-    'OPENTLC OpenShift Labs / OpenShift 3.5 - Client VM',
-    'DevOps Deployment Testing / OCP 3.9 Client VM Testing',
-    'DevOps Deployment Development / DEV OCP 3.9 Client VM',
+    'DevOps Deployment Testing / OpenShift Client VM - Testing',
+    'DevOps Team Development / DEV OpenShift Client VM',
 ].join("\n")
 
+def ocprelease_choice = [
+    '3.11.16',
+    '3.10.34',
+    '3.10.14',
+    '3.9.41',
+    '3.9.31',
+].join("\n")
+
+def region_choice = [
+    'na',
+    'emea',
+    'latam',
+    'apac',
+].join("\n")
 
 pipeline {
     agent any
@@ -47,6 +63,17 @@ pipeline {
             description: 'Catalog item',
             name: 'catalog_item',
         )
+        choice(
+            choices: ocprelease_choice,
+            description: 'Catalog item',
+            name: 'ocprelease',
+        )
+
+        choice(
+            choices: region_choice,
+            description: 'Region',
+            name: 'region',
+        )
     }
 
     stages {
@@ -58,11 +85,13 @@ pipeline {
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
             steps {
-                git url: 'https://github.com/fridim/cloudforms-oob'
+                git url: 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
+                    def ocprelease = params.ocprelease.trim()
+                    def region = params.region.trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -71,7 +100,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,quotacheck=t'
+                          -d 'check=t,quotacheck=t,ocprelease=${ocprelease},runtime=8,expiration=7,region=${region}'
                         """
                     ).trim()
 
@@ -156,7 +185,7 @@ pipeline {
             /* This step uses the delete_svc_guid.sh script to retire
              the service from CloudForms */
             steps {
-                git 'https://github.com/fridim/cloudforms-oob'
+                git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 sh "./opentlc/delete_svc_guid.sh '${guid}'"
             }
@@ -201,7 +230,7 @@ pipeline {
 
     post {
         failure {
-            git 'https://github.com/fridim/cloudforms-oob'
+            git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
             /* retire in case of failure */
             withCredentials(
                 [
@@ -213,6 +242,21 @@ pipeline {
                 export uri="${cf_uri}"
                 ./opentlc/delete_svc_guid.sh '${guid}'
                 """
+            }
+
+            /* Print ansible logs */
+            withCredentials([
+                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
+                sshUserPrivateKey(
+                    credentialsId: ssh_creds,
+                    keyFileVariable: 'ssh_key',
+                    usernameVariable: 'ssh_username')
+            ]) {
+                sh("""
+                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
+                    "find deployer_logs -name '*${guid}*log' | xargs cat"
+                """.trim()
+                )
             }
 
             withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
