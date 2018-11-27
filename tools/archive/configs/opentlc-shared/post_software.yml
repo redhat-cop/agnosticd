@@ -1,0 +1,246 @@
+- name: Step 00xxxxx post software
+  hosts: support
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: Create user vols
+      shell: "mkdir -p /srv/nfs/user-vols/vol{1..{{user_vols}}}"
+    - name: chmod the user vols
+      shell: "chmod -R 777 /srv/nfs/user-vols"
+
+- name: Step 00xxxxx post software
+  hosts: bastions
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: get nfs Hostname
+      set_fact:
+        nfs_host: "{{item}}"
+      with_items:
+        - "{{groups['tag_AnsibleGroup_nfs']}}"
+      when: '"{{env_type}}-{{guid}}" in hostvars[item].{{cloud_provider}}_tag_Project'
+
+    - set_fact:
+        pv_size: '10Gi'
+        pv_list: "{{ ocp_pvs }}"
+        persistentVolumeReclaimPolicy: Retain
+
+    - name: Generate PV file
+      template:
+        src: "{{ ANSIBLE_REPO_PATH | default('.') }}/files/pvs.j2"
+        dest: "/root//pvs-{{ env_type }}-{{ guid }}.yml"
+      tags: [ gen_pv_file ]
+
+    - set_fact:
+        pv_size: "{{user_vols_size}}"
+        persistentVolumeReclaimPolicy: Recycle
+
+    # - file:
+    #     path: /etc/exports.d/"{{ env_type }}"-"{{ guid }}".uservols.exports
+    #     state: touch
+    #     mode: 755
+    #
+    # - name: create exports file
+    #   lineinfile:
+    #     dest: "/etc/exports.d/{{ env_type }}-{{ guid }}.uservols.exports"
+    #     line: '/srv/nfs/vol{{ item }} *(rw,root_squash,no_wdelay,sync)'
+    #     state: present
+    #   with_sequence: start=1 end="{{user_vols}}"
+
+      notify: restart nfs services
+      run_once: True
+
+    - name: Generate user vol PV file
+      template:
+        src: "{{ ANSIBLE_REPO_PATH | default('.') }}/files/userpvs.j2"
+        dest: "/root/userpvs-{{ env_type }}-{{ guid }}.yml"
+      tags:
+        - gen_user_vol_pv
+
+    - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
+
+    - shell: 'oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
+
+- name: Configure Bastion for CF integration
+  hosts: bastions
+  become: yes
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tags: [ env-specific, cf_integration ]
+  tasks:
+    # This requires password :(
+    #- shell: "git clone http://github.com/redhat-gpe/OPEN_Admin /opt/OPEN_Admin/"
+    - name: Configure OPENTLC CloudForms integration
+      shell: "useradd opentlc-mgr"
+      ignore_errors: true
+    # - hostname:
+    #   name: "bastion.{{guid}}.openshift.opentlc.com"
+
+  #  - shell: "chown -R opentlc-mgr.opentlc-mgr /opt/OPEN_Admin/"
+    - file: "path=/opt/OPEN_Admin/ state=directory owner=opentlc-mgr recurse=yes group=opentlc-mgr  mode=0770"
+    - shell: "cp -rf /root/.kube /home/opentlc-mgr/"
+      ignore_errors: true
+    - shell: "chown -R opentlc-mgr.opentlc-mgr /home/opentlc-mgr/.kube"
+      ignore_errors: true
+    - shell: |
+          mkdir /home/opentlc-mgr/bin;
+          ln -s /opt/OPEN_Admin/OPENTLC-OCP3/provision-ose-projects.sh /home/opentlc-mgr/bin/provision-accounts.sh
+          ln -s /opt/OPEN_Admin/OPENTLC-OCP3/provision-ose-projects.sh /home/opentlc-mgr/bin/provision-ose-projects.sh
+          mkdir /home/opentlc-mgr/.ssh
+          echo 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC4OojwKH74UWVOY92y87Tb/b56CMJoWbz2gyEYsr3geOc2z/n1pXMwPfiC2KT7rALZFHofc+x6vfUi6px5uTm06jXa78S7UB3MX56U3RUd8XF3svkpDzql1gLRbPIgL1h0C7sWHfr0K2LG479i0nPt/X+tjfsAmT3nWj5PVMqSLFfKrOs6B7dzsqAcQPInYIM+Pqm/pXk+Tjc7cfExur2oMdzx1DnF9mJaj1XTnMsR81h5ciR2ogXUuns0r6+HmsHzdr1I1sDUtd/sEVu3STXUPR8oDbXBsb41O5ek6E9iacBJ327G3/1SWwuLoJsjZM0ize+iq3HpT1NqtOW6YBLR opentlc-mgr@inf00-mwl.opentlc.com' >> /home/opentlc-mgr/.ssh/authorized_keys
+          chown -R opentlc-mgr.opentlc-mgr /home/opentlc-mgr/.ssh
+          chmod 400 /home/opentlc-mgr/.ssh/authorized_keys
+          chmod 700 /home/opentlc-mgr/.ssh
+
+- name: env-specific infrastructure
+  hosts: masters
+  become: yes
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - env-specific_infra
+  tasks:
+
+    - name: Give administrative user cluster-admin privileges
+      command: "oc adm policy add-cluster-role-to-user cluster-admin {{ admin_user }}"
+
+    - name: Check for admin_project project
+      command: "oc get project {{admin_project}}"
+      register: result
+      ignore_errors: true
+    - name: Create admin_project project
+      command: "oc adm new-project {{admin_project}} --admin {{admin_user}} --node-selector='env=infra'"
+      when: result | failed
+
+    - name: Make admin_project project network global
+      command: "oc adm pod-network make-projects-global {{admin_project}}"
+
+    - name: Set admin_project SCC for anyuid
+      command: "oc adm policy add-scc-to-group anyuid system:serviceaccounts:{{admin_project}}"
+
+    - name: Add capabilities within anyuid which is not really ideal
+      command: "oc patch scc/anyuid --patch '{\"requiredDropCapabilities\":[\"MKNOD\",\"SYS_CHROOT\"]}'"
+
+- name: Remove all users from self-provisioners group
+  hosts: masters
+  become: yes
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tags: [ env-specific, remove_self_provisioners ]
+  tasks:
+
+    - name: Remove system:authenticated from self-provisioner role
+      shell: "oadm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
+      ignore_errors: true
+    - name: create our own OPENTLC-PROJECT-PROVISIONERS
+      shell: "oadm groups new OPENTLC-PROJECT-PROVISIONERS"
+      ignore_errors: true
+    - name: allow OPENTLC-PROJECT-PROVISIONERS members to provision their own projects
+      shell: "oadm policy add-cluster-role-to-group self-provisioner OPENTLC-PROJECT-PROVISIONERS"
+
+- name: Project Request Template
+  hosts: masters
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - project_request
+  tasks:
+
+    - name: Copy project request template to master
+      copy:
+        src: ./files/project-template.yml
+        dest: /root/project-template.yml
+
+    - name: Check for project request template
+      command: "oc get template project-request -n default"
+      register: request_template
+      ignore_errors: true
+
+    - name: Create project request template in default project
+      shell: "oc create -f /root/project-template.yml -n default || oc replace -f /root/project-template.yml -n default"
+      when: request_template | failed
+
+
+    - name: Update master config file to use project request template
+      lineinfile:
+        regexp: "  projectRequestTemplate"
+        dest: "/etc/origin/master/master-config.yaml"
+        line: '  projectRequestTemplate: "default/project-request"'
+        state: present
+      register: master_config
+
+    - name: Add Project request message
+      replace:
+        dest: '/etc/origin/master/master-config.yaml'
+        regexp: 'projectRequestMessage.*'
+        replace: "projectRequestMessage: '{{project_request_message}}'"
+        backup: yes
+
+
+    - name: Restart master service
+      service:
+        name: atomic-openshift-master
+        state: restarted
+      when: master_config.changed
+
+- name: node admin configs
+  hosts: nodes
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - env_specific_images
+  tasks:
+
+    - name: 'Pull image'
+      command: "docker pull {{ item }}"
+      with_items: '{{ env_specific_images }}'
+    - name: configure syslogd
+      copy:
+        src: ./files/logrotate.d_syslog
+        dest: /etc/logrotate.d/syslog
+
+    ## We need to check that this one work as expected
+    - name: Insert Garbage collection block
+      tags:
+        - garbage_collection_block
+      blockinfile:
+        state: present
+        dest: "/etc/origin/node/node-config.yaml"
+        marker: "### {mark} ANSIBLE MANAGED BLOCK ###"
+        insertafter: "kubeletArguments:"
+        block: |2
+            image-gc-high-threshold:
+              - "90"
+            image-gc-low-threshold:
+              - "80"
+    - name: restart atomic node after changes
+      shell: "systemctl restart atomic-openshift-node.service"
+      tags:
+        - garbage_collection_block
+
+- name: Install Nexus
+  hosts: masters
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  run_once: true
+  roles:
+    - { role: "nexus2-container", desired_project: "{{admin_project}}" }
+  tags:
+    - env-specific
+    - install_nexus

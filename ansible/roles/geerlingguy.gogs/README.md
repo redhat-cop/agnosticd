@@ -41,7 +41,7 @@ MySQL database support. Set `gogs_use_mysql` to `true` to configure MySQL for go
 ## Example Playbook
 
     - hosts: servers
-      vars_files:
+      
         - vars/main.yml
       roles:
         - geerlingguy.gogs

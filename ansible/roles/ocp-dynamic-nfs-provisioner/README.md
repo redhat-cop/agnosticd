@@ -43,7 +43,7 @@ Example Playbook
   tasks:
   - name: Set up Dynamic NFS Provisioning
       include_role:
-        name: "{{ ANSIBLE_REPO_PATH }}/roles/ocp-dynamic-nfs-provisioner"
+        name: "ocp-dynamic-nfs-provisioner"
       vars:
         nfs_provisioner_nfs_server_hostname: "support.GUID.internal"
         nfs_provisioner_storage_class_is_default: True
