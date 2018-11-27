@@ -6,6 +6,8 @@ ORIG=$(cd $(dirname $0); cd ../..; pwd)
 ansible_path=${ORIG}/ansible
 static=${ORIG}/tests/static
 
+cd ${ORIG}
+
 for i in ${static}/scenarii/*.{yaml,yml}; do
     config=$(basename "${i}")
 
