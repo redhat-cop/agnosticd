@@ -30,4 +30,4 @@ Example Playbook
     - hosts: masters
       run_once: true
       roles:
-        - { role: "{{ ANSIBLE_REPO_PATH }}/roles/ocp-infra-nexus", nexus_project: "sonatype-nexus" }
+        - { role: "ocp-infra-nexus", nexus_project: "sonatype-nexus" }
