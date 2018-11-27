@@ -12,5 +12,5 @@ ansible-playbook main.yml  -e "guid=${GUID}" -e "env_type=${ENVTYPE}" \
   -e "HostedZoneId=${HOSTZONEID}" -e "key_name=${KEYNAME}" \
   -e "subdomain_base_suffix=${BASESUFFIX}" \
   -e "software_to_deploy=openshift" \
-  -e "ANSIBLE_REPO_PATH=${DEPLOYER_REPO_PATH}" --skip-tags=remove_self_provisioners \
+  -e "ANSIBLE_REPO_PATH | default('.')=${DEPLOYER_REPO_PATH}" --skip-tags=remove_self_provisioners \
   -t step000,step001

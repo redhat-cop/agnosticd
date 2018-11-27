@@ -1,0 +1,170 @@
+---
+- name: Step 001 Deploy Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - step001
+    - deploy_infrastructure
+  tasks:
+    - name: Generate Ravello Template
+      template:
+        src: "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.j2"
+        dest: "{{ ANSIBLE_REPO_PATH | default('.') }}/workdir/{{cloud_provider}}_cloud_template.{{ env_type }}.{{ guid }}.template"
+      tags:
+        - ravello_infrastructure_deployment
+        - gen_rav_template
+    ######################### Create Ravello Blueprint
+
+    - name: display variables for create blueprint based on {{ app_template }}
+      debug:
+        var: "{{ item }}"
+        verbosity: 1
+      with_items:
+        - blueprint_name
+        - blueprint_description
+
+    - name: create blueprint based on {{ app_template }}
+      local_action:
+        module: ravello_app
+        app_name: "{{ blueprint_name }}"
+        description: "{{ blueprint_description }}"
+        app_template: "{{ ANSIBLE_REPO_PATH | default('.') }}/workdir/{{cloud_provider}}_cloud_template.{{ env_type }}.{{ guid }}.template"
+        state: design
+      register: design_results
+      tags:
+        - ravello_infrastructure_deployment
+        - create_ravello_blueprint
+
+    - debug:
+        var: "{{ item }}"
+        verbosity: 1
+      with_items:
+        - design_results.name
+        - design_results.blueprint_id
+
+    ######################### Start application from Ravello Blueprint
+
+    - name: display variables for create application based on deployed blueprint and wait for start
+      debug:
+        var: "{{ item }}"
+        verbosity: 1
+      with_items:
+        - application_name
+        - application_description
+        - design_results.blueprint_id
+        - wait_timeout
+
+    - name: create application based on deployed blueprint and wait for start
+      local_action:
+        module: ravello_app
+        app_name: "{{ application_name }}"
+        description: "{{ application_description }}"
+        state: present
+        blueprint_id: "{{ design_results.blueprint_id }}"
+        wait_timeout: "{{ wait_timeout }}"
+        application_ttl: "{{ env_expire }}"
+      register: app_results
+
+    - debug:
+        var: "{{ item }}"
+        verbosity: 1
+      with_items:
+        - app_results.app_name
+        - app_results.app_id
+
+    - name: delete blueprint used to create application
+      local_action:
+        blueprint_name: "{{ design_results.app_name + '-bp' }}"
+        blueprint_id: "{{ design_results.blueprint_id }}"
+        app_name: "{{ app_results.app_name }}"
+        module: ravello_app
+        state: blueprint_delete
+      register: bp_delete_results
+
+    - debug:
+        var: bp_delete_results
+        verbosity: 1
+
+
+######################### Update the inventory
+
+#    - name: Refresh cloud_provider cache
+#      shell: "{{ ANSIBLE_REPO_PATH | default('.') }}/inventory/{{ cloud_provider }}.py  --list {{ app_results.app_name }}"
+#      when: "not tower_run == 'true'"
+#      register: task_result
+#      until: task_result.rc == 0
+#      retries: 5
+#      delay: 30
+#      ignore_errors: yes
+#      tags:
+#       - refresh_inventory
+#       - refresh_inventory_script
+#
+#    - name: Refresh in-memory cloud_provider cache
+#      meta: refresh_inventory
+#      tags:
+#        - refresh_inventory
+#
+
+######################### Update the inventory
+
+    - name: Refresh cloud_provider cache
+      shell: "{{ ANSIBLE_REPO_PATH | default('.') }}/inventory/{{ cloud_provider }}.py  --list {{ app_results.app_name }}"
+      when: "not tower_run == 'true'"
+      register: task_result
+      until: task_result.rc == 0
+      retries: 5
+      delay: 30
+      ignore_errors: yes
+      tags:
+        - refresh_inventory
+        - refresh_inventory_script
+
+    - name: Refresh in-memory cloud_provider cache
+      meta: refresh_inventory
+      tags:
+        - refresh_inventory
+    - copy:
+        content: '{{ task_result.stdout }}'
+        dest: '{{ ANSIBLE_REPO_PATH | default('.') }}/stdout'
+    - name: Set inventory ravello groups as fact
+      set_fact:
+        ravello_groups: "{{ task_result.stdout | from_json }}"
+    - debug:
+        var: ravello_groups
+
+- name: Configure local ssh config for bastion proxy use
+  import_playbook: "{{ ANSIBLE_REPO_PATH | default('.') }}/cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
+
+- name: Wait for environment Readiness
+  hosts:
+    - bastion
+    - "{{ ('tag_Project_' ~ env_type ~ '_' ~ guid) | replace('-', '_') }}"
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_secret_vars.yml"
+  gather_facts: false
+  any_errors_fatal: True
+  become: true
+  tags:
+    - step001
+    - wait_ssh
+    - set_hostname
+  tasks:
+    - name: wait for host to be available and set hostnames
+      wait_for:
+        host: '{{ inventory_hostname }}'
+        port: 22
+        search_regex: OpenSSH
+      delegate_to: localhost
+      become: false
+    - debug:
+        msg: "{{hostvars[inventory_hostname]}}"
+    - name: Set hostname based on ec2_tag_internaldns
+      hostname:
+        name: "{{inventory_hostname}}"

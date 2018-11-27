@@ -1,0 +1,217 @@
+---
+# Run the Infra steps (step000, step001,step002)
+
+################################################################################
+################################################################################
+############ Step 000 Pre Infrastructure Deploy Tasks
+################################################################################
+################################################################################
+
+- import_playbook: "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/pre_infra.yml"
+  tags:
+    - step000
+    - pre_infra_tasks
+
+#################################################################################
+#################################################################################
+############# Step 001 Deploy Infrastructure
+#################################################################################
+#################################################################################
+
+- import_playbook: "{{ ANSIBLE_REPO_PATH | default('.') }}/cloud_providers/{{ cloud_provider }}_infrastructure_deployment.yml"
+  tags:
+    - step001
+    - deploy_infrastructure
+
+# Before continuing this playbook, assert that there is at least one new node
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: Assert new_node_instance_count and node_instance_count are setup properly.
+      tags: assert_new_node
+      assert:
+        that:
+          - (groups['nodes'] | length) == (node_instance_count|int)
+          - groups['newnodes'] | length > 0
+
+    - name: Ensure one bastion is present
+      assert:
+        that: groups['bastions'] | length > 0
+
+#################################################################################
+#################################################################################
+############# Step 002 Post Infrastructure Deploy Tasks
+#################################################################################
+#################################################################################
+
+- import_playbook: "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/post_infra.yml"
+  tags:
+    - step002
+    - post_infra_tasks
+
+#################################################################################
+#################################################################################
+############## Step 003 Pre Software Deploy Tasks
+#################################################################################
+#################################################################################
+# Run pre-software steps on new nodes, or all of them if we can't do just the new nodes ( pre_software playbook)
+
+
+- name: Configure all hosts with Repositories, Common Files and Set environment key
+  hosts:
+    - "newnodes"
+  become: true
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - step004
+    - common_tasks
+  roles:
+    - { role: "set-repositories", when: 'repo_method is defined' }
+    - { role: "common", when: 'install_common' }
+    - { role: "set_env_authorized_key", when: 'set_env_authorized_key' }
+
+
+- name: PreSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - flight_check
+  tasks:
+    - debug:
+        msg: "Pre-Software checks completed successfully"
+
+# Run openshift-node role on the new hosts
+
+- name: Configuring openshift-nodes
+  gather_facts: False
+  become: yes
+
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_secret_vars.yml"
+  hosts:
+    - "newnodes"
+  roles:
+    - "openshift-node"
+  tags:
+    - openshift_node_tasks
+
+- name: Step 00xxxxx bastion preparation for OpenShift deployment
+  hosts: bastions
+  become: true
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - openshift_host_templates
+  tasks:
+    - name: generate ansible hosts file, keep it under workdir
+      template:
+        src: "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/files/hosts_template.j2"
+        dest: "{{ ANSIBLE_REPO_PATH | default('.') }}/workdir/scaleup_hosts-{{ env_type }}-{{ guid }}"
+      delegate_to: localhost
+      become: false
+      tags:
+        - generate_ansible_hosts_file
+    - name: Copy over ansible hosts file
+      copy:
+        src: "{{ ANSIBLE_REPO_PATH | default('.') }}/workdir/scaleup_hosts-{{ env_type }}-{{ guid }}"
+        dest: /etc/ansible/scaleup_hosts
+
+## Run Scaleup playbook
+
+- name: Run OpenShift Scaleup playbook on first bastion
+  gather_facts: False
+  become: yes
+  hosts: bastions[0]
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - installing_openshift
+  ## Change to scale up, and change inventory file
+  tasks:
+    - name: run scaleup playbook
+      shell: "ansible-playbook -i /etc/ansible/scaleup_hosts /usr/share/ansible/openshift-ansible/playbooks/byo/openshift-node/scaleup.yml"
+      register: openshift_install_log
+      tags:
+        - openshift_installer
+    - name: show output of the scaleup playbook
+      debug:
+        var: openshift_install_log
+        verbosity: 2
+
+- name: Tag freshly created node as node
+  hosts: localhost
+  connection: local
+  become: False
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - generate_ansible_hosts_file
+  tasks:
+    # untag nodes, remove newnode tag
+    - name: Ensure tags 'newnode' for instance is set to 'false'
+      ec2_tag:
+        region: "{{ aws_region_final|d(aws_region) }}"
+        resource: "{{ hostvars[item].instance_id }}"
+        tags:
+          newnode: false
+      with_items: "{{ groups['newnodes'] }}"
+      when: cloud_provider == 'ec2'
+
+- name: Remove hosts from group newnodes
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_secret_vars.yml"
+  hosts: newnodes
+  tasks:
+    - group:
+        name: newnodes
+        state: absent
+
+## Generate new /etc/ansible/hosts file
+- name: Update /etc/ansible/host file on bastion
+  hosts: bastions
+  become: true
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - openshift_host_templates
+  tasks:
+    - debug:
+        msg: "WARNING: s3user credentials not set"
+      when: s3user_access_key is not defined
+
+    - name: generate ansible hosts file, keep it under workdir
+      template:
+        src: "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/files/hosts_template.j2"
+        dest: "{{ ANSIBLE_REPO_PATH | default('.') }}/workdir/hosts-{{ env_type }}-{{ guid }}"
+      delegate_to: localhost
+      become: false
+      tags:
+        - generate_ansible_hosts_file
+
+    - name: Copy over ansible hosts file
+      copy:
+        src: "{{ ANSIBLE_REPO_PATH | default('.') }}/workdir/hosts-{{ project_tag }}"
+        dest: /etc/ansible/hosts
+        backup: yes

@@ -50,7 +50,7 @@ WORKLOAD="ocp-client-vm"
 ansible-playbook -i ${TARGET_HOST}, ./configs/ocp-workloads/ocp-workload.yml \
                  -e"ansible_ssh_private_key_file=~/.ssh/${SSH_PRIVATE_KEY}" \
                  -e"ansible_ssh_user=${SSH_USERNAME}" \
-                    -e"ANSIBLE_REPO_PATH=`pwd`" \
+                    -e"ANSIBLE_REPO_PATH | default('.')=`pwd`" \
                     -e"ocp_workload=${WORKLOAD}" \
                     -e"ACTION=create"
 
