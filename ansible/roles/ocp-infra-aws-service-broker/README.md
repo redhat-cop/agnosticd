@@ -27,8 +27,8 @@ Example Playbook
   hosts: masters
   gather_facts: False
   become: yes
-  vars_files:
-    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  
+    
   run_once: true
   roles:
     - { role: "aws-broker" }
