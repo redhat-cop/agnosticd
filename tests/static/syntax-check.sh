@@ -36,4 +36,10 @@ for i in ${static}/scenarii/*.{yaml,yml}; do
                      -e ANSIBLE_REPO_PATH=${ansible_path} \
                      ${ansible_path}/destroy.yml \
                      -e @${i}
+    ansible-playbook --syntax-check \
+                     --list-tasks \
+                     "${inventory[@]}" \
+                     -e ANSIBLE_REPO_PATH=${ansible_path} \
+                     ${ansible_path}/configs/${env_type}/destroy_env.yml \
+                     -e @${i}
 done
