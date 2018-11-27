@@ -42,4 +42,24 @@ for i in ${static}/scenarii/*.{yaml,yml}; do
                      -e ANSIBLE_REPO_PATH=${ansible_path} \
                      ${ansible_path}/configs/${env_type}/destroy_env.yml \
                      -e @${i}
+
+    echo
+    echo "Without setting ANSIBLE_REPO_PATH:"
+
+    ansible-playbook --syntax-check \
+                     --list-tasks \
+                     "${inventory[@]}" \
+                     ${ansible_path}/main.yml \
+                     -e @${i}
+    ansible-playbook --syntax-check \
+                     --list-tasks \
+                     "${inventory[@]}" \
+                     ${ansible_path}/destroy.yml \
+                     -e @${i}
+    ansible-playbook --syntax-check \
+                     --list-tasks \
+                     "${inventory[@]}" \
+                     ${ansible_path}/configs/${env_type}/destroy_env.yml \
+                     -e @${i}
+
 done
