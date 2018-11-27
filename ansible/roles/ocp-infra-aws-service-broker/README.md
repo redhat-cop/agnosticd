@@ -28,10 +28,10 @@ Example Playbook
   gather_facts: False
   become: yes
   vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
   run_once: true
   roles:
-    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/aws-broker" }
+    - { role: "aws-broker" }
 
 License
 -------

@@ -26,9 +26,9 @@ Example Playbook
   gather_facts: False
   become: yes
   vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
   roles:
-    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/openwhisk" }
+    - { role: "openwhisk" }
 
 License
 -------
