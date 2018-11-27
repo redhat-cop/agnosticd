@@ -6,6 +6,8 @@ ORIG=$(cd $(dirname $0); cd ../..; pwd)
 ansible_path=${ORIG}/ansible
 static=${ORIG}/tests/static
 
+cd ${ORIG}
+
 for i in ${static}/scenarii/*.{yaml,yml}; do
     config=$(basename "${i}")
 
@@ -21,17 +23,28 @@ for i in ${static}/scenarii/*.{yaml,yml}; do
     echo '############################'
     echo "${config}"
     echo '############################'
-    touch ${ansible_path}/configs/${env_type}/env_secret_vars.yml
-    ansible-playbook --syntax-check \
-                     --list-tasks \
-                     "${inventory[@]}" \
-                     -e ANSIBLE_REPO_PATH=${ansible_path} \
-                     ${ansible_path}/main.yml \
-                     -e @${i}
-    ansible-playbook --syntax-check \
-                     --list-tasks \
-                     "${inventory[@]}" \
-                     -e ANSIBLE_REPO_PATH=${ansible_path} \
-                     ${ansible_path}/destroy.yml \
-                     -e @${i}
+
+    for playbook in \
+        ${ansible_path}/main.yml \
+        ${ansible_path}/destroy.yml \
+        ${ansible_path}/configs/${env_type}/destroy_env.yml \
+        ${ansible_path}/configs/${env_type}/scaleup.yml; do
+        if [ -e "${playbook}" ]; then
+            echo
+            echo -n "With ANSIBLE_REPO_PATH: "
+            ansible-playbook --syntax-check \
+                             --list-tasks \
+                             "${inventory[@]}" \
+                             -e ANSIBLE_REPO_PATH=${ansible_path} \
+                             "${playbook}" \
+                             -e @${i}
+            echo -n "Without ANSIBLE_REPO_PATH: "
+
+            ansible-playbook --syntax-check \
+                            --list-tasks \
+                            "${inventory[@]}" \
+                            "${playbook}" \
+                            -e @${i}
+        fi
+    done
 done
