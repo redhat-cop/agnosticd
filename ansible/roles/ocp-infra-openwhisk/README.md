@@ -25,8 +25,6 @@ Example Playbook
   run_once: true
   gather_facts: False
   become: yes
-  
-    
   roles:
     - { role: "openwhisk" }
 
