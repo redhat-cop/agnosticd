@@ -51,7 +51,7 @@ None.
 ## Example Playbook
 
     - hosts: utility
-      
+      vars_files: 
         - vars/main.yml
       roles:
         - geerlingguy.nodejs

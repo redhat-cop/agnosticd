@@ -27,8 +27,6 @@ Example Playbook
   hosts: masters
   gather_facts: False
   become: yes
-  
-    
   run_once: true
   roles:
     - { role: "aws-broker" }
