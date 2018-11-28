@@ -11,7 +11,6 @@ ansible-playbook main.yml  -e "guid=${GUID}" -e "env_type=${ENVTYPE}" \
   -e "cloud_provider=${CLOUDPROVIDER}" -e "aws_region=${REGION}" \
   -e "HostedZoneId=${HOSTZONEID}" -e "key_name=${KEYNAME}" \
   -e "subdomain_base_suffix=${BASESUFFIX}" \
-  -e "## SB Don't set software_to_deploy from here, always use extra vars (-e) or "none" will be used
-#software_to_deploy:=openshift" \
+  -e "software_to_deploy=openshift" \
   -e "ANSIBLE_REPO_PATH | default('.')=${DEPLOYER_REPO_PATH}" --skip-tags=remove_self_provisioners \
   -t step000,step001
