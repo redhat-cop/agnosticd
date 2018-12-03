@@ -17,6 +17,8 @@ set -xe -o pipefail
 ORIG=$(cd $(dirname $0); cd ..; pwd)
 DEPLOYER_REPO_PATH="${ORIG}/ansible"
 
+export ANSIBLE_CONFIG=${DEPLOYER_REPO_PATH}/ansible.cfg
+
 . "$1"
 
 if [ -z "${GUID}" ]; then
