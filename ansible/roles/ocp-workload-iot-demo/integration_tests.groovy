@@ -55,6 +55,14 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
+                    def cfparams = [
+                        'check=t',
+                        'quotacheck=t',
+                        "region=global_gpte",
+                        'expiration=7',
+                        'runtime=8',
+                        'users=2',
+                    ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -63,7 +71,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,quotacheck=t'
+                          -d '${cfparams}'
                         """
                     ).trim()
 
