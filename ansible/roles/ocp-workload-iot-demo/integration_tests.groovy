@@ -63,6 +63,7 @@ pipeline {
                         'expiration=7',
                         'runtime=8',
                         'users=2',
+                        'nodes=2',
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
