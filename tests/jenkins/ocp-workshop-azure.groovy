@@ -73,6 +73,7 @@ pipeline {
             environment {
                 uri = "${cf_uri}"
                 credentials = credentials("${opentlc_creds}")
+                DEBUG = 'true'
             }
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
@@ -173,6 +174,7 @@ pipeline {
                 uri = "${cf_uri}"
                 credentials = credentials("${opentlc_creds}")
                 admin_credentials = credentials("${opentlc_admin_creds}")
+                DEBUG = 'true'
             }
             /* This step uses the delete_svc_guid.sh script to retire
              the service from CloudForms */
@@ -232,6 +234,7 @@ pipeline {
             ) {
                 sh """
                 export uri="${cf_uri}"
+                export DEBUG=true
                 ./opentlc/delete_svc_guid.sh '${guid}'
                 """
             }
