@@ -18,7 +18,7 @@ def openshift_location = ''
 // Catalog items
 def choices = [
     'DevOps Shared Cluster Development / DEV - IOT Enterprise 4.0 Demo',
-    'IoT Demos / IoT Enterprise 4.0 Demo',
+    'IoT Demos / IoT Industry 4.0 Demo',
 ].join("\n")
 
 pipeline {
