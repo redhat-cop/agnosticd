@@ -1,20 +1,115 @@
 ---
 - name: Step 00xxxxx software
-  hosts: localhost
-  gather_facts: False
+  hosts: bastions
+  gather_facts: false
   become: false
   tasks:
-    - debug:
-        msg: "Software tasks started"
-#
-# - name: Set up ClientVM
-#   hosts: bastions
-#   gather_facts: false
-#   become: true
-#   tasks:
-#   - name: Set up Client VM
-#     include_role:
-#       name: "ocp-client-vm"
+    - when: install_ocp4 | bool
+      block:
+        - name: Get awscli bundle
+          get_url:
+            url: https://s3.amazonaws.com/aws-cli/awscli-bundle.zip
+            dest: /tmp/awscli-bundle.zip
 
-    - debug:
-        msg: "Software tasks completed"
+        - name: Unzip awscli-bundle.zip
+          unarchive:
+            src: /tmp/awscli-bundle.zip
+            dest: /tmp/
+            remote_src: yes
+
+        - name: Install awscli
+          command: /tmp/awscli-bundle/install -i /usr/local/aws -b /bin/aws
+          args:
+            creates: /usr/local/aws
+          become: yes
+
+        - name: cleanup archive and tmp files
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/awscli-bundle
+            - /tmp/awscli-bundle.zip
+
+        - name: Create .aws directory
+          file:
+            path: ~/.aws
+            state: directory
+
+        - name: Add aws credentials
+          blockinfile:
+            path: ~/.aws/credentials
+            block: |-
+              [default]
+              aws_access_key_id = {{ aws_access_key_id }}
+              aws_secret_access_key = {{ aws_secret_access_key }}
+
+              - hosts: localhost
+
+        - name: Install Packages
+          become: yes
+          package:
+            name:
+              - golang
+              - python2-boto3
+              - unzip
+
+        - name: Get OS (var)
+          shell: "/usr/bin/go env GOOS"
+          register: GOOS_VAR
+
+        - name: Get Arch (var)
+          shell: "/usr/bin/go env GOARCH"
+          register: GOARCH_VAR
+
+        - name: Make sure directory /usr/local/bin exists
+          become: yes
+          file:
+            path: /usr/local/bin
+            state: directory
+
+        - name: Get the OpenShift Installer
+          become: yes
+          get_url:
+            url: "https://github.com/openshift/installer/releases/download/{{ ocp4_installer_version }}/openshift-install-{{ GOOS_VAR.stdout }}-{{ GOARCH_VAR.stdout }}"
+            dest: /usr/local/bin/openshift-install
+            mode: 0775
+            owner: root
+            group: root
+
+        - name: Get the OpenShift CLI
+          become: yes
+          unarchive:
+            src: "https://mirror.openshift.com/pub/openshift-v3/clients/{{ oc_client_version }}/linux/oc.tar.gz"
+            remote_src: yes
+            dest: /usr/local/bin
+            mode: 0775
+            owner: root
+            group: root
+
+        - name: Write down OCP4 token
+          copy:
+            content: "{{ ocp4_token }}"
+            dest: ~/ocp_auth_token.json
+            mode: 0700
+
+        - name: Generate SSH keys
+          shell: ssh-keygen -b 2048 -t rsa -f ~/.ssh/id_rsa -q -N ""
+          args:
+            creates: ~/.ssh/id_rsa
+
+        - name: Generate SSH pub key
+          shell: ssh-keygen -y -f ~/.ssh/id_rsa > ~/.ssh/id_rsa.pub
+          args:
+            creates: ~/.ssh/id_rsa.pub
+
+        - environment:
+            OPENSHIFT_INSTALL_PULL_SECRET_PATH: /home/{{ ansible_user }}/ocp_auth_token.json
+            OPENSHIFT_INSTALL_SSH_PUB_KEY_PATH: /home/{{ ansible_user }}/.ssh/id_rsa.pub
+            OPENSHIFT_INSTALL_BASE_DOMAIN: "{{ guid }}{{subdomain_base_suffix}}"
+            OPENSHIFT_INSTALL_CLUSTER_NAME: "{{ guid }}"
+            OPENSHIFT_INSTALL_PLATFORM: aws
+            #OPENSHIFT_INSTALL_AWS_REGION: "{{ aws_region_final|d(aws_region)|d('us-east-1') }}"
+            OPENSHIFT_INSTALL_AWS_REGION: us-east-1
+          name: Run the installer
+          command: openshift-install create cluster
