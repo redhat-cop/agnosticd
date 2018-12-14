@@ -85,6 +85,19 @@ pipeline {
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
+                    def cfparams = [
+                        'check=t',
+                        'quotacheck=t',
+                        "ocprelease=${ocprelease}",
+                        "region=${region}",
+                        'expiration=7',
+                        'runtime=8',
+                        'nodes=2',
+                        'users=2',
+                        'city=jenkinsccicd',
+                        'salesforce=test',
+                        'notes=devops_automation_jenkins',
+                    ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -93,7 +106,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,quotacheck=t,ocprelease=${ocprelease},region=${region},expiration=7,runtime=8,nodes=2'
+                          -d '${cfparams}' \
                         """
                     ).trim()
 
