@@ -18,6 +18,52 @@
           name: infra-common-ssh-config-generate
         when: "'bastions' in groups"
 
+- name: Start clientVM and cluster instances if they are stopped
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: no
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  tasks:
+    - set_fact:
+        clientvm_id: "{{ hostvars[groups.bastions[0]].instance_id }}"
+      when:
+        - "'bastions' in groups"
+        - groups.bastions | length > 0
+
+    - fail:
+        msg: "No clientVM present"
+      when: >-
+        'bastions' not in groups or groups.bastions | length == 0
+
+    - name: Start clientVM instance
+      command: "aws ec2 start-instances --instance-ids '{{clientvm_id}}'"
+
+    - name: Get cluster instance Ids
+      command: >-
+        aws ec2 describe-instances
+        --filters "Name=tag:clusterid,Values=cluster-{{ guid }}"
+        --query 'Reservations[*].Instances[*].InstanceId'
+        --output text
+      changed_when: false
+      failed_when: instanceids.stdout | trim | length == 0
+      register: instanceids
+
+    - name: Start cluster instances
+      command: >-
+            aws ec2 start-instances --instance-ids {{ instanceids.stdout | trim }}
+
+    - name: Wait for clientVM instance
+      command: "aws ec2 wait instance-running --instance-ids '{{clientvm_id}}'"
+
+    - name: Wait for cluster instances
+      command: >-
+            aws ec2 wait instance-running
+            --filters "Name=tag:clusterid,Values=cluster-{{ guid }}"
+
 - name: Destroy OCP 4 resources using the installer
   hosts: bastions
   gather_facts: false
@@ -29,6 +75,10 @@
         ansible_ssh_extra_args: >-
           {{ ansible_ssh_extra_args|d() }}
           -F {{hostvars.localhost.output_dir}}/{{ env_type }}_{{ guid }}_ssh_conf
+
+    - name: wait for linux host to be available
+      wait_for_connection:
+        timeout: 20
 
     - name: Pack an archive of everything in case something goes wrong
       archive:
@@ -54,6 +104,8 @@
         src: /tmp/cluster-{{ guid }}.tar.gz
         dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_cluster-{{ guid }}.tar.gz"
 
+    - set_fact:
+        oktodelete: yes
 
 - name: Delete ocp4 provisioner stack
   hosts: localhost
@@ -64,3 +116,7 @@
     - name: Run infra-ec2-template-destroy
       include_role:
         name: infra-ec2-template-destroy
+      when:
+        - "'bastions' in groups"
+        - groups.bastions | length > 0
+        - hostvars[groups.bastions[0]].oktodelete
