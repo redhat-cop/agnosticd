@@ -12,14 +12,14 @@ def notification_email = 'cbomman@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
-//def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
+def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
 
 // Admin host ssh location is in a credential too
-//def ssh_admin_host = 'admin-host-na'
+def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-//def ssh_location = ''
+def ssh_location = ''
 
 
 // Catalog items
@@ -30,12 +30,8 @@ def choices = [
 ].join("\n")
 
 def ocprelease_choice = [
-    '3.11.43',
-    '3.11.16',
     '3.10.34',
-    '3.10.14',
-    '3.9.41',
-    '3.9.31',
+    '3.9.40',
 ].join("\n")
 
 def region_choice = [
@@ -69,10 +65,9 @@ pipeline {
             description: 'Catalog item',
             name: 'ocprelease',
         )
-
         choice(
             choices: region_choice,
-            description: 'Region',
+            description: 'Catalog item',
             name: 'region',
         )
     }
@@ -87,7 +82,7 @@ pipeline {
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
             steps {
-                git url: 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
+                git url: 'https://github.com/fridim/cloudforms-oob'
 
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
@@ -130,7 +125,6 @@ pipeline {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
                     --guid ${guid} \
@@ -154,46 +148,32 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 30 \
+                          --timeout 90 \
                           --filter 'has completed'
                         """
                     ).trim()
 
-		    echo email	
-                    try {
-                        def m = email =~ /Openshift Master Console: (https:\/\/master\.[^ ]+)/
-                        openshift_location = m[0][1]
-                        echo "openshift_location = '${openshift_location}'"
-
-                        m = email =~ /Web App URL: (https:\/\/[^ \n]+)/
-                        webapp_location = m[0][1]
-                        echo "webapp_location = '${openshift_location}'"
-
-                        m = email =~ /Cluster Admin User: ([^ \n]+ \/ [^ \n]+)/
-                        echo "Custer Admin User: ${m[0][1]}"
-                    } catch(Exception ex) {
-                        echo "Could not parse email:"
-                        echo email
-                        echo ex.toString()
-                        throw ex
-                    }
+                    def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
+                    ssh_location = m[0][1]
+                    echo "ssh_location = '${ssh_location}'"
                 }
             }
         }
 
-//        stage('SSH') {
-//            steps {
-//                withCredentials([
-//                    sshUserPrivateKey(
-//                        credentialsId: ssh_creds,
-//                        keyFileVariable: 'ssh_key',
-//                        usernameVariable: 'ssh_username')
-//                ]) {
-//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
-//                }
-//            }
-//        }
+        stage('SSH') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: ssh_creds,
+                        keyFileVariable: 'ssh_key',
+                        usernameVariable: 'ssh_username')
+                ]) {
+                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
+                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
+                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} sudo ansible -m ping all"
+                }
+            }
+        }
 
         stage('Confirm before retiring') {
             when {
@@ -215,7 +195,7 @@ pipeline {
             /* This step uses the delete_svc_guid.sh script to retire
              the service from CloudForms */
             steps {
-                git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
+                git 'https://github.com/fridim/cloudforms-oob'
 
                 sh "./opentlc/delete_svc_guid.sh '${guid}'"
             }
@@ -260,7 +240,7 @@ pipeline {
 
     post {
         failure {
-            git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
+            git 'https://github.com/fridim/cloudforms-oob'
             /* retire in case of failure */
             withCredentials(
                 [
@@ -276,19 +256,19 @@ pipeline {
             }
 
             /* Print ansible logs */
-//            withCredentials([
-//                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
-//                sshUserPrivateKey(
-//                    credentialsId: ssh_creds,
-//                    keyFileVariable: 'ssh_key',
-//                    usernameVariable: 'ssh_username')
-//            ]) {
-//                sh("""
-//                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
-//                    "find deployer_logs -name '*${guid}*log' | xargs cat"
-//                """.trim()
-//                )
-//            }
+            withCredentials([
+                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
+                sshUserPrivateKey(
+                    credentialsId: ssh_creds,
+                    keyFileVariable: 'ssh_key',
+                    usernameVariable: 'ssh_username')
+            ]) {
+                sh("""
+                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
+                    "find deployer_logs -name '*${guid}*log' | xargs cat"
+                """.trim()
+                )
+            }
 
             withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
                 mail(
