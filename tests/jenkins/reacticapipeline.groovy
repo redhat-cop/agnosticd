@@ -12,14 +12,14 @@ def notification_email = 'cbomman@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
-def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
+//def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
 
 // Admin host ssh location is in a credential too
-def ssh_admin_host = 'admin-host-na'
+//def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ssh_location = ''
+//def ssh_location = ''
 
 
 // Catalog items
@@ -181,19 +181,19 @@ pipeline {
             }
         }
 
-        stage('SSH') {
-            steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: ssh_creds,
-                        keyFileVariable: 'ssh_key',
-                        usernameVariable: 'ssh_username')
-                ]) {
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
-                }
-            }
-        }
+//        stage('SSH') {
+//            steps {
+//                withCredentials([
+//                    sshUserPrivateKey(
+//                        credentialsId: ssh_creds,
+//                        keyFileVariable: 'ssh_key',
+//                        usernameVariable: 'ssh_username')
+//                ]) {
+//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
+//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
+//                }
+//            }
+//        }
 
         stage('Confirm before retiring') {
             when {
@@ -276,19 +276,19 @@ pipeline {
             }
 
             /* Print ansible logs */
-            withCredentials([
-                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
-                sshUserPrivateKey(
-                    credentialsId: ssh_creds,
-                    keyFileVariable: 'ssh_key',
-                    usernameVariable: 'ssh_username')
-            ]) {
-                sh("""
-                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
-                    "find deployer_logs -name '*${guid}*log' | xargs cat"
-                """.trim()
-                )
-            }
+//            withCredentials([
+//                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
+//                sshUserPrivateKey(
+//                    credentialsId: ssh_creds,
+//                    keyFileVariable: 'ssh_key',
+//                    usernameVariable: 'ssh_username')
+//            ]) {
+//                sh("""
+//                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
+//                    "find deployer_logs -name '*${guid}*log' | xargs cat"
+//                """.trim()
+//                )
+//            }
 
             withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
                 mail(
