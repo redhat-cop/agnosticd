@@ -18,7 +18,7 @@ Available variables are listed below, along with default values:
 
 ```yaml
 zsh_users:
-  - "{{ ansible_ssh_user }}"
+  - "{{ ansible_user }}"
 zsh_ohmy_theme: pygmalion
 zsh_ohmy_plugins:
   - git
