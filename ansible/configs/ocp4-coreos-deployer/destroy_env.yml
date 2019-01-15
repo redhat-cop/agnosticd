@@ -20,21 +20,25 @@
       block:
         - name: Grab and set stack creation_time
           set_fact:
-            student_user: >-
-              {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_outputs.StudentUser }}
-
             stack_creation_time: >-
               {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_description.creation_time }}
             stack_status: >-
               {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_description.stack_status }}
 
-        - name: Backup even log for user
-          shell: >-
-            aws cloudtrail lookup-events
-            --lookup-attributes AttributeKey=Username,AttributeValue={{ student_user }}
-            --start-time {{ stack_creation_time }}
-            > {{ output_dir }}/{{ env_type }}_{{ guid }}_cloudtrail_event_log.json
-          when: email is defined or owner is defined
+        - when: stack_status == "CREATE_COMPLETE"
+          block:
+            - name: Grab student user
+              set_fact:
+                student_user: >-
+                  {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_outputs.StudentUser }}
+
+            - name: Backup event log for user
+              shell: >-
+                aws cloudtrail lookup-events
+                --lookup-attributes AttributeKey=Username,AttributeValue={{ student_user }}
+                --start-time {{ stack_creation_time }}
+                > {{ output_dir }}/{{ env_type }}_{{ guid }}_cloudtrail_event_log.json
+              when: email is defined or owner is defined
 
 - name: Build inventory
   hosts: localhost
@@ -63,53 +67,55 @@
     AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
     AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
   tasks:
-    - set_fact:
-        clientvm_id: "{{ hostvars[groups.bastions[0]].instance_id }}"
-      when:
-        - "'bastions' in groups"
-        - groups.bastions | length > 0
-
-    - fail:
-        msg: "No clientVM present"
-      when: >-
-        ( 'bastions' not in groups or groups.bastions | length == 0 )
-        and stack_status is defined
-        and stack_status == 'CREATE_COMPLETE'
-
     - when:
         - stack_status is defined
         - stack_status == 'CREATE_COMPLETE'
       block:
-        - name: Start clientVM instance
-          command: "aws ec2 start-instances --instance-ids '{{clientvm_id}}'"
+        - set_fact:
+            clientvm_id: "{{ hostvars[groups.bastions[0]].instance_id }}"
+          when:
+            - "'bastions' in groups"
+            - groups.bastions | length > 0
 
-        - name: Get cluster instance Ids
-          command: >-
-            aws ec2 describe-instances
-            --filters
-            "Name=tag:clusterid,Values=cluster-{{ guid }}"
-            "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped"
-            --query 'Reservations[*].Instances[*].InstanceId'
-            --output text
-          changed_when: false
-          # Sometimes deployment fails before any OCP instances is created, so comment this line:
-          # failed_when: instanceids.stdout | trim | length == 0
-          register: instanceids
+        - fail:
+            msg: "No clientVM present"
+          when: >-
+            'bastions' not in groups or groups.bastions | length == 0 
 
-        - name: Start cluster instances
-          when: instanceids.stdout | trim | length > 0
-          command: >-
-                aws ec2 start-instances --instance-ids {{ instanceids.stdout | trim }}
+        - when:
+            - stack_status is defined
+            - stack_status == 'CREATE_COMPLETE'
+          block:
+            - name: Start clientVM instance
+              command: "aws ec2 start-instances --instance-ids '{{clientvm_id}}'"
 
-        - name: Wait for clientVM instance
-          command: "aws ec2 wait instance-running --instance-ids '{{clientvm_id}}'"
+            - name: Get cluster instance Ids
+              command: >-
+                aws ec2 describe-instances
+                --filters
+                "Name=tag:clusterid,Values=cluster-{{ guid }}"
+                "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped"
+                --query 'Reservations[*].Instances[*].InstanceId'
+                --output text
+              changed_when: false
+              # Sometimes deployment fails before any OCP instances is created, so comment this line:
+              # failed_when: instanceids.stdout | trim | length == 0
+              register: instanceids
 
-        - name: Wait for cluster instances
-          when: instanceids.stdout | trim | length > 0
-          ignore_errors: true
-          command: >-
-                aws ec2 wait instance-running
-                --filters "Name=tag:clusterid,Values=cluster-{{ guid }}"
+            - name: Start cluster instances
+              when: instanceids.stdout | trim | length > 0
+              command: >-
+                    aws ec2 start-instances --instance-ids {{ instanceids.stdout | trim }}
+
+            - name: Wait for clientVM instance
+              command: "aws ec2 wait instance-running --instance-ids '{{clientvm_id}}'"
+
+            - name: Wait for cluster instances
+              when: instanceids.stdout | trim | length > 0
+              ignore_errors: true
+              command: >-
+                    aws ec2 wait instance-running
+                    --filters "Name=tag:clusterid,Values=cluster-{{ guid }}"
 
 - name: Destroy OCP 4 resources using the installer
   hosts: bastions
@@ -117,51 +123,54 @@
   become: no
   run_once: yes
   tasks:
-    - name: Set facts for remote access
-      set_fact:
-        ansible_ssh_extra_args: >-
-          {{ ansible_ssh_extra_args|d() }}
-          -F {{hostvars.localhost.output_dir}}/{{ env_type }}_{{ guid }}_ssh_conf
-
-    - name: Wait for linux host to be available
-      wait_for_connection:
-        timeout: 20
-
-    - name: Pack an archive of everything in case something goes wrong
-      become: yes
-      archive:
-        path: /home
-        dest: /tmp/home.tar.gz
-
-    - name: Fetch the archive
-      fetch:
-        flat: yes
-        src: /tmp/home.tar.gz
-        dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_user_home.tar.gz"
-
-    - stat:
-        path: /home/{{ ansible_user }}/cluster-{{ guid }}
-      register: statclusterdir
-
-    - when: statclusterdir.stat.exists
+    - when:
+        - hostvars.localhost.stack_status is defined
+        - hostvars.localhost.stack_status == 'CREATE_COMPLETE'
       block:
-      - name: destroy terraform resources (openshift-install destroy cluster)
-        command: openshift-install destroy cluster --dir=/home/{{ ansible_user }}/cluster-{{ guid }}/
-        register: destroyr
+        - name: Set facts for remote access
+          set_fact:
+            ansible_ssh_extra_args: >-
+              {{ ansible_ssh_extra_args|d() }}
+              -F {{hostvars.localhost.output_dir}}/{{ env_type }}_{{ guid }}_ssh_conf
 
-      - name: pack an archive of everything
-        archive:
-          path: /home/{{ansible_user}}/cluster-{{ guid }}
-          dest: /tmp/cluster-{{ guid }}.tar.gz
+        - name: Wait for linux host to be available
+          wait_for_connection:
+            timeout: 20
 
-      - name: get archive of environment target dir
-        fetch:
-          flat: yes
-          src: /tmp/cluster-{{ guid }}.tar.gz
-          dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_cluster-{{ guid }}.tar.gz"
+        - name: Pack an archive of everything in case something goes wrong
+          become: yes
+          archive:
+            path: /home
+            dest: /tmp/home.tar.gz
 
-    - set_fact:
-        oktodelete: yes
+        - name: Fetch the archive
+          fetch:
+            flat: yes
+            src: /tmp/home.tar.gz
+            dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_user_home.tar.gz"
+
+        - stat:
+            path: /home/{{ ansible_user }}/cluster-{{ guid }}
+          register: statclusterdir
+
+        - when: statclusterdir.stat.exists
+          block:
+          - name: destroy terraform resources (openshift-install destroy cluster)
+            command: openshift-install destroy cluster --dir=/home/{{ ansible_user }}/cluster-{{ guid }}/
+            register: destroyr
+
+          - name: pack an archive of everything
+            archive:
+              path: /home/{{ansible_user}}/cluster-{{ guid }}
+              dest: /tmp/cluster-{{ guid }}.tar.gz
+
+          - name: get archive of environment target dir
+            fetch:
+              flat: yes
+              src: /tmp/cluster-{{ guid }}.tar.gz
+              dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_cluster-{{ guid }}.tar.gz"
+        - set_fact:
+            oktodelete: yes
 
 - name: Delete ocp4 provisioner stack
   hosts: localhost
@@ -174,6 +183,16 @@
         name: infra-ec2-template-destroy
       when:
         # Before deleting the provisioner, make sure destroy terraform successfully run.
+        - stack_status is defined
+        - stack_status == 'CREATE_COMPLETE'
         - "'bastions' in groups"
         - groups.bastions | length > 0
         - hostvars[groups.bastions[0]].oktodelete
+
+    - name: Run infra-ec2-template-destroy
+      include_role:
+        name: infra-ec2-template-destroy
+      when:
+        # delete stack if stack creation failed
+        - stack_status is defined
+        - stack_status != 'CREATE_COMPLETE'
