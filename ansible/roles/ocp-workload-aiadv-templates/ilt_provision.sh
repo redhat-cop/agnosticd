@@ -2,7 +2,7 @@
 
 END_PROJECT_NUM=1
 START_PROJECT_NUM=1
-WORKLOAD="ocp-workload-fuse-ignite"
+WORKLOAD="ocp-workload-aiadv-templates"
 LOG_FILE=/tmp/$WORKLOAD
 
 POSTGRESQL_MEMORY_LIMIT=512Mi
@@ -94,4 +94,3 @@ function executeAnsibleViaLocalhost() {
 ensurePreReqs
 login
 executeLoop
-
