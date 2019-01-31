@@ -27,7 +27,8 @@ Role Variables
 |*acme_cache_cert_file*|Yes| "/tmp/ssl.cert"| Local Cache File for Certificate
 |*acme_cache_key_file*|Yes| "/tmp/ssl.key"|Local Cache File for Key
 |*acme_cache_ca_file*|Yes| "/tmp/ssl_ca.cer"|Local Cache File for CA Certificate
-|*acme_archive_file*|Yes| "/tmp/acme.tar.gz"| Local (to the host ansible is running on) cache of certificates. Prevents re-requesting certificates for later runs of the playbook when the domains haven't changed. acme.tar.gz will contain the entire .acme.sh directory so that it can be restored for future runs on new machines with the same domain names.
+|*acme_cache_fullchain_file*|Yes| "/tmp/fullchain.cer"|Local Cache File for the Fullchain Certificate
+|*acme_cache_archive_file*|Yes| "/tmp/acme.tar.gz"| Local (to the host ansible is running on) cache of certificates. Prevents re-requesting certificates for later runs of the playbook when the domains haven't changed. acme.tar.gz will contain the entire .acme.sh directory so that it can be restored for future runs on new machines with the same domain names.
 |*acme_production*|Yes|False|Use the Production Let's Encrypt Server. Leave to False for testing runs to prevent issues with the Let's Encrypt rate limits
 |*acme_renew_automatically*|Yes|False|Install a cron job to automatically renew Certificates. Checks once a day.
 |*acme_force_issue*|Yes|False|Force the creation of new certificates even if there are certificates already on the host or certificates in the local cache
@@ -55,9 +56,11 @@ Including an example of how to use your role (for instance, with variables passe
     - acme_domain: "master.example.opentlc.com"
     - acme_production: False
     - acme_remote_dir: "/root"
-    - acme_local_cache_cert_file: "/tmp/server.cert"
-    - acme_local_cache_key_file: "/tmp/server.key"
-    - acme_local_cache_ca_file: "/tmp/server_ca.cer"
+    - acme_cache_cert_file: "/tmp/server.cert"
+    - acme_cache_key_file: "/tmp/server.key"
+    - acme_cache_ca_file: "/tmp/server_ca.cer"
+    - acme_cache_fullchain_file: "/tmp/fullchain.cer"
+    - acme_cache_archive_file: "/tmp/acme.tar.gz"
     - acme_renew_automatically: False
     - acme_force_issue: False
 
@@ -74,9 +77,11 @@ Including an example of how to use your role (for instance, with variables passe
     - acme_aws_secret_access_key: "<AWS_SECRET_ACCESS_KEY>"
     - acme_production: False
     - acme_remote_dir: "/root"
-    - acme_local_cache_cert_file: "/tmp/server.cert"
-    - acme_local_cache_key_file: "/tmp/server.key"
-    - acme_local_cache_ca_file: "/tmp/server_ca.cer"
+    - acme_cache_cert_file: "/tmp/server.cert"
+    - acme_cache_key_file: "/tmp/server.key"
+    - acme_cache_ca_file: "/tmp/server_ca.cer"
+    - acme_cache_fullchain_file: "/tmp/fullchain.cer"
+    - acme_cache_archive_file: "/tmp/acme.tar.gz"
     - acme_renew_automatically: False
     - acme_force_issue: False
 
@@ -94,9 +99,11 @@ Including an example of how to use your role (for instance, with variables passe
     - acme_aws_secret_access_key: "<AWS_SECRET_ACCESS_KEY>"
     - acme_production: False
     - acme_remote_dir: "/root"
-    - acme_local_cache_cert_file: "/tmp/server.cert"
-    - acme_local_cache_key_file: "/tmp/server.key"
-    - acme_local_cache_ca_file: "/tmp/server_ca.cer"
+    - acme_cache_cert_file: "/tmp/server.cert"
+    - acme_cache_key_file: "/tmp/server.key"
+    - acme_cache_ca_file: "/tmp/server_ca.cer"
+    - acme_cache_fullchain_file: "/tmp/fullchain.cer"
+    - acme_cache_archive_file: "/tmp/acme.tar.gz"
     - acme_renew_automatically: False
     - acme_force_issue: False
 ```
