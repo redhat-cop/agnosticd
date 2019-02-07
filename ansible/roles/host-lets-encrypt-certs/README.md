@@ -24,6 +24,7 @@ Role Variables
 |*acme_aws_secret_access_key*|No| "" |AWS Secret Access Key for Route53  (Only for Wildcard Domains)
 |*acme_additional_args*|No |"" |Additional arguments for the Acme script
 |*acme_remote_dir*|Yes| "/root"| The directoroy on the remote host in which to install acme.sh
+|*acme_install_dir*|Yes| "/root/certificates"| The directory on the remote host in which to install the requested certificates into
 |*acme_cache_cert_file*|Yes| "/tmp/ssl.cert"| Local Cache File for Certificate
 |*acme_cache_key_file*|Yes| "/tmp/ssl.key"|Local Cache File for Key
 |*acme_cache_ca_file*|Yes| "/tmp/ssl_ca.cer"|Local Cache File for CA Certificate
