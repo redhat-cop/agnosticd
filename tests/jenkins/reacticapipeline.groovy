@@ -138,7 +138,7 @@ pipeline {
         }
         */
 
-def openshift_location = ‘'
+def openshift_location = ''
 
         stage('Wait for last email and parse OpenShift location') {
             environment {
