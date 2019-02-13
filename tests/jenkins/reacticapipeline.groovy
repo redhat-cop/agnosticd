@@ -20,7 +20,7 @@ def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 // state variables
 def guid=''
 //def ssh_location = ''
-
+def openshift_location = ''
 
 // Catalog items
 def choices = [
@@ -137,8 +137,6 @@ pipeline {
             }
         }
         */
-
-def openshift_location = ''
 
         stage('Wait for last email and parse OpenShift location') {
             environment {
