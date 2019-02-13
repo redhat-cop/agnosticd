@@ -137,8 +137,10 @@ pipeline {
             }
         }
         */
-//        stage('Wait for last email and parse SSH location') {
-        stage('Wait for last email') {
+
+def openshift_location = ‘'
+
+        stage('Wait for last email and parse OpenShift location') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
@@ -153,15 +155,23 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 90 \
+                          --timeout 30 \
                           --filter 'has completed'
                         """
                     ).trim()
 
-//                    def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
-//                    ssh_location = m[0][1]
-//                    echo "ssh_location = '${ssh_location}'"
+                    def m = email =~ /You can find the master's console here: ([^ <]+)/
+                    openshift_location = m[0][1]
                 }
+            }
+        }
+
+        stage('Test OpenShift access') {
+            environment {
+                credentials = credentials("${opentlc_creds}")
+            }
+            steps {
+                sh "./tests/jenkins/downstream/openshift_client.sh '${openshift_location}'"
             }
         }
 
