@@ -19,7 +19,6 @@ def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // state variables
 def guid=''
-//def ssh_location = ''
 def openshift_location = ''
 
 // Catalog items
@@ -153,14 +152,14 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 100 \
+                          --timeout 30 \
                           --filter 'has completed'
                         """
                     ).trim()
 
-                    def m = email =~ /You can find the master's console here: ([^ <]+)/
+
+                    def m = email =~ /To get started, please login with your OPENTLC credentials to: ([^ ]+) in your web browser/
                     openshift_location = m[0][1]
-                    echo "openshift_location = '${openshift_location}'"
                 }
             }
         }
