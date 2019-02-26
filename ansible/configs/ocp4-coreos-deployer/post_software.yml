@@ -8,12 +8,94 @@
       msg: "Post-Software Steps starting"
 
 - name: PostSoftware flight-check
-  hosts: localhost
-  connection: local
+  hosts: bastions
+  run_once: yes
   gather_facts: false
   become: false
   tags:
   - post_flight_check
   tasks:
-  - debug:
-      msg: "Post-Software checks completed successfully"
+    - when: install_ocp4 | bool
+      environment:
+        KUBECONFIG: cluster-{{ guid }}/auth/kubeconfig
+      ignore_errors: yes
+      block:
+        - name: Check DNS webconsole
+          command: nslookup "{{ webconsole | urlsplit('hostname') }}"
+          register: checkdnswebconsole
+          changed_when: false
+          retries: 15
+          until: checkdnswebconsole is succeeded
+          delay: 30
+
+        - name: Check DNS API
+          command: nslookup "{{ showserver.stdout | trim | urlsplit('hostname') }}"
+          register: checkdnsapi
+          changed_when: false
+
+        - name: Webconsole
+          uri:
+            url: "{{ webconsole }}"
+            validate_certs: no
+          register: testwebconsole
+          retries: 5
+          until: testwebconsole is succeeded
+          delay: 60
+
+        - name: Cluster-info
+          command: oc cluster-info
+          register: clusterinfor
+          changed_when: false
+
+        - name: Create project
+          command: oc new-project postflightcheck
+          register: newproject
+
+        - name: New-app
+          command: oc new-app cakephp-mysql-persistent -n postflightcheck
+          register: newapp
+
+        - name: Wait for mysql
+          command: timeout 300 oc rollout status dc/mysql -w -n postflightcheck
+          register: mysqlw
+          changed_when: false
+
+        - name: Wait for php
+          command: timeout 300 oc rollout status dc/cakephp-mysql-persistent -w -n postflightcheck
+          register: phpw
+          changed_when: false
+
+        - name: Get route
+          command: >-
+            oc get route
+            -l template=cakephp-mysql-persistent
+            --no-headers
+            -o json
+            -n postflightcheck
+          register: getroute
+          changed_when: false
+
+        - name: Test that route is reachable
+          uri:
+            url: "http://{{ getroute.stdout|from_json|json_query('items[0].spec.host') }}"
+          register: testroute
+
+        - name: Delete project
+          command: oc delete project postflightcheck
+
+        - debug:
+            msg: "{{ item }}"
+          loop:
+            - "user.info: "
+            - "user.info: Post Flight Check"
+            - "user.info: DNS Web Console ............... {{ 'OK' if checkdnswebconsole.rc == 0 else 'FAIL' }}"
+            - "user.info: DNS API ....................... {{ 'OK' if checkdnsapi.rc == 0 else 'FAIL' }}"
+            - "user.info: Web console ................... {{ 'OK' if testwebconsole is succeeded else 'FAIL' }}"
+            - "user.info: API ........................... {{ 'OK' if clusterinfor.rc == 0 else 'FAIL' }}"
+            - "user.info: Create Project with PV ........ {{ 'OK' if newproject.rc == 0 else 'FAIL' }}"
+            - "user.info: App deployed .................. {{ 'OK' if phpw.rc == 0 and mysqlw.rc == 0 else 'FAIL' }}"
+            - "user.info: Route ......................... {{ 'OK' if testroute is succeeded else 'FAIL' }}"
+
+    # Always succeed deployment regardless of the result of the tests. (This is preview software)
+    - debug:
+        msg: "Post-Software checks completed successfully"

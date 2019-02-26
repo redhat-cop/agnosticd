@@ -6,6 +6,11 @@
   tasks:
     - when: install_ocp4 | bool
       block:
+        - name: Create deployinprogress file
+          file:
+            path: /tmp/deployinprogress
+            state: touch
+
         - name: Get awscli bundle
           get_url:
             url: https://s3.amazonaws.com/aws-cli/awscli-bundle.zip
@@ -41,8 +46,8 @@
             path: ~/.aws/credentials
             block: |-
               [default]
-              aws_access_key_id = {{ aws_access_key_id }}
-              aws_secret_access_key = {{ aws_secret_access_key }}
+              aws_access_key_id = {{ hostvars.localhost.student_access_key_id }}
+              aws_secret_access_key = {{ hostvars.localhost.student_secret_access_key }}
 
               - hosts: localhost
 
@@ -87,12 +92,6 @@
             owner: root
             group: root
 
-        - name: Write down OCP4 token
-          copy:
-            content: "{{ ocp4_token }}"
-            dest: ~/ocp_auth_token.json
-            mode: 0700
-
         - name: Generate SSH keys
           shell: ssh-keygen -b 2048 -t rsa -f ~/.ssh/id_rsa -q -N ""
           args:
@@ -103,13 +102,118 @@
           args:
             creates: ~/.ssh/id_rsa.pub
 
-        - environment:
-            OPENSHIFT_INSTALL_PULL_SECRET_PATH: /home/{{ ansible_user }}/ocp_auth_token.json
-            OPENSHIFT_INSTALL_SSH_PUB_KEY_PATH: /home/{{ ansible_user }}/.ssh/id_rsa.pub
-            OPENSHIFT_INSTALL_BASE_DOMAIN: "{{ guid }}{{subdomain_base_suffix}}"
-            OPENSHIFT_INSTALL_CLUSTER_NAME: "{{ guid }}"
-            OPENSHIFT_INSTALL_PLATFORM: aws
-            #OPENSHIFT_INSTALL_AWS_REGION: "{{ aws_region_final|d(aws_region)|d('us-east-1') }}"
-            OPENSHIFT_INSTALL_AWS_REGION: us-east-1
-          name: Run the installer
-          command: openshift-install create cluster
+        - name: Slurp public key
+          slurp:
+            path: /home/{{ ansible_user }}/.ssh/id_rsa.pub
+          register: idrsapub
+
+        - name: Create cluster directory
+          file:
+            path: /home/{{ ansible_user }}/cluster-{{ guid }}
+            state: directory
+
+        - stat:
+            path: files/install-config.yaml.{{ ocp4_installer_version }}.j2
+          register: rconfig
+          delegate_to: localhost
+
+        - name: Use version-specific template for install-config-yaml
+          set_fact:
+            install_config_template_path: files/install-config.yaml.{{ ocp4_installer_version }}.j2
+          when: rconfig.stat.exists
+
+        - name: Use default template for install-config-yaml
+          set_fact:
+            install_config_template_path: files/install-config.yaml.j2
+          when: not rconfig.stat.exists
+
+        - name: Generate config install-config.yaml
+          template:
+            src: "{{ install_config_template_path }}"
+            dest: /home/{{ ansible_user }}/cluster-{{ guid }}/install-config.yaml
+
+        - name: Run the installer
+          command: openshift-install create cluster --dir=/home/{{ ansible_user }}/cluster-{{ guid }}/
+
+        - name: Fetch kube config
+          fetch:
+            flat: yes
+            src: /home/{{ ansible_user }}/cluster-{{ guid }}/auth/{{ item }}
+            dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_{{ item }}"
+          loop:
+            - kubeconfig
+            - kubeadmin-password
+
+        - name: Get kubeadmin password
+          slurp:
+            path: /home/{{ ansible_user }}/cluster-{{ guid }}/auth/kubeadmin-password
+          register: kubeadminr
+
+        - name: Get console route
+          environment:
+            KUBECONFIG: /home/{{ ansible_user }}/cluster-{{ guid }}/auth/kubeconfig
+          command: oc get route -n openshift-console console -o json
+          register: routeconsole
+          retries: 10
+          delay: 30
+          until: routeconsole is succeeded
+          ignore_errors: yes
+          tags: post_flight_check
+
+        - name: Set webconsole address
+          set_fact:
+            webconsole: "http://{{ routeconsole.stdout | from_json | json_query('spec.host') }}"
+          when: routeconsole is succeeded
+          tags: post_flight_check
+
+        # sometimes the route is not ready, guess it
+        - name: Guess webconsole address
+          set_fact:
+            webconsole: "http://console-openshift-console.apps.cluster-{{ guid }}.{{ guid }}.{{ subdomain_base }}"
+          when: routeconsole is failed
+
+        - name: Get API for command line
+          environment:
+            KUBECONFIG: /home/{{ ansible_user }}/cluster-{{ guid }}/auth/kubeconfig
+          command: oc whoami --show-server
+          register: showserver
+          tags: post_flight_check
+
+        - name: Print Overview
+          debug:
+            msg: "{{ item }}"
+          with_items:
+            - "user.info: Kubeadmin user / password: kubeadmin / {{ kubeadminr.content | b64decode }}"
+            - "user.info: Openshift Master Console: {{ webconsole }}"
+            - "user.info: Openshift API for command line 'oc' client: {{ showserver.stdout | trim }}"
+            - "user.info: Download oc client from https://mirror.openshift.com/pub/openshift-v3/clients/{{ oc_client_version }}"
+            - "user.info: "
+            - "user.info: You *CANNOT* SSH into this environment"
+
+      always:
+        - name: Delete deployfinished file
+          file:
+            path: /tmp/deployinprogress
+            state: absent
+
+- name: Step 00xxxxx software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    # NOT Pre-installed 
+    - set_fact:
+        bastion_hostname: "{{groups['bastions'].0 }}"
+    - name: Print Student aws access as user.info
+      debug:
+        msg: "{{ item }}"
+      with_items:
+        - "user.info: WARNING: with great power comes great responsibility. We monitor usage."
+        - "user.info: Your AWS programmatic access: {{ student_access_key_id }} / {{ student_secret_access_key }}"
+        - "user.info: "
+        - "user.info: SSH Access: ssh {{ student_username }}@{{ hostvars[bastion_hostname].public_ip_address }}"
+        - "user.info: Use your OPENTLC SSH key, see http://www.opentlc.com/ssh.html"
+      when:
+        - not install_ocp4 | bool
+        - student_access_key_id is defined
+        - student_secret_access_key is defined
