@@ -1,0 +1,59 @@
+---
+- name: List all accounts in the organization.
+  command: >-
+    aws --profile {{ aws_master_profile }}
+    organizations list-accounts
+    --query 'Accounts[].Name'
+  register: _listaccounts
+  changed_when: false
+
+- when: account_name not in _listaccounts.stdout|from_json|list
+  name: Create New account.
+  command: >-
+    aws --profile {{ aws_master_profile }}
+    organizations create-account
+    --email {{ account_email }}
+    --account-name "{{ account_name }}"
+    --role-name "{{ aws_role_name }}"
+    --query 'CreateAccountStatus.[Id]'
+    --output text
+  register: _createaccount
+
+- when:
+    - _createaccount is not skipped
+    - _createaccount.stdout != ''
+  block:
+    - name: Wait for account to be created.
+      command: >-
+        aws --profile {{ aws_master_profile }}
+        organizations describe-create-account-status
+        --create-account-request-id {{ _createaccount.stdout }}
+        --query 'CreateAccountStatus.[State]'
+        --output text
+      register: _describestatus
+      until: _describestatus.stdout in ['SUCCEEDED', 'FAILED']
+      delay: 10
+      retries: 20
+
+    - fail:
+        msg: The creation of the account failed.
+      when: _describestatus.stdout == 'FAILED'
+
+    - name: Get the account ID
+      command: >-
+        aws --profile {{ aws_master_profile }}
+        organizations describe-create-account-status
+        --create-account-request-id {{ _createaccount.stdout }}
+        --query 'CreateAccountStatus.[AccountId]'
+        --output text
+      register: _describestatusid
+
+    - name: Save account id in variable 'account_id'
+      set_fact:
+        account_id: "{{ _describestatusid.stdout }}"
+
+- when:
+    - _createaccount is skipped
+    - account_id is not defined
+  fail:
+    msg: Account already exists, please set the variable account_id
