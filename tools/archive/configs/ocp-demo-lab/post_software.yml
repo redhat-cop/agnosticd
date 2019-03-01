@@ -1,0 +1,169 @@
+- name: Create user-vols on the support host
+  hosts: support
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: Create user vols
+      shell: "mkdir -p /srv/nfs/user-vols/vol{1..{{user_vols}}}"
+    - name: chmod the user vols
+      shell: "chmod -R 777 /srv/nfs/user-vols"
+
+- name: Create System PVs and user PVs
+  hosts: bastions
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tasks:
+    - name: get nfs Hostname
+      set_fact:
+        nfs_host: groups['support'].0
+
+    - set_fact:
+        pv_size: '10Gi'
+        pv_list: "{{ ocp_pvs }}"
+        persistentVolumeReclaimPolicy: Retain
+
+    - name: Generate PV file
+      template:
+        src: "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/files/pvs.j2"
+        dest: "/root//pvs-{{ env_type }}-{{ guid }}.yml"
+      tags: [ gen_pv_file ]
+
+    - set_fact:
+        pv_size: "{{user_vols_size}}"
+        persistentVolumeReclaimPolicy: Recycle
+
+      notify: restart nfs services
+      run_once: True
+
+    - name: Generate user vol PV file
+      template:
+        src: "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/files/userpvs.j2"
+        dest: "/root/userpvs-{{ env_type }}-{{ guid }}.yml"
+      tags:
+        - gen_user_vol_pv
+
+    - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
+
+    - shell: 'oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || oc update -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
+
+- name: env-specific infrastructure
+  hosts: masters
+  become: yes
+  gather_facts: False
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - env-specific_infra
+  tasks:
+
+    - name: Give administrative user cluster-admin privileges
+      command: "oc adm policy add-cluster-role-to-user cluster-admin {{ admin_user }}"
+
+    - name: Check for admin_project project
+      command: "oc get project {{admin_project}}"
+      register: result
+      ignore_errors: true
+    - name: Create admin_project project
+      command: "oc adm new-project {{admin_project}} --admin {{admin_user}} --node-selector='env=infra'"
+      when: result | failed
+
+    - name: Make admin_project project network global
+      command: "oc adm pod-network make-projects-global {{admin_project}}"
+
+    - name: Set admin_project SCC for anyuid
+      command: "oc adm policy add-scc-to-group anyuid system:serviceaccounts:{{admin_project}}"
+
+    - name: Add capabilities within anyuid which is not really ideal
+      command: "oc patch scc/anyuid --patch '{\"requiredDropCapabilities\":[\"MKNOD\",\"SYS_CHROOT\"]}'"
+
+- name: node admin configs
+  hosts: nodes
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  tags:
+    - env-specific
+    - env_specific_images
+  tasks:
+
+    - name: 'Pull image'
+      command: "docker pull {{ item }}"
+      with_items: '{{ env_specific_images }}'
+
+    - name: configure syslogd
+      copy:
+        src: ./files/logrotate.d_syslog
+        dest: /etc/logrotate.d/syslog
+
+    - name: Insert Garbage collection block
+      tags:
+        - garbage_collection_block
+      blockinfile:
+        state: present
+        dest: "/etc/origin/node/node-config.yaml"
+        marker: "### {mark} ANSIBLE MANAGED BLOCK ###"
+        insertafter: "kubeletArguments:"
+        block: |2
+            image-gc-high-threshold:
+              - "90"
+            image-gc-low-threshold:
+              - "80"
+    - name: restart atomic node after changes
+      shell: "systemctl restart atomic-openshift-node.service"
+      tags:
+        - garbage_collection_block
+
+
+
+- name: Install Nexus
+  hosts: masters
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  run_once: true
+  roles:
+    - { role: "ocp-infra-nexus", nexus_project: "{{admin_project}}" }
+  tags:
+    - env-specific
+    - install_nexus
+
+- name: Install dev-workstation on bastion and cofigure opentlc ipa
+  hosts: bastions
+  gather_facts: False
+  become: yes
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+  run_once: true
+  roles:
+    - { role: "dev-workstation", desired_user: "{{dev_user}}" }
+  tags:
+    - env-specific
+    - install_dev_workstation
+  tasks:
+    # sssd bug, fixed by restart
+    - name: restart sssd
+      service:
+        name: sssd
+        state: restarted
+      when: install_ipa_client
+
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Post-Software checks completed successfully"

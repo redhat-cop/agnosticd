@@ -1,0 +1,787 @@
+---
+- name: Step 00xxxxx post software
+  hosts: support
+  gather_facts: False
+  become: yes
+  tasks:
+  - name: Create user vols
+    shell: "mkdir -p /srv/nfs/user-vols/vol{1..{{user_vols}}}"
+  - name: chmod the user vols
+    shell: "chmod -R 777 /srv/nfs/user-vols"
+
+- name: Step 00xxxxx post software
+  hosts: bastions
+  run_once: true
+  gather_facts: False
+  become: yes
+  tasks:
+  - when: install_nfs|bool
+    block:
+    - name: get nfs Hostname
+      set_fact:
+        nfs_host: "{{ groups['support']|sort|first }}"
+
+    - set_fact:
+        pv_size: '10Gi'
+        pv_list: "{{ ocp_pvs }}"
+        persistentVolumeReclaimPolicy: Retain
+
+    - name: Generate PV file
+      template:
+        src: "./files/pvs.j2"
+        dest: "/root/pvs-{{ env_type }}-{{ guid }}.yml"
+      tags: [ gen_pv_file ]
+      when: pv_list.0 is defined
+
+    - set_fact:
+        pv_size: "{{user_vols_size}}"
+        persistentVolumeReclaimPolicy: Recycle
+
+      notify: restart nfs services
+      run_once: True
+
+    - name: Generate user vol PV file
+      template:
+        src: "./files/userpvs.j2"
+        dest: "/root/userpvs-{{ env_type }}-{{ guid }}.yml"
+      tags:
+        - gen_user_vol_pv
+
+    - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
+      tags:
+        - create_user_pv
+      when: pv_list.0 is defined
+
+    - shell: 'oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
+      tags:
+        - create_user_pv
+
+- name: For CNS change default storage class to glusterfs-storage (3.9.27, 3.9.30)
+  hosts: masters
+  run_once: true
+  become: yes
+  gather_facts: False
+  tags:
+  - env-specific
+  - env-specific_infra
+  - storage-class
+  tasks:
+  - when:
+      - osrelease is version_compare('3.9.27', '>=')
+      - osrelease is version_compare('3.9.30', '<=')
+      - install_glusterfs|bool
+    block:
+    - name: Set glusterfs-storage class to default
+      command: >
+        oc patch storageclass glusterfs-storage
+        -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "true"}}}'
+      register: changesc_r
+      failed_when:
+        - changesc_r.stdout.find('storageclass "glusterfs-storage" not patched') == -1
+        - changesc_r.rc != 0
+      changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage" patched') != -1
+    - name: Remove default from glusterfs-storage-block class
+      register: changesc_r
+      changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage-block" patched') != -1
+      failed_when:
+        - changesc_r.stdout.find('storageclass "glusterfs-storage-block" not patched') == -1
+        - changesc_r.rc != 0
+      command: >
+        oc patch storageclass glusterfs-storage-block
+        -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "false"}}}'
+
+- name: Configure Bastion for CF integration
+  hosts: bastions
+  become: yes
+  gather_facts: False
+  tags:
+  - env-specific
+  - cf_integration
+  - opentlc_integration
+  tasks:
+  - name: Include mgr_users vars
+    include_vars:
+      file: mgr_users.yml
+
+  - name: Configure Bastion
+    include_role:
+      name: "opentlc-integration"
+    vars:
+      no_log: yes
+    when: install_opentlc_integration|bool
+  - name: Copy /root/.kube to ~opentlc-mgr/
+    command: "cp -rf /root/.kube /home/opentlc-mgr/"
+    when: install_opentlc_integration|bool
+
+  - name: set permission for .kube
+    when: install_opentlc_integration|bool
+    file:
+      path: /home/opentlc-mgr/.kube
+      owner: opentlc-mgr
+      group: opentlc-mgr
+      recurse: yes
+
+- name: env-specific infrastructure
+  hosts: masters
+  run_once: true
+  become: yes
+  gather_facts: False
+  tags:
+  - env-specific
+  - env-specific_infra
+  tasks:
+  - name: Command to enable the wildcard routes in the OCP cluster for 3scale
+    shell: "oc set env dc/router ROUTER_ALLOW_WILDCARD_ROUTES=true -n default"
+
+  - name: Give administrative user cluster-admin privileges
+    command: "oc adm policy add-cluster-role-to-user cluster-admin {{ admin_user }}"
+
+  - name: Check for admin_project project
+    command: "oc get project {{admin_project}}"
+    register: result
+    changed_when: false
+    ignore_errors: true
+
+  - name: Create admin_project project (for OCP before 3.10)
+    command: "oc adm new-project {{admin_project}} --admin {{admin_user}} --node-selector='env=infra'"
+    when:
+    - result | failed
+    - osrelease is version_compare("3.10", "<")
+
+  - name: Create admin_project project (for OCP 3.10+)
+    command: "oc adm new-project {{admin_project}} --admin {{admin_user}} --node-selector='node-role.kubernetes.io/infra=true'"
+    when:
+    - result | failed
+    - osrelease is version_compare("3.10", ">=")
+
+  - name: Make admin_project project network global
+    command: "oc adm pod-network make-projects-global {{admin_project}}"
+    when: ovs_plugin == "multitenant"
+
+  - name: Set admin_project SCC for anyuid
+    command: "oc adm policy add-scc-to-group anyuid system:serviceaccounts:{{admin_project}}"
+
+  - name: Add capabilities within anyuid which is not really ideal
+    command: "oc patch scc/anyuid --patch '{\"requiredDropCapabilities\":[\"MKNOD\",\"SYS_CHROOT\"]}'"
+    ignore_errors: true
+
+  - name: Set Node Selector to empty for project openshift-template-service-broker
+    shell: oc annotate namespace openshift-template-service-broker openshift.io/node-selector="" --overwrite
+    ignore_errors: true
+    when:
+      - osrelease is version_compare('3.7', '>=')
+      - osrelease is version_compare('3.10', '<')
+
+- name: Remove all users from self-provisioners group
+  hosts: masters
+  run_once: true
+  become: yes
+  gather_facts: False
+  tags: [ env-specific, remove_self_provisioners ]
+  tasks:
+  - when: remove_self_provisioners|bool
+    block:
+    - name: Set clusterRoleBinding auto-update to false
+      command: oc annotate -n default --overwrite clusterrolebinding.rbac self-provisioners rbac.authorization.kubernetes.io/autoupdate=false
+
+    - name: Remove system:authenticated from self-provisioner role
+      command: "oc adm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
+      ignore_errors: true
+
+    - name: create our own OPENTLC-PROJECT-PROVISIONERS
+      command: "oc adm groups new OPENTLC-PROJECT-PROVISIONERS"
+      ignore_errors: true
+
+    - name: allow OPENTLC-PROJECT-PROVISIONERS members to provision their own projects
+      command: "oc adm policy add-cluster-role-to-group self-provisioner OPENTLC-PROJECT-PROVISIONERS"
+
+- name: Project Request Template
+  hosts: masters
+  gather_facts: False
+  become: yes
+  tags:
+  - env-specific
+  - project_request
+  tasks:
+  - name: Copy project request template to master
+    template:
+      src: ./files/project-template.j2
+      dest: /root/project-template.yml
+
+  - name: Check for project request template
+    command: "oc get template project-request -n default"
+    register: request_template
+    ignore_errors: true
+
+  - name: Create project request template in default project
+    shell: "oc create -f /root/project-template.yml -n default || oc replace -f /root/project-template.yml -n default"
+    when: request_template | failed
+
+  - name: Update master config file to use project request template
+    lineinfile:
+      regexp: "  projectRequestTemplate"
+      dest: "/etc/origin/master/master-config.yaml"
+      line: '  projectRequestTemplate: "default/project-request"'
+      state: present
+    register: master_config
+
+  - name: Label default Namespace for NetworkPolicy
+    command: oc label namespace default name=default
+    when: ovs_plugin == "networkpolicy"
+
+  - name: Add Project request message
+    replace:
+      dest: '/etc/origin/master/master-config.yaml'
+      regexp: 'projectRequestMessage.*'
+      replace: "projectRequestMessage: '{{project_request_message}}'"
+      backup: yes
+
+  - name: Restart master service (Pre 3.7)
+    service:
+      name: atomic-openshift-master
+      state: restarted
+    when:
+      - master_config.changed
+      - osrelease is version_compare('3.7', '<')
+
+  - name: Restart master API service (3.7 - 3.9)
+    service:
+      name: atomic-openshift-master-api
+      state: restarted
+    when:
+      - master_config.changed
+      - osrelease is version_compare('3.7', '>=')
+      - osrelease is version_compare('3.10', '<')
+
+  - name: Restart master API Pods (3.10+)
+    command: /usr/local/bin/master-restart api
+    when:
+      - master_config.changed
+      - osrelease is version_compare('3.10', '>=')
+
+- name: node admin configs
+  hosts: nodes
+  gather_facts: False
+  become: yes
+  tags:
+  - env-specific
+  - env_specific_images
+  tasks:
+  - name: 'Pull Env Specific Images'
+    command: "docker pull {{ item }}"
+    with_items: '{{ env_specific_images }}'
+    when: env_specific_images.0 is defined
+
+- name: Import jenkins images for OCP 3.7 and newer
+  hosts: masters
+  run_once: true
+  become: yes
+  gather_facts: False
+  tags:
+  - env-specific
+  - env_specific_images
+  tasks:
+  - when: osrelease is version_compare('3.7', '>=')
+    block:
+    - name: Remove default Jenkins ImageStream
+      command: oc delete is jenkins -n openshift
+      ignore_errors: true
+
+    - name: Import jenkins from Red Hat Registry
+      command: oc tag --source=docker registry.access.redhat.com/openshift3/jenkins-2-rhel7:v{{ repo_version }} openshift/jenkins:v{{ repo_version }} -n openshift
+      ignore_errors: true
+
+    - name: Tag Jenkins jenkins:latest
+      command: oc tag openshift/jenkins:v{{ repo_version }} openshift/jenkins:latest -n openshift
+      register: octag_result
+      retries: 5
+      delay: 2
+      until: octag_result is succeeded
+      ignore_errors: true
+
+    - name: Tag Jenkins jenkins:2
+      command: oc tag openshift/jenkins:v{{ repo_version }} openshift/jenkins:2 -n openshift
+      register: octag_result
+      retries: 5
+      delay: 2
+      until: octag_result is succeeded
+      ignore_errors: true
+
+- name: Fix NFS PV Recycling for OCP 3.7 and newer
+  gather_facts: False
+  become: yes
+  hosts:
+  - nodes
+  - infranodes
+  - masters
+  tags:
+  - env-specific
+  - install_nfs
+  tasks:
+  - name: Fix NFS PV Recycling
+    when:
+    - install_nfs|d(True)|bool
+    block:
+    - name: Pull ose-recycler Image
+      command: docker pull registry.access.redhat.com/openshift3/ose-recycler:latest
+      register: pull_result
+      retries: 5
+      delay: 10
+      until: pull_result is succeeded
+      when:
+      - osrelease is version_compare('3.7', '>=')
+
+    - name: Tag ose-recycler Image (for OCP 3.7 - 3.9)
+      command: >
+        docker tag registry.access.redhat.com/openshift3/ose-recycler:latest
+        registry.access.redhat.com/openshift3/ose-recycler:v{{ osrelease }}
+      when:
+      - osrelease is version_compare('3.7', '>=')
+      - osrelease is version_compare('3.10', '<')
+
+    - name: Tag ose-recycler Image (for OCP 3.10+)
+      command: >
+        docker tag registry.access.redhat.com/openshift3/ose-recycler:latest
+        registry.access.redhat.com/openshift3/ose-recycler:v1.10.0
+      when:
+      - osrelease is version_compare('3.10', '>=')
+
+- name: Fix CRI-O Garbage Collection DaemonSet for OCP 3.9 (up to 3.9.25)
+  gather_facts: False
+  become: yes
+  hosts: masters
+  run_once: true
+  tasks:
+  - name: Fix cri-o garbage collection
+    when:
+    - osrelease is version_compare('3.9.0', '>=')
+    - osrelease is version_compare('3.9.25', '<=')
+    - container_runtime == "cri-o"
+    block:
+    - name: Patch dockergc DaemonSet
+      shell: "oc patch daemonset dockergc --patch='\"spec\": { \"template\": { \"spec\": { \"containers\": [ { \"command\": [ \"/usr/bin/oc\" ], \"name\": \"dockergc\" } ] } } }' -n default"
+      ignore_errors: true
+    - name: Redeploy dockergc DaemonSet pods
+      shell: "oc delete pod $(oc get pods -n default|grep dockergc|awk -c '{print $1}') -n default"
+
+# Install OpenWhisk
+- name: Install OpenWhisk
+  hosts: masters
+  run_once: true
+  gather_facts: False
+  become: yes
+  tags:
+  - env-specific
+  - install_openwhisk
+  tasks:
+  - include_role:
+      name: "ocp-infra-openwhisk"
+    when:
+      - install_openwhisk|d(False)|bool
+
+# Set up Prometheus/Node Exporter/Alertmanager/Grafana
+# on the OpenShift Cluster
+- name: Install Prometheus and Grafana (Pre 3.10)
+  gather_facts: False
+  become: yes
+  hosts:
+  - nodes
+  - infranodes
+  - masters
+  - bastions
+  tags:
+    - install_prometheus
+  tasks:
+    - include_role:
+        name: "ocp-infra-prometheus-pre310"
+      when:
+      - install_prometheus|d(False)|bool
+      - osrelease is version_compare("3.10", "<")
+
+# Deploy Grafana Manually until the install playbooks can
+# (3.10 and onwards)
+- name: Pre-pull Grafana Image (3.10+)
+  gather_facts: False
+  become: yes
+  hosts:
+  - infranodes
+  tags:
+  - install_prometheus
+  tasks:
+  - name: Ensure Grafana Image is on Infranodes
+    shell: "docker pull docker.io/mrsiano/grafana-ocp:latest"
+    when:
+    - install_prometheus|d(False)|bool
+    - osrelease is version_compare("3.10", ">=")
+
+- name: Install Grafana (3.10+)
+  gather_facts: False
+  become: yes
+  hosts:
+  - bastions
+  run_once: true
+  tags:
+  - install_prometheus
+  tasks:
+  - when:
+    - install_prometheus|bool
+    - osrelease is version_compare("3.10", ">=")
+    block:
+    - name: Check if Grafana is already there
+      command: "oc get project openshift-grafana"
+      register: grafana_exists
+      changed_when: False
+      ignore_errors: true
+    - name: Run Grafana Installation Playbook
+      shell: "ansible-playbook -i /etc/ansible/hosts /usr/share/ansible/openshift-ansible/playbooks/openshift-grafana/config.yml"
+      when: grafana_exists is failed
+    - name: Add admin permissions to admin_user for Grafana project
+      shell: "oc policy add-role-to-user admin {{admin_user}} -n openshift-grafana"
+      when: grafana_exists is failed
+
+# Update Firewall Rules for Node Exporter to work (3.10 and onwards).
+- name: Node Exporter and Grafana Configuration (3.10+)
+  gather_facts: False
+  become: yes
+  hosts:
+  - nodes
+  - infranodes
+  - masters
+  tags:
+  - install_prometheus
+  tasks:
+  - when:
+    - install_prometheus|d(False)|bool
+    - osrelease is version_compare("3.10", ">=")
+    - osrelease is version_compare("3.10.34", "<")
+    block:
+    # Node Exporters on all Nodes liston on port 9100.
+    # Open Firewall Port 9100 for future sessions by adding
+    # the rule to the iptables file.
+    - name: Open Firewall port 9100 for future sessions
+      lineinfile:
+        dest: /etc/sysconfig/iptables
+        insertafter: '-A FORWARD -j REJECT --reject-with icmp-host-prohibited'
+        line: '-A OS_FIREWALL_ALLOW -p tcp -m state --state NEW -m tcp --dport 9100 -j ACCEPT'
+        state: present
+    # Open Firewall Port 9100 for current session by adding
+    # the rule to the current iptables configuration. We won't
+    # need to restart the iptables service - which will ensure
+    # all OpenShift rules stay in place.
+    - name: Open Firewall Port 9100 for current session
+      iptables:
+        action: insert
+        protocol: tcp
+        destination_port: 9100
+        state: present
+        chain: OS_FIREWALL_ALLOW
+        jump: ACCEPT
+
+- name: Customize Service Catalog UI for workshops
+  hosts: masters
+  run_once: true
+  gather_facts: False
+  become: yes
+  tasks:
+  - name: Customize Service Catalog UI for workshops
+    include_role:
+      name: "ocp-infra-enable-custom-catalog"
+    when: enable_workshops_catalog|d(False)|bool
+  tags:
+  - env-specific
+  - custom_ui
+
+- name: Install Nexus
+  hosts: masters
+  run_once: true
+  gather_facts: False
+  become: yes
+  tasks:
+  - include_role:
+      name: "ocp-infra-nexus"
+    vars:
+      nexus_project: "{{admin_project}}"
+    when: install_nexus|d(False)|bool
+  tags:
+  - env-specific
+  - install_nexus
+
+- name: Install AWS Broker
+  hosts: masters
+  run_once: true
+  gather_facts: False
+  become: yes
+  tags:
+  - env-specific
+  - install_aws_broker
+  tasks:
+  - include_role:
+      name: "ocp-infra-aws-service-broker"
+    when: install_aws_broker|d(False)|bool
+
+- name: Update Ansible (Automation) Broker to show images from DockerHub
+  hosts: masters
+  run_once: true
+  gather_facts: False
+  become: yes
+  tags:
+  - env-specific
+  - install_openshiftapb
+  tasks:
+  - name: Update ASB
+    include_role:
+      name: "openshift-ansible-broker"
+    when: install_openshiftapb|d(False)|bool
+
+- name: Install Maistra (Istio)
+  hosts: masters
+  run_once: true
+  gather_facts: False
+  become: yes
+  tags:
+  - env-specific
+  - install_maistra
+  tasks:
+  - name: Install Maistra
+    include_role:
+      name: "ocp-infra-maistra"
+    vars:
+      openshift_master_public: "{{ master_lb_dns }}"
+    when: install_maistra|d(False)|bool
+
+# WK Added for RHTE
+# Install Infrastructure workloads first
+- name: Install ocp-infra workloads
+  hosts: masters
+  gather_facts: false
+  run_once: true
+  become: yes
+  tags:
+    - infra_workloads
+  tasks:
+  - name: Install ocp-infra workloads
+    when:
+    - infra_workloads|d("")|length > 0
+    block:
+    - name: Check if admin_user is set
+      fail:
+        msg: admin_user must be set for ocp-infra workloads
+      when:
+      - not admin_user is defined or admin_user|length == 0
+    - name: Install ocp-infra-workloads
+      when:
+      - infra_workloads|d("")|length >0
+      block:
+      - name: Deploy ocp-infra workloads
+        include_role:
+          name: "{{ workload_loop_var }}"
+        vars:
+          #admin_user: "{{ admin_user }}"
+          ocp_username: "{{ admin_user }}"
+          ACTION: "provision"
+        loop: "{{ infra_workloads.split(',')|list }}"
+        loop_control:
+          loop_var: workload_loop_var
+
+# Install User Workloads second
+- name: Install ocp-workload workloads for multiple Users
+  hosts: masters
+  gather_facts: false
+  run_once: true
+  become: yes
+  tags:
+    - student_workloads
+  tasks:
+  - name: Install ocp-workloads
+    when:
+    - num_users|d(0)|int > 0
+    - student_workloads|d("")|length > 0
+    block:
+    - name: Check if authentication mechanism is set to htpasswd
+      fail:
+        msg: Authentication Mechanism must be htpasswd
+      when:
+      - install_idm|d("") != "htpasswd"
+    - name: Check if remove_self_provisioners=true
+      fail:
+        msg: remove_self_provisioners must be set to true
+      tags:
+        - remove_self_provisioners
+      when:
+      - not remove_self_provisioners|d(False)|bool
+
+    - name: Generate list of User IDs
+      set_fact:
+        users: "{{ lookup('sequence', 'start=1 end={{ num_users|int }}', wantlist=true) | map('int') | list }}"
+
+    - name: Deploy ocp-workloads for each user ID
+      include_role:
+        name: "{{ workload_loop_var[1] }}"
+      vars:
+        ocp_username: "user{{ workload_loop_var[0] }}"
+        ACTION: "provision"
+      loop: "{{ users | product(student_workloads.split(','))|list }}"
+      loop_control:
+        loop_var: workload_loop_var
+# WK Added for RHTE End
+
+- name: Zabbix for masters
+  hosts: masters
+  gather_facts: true
+  become: yes
+  vars:
+    zabbix_auto_registration_keyword: OCP Master
+  tasks:
+    - when: install_zabbix|bool
+      block:
+      - include_role:
+          name: "zabbix-client"
+      - include_role:
+          name: "zabbix-client-openshift-master"
+      - include_role:
+          name: "zabbix-client-openshift-node"
+  tags:
+  - env-specific
+  - install_zabbix
+
+- name: Zabbix for nodes
+  hosts:
+  - nodes
+  - infranodes
+  gather_facts: true
+  become: yes
+  vars:
+    zabbix_auto_registration_keyword: OCP Node
+    zabbix_token: "{{ hostvars[groups['masters'][0]].zabbix_token }}"
+    hawkular_route: "{{ hostvars[groups['masters'][0]].hawkular_route }}"
+  tasks:
+  - when: install_zabbix|bool
+    block:
+      - include_role:
+          name: "zabbix-client"
+      - include_role:
+          name: "zabbix-client-openshift-node"
+  tags:
+  - env-specific
+  - install_zabbix
+
+- name: Zabbix for all other hosts (bastion, support, ...)
+  hosts:
+  - bastions
+  - support
+  gather_facts: true
+  become: yes
+  vars:
+    zabbix_auto_registration_keyword: OCP Host
+  tasks:
+    - when: install_zabbix|bool
+      include_role:
+        name: "zabbix-client"
+  tags:
+  - env-specific
+  - install_zabbix
+
+# start supporting this only for OCP >= 3.9
+- name: Run diagnostics from master
+  hosts: masters
+  become: yes
+  gather_facts: False
+  run_once: yes
+  tasks:
+  - when:
+    - osrelease is version_compare('3.9', '>=')
+    - run_ocp_diagnostics|d(False)| bool
+    block:
+    # this command should return 0 (no error)
+    - name: Run oc adm diagnostics
+      shell: oc adm diagnostics > /tmp/diagnostics.log
+      register: r_diag
+      retries: 2
+      until: r_diag is succeeded
+      ignore_errors: true
+
+    - name: Ensure /tmp/openshift exist
+      file:
+        path: /tmp/openshift
+        state: directory
+
+    # oc adm diagnostics logs everything in /tmp/openshift
+    - name: Create an archive of diagnostics output logs
+      archive:
+        path:
+          - /tmp/openshift
+          - /tmp/diagnostics.log
+        dest: /tmp/diagnostics.tar.gz
+
+    - name: Fetch the diagnostic archive and logs
+      fetch:
+        src: /tmp/diagnostics.tar.gz
+        dest: "{{output_dir}}/{{project_tag}}_diagnostics.tar.gz"
+        flat: true
+
+    - name: Report diagnostics failure
+      fail:
+        msg: "FAIL {{ project_tag }} Diagnostics"
+      when: r_diag is failed
+
+- name: Configure IPA on bastion
+  hosts: bastions
+  become: yes
+  gather_facts: False
+  run_once: yes
+  tasks:
+  - include_role:
+      name: "bastion-opentlc-ipa"
+    when: install_ipa_client|bool
+
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+  - post_flight_check
+  tasks:
+  - debug:
+      msg: "Post-Software checks completed successfully"
+
+- name: Gather facts
+  hosts:
+  - all
+  gather_facts: true
+  tags:
+    - ocp_report
+
+- name: Generate reports
+  hosts: localhost
+  connection: local
+  become: false
+  tags:
+  - ocp_report
+  vars:
+    env_all_hosts: all
+  tasks:
+  - name: get repo version used to deploy
+    command: git rev-parse HEAD
+    args:
+      chdir: "{{ ANSIBLE_REPO_PATH | default('.') }}"
+    register: ansible_agnostic_deployer_head
+
+  - name: Gather ec2 facts
+    ec2_instance_facts:
+      aws_access_key: "{{ aws_access_key_id }}"
+      aws_secret_key: "{{ aws_secret_access_key }}"
+      region: "{{ aws_region_final|d(aws_region) }}"
+      filters:
+        instance-state-name: running
+        "tag:Project": "{{project_tag}}"
+    when:
+      - ocp_report|bool
+      - cloud_provider == 'ec2'
+  - name: Generate report
+    template:
+      src: "./files/ocp_report.adoc.j2"
+      dest: "{{output_dir}}/ocp_report_{{ env_type }}-{{ guid }}.adoc"
+    when:
+      - ocp_report|bool
+      - cloud_provider == 'ec2'

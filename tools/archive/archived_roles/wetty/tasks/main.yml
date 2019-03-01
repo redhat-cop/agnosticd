@@ -1,0 +1,171 @@
+# file: roles/wetty/tasks/main.yml
+---
+- name: Install Make & GCC
+  become: yes
+  yum:
+    name: "{{ item }}"
+    state: present
+  with_items:
+    - make
+    - gcc-c++
+
+- name: Install Wetty Globaly
+  become: yes
+  command: npm install wetty -g chdir=/home/{{ system_user }}
+  args:
+    creates: /usr/lib/node_modules/wetty/bin/wetty.js
+
+#-------------------------------------------------------
+# Let's Encrypt.
+#-------------------------------------------------------
+- name: Copy cert.pem to Wetty dir
+  become: yes
+  command: cp cert.pem /home/{{ system_user }}/.ssh/ chdir="/etc/letsencrypt/live/{{ workshop_prefix | lower }}.{{ hostvars[inventory_hostname]['ec2_tag_Index'] }}.{{ domain_name }}/"
+  args:
+    creates: /home/{{ system_user }}/.ssh/cert.pem
+  when: letsencrypt
+
+- name: Copy privkey.pem to Wetty dir
+  become: yes
+  command: cp privkey.pem /home/{{ system_user }}/.ssh/ chdir="/etc/letsencrypt/live/{{ workshop_prefix | lower }}.{{ hostvars[inventory_hostname]['ec2_tag_Index'] }}.{{ domain_name }}/"
+  args:
+    creates: /home/{{ system_user }}/.ssh/privkey.pem
+  when: letsencrypt
+
+#-------------------------------------------------------
+# Self-Signed Certs
+#-------------------------------------------------------
+- name: Generate Self Signed Certs
+  command: >
+    openssl req -new
+      -x509
+      -nodes
+      -days {{ item.days | default(3650) }}
+      -subj "/C={{ item.country | default('') }}/ST={{ item.state | default('') }}/L={{ item.city | default('') }}/O={{ item.organization | default('') }}/OU={{ item.unit | default('') }}/CN={{ item.name }}/emailAddress={{ item.email | default('') }}"
+      -newkey rsa:2048
+      -keyout /home/{{ system_user }}/.ssh/privkey.pem
+      -out /home/{{ system_user }}/.ssh/cert.pem
+  args:
+    creates: /home/{{ system_user }}/.ssh/*.pem
+  with_items: "{{ openssl_self_signed }}"
+  when: not letsencrypt
+
+- name: Set permissions on SSL certs
+  become: yes
+  file:
+    path: "/home/{{ system_user }}/.ssh/{{ item }}"
+    group: "{{ system_user }}"
+    owner: "{{ system_user }}"
+    mode: 0400
+  with_items:
+    - cert.pem
+    - privkey.pem
+
+# SYSTEMD
+- name: Template Systemd Service File for Wetty
+  become: yes
+  template:
+    src: "wetty.service.j2"
+    dest: "/etc/systemd/system/wetty.service"
+    group: root
+    owner: root
+    mode: 0644
+  notify: wetty
+
+- name: enable wetty service
+  become: yes
+  service:
+    name: wetty
+    enabled: yes
+
+# password_hash requires the passlib python module to generate password hashes
+# pip install passlib
+- name: Set ec2-user password
+  become: yes
+  user:
+    name: "ec2-user"
+    password: "{{ workshop_password |password_hash('sha512') }}"
+    state: present
+    append: yes
+
+- name: Update SSH Config
+  become: yes
+  copy:
+    src: sshd_config
+    dest: "/etc/ssh/sshd_config"
+    group: root
+    owner: root
+    mode: 0644
+  notify:
+    - sshd
+
+# - name: Open port in Firewall
+#   become: yes
+#   firewalld:
+#     port: 8888/tcp  #"{{ wetty_port }}"
+#     permanent: true
+#     state: enabled
+
+- name: check to see if firewalld is installed
+  become: yes
+  command: rpm -q firewalld
+  register: rf_result
+  ignore_errors: True
+
+- name: Turn off Firewall
+  become: yes
+  systemd:
+    name: firewalld
+    enabled: no
+    state: stopped
+  when: rf_result.rc == 0
+
+- name: Create SELinux dir
+  become: yes
+  file:
+    group: "{{ system_user }}"
+    owner: "{{ system_user }}"
+    mode: 0700
+    path: "/home/{{ system_user }}/.selinux"
+    state: directory
+
+- name: Copy over SELinux modules for Wetty
+  become: yes
+  copy:
+    src: "{{ item }}"
+    dest: "/home/{{ system_user }}/.selinux"
+    group: "{{system_user}}"
+    owner: "{{system_user}}"
+    mode: 0700
+  with_items:
+    - wetty.pp
+    - wetty.te
+  register: result
+
+- name: Update SELinux for Wetty
+  become: yes
+  command: semodule -i wetty.pp chdir=/home/{{ system_user }}/.selinux
+  notify: wetty
+  when: result.changed
+
+###########################################################
+#   Build from Source
+###########################################################
+# - name: Clone Wetty
+#   git:
+#     clone: yes
+#     force: yes
+#     dest: "/home/{{ system_user }}/.wetty"
+#     repo: "https://github.com/krishnasrinivas/wetty"
+#
+# - name: Set permissions on repo
+#   become: yes
+#   file:
+#     recurse: yes
+#     path: "/home/{{ system_user }}/.wetty"
+#     group: "{{ system_user }}"
+#     owner: "{{ system_user }}"
+#     mode: 0700
+#
+# - name: Install wetty
+#   command: npm install chdir="/home/{{ system_user }}/.wetty"

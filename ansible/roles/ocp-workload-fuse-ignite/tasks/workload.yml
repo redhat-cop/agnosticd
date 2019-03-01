@@ -1,30 +1,108 @@
 ---
-- name: define ocp_project
-  set_fact:
-    ocp_project: "fuse-{{guid}}"
 
-- name: Create project for workload
-  shell: "oc new-project {{ocp_project}}"
+- name: check if user is cluster admin
+  shell: "oc get project default"
+  register: default_project_result
+  ignore_errors: true
+  changed_when: false
 
-- name: Make sure we go back do default project
-  shell: "oc project default"
+- name: user granted access rights
+  fail:
+    msg: "User does not have cluster-admin rights to install Fuse Online"
+  when: default_project_result is failed
 
-- name: Create serviceaccount-as-oauthclient
-  shell: "oc create -f https://raw.githubusercontent.com/syndesisio/syndesis/master/app/deploy/support/serviceaccount-as-oauthclient-restricted.yml -n {{ocp_project}}
-"
+- name: Create project for workload; project =  {{ocp_project}}
+  shell: "oc new-project {{ocp_project}} --display-name={{ocp_project}}"
 
-- name: Create workload template
-  shell: "oc create -f https://raw.githubusercontent.com/syndesisio/syndesis/master/app/deploy/syndesis-restricted.yml -n {{ocp_project}}
-"
+# credentials for accessing registry.redhat.io
+#- name: Create project for workload; project =  {{ocp_project}}
+#  shell: "oc create secret docker-registry rhcc --docker-server=registry.redhat.io --docker-username={{oreg_user}} --docker-password={{oreg_pass}} --docker-email=honghuac@gmail.com"
 
-- name: Create the workload app
+- name: "Label namespace"
+  command: "oc label namespace {{ocp_project}} AAD='{{guid}}'"
+
+- name: Make sure we go back do {{ocp_project}} project
+  shell: "oc project {{ocp_project}}"
+
+- name: List existing CRDs
   shell: |
-      oc new-app syndesis-restricted -p ROUTE_HOSTNAME=fuse.{{ocp_project}}.{{ocp_apps_domain}} \
-      -p OPENSHIFT_PROJECT={{ocp_project}} \
-      -p OPENSHIFT_OAUTH_CLIENT_SECRET=$(oc sa get-token syndesis-oauth-client -n {{ocp_project}}) -n {{ocp_project}}
+    oc get crd
 
-- name: Give ocp_username access to ocp_project
+- name: Ensure the following directory is refreshed in remote, /tmp/{{ocp_project}}
+  file:
+    path: "/tmp/{{ocp_project}}"
+    state: absent
+- file:
+    path: "/tmp/{{ocp_project}}"
+    state: directory
+
+- name: Register a new CRD for Fuse Online
+  template:
+    src: templates/install_ocp.sh
+    dest: /tmp/{{ocp_project}}/install_ocp.sh
+- script: /tmp/{{ocp_project}}/install_ocp.sh --setup
+
+- name: Grant installation permission to user
+  template:
+    src: templates/install_ocp.sh
+    dest: /tmp/{{ocp_project}}/install_ocp.sh
+- script: /tmp/{{ocp_project}}/install_ocp.sh --grant {{ocp_username}}
+
+# ######                 Fuse Online            ##########
+
+- name: Install Fuse Online
+  template:
+    src: templates/install_ocp.sh
+    dest: /tmp/{{ocp_project}}/install_ocp.sh
+- script: /tmp/{{ocp_project}}/install_ocp.sh
+
+- name: Scale up broker-amq
+  shell: |
+      oc scale dc/broker-amq --replicas=1 -n {{ocp_project}}
+
+# ########################################################
+
+# ######        Coolstore Catalog Service       ##########
+
+- name: Add the view role to the default service account
+  shell: "oc policy add-role-to-user view -z default -n {{ocp_project}}"
+
+- name: Copy catalog service configmap to known path
+  template:
+    src: templates/app-config.yaml
+    dest: /tmp/{{ocp_project}}/app-config.yaml
+- name: Load catalog service configmap
+  shell: "oc create configmap app-config --from-file=/tmp/{{ocp_project}}/app-config.yaml -n {{ocp_project}}"
+
+
+- name: Copy catalog service (with db) template to known path
+  template:
+    src: templates/coolstore-catalog-mongodb-persistent.yaml
+    dest: /tmp/{{ocp_project}}/coolstore-catalog-mongodb-persistent.yaml
+- name: Build and create catalog service
+  shell: |
+      oc new-app \
+      -f /tmp/{{ocp_project}}/coolstore-catalog-mongodb-persistent.yaml \
+      -p CATALOG_DB_USERNAME=mongo \
+      -p CATALOG_DB_PASSWORD=mongo \
+      -n {{ocp_project}}
+
+- name: resume catalog-service
+  shell: oc rollout resume dc/catalog-service -n {{ocp_project}}
+- include_tasks: ./wait_for_deploy.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - catalog-service
+
+# ########################################################
+
+- name: Annotate the empty project as requested by user
+  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
+
+- name: Give ocp_username access to ocp_project; user = {{ocp_username}}
   shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"
+
 
 - name: workload Tasks Complete
   debug:

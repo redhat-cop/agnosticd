@@ -1,0 +1,162 @@
+---
+- name: define ocp_project
+  set_fact:
+    ocp_project: "iot-demo-{{guid}}"
+
+- name: define ocp_project (multiple user)
+  set_fact:
+    ocp_project: "iot-demo-{{guid}}-{{ocp_username}}"
+  when:
+    - user_count|d(0)|int > 0
+    - student_workloads|d("")|length > 0
+
+- name: Set portcheck to a valid result for first use
+  shell: echo "false"
+  register: portcheck
+
+- name: Check for open MQTT port
+  vars:
+    mqtt_port: 31883
+  block:
+    - name: Wait for port and loop
+      wait_for:
+        host: ec-broker-mqtt.{{ocp_project}}.{{ocp_apps_domain}}
+        port: "{{ item }}"
+        state: started
+        delay: 0
+        connect_timeout: 2
+        timeout: 3
+      loop: "{{ range(mqtt_port|int + 1, 31992, 1)|list }}"
+      when: portcheck.failed == false
+      register: portcheck
+  rescue:    
+    - set_fact:
+        mqtt_port: "{{ portcheck.results|selectattr('failed', 'defined')|selectattr('failed')|map(attribute='item')|first}}"
+    - debug: msg="MQTT Port Assignment is {{ mqtt_port }}"
+    # Use to force fail on rescue since we short circuit the failure by handling in rescue
+    #- command: /bin/false
+
+- name: Reset portcheck for MQTTS loop
+  shell: echo "false"
+  register: portcheck
+
+- name: Check for open MQTTS port
+  vars:
+    mqtts_port: 31993
+  block:
+    - name: Wait for port and loop
+      wait_for:
+        host: ec-broker-mqtt.{{ocp_project}}.{{ocp_apps_domain}}
+        port: "{{ item }}"
+        state: started
+        delay: 0
+        connect_timeout: 2
+        timeout: 3
+      loop: "{{ range(mqtts_port|int + 1, 32102, 1)|list }}"
+      when: portcheck.failed == false
+      register: portcheck
+  rescue:    
+    - set_fact:
+        mqtts_port: "{{ portcheck.results|selectattr('failed', 'defined')|selectattr('failed')|map(attribute='item')|first}}"
+    - debug: msg="MQTTS Port Assignment is {{ mqtts_port }}"
+    # Use to force fail on rescue since we short circuit the failure by handling in rescue
+    #- command: /bin/false
+
+- name: Create project for IoT Demo
+  shell: |
+         oc new-project {{ocp_project}} \
+         --display-name="IoT Demo - {{guid}}" \
+         --description="Industry 4.0 IoT Demo"
+  ignore_errors: true
+
+- name: "Label namespace"
+  command: "oc label namespace {{ocp_project}} AAD='{{guid}}'"
+
+- name: Add anyuser
+  shell: "oc adm policy add-scc-to-user anyuid -z default -n {{ocp_project}}"
+
+- name: Add Quay Image Pull Secret for Eurotech Images
+  shell: "oc create -f /tmp/{{guid}}/redhat-iot-rhpds-secret.yml -n {{ocp_project}}"
+
+- name: Add Quay Image Pull Secret for Eurotech Images
+  shell: "oc secrets link default redhat-iot-rhpds-pull-secret --for=pull -n {{ocp_project}}"
+
+- name: Add MariaDB Secret
+  shell: "oc create secret generic ec-db --from-literal=name=ecdb --from-literal=username=redhat --from-literal=password=RedHat123 -n {{ocp_project}}"
+
+- name: Ensure dir exists
+  file:
+    path: /tmp/{{guid}}/certs/
+    state: directory
+
+- name: Generate Self Signed Certs
+  command: >
+    openssl req -new
+      -x509
+      -nodes
+      -days {{ item.days | default(3650) }}
+      -subj "/C={{ item.country | default('') }}/ST={{ item.state | default('') }}/L={{ item.city | default('') }}/O={{ item.organization | default('') }}/OU={{ item.unit | default('') }}/CN={{ item.name }}/emailAddress={{ item.email | default('') }}"
+      -newkey rsa:2048
+      -keyout /tmp/{{guid}}/certs/key.pem
+      -out /tmp/{{guid}}/certs/cert.pem
+  args:
+    creates: /tmp/{{guid}}/certs/*.pem
+  with_items: "{{ openssl_self_signed }}"
+
+- name: Add Self Signed Certs
+  shell: "oc create secret generic ec-crt --from-file=crt=/tmp/{{guid}}/certs/cert.pem --from-file=key=/tmp/{{guid}}/certs/key.pem --from-file=ca=/tmp/{{guid}}/certs/cert.pem -n {{ocp_project}}"
+
+# -f /tmp/{{guid}}/mariadb.yaml
+- name: Deploy MariaDB
+  shell: "oc new-app -e MYSQL_USER=redhat -e MYSQL_PASSWORD=RedHat123 -e MYSQL_DATABASE=ecdb -e MYSQL_LOWER_CASE_TABLE_NAMES=1 -e NAMESPACE=openshift -e VOLUME_CAPACITY=1Gi -e MARIADB_VERSION=10.2 mariadb:10.2 -n {{ocp_project}}"
+
+- name: Deploy Elasticsearch
+  shell: "oc new-app -e 'ES_JAVA_OPTS=-Des.cluster.name=kapua-datastore -Des.http.cors.enabled=true -Des.http.cors.allow-origin=* -Xms256m -Xmx256m' elasticsearch:5.4 -n {{ocp_project}}"
+
+- name: Deploy EC Broker
+  shell: "oc new-app -f /tmp/{{guid}}/broker.yml -p 'MQTT_NODE_PORT={{mqtt_port}}' -p 'MQTTS_NODE_PORT={{mqtts_port}}' -p IMAGE_VERSION=5.0.0 -p NAMESPACE={{ocp_project}} -p EC_SECRET_DB=ec-db -p DISABLE_SSL=true -n {{ocp_project}}"
+
+- name: Deploy EC Console
+  shell: "oc new-app -f /tmp/{{guid}}/console.yml -p 'IMAGE_VERSION=5.0.0' -p 'NAMESPACE={{ocp_project}}' -p 'EC_SECRET_DB=ec-db' -n {{ocp_project}}"
+
+- name: Deploy EC API
+  shell: "oc new-app -f /tmp/{{guid}}/api.yml -p 'IMAGE_VERSION=5.0.0' -p 'NAMESPACE={{ocp_project}}' -p 'EC_SECRET_DB=ec-db' -n {{ocp_project}}"
+
+- name: Print Dashboard URL
+  debug:
+    msg: "user.info: Dashboard: http://dashboard-{{ocp_project}}.{{ocp_apps_domain}}"
+
+- name: Print Console URL
+  debug:
+    msg: "user.info: EC Console: http://ec-console-{{ocp_project}}.{{ocp_apps_domain}} UserID: ec-sys Password: ec-password"
+
+- name: Print MQTT Broker URL
+  debug:
+    msg: "user.info: EC Broker MQTT: mqtt://ec-broker-mqtt.{{ocp_project}}.{{ocp_apps_domain}}:{{mqtt_port}} Account: Red-Hat Login: ec-sys Password: ec-password"
+
+# Not used yet, disable until it is relevant
+#- name: Print MQTTS Broker URL
+#  debug:
+#    msg: "user.info: EC Broker MQTTS: mqtt://ec-broker-mqtts.{{ocp_project}}.{{ocp_apps_domain}}:{{mqtts_port}}"
+
+- name: Deploy Dashboard Proxy and JDG
+  shell: "oc new-app -f /tmp/{{guid}}/dashboard-proxy.yml -p 'BROKER_USERNAME=ec-sys' -p 'BROKER_PASSWORD=ec-password'"
+
+- name: Deploy Dashboard App
+  shell: "oc new-app -f /tmp/{{guid}}/dashboard.yml -p 'BROKER_HOSTNAME=ec-broker-ws-{{ocp_project}}' -p 'BROKER_PASSWORD=ec-password' -p 'BROKER_USERNAME=ec-sys' -p 'DASHBOARD_PROXY_HOSTNAME=dashboard-proxy-{{ocp_project}}'"
+
+- name: Deploy virtual gateway
+  shell: "oc new-app quay.io/redhat-iot/esf:5.2.0-DEMO"
+
+- name: Print ESF Virtual Gateway URL
+  debug:
+    msg: "user.info: ESF Virtual Gateway: http://esf-{{ocp_project}}.{{ocp_apps_domain}} UserID: admin Password: admin"
+
+- name: Expose virtual gateway web ui
+  shell: "oc expose svc/esf"
+
+- name: Annotate the completed project as requested by user
+  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
+
+- name: Give user access to the completed project
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"

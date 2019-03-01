@@ -1,0 +1,50 @@
+---
+
+-----
+WORKLOAD="ocp-workload-3scale-lifecycle"
+SUBDOMAIN_BASE=`oc whoami --show-server | cut -d'.' -f 2,3,4,5 | cut -d':' -f 1`
+
+# API manager provision
+ansible-playbook -i localhost, -c local ./configs/ocp-workloads/ocp-workload.yml \
+                    -e"ocp_workload=${WORKLOAD}" \
+                    -e"ACTION=create" \
+                    -e"subdomain_base=$SUBDOMAIN_BASE"
+
+
+
+ansible-playbook -i localhost, -c local ./configs/ocp-workloads/ocp-workload.yml \
+                    -e"ocp_workload=${WORKLOAD}" \
+                    -e"ACTION=remove" \
+                    -e"subdomain_base=$SUBDOMAIN_BASE" 
+-----
+
+- name: Check if Red Hat SSO was already provisioned
+  command: "oc get service sso -n {{shared_ns}}"
+  register: sso_already_installed
+  ignore_errors: true
+  changed_when: false
+
+- name: Install Red Hat SSO in shared namespace {{shared_ns}}
+  block:
+    - name: define sso template version
+      set_fact:
+        sso_version: "ose-v1.4.15"
+    - name: Make sure use shared namespace
+      shell: "oc project {{shared_ns}}"
+    - name: Create service accounts and secrets for RH SSO
+      shell: "oc create -f https://raw.githubusercontent.com/jboss-openshift/application-templates/{{sso_version}}/secrets/sso-app-secret.json -n {{shared_ns}}"
+    - name: Add cluster view policy to sa for clustering
+      shell: "oc policy add-role-to-user view system:serviceaccount:{{shared_ns}}:sso-service-account -n {{shared_ns}}"
+    - name: Import RH SSO template
+      shell: "oc create -f https://raw.githubusercontent.com/jboss-openshift/application-templates/{{sso_version}}/sso/sso72-mysql-persistent.json"
+    - name: Create RH SSO app
+      shell: "oc new-app sso72-mysql-persistent -p HTTPS_NAME=jboss -p HTTPS_PASSWORD=mykeystorepass -p SSO_ADMIN_USERNAME=keyadmin \
+      -p SSO_ADMIN_PASSWORD=keypassword -n {{shared_ns}}"
+    - name: Wait for Red Hat SSO to be running
+      command: "oc get dc/sso -o yaml -n {{shared_ns}}"
+      register: result
+      until: '"availableReplicas: 1" in result.stdout'
+      retries: 5
+      delay: 60
+      changed_when: false
+  when: sso_already_installed is failed

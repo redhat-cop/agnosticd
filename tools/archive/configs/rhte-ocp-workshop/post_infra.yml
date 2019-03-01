@@ -1,0 +1,533 @@
+- name: Step 002 Post Infrastructure
+  hosts: localhost
+  connection: local
+  become: false
+  tags:
+    - step002
+    - post_infrastructure
+  tasks:
+    - environment:
+        AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+        AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+        AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+      when:
+        - "'clientvms' in groups"
+        - groups['clientvms'] | length > 0
+        - cloudformation_out_final is defined
+        - cloudformation_out_final.stack_outputs.AutoScalingGroupClientVM is defined
+      tags:
+        - clientvms
+      block:
+      - name: test cloudformation_out_final
+        debug:
+          var: cloudformation_out_final
+          verbosity: 2
+
+      - name: Deactivate autoscaling
+        command: >-
+          aws autoscaling suspend-processes --auto-scaling-group-name
+          {{cloudformation_out_final.stack_outputs.AutoScalingGroupClientVM}}
+
+      - name: Write down autoscaling name
+        copy:
+          dest: "{{output_dir}}/{{ env_type }}.{{ guid }}.AutoScalingGroupClientVM"
+          content: "{{cloudformation_out_final.stack_outputs.AutoScalingGroupClientVM}}"
+
+      - name: Allocate and associate an EIP to the clientVMs
+        ec2_eip:
+          device_id: "{{hostvars[item].instance_id}}"
+          release_on_disassociation: yes
+        with_items: "{{groups['clientvms']}}"
+        register: eips
+
+      # reimport roles to update inventory, since publicIP changed
+      - name: Run infra-ec2-create-inventory Role
+        import_role:
+          name: "infra-ec2-create-inventory"
+
+      - name: Run Common SSH Config Generator Role
+        import_role:
+          name: "infra-common-ssh-config-generate"
+
+      - name: Create JSON file for DNS records for clientVM
+        vars:
+          DNS_action: UPSERT
+        template:
+          src: ./files/clientvms_dns.json.j2
+          dest: "{{output_dir}}/{{env_type}}-{{guid}}_clientvms_dns.json"
+
+      - name: Create clientvms DNS names
+        command: >-
+          aws route53 change-resource-record-sets
+          --hosted-zone-id {{HostedZoneId}}
+          --change-batch file:///{{output_dir}}/{{env_type}}-{{guid}}_clientvms_dns.json
+
+      - name: Rename instance
+        ec2_tag:
+          state: present
+          resource: "{{hostvars[item].instance_id}}"
+          tags:
+            Name: "clientvm{{idx + 1}}"
+        with_items: "{{groups['clientvms']}}"
+        loop_control:
+          index_var: idx
+
+      - name: Set hostname
+        become: yes
+        hostname:
+          name: "clientvm{{idx + 1}}"
+        delegate_to: "{{item}}"
+        with_items: "{{groups['clientvms']}}"
+        loop_control:
+          index_var: idx
+
+    - name: Job Template to launch a Job Template with update on launch inventory set
+      uri:
+        url: "https://{{ ansible_tower_ip }}/api/v1/job_templates/{{ job_template_id }}/launch/"
+        method: POST
+        user: "{{tower_admin}}"
+        password: "{{tower_admin_password}}"
+        body:
+          extra_vars:
+            guid: "{{guid}}"
+            ipa_host_password: "{{ipa_host_password}}"
+
+        body_format: json
+        validate_certs: False
+        HEADER_Content-Type: "application/json"
+        status_code: 200, 201
+      when: tower_run == 'true'
+
+    - name: get S3User credentials from stack outputs
+      set_fact:
+        s3user: "{{ cloudformation_out_final.stack_outputs.S3User }}"
+        s3user_access_key: "{{ cloudformation_out_final.stack_outputs.S3UserAccessKey }}"
+        s3user_secret_access_key: "{{ cloudformation_out_final.stack_outputs.S3UserSecretAccessKey }}"
+      when:
+        - cloudformation_out_final is defined
+        - cloudformation_out_final.stack_outputs.S3UserAccessKey is defined
+        - cloudformation_out_final.stack_outputs.S3UserSecretAccessKey is defined
+      tags:
+        - provision_cf_template
+
+    - name: write down s3user credentials
+      copy:
+        dest: "{{output_dir}}/{{ env_type }}.{{ guid }}.s3user.credentials"
+        content: |
+          * S3 Bucket for registry: {{s3user}}
+          ** S3User access key: {{s3user_access_key}}
+          ** S3User secret key: {{s3user_secret_access_key}}
+      when: s3user_access_key is defined
+
+    - name: get Route53User credentials from stack outputs
+      set_fact:
+        route53user: "{{ cloudformation_out_final.stack_outputs.Route53User }}"
+        route53user_access_key: "{{ cloudformation_out_final.stack_outputs.Route53UserAccessKey }}"
+        route53user_secret_access_key: "{{ cloudformation_out_final.stack_outputs.Route53UserSecretAccessKey }}"
+      when:
+        - cloudformation_out_final is defined
+        - cloudformation_out_final.stack_outputs.Route53UserAccessKey is defined
+        - cloudformation_out_final.stack_outputs.Route53UserSecretAccessKey is defined
+      tags:
+        - provision_cf_template
+
+    - name: write down Route53User credentials
+      copy:
+        dest: "{{output_dir}}/{{ env_type }}.{{ guid }}.route53user.credentials"
+        content: |
+          * Route53 User for Let's Encrypt: {{ route53user }}
+          ** Route53User access key: {{ route53user_access_key }}
+          ** Route53User secret key: {{ route53user_secret_access_key }}
+      when: route53user_access_key is defined
+
+
+- name: Detect and map data disks (support) for Azure
+  hosts: support
+  become: true
+  gather_facts: false
+
+
+
+  tasks:
+    - name: test if docker_device file is present (previous run)
+      stat:
+        path: /var/preserve/docker_device
+      register: rfile
+
+    - name: Get docker device
+      changed_when: false
+      vars:
+        query: "[?name == 'support']|[].volumes[?purpose=='docker'].lun|[0][0]"
+      shell: >
+        parted -m /dev/sda print all 2>/dev/null
+        | grep unknown
+        | grep /dev/sd
+        | cut -d':' -f1
+        | sed -n '{{ (instances|json_query(query)|int) + 1}}p'
+      register: result
+      when:
+        - cloud_provider == 'azure'
+        - instances is defined
+        # docker_device will be present on support nodes only when glusterfs is installed
+        - install_glusterfs | bool
+        - not rfile.stat.exists
+
+    - name: set fact for docker_device
+      set_fact:
+        docker_device: "{{ result.stdout }}"
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - install_glusterfs | bool
+        - not rfile.stat.exists
+
+    - name: Write down docker_device for idempotency
+      copy:
+        dest: /var/preserve/docker_device
+        content: "{{ docker_device }}"
+        force: no
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - install_glusterfs | bool
+        - not rfile.stat.exists
+
+    # idempotency
+
+    - name: get device_name from file (from previous run)
+      slurp:
+        src: /var/preserve/docker_device
+      register: slurp_result
+      when:
+        - cloud_provider == 'azure'
+        - install_glusterfs | bool
+        - rfile.stat.exists
+
+    - name: set fact for docker_device (from previous run)
+      set_fact:
+        docker_device: "{{ slurp_result.content|b64decode }}"
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - install_glusterfs | bool
+        - rfile.stat.exists
+
+    # glusterfs device
+
+    - name: test if glusterfs_device_name file is present (previous run)
+      stat:
+        path: /var/preserve/glusterfs_device_name
+      register: rfile
+
+    - name: Get glusterfs device
+      changed_when: false
+      vars:
+        query: "[?name == 'support']|[].volumes[?purpose=='glusterfs'].lun|[0][0]"
+      shell: >
+        parted -m /dev/sda print all 2>/dev/null
+        | grep unknown
+        | grep /dev/sd
+        | cut -d':' -f1
+        | sed -n '{{ (instances|json_query(query)|int) + 1}}p'
+      register: result
+      when:
+        - install_glusterfs | bool
+        - cloud_provider == 'azure'
+        - instances is defined
+        - not rfile.stat.exists
+
+    - name: set fact for glusterfs_device_name
+      set_fact:
+        glusterfs_device_name: "{{ result.stdout }}"
+      when:
+        - install_glusterfs | bool
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - not rfile.stat.exists
+
+    - name: Write down glusterfs_device_name for idempotency
+      copy:
+        dest: /var/preserve/glusterfs_device_name
+        content: "{{ glusterfs_device_name }}"
+        force: no
+      when:
+        - install_glusterfs | bool
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - not rfile.stat.exists
+
+    # idempotency
+
+    - name: get device_name from file (from previous run)
+      slurp:
+        src: /var/preserve/glusterfs_device_name
+      register: slurp_result
+      when:
+        - cloud_provider == 'azure'
+        - install_glusterfs | bool
+        - rfile.stat.exists
+
+    - name: set fact for glusterfs_device_name (from previous run)
+      set_fact:
+        glusterfs_device_name: "{{ slurp_result.content|b64decode }}"
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - install_glusterfs | bool
+        - rfile.stat.exists
+
+    # nfs_pvs
+
+    - name: test if nfs_pvs file is present (previous run)
+      stat:
+        path: /var/preserve/nfs_pvs
+      register: rfile
+
+    - name: Get NFS device
+      changed_when: false
+      vars:
+        query: "[?name == 'support']|[].volumes[?purpose=='nfs'].lun|[0][0]"
+      shell: >
+        parted -m /dev/sda print all 2>/dev/null
+        | grep unknown
+        | grep /dev/sd
+        | cut -d':' -f1
+        | sed -n '{{ (instances|json_query(query)|int) + 1}}p'
+      register: result
+      when:
+        - install_nfs | bool
+        - cloud_provider == 'azure'
+        - instances is defined
+        - not rfile.stat.exists
+
+    - name: set fact for nfs_pvs
+      set_fact:
+        nfs_pvs: "{{ result.stdout }}"
+      when:
+        - install_nfs | bool
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - not rfile.stat.exists
+
+    - name: Write down nfs_pvs for idempotency
+      copy:
+        dest: /var/preserve/nfs_pvs
+        content: "{{ nfs_pvs }}"
+        force: no
+      when:
+        - install_nfs | bool
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - not rfile.stat.exists
+
+    # idempotency
+
+    - name: get nfs_pvs from file (from previous run)
+      slurp:
+        src: /var/preserve/nfs_pvs
+      register: slurp_result
+      when:
+        - cloud_provider == 'azure'
+        - install_nfs | bool
+        - rfile.stat.exists
+
+    - name: set fact for nfs_pvs (from previous run)
+      set_fact:
+        nfs_pvs: "{{ slurp_result.content|b64decode }}"
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - install_nfs | bool
+        - rfile.stat.exists
+
+- name: Detect and map data disks (nodes) for Azure
+  hosts: nodes
+  become: true
+  gather_facts: false
+  tasks:
+    - name: test if docker_device file is present (previous run)
+      stat:
+        path: /var/preserve/docker_device
+      register: rfile
+
+    - name: Get docker device
+      changed_when: false
+      vars:
+        query: "[?name == 'node']|[].volumes[?purpose=='docker'].lun|[0][0]"
+      shell: >
+        parted -m /dev/sda print all 2>/dev/null
+        | grep unknown
+        | grep /dev/sd
+        | cut -d':' -f1
+        | sed -n '{{ (instances|json_query(query)|int) + 1}}p'
+      register: result
+      when:
+        - cloud_provider == 'azure'
+        - instances is defined
+        - not rfile.stat.exists
+
+    - name: set fact for docker_device
+      set_fact:
+        docker_device: "{{ result.stdout }}"
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - not rfile.stat.exists
+
+    - name: Write down docker_device for idempotency
+      copy:
+        dest: /var/preserve/docker_device
+        content: "{{ docker_device }}"
+        force: no
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - not rfile.stat.exists
+
+    # idempotency
+
+    - name: get device_name from file (from previous run)
+      slurp:
+        src: /var/preserve/docker_device
+      register: slurp_result
+      when:
+        - cloud_provider == 'azure'
+        - rfile.stat.exists
+
+    - name: set fact for docker_device (from previous run)
+      set_fact:
+        docker_device: "{{ slurp_result.content|b64decode }}"
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - rfile.stat.exists
+
+- name: Detect and map data disks (infranodes) for Azure
+  hosts: infranodes
+  become: true
+  gather_facts: false
+
+
+
+  tasks:
+    - name: test if docker_device file is present (previous run)
+      stat:
+        path: /var/preserve/docker_device
+      register: rfile
+
+    - name: Get docker device
+      changed_when: false
+      vars:
+        query: "[?name == 'infranode']|[].volumes[?purpose=='docker'].lun|[0][0]"
+      shell: >
+        parted -m /dev/sda print all 2>/dev/null
+        | grep unknown
+        | grep /dev/sd
+        | cut -d':' -f1
+        | sed -n '{{ (instances|json_query(query)|int) + 1}}p'
+      register: result
+      when:
+        - cloud_provider == 'azure'
+        - instances is defined
+        - not rfile.stat.exists
+
+    - name: set fact for docker_device
+      set_fact:
+        docker_device: "{{ result.stdout }}"
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - not rfile.stat.exists
+
+    - name: Write down docker_device for idempotency
+      copy:
+        dest: /var/preserve/docker_device
+        content: "{{ docker_device }}"
+        force: no
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - not rfile.stat.exists
+
+    # idempotency
+
+    - name: get device_name from file (from previous run)
+      slurp:
+        src: /var/preserve/docker_device
+      register: slurp_result
+      when:
+        - cloud_provider == 'azure'
+        - rfile.stat.exists
+
+    - name: set fact for docker_device (from previous run)
+      set_fact:
+        docker_device: "{{ slurp_result.content|b64decode }}"
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - rfile.stat.exists
+
+- name: Map data disks (masters) for Azure
+  hosts: masters
+  become: true
+  gather_facts: false
+
+
+
+  tasks:
+    - name: test if docker_device file is present (previous run)
+      stat:
+        path: /var/preserve/docker_device
+      register: rfile
+
+    - name: Get docker device
+      changed_when: false
+      vars:
+        query: "[?name == 'master']|[].volumes[?purpose=='docker'].lun|[0][0]"
+      shell: >
+        parted -m /dev/sda print all 2>/dev/null
+        | grep unknown
+        | grep /dev/sd
+        | cut -d':' -f1
+        | sed -n '{{ (instances|json_query(query)|int) + 1}}p'
+      register: result
+      when:
+        - cloud_provider == 'azure'
+        - instances is defined
+        - not rfile.stat.exists
+
+    - name: set fact for docker_device
+      set_fact:
+        docker_device: "{{ result.stdout }}"
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - not rfile.stat.exists
+
+    - name: Write down docker_device for idempotency
+      copy:
+        dest: /var/preserve/docker_device
+        content: "{{ docker_device }}"
+        force: no
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - not rfile.stat.exists
+
+    # idempotency
+
+    - name: get device_name from file (from previous run)
+      slurp:
+        src: /var/preserve/docker_device
+      register: slurp_result
+      when:
+        - cloud_provider == 'azure'
+        - rfile.stat.exists
+
+    - name: set fact for docker_device (from previous run)
+      set_fact:
+        docker_device: "{{ slurp_result.content|b64decode }}"
+      when:
+        - cloud_provider == 'azure'
+        - result | succeeded
+        - rfile.stat.exists

@@ -4,9 +4,6 @@
   connection: local
   gather_facts: false
   become: false
-  vars_files:
-    - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_secret_vars.yml"
   tags:
     - step001
     - deploy_infrastructure
@@ -19,13 +16,15 @@
     AZURE_CONFIG_DIR: "/tmp/.azure-{{project_tag}}"
   tasks:
     - name: Ensure az is installed
+      environment:
+        PATH: /usr/bin
       command: which az
       register: az_result
 
     - name: Fail if az not available
       fail:
         msg: you need azure-cli installed
-      when: az_result|failed
+      when: az_result is failed
 
     - set_fact:
         stack_tag: "{{env_type | replace('-', '_')}}_{{guid}}"
@@ -34,8 +33,8 @@
         - must
 
     - set_fact:
-        t_dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
-        params_dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{project_tag}}-cloud_template_parameters.json"
+        t_dest: "{{output_dir}}/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
+        params_dest: "{{output_dir}}/{{project_tag}}-cloud_template_parameters.json"
       tags:
         - azure_infrastructure_deployment
         - validate_azure_template
@@ -43,7 +42,7 @@
 
     - name: Azure Generate Resource manager template
       template:
-        src: "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.j2"
+        src: "../configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.j2"
         dest: "{{t_dest}}"
       tags:
         - azure_infrastructure_deployment
@@ -52,17 +51,24 @@
 
     # use command line 'az' to validate template and deploy
     - name: Login to Azure
-      command: az login --service-principal -u {{azure_service_principal}} -p {{azure_password}} --tenant {{azure_tenant}}
+      command: >-
+        az login --service-principal
+        -u "{{azure_service_principal}}"
+        -p {{azure_password}}
+        --tenant {{azure_tenant}}
+      environment:
+        PATH: /usr/bin
       tags:
         - validate_azure_template
         - create_inventory
         - must
-
     - name: Create the resource group
       tags:
         - azure_infrastructure_deployment
         - validate_azure_template
-      command: az group create --name "{{project_tag}}" --location "{{azure_region}}"
+      azure_rm_resourcegroup:
+        name: "{{ az_resource_group }}"
+        location: "{{ azure_region }}"
 
     - name: Get SSH public key
       set_fact:
@@ -70,6 +76,8 @@
         ssh_key_data: "{{lookup('file', '~/.ssh/{{key_name}}.pub')}}"
       tags:
         - validate_azure_template
+        - must
+        - create_inventory
 
     - name: Build parameter file
       copy:
@@ -86,17 +94,53 @@
         - validate_azure_template
 
     - name: Validate arm template
-      command: az group deployment validate --template-file {{t_dest}} --resource-group {{project_tag}} --parameters @{{params_dest}}
+      environment:
+        PATH: /usr/bin
+      command: >-
+        az group deployment validate
+        --template-file {{t_dest}}
+        --resource-group {{az_resource_group}}
+        --parameters @{{params_dest}}
       changed_when: false
       tags:
         - azure_infrastructure_deployment
         - validate_azure_template
 
     - name: ARM Group deployment create
-      command: az group deployment create --template-file {{t_dest}} --resource-group {{project_tag}} --parameters @{{params_dest}}
+      environment:
+        PATH: /usr/bin
+      command: >-
+        az group deployment create
+        --name {{env_type}}.{{guid}}
+        --template-file {{t_dest}}
+        --resource-group {{az_resource_group}}
+        --parameters @{{params_dest}}
       register: az_deploy
       tags:
         - azure_infrastructure_deployment
+        - az_rm_deploy
+      until: az_deploy is succeeded
+      retries: 0
+
+    # I tried to use the 'azure_rm_deployment' ansible module instead of the azure-cli,
+    # but this does not work for large templates.
+    # Also, module is marked as 'preview' so let's use the cli for now.
+    # Commented for later use:
+    #
+    #   azure_rm_deployment:
+    #     deployment_name: "{{env_type}}.{{guid}}"
+    #     resource_group_name: "{{az_resource_group}}"
+    #     location: "{{ azure_region }}"
+    #     template: "{{ lookup('file', t_dest) }}"
+    #     parameters:
+    #       adminUsername:
+    #         value: "{{remote_user}}"
+    #       sshKeyData:
+    #         value: "{{ssh_key_data}}"
+    #       DNSZone:
+    #         value: "{{HostedZoneId}}"
+    #       guid:
+    #         value: "{{guid}}"
 
     - debug:
         var: az_deploy
@@ -107,7 +151,7 @@
     - name: Fetch DNS zone NS entries
       azure_rm_dnsrecordset_facts:
         zone_name: "{{guid}}.{{HostedZoneId}}"
-        resource_group: "{{project_tag}}"
+        resource_group: "{{az_resource_group}}"
         record_type: NS
         relative_name: '@'
       register: subzone_ns
@@ -127,12 +171,18 @@
         zone_name: "{{HostedZoneId}}"
         record_type: NS
         state: present
-        records: "{{subzone_ns | json_query('ansible_facts.azure_dnsrecordset[0].properties.NSRecords[*].{entry: nsdname}')}}"
+        records: "{{ subzone_ns | json_query('ansible_facts.azure_dnsrecordset[0].properties.NSRecords[*].{entry: nsdname}') }}"
       tags:
         - azure_infrastructure_deployment
 
+    # use '--show-details' feature from the cli, it groups instances and their public IPs.
+    # It saves us API calls.
     - name: Get list of VMs
-      command: az vm list -g "{{project_tag}}" --show-details
+      command: az vm list --resource-group "{{az_resource_group}}" --show-details
+      # specify path to use azure-cli from system and not from python virtualenv
+      environment:
+        PATH: /usr/bin
+      changed_when: false
       register: result_list
       tags:
         - create_inventory
@@ -154,39 +204,48 @@
 
     - name: Build inventory
       add_host:
-        name: "{{item.name}}"
-        shortname: "{{item.name}}"
+        name: "{{item.osProfile.computerName|default(item.name)}}"
+        shortname: "{{item.tags.Name|default(item.name)}}"
         groups:
           - "tag_Project_{{stack_tag}}"
           - "tag_{{stack_tag}}_{{item.tags.AnsibleGroup | default('unknowns')}}"
           - "tag_{{stack_tag}}_ostype_{{item.tags.ostype | default('unknown')}}"
           - "{{item.tags.ostype | default('unknowns')}}"
           - "{{ 'newnodes' if (item.tags.newnode|d()|bool) else 'all'}}"
-        ansible_ssh_user: "{{ remote_user }}"
+        ansible_user: "{{ remote_user }}"
         remote_user: "{{ remote_user | d('azure') }}"
         ansible_ssh_private_key_file: "{{ssh_key}}"
         key_name: "{{key_name}}"
         state: "{{item.powerState|d('unknown')}}"
-        internaldns: "{{item.tags.internaldns | default(item.name)}}"
+        internaldns: "{{item.tags.internaldns | d(item.osProfile.computerName) |d(item.name)}}"
         instance_id: "{{ item.vmId | d('unknown')}}"
         region: "{{azure_region}}"
-        public_dns_name: "{{item.fqdns}}"
+        public_dns_name: "{{item.fqdns|d(item.publicIps)|d('')}}"
         private_dns_name: "{{item.tags.internaldns|d(item.name)}}"
         private_ip_address: "{{item.privateIps}}"
         public_ip_address: "{{item.publicIps}}"
         placement: "{{item.zones}}"
         image_id: "{{item.storageProfile.osDisk.image|d('unknown')}}"
         ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+        instance_canonical_name: "{{ item.tags.canonical_name }}"
       with_items: "{{vm_list}}"
+      when:
+        - item.tags is defined
+        - item.tags.Project is defined
+        - item.tags.Project == project_tag
+      loop_control:
+        label: "{{ item.name }}"
       tags:
         - create_inventory
         - must
 
     # AnsibleGroup tag can have several comma-separated values. Ex: activedirectories,windows
     - add_host:
-        name: "{{item.name}}"
+        name: "{{item.osProfile.computerName|default(item.name)}}"
         groups: "{{item.tags.AnsibleGroup}}"
       with_items: "{{vm_list}}"
+      loop_control:
+        label: "{{ item.name }}"
       tags:
         - create_inventory
         - must
@@ -196,19 +255,21 @@
         var: hostvars
         verbosity: 2
 
+# Copy env_vars variables from the config to all hosts
+- import_playbook: ../include_vars.yml
+
+# TODO: use common infra role instead of this playbook
 - name: Configure local ssh config for bastion proxy use
-  include: "{{ANSIBLE_REPO_PATH}}/cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
+  import_playbook: "{{cloud_provider}}_ssh_config_setup.yml"
   when: groups['bastions']
+  tags:
+    - must
+    - create_inventory
 
 - name: wait_for_connection for all non-windows machines and set hostname
   hosts:
     - all:!windows:!network
-  vars_files:
-      - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_vars.yml"
-      - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_secret_vars.yml"
   gather_facts: false
-  any_errors_fatal: true
-  ignore_errors: false
   become: true
   tags:
     - step001
@@ -217,13 +278,52 @@
   tasks:
     - name: wait for linux host to be available
       wait_for_connection:
+        timeout: 300
+      register: rwait
+      ignore_errors: true
 
-    - name: Set hostname based on tag_internaldns
-      hostname:
-        name: "{{hostvars[inventory_hostname].internaldns}}"
-      when: hostvars[inventory_hostname].internaldns is defined
+    - name: restart instance if wait_for_connection failed
+      become: false
+      environment:
+        AZURE_CLIENT_ID: "{{azure_service_principal}}"
+        AZURE_TENANT: "{{azure_tenant}}"
+        AZURE_SECRET: "{{azure_password}}"
+        AZURE_SUBSCRIPTION_ID: "{{azure_subscription_id}}"
+        # AZURE_CONFIG_DIR: create a specific config dir for this stack to allow concurrent access
+        AZURE_CONFIG_DIR: "/tmp/.azure-{{project_tag}}"
+      command: "az vm restart --resource-group {{az_resource_group}} --name '{{inventory_hostname}}'"
+      delegate_to: localhost
+      when: rwait is failed
 
-    - stat:
+    - name: wait for linux host to be available (retry)
+      wait_for_connection:
+      when: rwait is failed
+
+    - ping:
+      register: rping
+      retries: 3
+      delay: 10
+      until: rping is succeeded
+
+
+    # < get internal domain name for later use
+    - name: Get internal fqdn
+      command: domainname -d
+      register: internalfqdn_r
+      changed_when: false
+
+    - name: NetworkManager get active interface uuid
+      command: nmcli --get-values UUID connection show --active
+      register: result_active_uuid
+      changed_when: false
+
+    - name: set fact internal_azure_dns_suffix for later use
+      set_fact:
+        internal_azure_dns_suffix: "{{internalfqdn_r.stdout}}"
+        nm_active_connection: "{{result_active_uuid.stdout}}"
+
+    - name: Stat /etc/cloud/cloud.cf file
+      stat:
         path: /etc/cloud/cloud.cfg
       register: cloud_cfg_file
 
@@ -236,13 +336,17 @@
       when: cloud_cfg_file.stat.exists
       tags: disable_cloud_cfg_hostname
 
+    - name: Populate /etc/hosts
+      lineinfile:
+        dest: /etc/hosts
+        regexp: ' {{hostvars[item].internaldns}}$'
+        line: '{{hostvars[item].private_ip_address}} {{hostvars[item].internaldns}}'
+      with_items: "{{ groups['all'] }}"
+
 - name: Set facts for Windows hosts if any exist and wait_for_connection
   gather_facts: false
   hosts:
     - windows
-  vars_files:
-    - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ANSIBLE_REPO_PATH}}/configs/{{ env_type }}/env_secret_vars.yml"
   tasks:
     - name: set facts for remote access
       set_fact:
@@ -252,9 +356,77 @@
         ansible_password: "{{ windows_password | default(hostvars['localhost'].generated_windows_password) }}"
         ansible_port: 5986
         ansible_user: Administrator
-        ansible_ssh_user: Administrator
         ansible_winrm_server_cert_validation: ignore
 
     - name: wait for windows host to be available
       wait_for_connection:
         timeout: 900
+        connect_timeout: 60
+        delay: 120
+      register: rwait
+      ignore_errors: true
+
+    - name: restart instance if wait_for_connection failed
+      become: false
+      environment:
+        AZURE_CLIENT_ID: "{{azure_service_principal}}"
+        AZURE_TENANT: "{{azure_tenant}}"
+        AZURE_SECRET: "{{azure_password}}"
+        AZURE_SUBSCRIPTION_ID: "{{azure_subscription_id}}"
+        # AZURE_CONFIG_DIR: create a specific config dir for this stack to allow concurrent access
+        AZURE_CONFIG_DIR: "/tmp/.azure-{{project_tag}}"
+      command: "az vm restart --resource-group {{az_resource_group}} --name '{{inventory_hostname}}'"
+      delegate_to: localhost
+      when: rwait is failed
+
+    - name: wait for windows host to be available (retry)
+      wait_for_connection:
+        timeout: 900
+        connect_timeout: 60
+        delay: 120
+      when: rwait is failed
+
+- name: Detect and map data disks for Azure
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - when: instances is defined
+      block:
+        - name: Map Azure disks using LUN.
+          include_role:
+            name: infra-azure-disk-map
+          vars:
+            disk_map_device:
+              name: "{{ item.name }}"
+              lun: "{{ index }}"
+          when: item.enable|d(true)
+          loop_control:
+            index_var: index
+          loop: >-
+            {{ instances
+            | json_query("
+                [?name == '" + instance_canonical_name + "']
+                | [].volumes[]
+              ")
+            }}
+
+- name: Create Azure Service Principal for OSBA/Cloud Provider
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: no
+  tags:
+  - env-specific
+  - create_azure_service_principal
+  environment:
+    AZURE_CLIENT_ID: "{{azure_service_principal}}"
+    AZURE_TENANT: "{{azure_tenant}}"
+    AZURE_SECRET: "{{azure_password}}"
+    AZURE_SUBSCRIPTION_ID: "{{azure_subscription_id}}"
+    # AZURE_CONFIG_DIR: create a specific config dir for this stack to allow concurrent access
+    AZURE_CONFIG_DIR: "/tmp/.azure-{{project_tag}}"
+  tasks:
+  - include_role:
+      name: infra-azure-create-service-principal
+

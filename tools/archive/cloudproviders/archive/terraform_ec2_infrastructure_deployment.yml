@@ -1,0 +1,192 @@
+---
+- name: Terraform | Step 001 Deploy Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars_files:
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ ANSIBLE_REPO_PATH | default('.') }}/configs/{{ env_type }}/env_secret_vars.yml"
+  tags:
+    - step001
+    - deploy_infrastructure
+  tasks:
+  - name: Terraform | Check if Terraform is installed
+    command: terraform version
+    register: terraform_check
+    tags:
+      - step001
+
+  - name: Terraform | Install Terraform 
+    fail:
+      msg: "You need to install Terraform"
+    when: terraform_check.stdout.find('is not installed') != -1
+    tags:
+      - step001
+
+  - name: Terraform | Generate Terraform build file
+    template:
+      dest: "{{ANSIBLE_REPO_PATH | default('.')}}/workdir/{{ env_type }}.{{ guid }}.{{cloud_provider}}.tf"
+      src:  "{{ANSIBLE_REPO_PATH | default('.')}}/configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.tf.j2"
+    tags:
+      - step001
+
+  - name: Terraform | Generate Terraform secrets file
+    template: 
+      dest: "{{ANSIBLE_REPO_PATH | default('.')}}/workdir/terraform.tfvars"
+      src:  "{{ANSIBLE_REPO_PATH | default('.')}}/configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.tfvars.j2"
+    tags:
+      - step001
+  
+  - name: Terraform | Run Terraform
+    shell: cd {{ANSIBLE_REPO_PATH | default('.')}}/workdir ; terraform init ; terraform apply chdir="{{ANSIBLE_REPO_PATH | default('.')}}/workdir" -auto-approve
+    tags:
+      - step001
+  
+  - name: Terraform | Wait for AWS AMIs to become initialized 
+    pause: minutes=2
+    tags:
+      - step001
+
+  - name: Gather EC2 facts
+    ec2_remote_facts:
+      aws_access_key: "{{ aws_access_key_id }}"
+      aws_secret_key: "{{ aws_secret_access_key }}"
+      region: "{{ aws_region | default(region) | default('us-east-1')}}"
+      filters:
+        instance-state-name: running
+        "tag:Project": "{{project_tag}}"
+    register: ec2_facts
+    tags:
+      - create_inventory
+      - must
+
+  - name: debug ec2_facts
+    debug:
+      var: ec2_facts
+      verbosity: 2
+
+  - name: windows ostype workaround
+    set_fact:
+      project_tag_ostype: "{{project_tag}}_ostype"
+    tags:
+      - create_inventory
+      - must
+
+  - set_fact:
+      stack_tag: "{{env_type | replace('-', '_')}}_{{guid}}"
+    tags:
+      - create_inventory
+      - must
+
+  - add_host:
+      name: "{{item.public_dns_name}}"
+      shortname: "{{item.tags.Name | default(item.private_dns_name)}}"
+      groups:
+        - "tag_Project_{{stack_tag}}"
+        - "tag_{{stack_tag}}_{{item['tags'][project_tag] | default('unknowns')}}"
+        - "tag_{{stack_tag}}_ostype_{{item['tags'][project_tag_ostype] | default('unknown')}}"
+        - "{{item.tags.ostype | default('unknowns')}}"
+        - "{{item['tags'][project_tag_ostype] | default('unknowns')}}"
+        - "{{ 'newnodes' if (item.tags.newnode|d()|bool) else 'all'}}"
+      ansible_user: ec2-user
+      remote_user: ec2-user
+      ansible_ssh_private_key_file: "{{item['key_name']}}"
+      key_name: "{{item['key_name']}}"
+      state: "{{item['state']}}"
+      internaldns: "{{item.tags.internaldns | default(item.private_dns_name)}}"
+      instance_id: "{{ item.id }}"
+      region: "{{item['region']}}"
+      public_dns_name: "{{item['public_dns_name']}}"
+      private_dns_name: "{{item['private_dns_name']}}"
+      private_ip_address: "{{item['private_ip_address']}}"
+      public_ip_address: "{{item['public_ip_address']}}"
+      placement: "{{item['placement']['zone']}}"
+      image_id: "{{item['image_id']}}"
+      ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+    with_items: "{{ec2_facts['instances']}}"
+    tags:
+      - create_inventory
+      - must
+
+  # AnsibleGroup tag can have several comma-separated values. Ex: activedirectories,windows
+  - add_host:
+      name: "{{item.public_dns_name}}"
+      groups: "{{item.tags.AnsibleGroup}}"
+    with_items: "{{ec2_facts['instances']}}"
+    tags:
+      - create_inventory
+      - must
+
+  - name: debug hostvars
+    debug:
+      var: hostvars
+      verbosity: 2
+  - name: debug groups
+    debug:
+      var: groups
+      verbosity: 2
+
+- name: Configure local ssh config for bastion proxy use
+  import_playbook: "{{ANSIBLE_REPO_PATH | default('.')}}/cloud_providers/{{cloud_provider}}_ssh_config_setup.yml"
+  when: groups['bastions']
+
+- name: wait_for_connection for all non-windows machines and set hostname
+  hosts:
+    - all:!windows:!network
+  vars_files:
+      - "{{ANSIBLE_REPO_PATH | default('.')}}/configs/{{ env_type }}/env_vars.yml"
+      - "{{ANSIBLE_REPO_PATH | default('.')}}/configs/{{ env_type }}/env_secret_vars.yml"
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  become: true
+  tags:
+    - step001
+    - wait_ssh
+    - set_hostname
+  tasks:
+    - name: wait for linux host to be available
+      wait_for_connection:
+
+    - name: Set hostname based on tag_internaldns
+      hostname:
+        name: "{{hostvars[inventory_hostname].internaldns}}"
+      when: hostvars[inventory_hostname].internaldns is defined
+
+    - stat:
+        path: /etc/cloud/cloud.cfg
+      register: cloud_cfg_file
+
+    - name: disable updating hostname in /etc/cloud/cloud.cfg
+      lineinfile:
+        dest: /etc/cloud/cloud.cfg
+        regexp: 'update_hostname$'
+        line: '# - update_hostname'
+        backup: yes
+      when: cloud_cfg_file.stat.exists
+      tags: disable_cloud_cfg_hostname
+
+- name: Set facts for Windows hosts if any exist and wait_for_connection
+  gather_facts: false
+  hosts:
+    - windows
+  vars_files:
+    - "{{ANSIBLE_REPO_PATH | default('.')}}/configs/{{ env_type }}/env_vars.yml"
+    - "{{ANSIBLE_REPO_PATH | default('.')}}/configs/{{ env_type }}/env_secret_vars.yml"
+  tasks:
+    - name: set facts for remote access
+      set_fact:
+        ansible_become: false
+        ansible_connection: winrm
+        ansible_host: "{{ public_dns_name }}"
+        ansible_password: "{{ windows_password | default(hostvars['localhost'].generated_windows_password) }}"
+        ansible_port: 5986
+        ansible_user: Administrator
+        ansible_winrm_server_cert_validation: ignore
+
+    - name: wait for windows host to be available
+      wait_for_connection:
+        timeout: 900
+        connect_timeout: 60
+        delay: 120

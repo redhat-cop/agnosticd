@@ -1,0 +1,111 @@
+---
+- import_playbook: ../../include_vars.yml
+
+- name: Delete Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: no
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  tasks:
+    - name: Fetch autoscaling name
+      slurp:
+        src: "{{output_dir}}/{{ env_type }}.{{ guid }}.AutoScalingGroupClientVM"
+      register: asg_r
+      ignore_errors: yes
+    - when: asg_r is succeeded
+      block:
+        - name: Delete AutoScalingGroupClientVM
+          command: >-
+              aws autoscaling delete-auto-scaling-group --force-delete --auto-scaling-group-name {{asg_r.content|b64decode}}
+          ignore_errors: yes
+
+        - name: Delete instance
+          ec2_instance:
+            state: absent
+            filters:
+              instance-state-name: running
+              "tag:Project": "{{project_tag}}"
+          when: project_tag is defined
+
+    - name: Delete S3 bucket
+      environment:
+        AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+        AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+        AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+      s3_bucket:
+        name: "{{ env_type }}-{{ guid }}"
+        state: absent
+        force: yes
+        region: "{{ aws_region_final|d(aws_region) }}"
+      tags:
+        - remove_s3
+      register: s3_result
+      until: s3_result is succeeded
+      retries: 5
+      delay: 60
+      ignore_errors: yes
+      when: cloud_provider == 'ec2'
+
+    - name: report s3 error
+      fail:
+        msg: "FAIL {{ project_tag }} delete s3"
+      when:
+        - s3_result is not succeeded
+        - cloud_provider == 'ec2'
+
+    - name: Destroy cloudformation template
+      cloudformation:
+        aws_access_key: "{{ aws_access_key_id }}"
+        aws_secret_key: "{{ aws_secret_access_key }}"
+        stack_name: "{{project_tag}}"
+        state: "absent"
+        region: "{{aws_region_final|d(aws_region)}}"
+        disable_rollback: false
+        tags:
+          Stack: "project {{env_type}}-{{ guid }}"
+      tags: [ destroying, destroy_cf_deployment ]
+      register: cloudformation_result
+      until: cloudformation_result is succeeded
+      retries: 5
+      delay: "{{ cloudformation_retry_delay | default(60) }}"
+      ignore_errors: yes
+      when: cloud_provider == 'ec2'
+
+    - name: report Cloudformation error
+      fail:
+        msg: "FAIL {{ project_tag }} Destroy Cloudformation"
+      when:
+        - cloudformation_result is not succeeded
+        - cloud_provider == 'ec2'
+      tags: [ destroying, destroy_cf_deployment ]
+
+    - when: asg_r is succeeded
+      block:
+        - name: Get all records
+          command: >-
+            aws route53 list-resource-record-sets --hosted-zone-id {{HostedZoneId}}
+          register: records
+
+        - name: Delete DNS record for each clientVM
+          route53:
+            zone: "{{subdomain_base_suffix[1:]}}."
+            record: "{{item.Name}}"
+            type: "{{item.Type}}"
+            value: "{{item.ResourceRecords[0].Value}}"
+            ttl: "{{item.TTL}}"
+            state: absent
+          when: >-
+            'Name' in item
+            and 'ResourceRecords' in item
+            and item.Name | regex_search('^clientvm')
+            and item.Name | regex_search(guid|string + subdomain_base_suffix)
+          with_items: "{{records.stdout|from_json|json_query('ResourceRecordSets')}}"
+          ignore_errors: yes
+
+- name: Import default azure destroy playbook
+  import_playbook: ../../cloud_providers/azure_destroy_env.yml
+  when: cloud_provider == 'azure'
