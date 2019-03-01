@@ -8,8 +8,14 @@ def cf_group = 'rhpds-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gucore@redhat.com'
+def notification_email = 'cbomman@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
+
+// SSH key
+def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
+
+// Admin host ssh location is in a credential too
+def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
@@ -17,12 +23,34 @@ def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'DevOps Shared Cluster Development / DEV - IOT Enterprise 4.0 Demo',
-    'IoT Demos / IoT Industry 4.0 Demo',
+    'Middleware Solutions Demos / FSI CC Dispute Demo',
+    'DevOps Shared Cluster Testing / Testing - Shared FSI CC Dispute Demo',
+    'DevOps Shared Cluster Development / DEV - FSI CC Dispute Demo',
+].join("\n")
+
+def ocprelease_choice = [
+    '3.11.43',
+    '3.11.16',
+    '3.10.34',
+    '3.10.14',
+    '3.9.41',
+    '3.9.40',
+].join("\n")
+
+def region_choice = [
+    'global_gpte',
+    'na',
+    'emea',
+    'latam',
+    'apac',
 ].join("\n")
 
 pipeline {
     agent any
+
+    options {
+        buildDiscarder(logRotator(daysToKeepStr: '30'))
+    }
 
     parameters {
         booleanParam(
@@ -35,10 +63,16 @@ pipeline {
             description: 'Catalog item',
             name: 'catalog_item',
         )
-    }
-
-    options {
-        buildDiscarder(logRotator(daysToKeepStr: '30'))
+        choice(
+            choices: ocprelease_choice,
+            description: 'Catalog item',
+            name: 'ocprelease',
+        )
+        choice(
+            choices: region_choice,
+            description: 'Catalog item',
+            name: 'region',
+        )
     }
 
     stages {
@@ -51,19 +85,25 @@ pipeline {
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
             steps {
-                git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
+                git url: 'https://github.com/fridim/cloudforms-oob'
 
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
+                    def ocprelease = params.ocprelease.trim()
+                    def region = params.region.trim()
                     def cfparams = [
                         'check=t',
                         'quotacheck=t',
-                        "region=global_gpte",
+                        "ocprelease=${ocprelease}",
+                        "region=${region}",
                         'expiration=7',
                         'runtime=8',
-                        'users=2',
                         'nodes=2',
+                        'users=2',
+                        'city=jenkinsccicd',
+                        'salesforce=test',
+                        'notes=devops_automation_jenkins',
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
@@ -73,7 +113,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d '${cfparams}'
+                          -d '${cfparams}' \
                         """
                     ).trim()
 
@@ -81,13 +121,28 @@ pipeline {
                 }
             }
         }
+        /* Skip this step because sometimes the completed email arrives
+         before the 'has started' email
+        stage('Wait for first email') {
+            environment {
+                credentials=credentials("${imap_creds}")
+            }
+            steps {
+                sh """./tests/jenkins/downstream/poll_email.py \
+                    --server '${imap_server}' \
+                    --guid ${guid} \
+                    --timeout 20 \
+                    --filter 'has started'"""
+            }
+        }
+        */
 
         stage('Wait for last email and parse OpenShift location') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 script {
@@ -103,7 +158,7 @@ pipeline {
                     ).trim()
 
 
-                    def m = email =~ /You can find the master's console here: ([^ <]+)/
+                    def m = email =~ /To get started, please login with your OPENTLC credentials to: ([^ ]+) in your web browser/
                     openshift_location = m[0][1]
                 }
             }
@@ -118,17 +173,20 @@ pipeline {
             }
         }
 
-        stage('Test demo') {
-            options {
-                timeout(time: 20, unit: 'MINUTES')
-            }
-            environment {
-                credentials = credentials("${opentlc_creds}")
-            }
-            steps {
-                sh "./tests/jenkins/downstream/openshift_test_demo.sh '${openshift_location}' '${guid}'"
-            }
-        }
+//        stage('SSH') {
+//            steps {
+//                withCredentials([
+//                    sshUserPrivateKey(
+//                        credentialsId: ssh_creds,
+//                        keyFileVariable: 'ssh_key',
+//                        usernameVariable: 'ssh_username')
+//                ]) {
+//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
+//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
+//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} sudo ansible -m ping all"
+//                }
+//            }
+//        }
 
         stage('Confirm before retiring') {
             when {
@@ -150,7 +208,7 @@ pipeline {
             /* This step uses the delete_svc_guid.sh script to retire
              the service from CloudForms */
             steps {
-                git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
+                git 'https://github.com/fridim/cloudforms-oob'
 
                 sh "./opentlc/delete_svc_guid.sh '${guid}'"
             }
@@ -179,7 +237,7 @@ pipeline {
         }
         stage('Wait for deletion email') {
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
@@ -191,18 +249,11 @@ pipeline {
                 }
             }
         }
-        stage('Ensure projects are deleted') {
-            steps {
-                withCredentials([usernameColonPassword(credentialsId: opentlc_creds, variable: 'credentials')]) {
-                    sh "./tests/jenkins/downstream/openshift_ensure_projects_deleted.sh '${openshift_location}' '${guid}'"
-                }
-            }
-        }
     }
 
     post {
         failure {
-            git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
+            git 'https://github.com/fridim/cloudforms-oob'
             /* retire in case of failure */
             withCredentials(
                 [
@@ -217,6 +268,21 @@ pipeline {
                 """
             }
 
+            /* Print ansible logs */
+//            withCredentials([
+//                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
+//                sshUserPrivateKey(
+//                    credentialsId: ssh_creds,
+//                    keyFileVariable: 'ssh_key',
+//                    usernameVariable: 'ssh_username')
+//            ]) {
+//                sh("""
+//                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
+//                    "find deployer_logs -name '*${guid}*log' | xargs cat"
+//                """.trim()
+//                )
+//            }
+
             withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
                 mail(
                     subject: "${env.JOB_NAME} (${env.BUILD_NUMBER}) failed GUID=${guid}",
@@ -226,6 +292,26 @@ pipeline {
                     from: credentials.split(':')[0]
               )
             }
+
+	    withCredentials([
+                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
+                sshUserPrivateKey(
+                    credentialsId: ssh_creds,
+                    keyFileVariable: 'ssh_key',
+                    usernameVariable: 'ssh_username')
+            ]) {
+                script {
+                  // Be careful with commands executed on admin host, make sure it's 'read-only' commands
+                  def retstring = sh("""
+                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
+                    "find deployer_logs -name '*${guid}*log' | xargs -n1 grep OKTODELETE"
+                    exit 0
+                  """.trim()
+                  )
+                  assert retstring.contains("OKTODELETE")
+                }
+            }
+
             withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
                 sh(
                     """
