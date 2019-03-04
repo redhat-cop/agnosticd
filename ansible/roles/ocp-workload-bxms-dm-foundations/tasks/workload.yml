@@ -1,0 +1,115 @@
+---
+- name: define ocp_project
+  set_fact:
+    ocp_project: "bxms-dm-{{guid}}"
+
+- name: "Create project for workload {{ocp_project}}"
+  shell: "oc new-project {{ocp_project}}"
+
+- name: "Label namespace"
+  command: "oc label namespace {{ocp_project}} AAD='{{guid}}'"
+
+- name: Annotate the empty project as requested by user
+  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
+
+- name: Make sure we go back to default project
+  shell: "oc project default"
+
+- name: Prep local filesystem for temp files
+  file:
+    path: "/tmp/{{guid}}"
+    state: directory
+
+# Note; depending on the environment, OCP projects may or may not have default limit ranges
+- name: Delete default limitrange
+  shell: |
+    oc delete limitrange {{ocp_project}}-core-resource-limits -n {{ocp_project}}
+  ignore_errors: true
+
+- name: Create a new limitrange
+  template:
+    src: templates/limitrange.yaml.j2
+    dest: /tmp/{{ocp_project}}_limitrange.yaml
+- shell: |
+    oc create -f /tmp/{{ocp_project}}_limitrange.yaml -n {{ocp_project}}
+
+# Imagestreams are beginning to reference the new and secured registry.redhat.io .
+# Will switch this back to registry.access.redhat.com  (until GPTE has an elab solution that allows for pull down from secured registries that is seemless to student
+- name: Update DM image streams
+  template:
+    src: "{{DM_IS_FILE_NAME}}"
+    dest: "{{DM_IS_URL}}"
+
+- name: Load dm imagestream
+  shell: "oc create -f {{DM_IS_URL}} -n {{ocp_project}}"
+
+- name: Create the Angular Application Template
+  shell: oc create -f {{NG_TEMPLATE_URL}} -n {{ocp_project}}
+
+- name: Fire and forget to install Angular application container
+  async: 3600
+  poll: 0
+  shell: |
+      oc new-app --template=ng-dmf-template --name=angular-dmf -n {{ocp_project}} \
+      -p APPLICATION_NAME=angular-dmf > /tmp/{{guid}}/angular-dmf.txt
+
+- name: Create the Decision Manager Template
+  shell: "oc create -f {{DM_TEMPLATE_URL}} -n {{ocp_project}}"
+
+- name: Initialize secrets template
+  shell: "oc create -f {{SECRETS_TEMPLATE_URL}} -n {{ocp_project}}"
+
+- name: Create Decision Central Secret
+  shell: "oc new-app --template=example-app-secret -n {{ocp_project}} -p SECRET_NAME=decisioncentral-app-secret"
+
+- name: Create Kie Server Secret
+  shell: "oc new-app --template=example-app-secret -n {{ocp_project}} -p SECRET_NAME=kieserver-app-secret"
+
+- name: Create service account
+  shell: "oc create sa dm-foundations-rhdmsvc -n {{ocp_project}}"
+
+- name: Use Decision Central Secret for pull
+  shell: "oc secrets link --for=pull dm-foundations-rhdmsvc decisioncentral-app-secret -n {{ocp_project}}"
+
+- name: Use Decision Central Secret for mount
+  shell: "oc secrets link --for=mount dm-foundations-rhdmsvc decisioncentral-app-secret -n {{ocp_project}}"
+
+- name: Grant view access to service account
+  shell: "oc policy add-role-to-user view system:serviceaccount:{{ocp_project}}:dm-foundations-rhdmsvc -n {{ocp_project}}"
+
+- name: Create Decision Manager containers based in template {{DM_TEMPLATE_URL}}
+  shell: |
+      oc new-app --template=rhdm7-only --name=dm-foundations -n {{ocp_project}} \
+      -p RHT_IMAGE_STREAM_NAMESPACE={{ocp_project}} \
+      -p KIE_ADMIN_PWD=r3dh4t1! \
+      -p MAVEN_REPO_PASSWORD=r3dh4t1! \
+      -p APPLICATION_NAME=dm-foundations > /tmp/{{guid}}/dm-foundations.txt
+
+- include_tasks: ./wait_for_build.yml
+  static: no
+  vars:
+    build_to_wait:
+      - dm-foundations-custom-kieserver
+
+- name: resume dm-foundations-rhdmcentr
+  shell: oc rollout resume dc/dm-foundations-rhdmcentr -n {{ocp_project}}
+- include_tasks: ./wait_for_deploy.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - dm-foundations-rhdmcentr
+
+- name: resume dm-foundations-kieserver
+  shell: oc rollout resume dc/dm-foundations-kieserver -n {{ocp_project}}
+- include_tasks: ./wait_for_deploy.yml
+  static: no
+  vars:
+    pod_to_wait:
+      - dm-foundations-kieserver
+
+- name: Give ocp_username access to ocp_project; user = {{ocp_username}}
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete
