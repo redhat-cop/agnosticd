@@ -1,4 +1,3 @@
-{% raw %}
 #!/bin/bash
 
 # ====================================================
@@ -610,4 +609,3 @@ EOT
 if [ $(hasflag --open -o) ]; then
     open_url "https://$route"
 fi
-{% endraw %}
