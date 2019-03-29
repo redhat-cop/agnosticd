@@ -139,29 +139,28 @@ pipeline {
         */
 
 //        stage('Wait for last email and parse OpenShift location') {
-        stage('Wait for last email') {
-            environment {
-                credentials=credentials("${imap_creds}")
-            }
-            steps {
+//            environment {
+//                credentials=credentials("${imap_creds}")
+//            }
+//            steps {
 //                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
 //                    branch: 'development'
 
-                script {
-                    email = sh(
-                        returnStdout: true,
-                        script: """./tests/jenkins/downstream/poll_email.py \
-                          --server '${imap_server}' \
-                          --guid ${guid} \
-                          --timeout 30 \
-                          --filter 'has completed'"""
-                    ).trim()
+//                script {
+//                    email = sh(
+//                        returnStdout: true,
+//                        script: """./tests/jenkins/downstream/poll_email.py \
+//                          --server '${imap_server}' \
+//                          --guid ${guid} \
+//                          --timeout 30 \
+//                          --filter 'has completed'"""
+//                    ).trim()
 
 //                    def m = email =~ /To get started, please login with your OPENTLC credentials to: ([^ ]+) in your web browser/
 //                    openshift_location = m[0][1]
-                }
-            }
-        }
+//                }
+//            }
+//        }
 
 //        stage('Test OpenShift access') {
 //            environment {
