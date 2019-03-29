@@ -138,10 +138,24 @@ pipeline {
         }
         */
 
-//        stage('Wait for last email and parse OpenShift location') {
+        stage('Wait for last email') {
 //            environment {
 //                credentials=credentials("${imap_creds}")
 //            }
+            steps { 
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                    branch: 'development'
+                
+                withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
+                    sh """./tests/jenkins/downstream/poll_email.py \
+                        --guid ${guid} \
+                        --timeout 20 \
+                        --server '${imap_server}' \
+                        --filter 'has completed'"""
+                }
+            }
+        }
+
 //            steps {
 //                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
 //                    branch: 'development'
