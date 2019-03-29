@@ -19,7 +19,7 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def openshift_location = ''
+//def openshift_location = ''
 
 // Catalog items
 def choices = [
@@ -28,22 +28,22 @@ def choices = [
     'DevOps Shared Cluster Development / DEV - Shared CodeReady Workspaces',
 ].join("\n")
 
-def ocprelease_choice = [
-    '3.11.43',
-    '3.11.16',
-    '3.10.34',
-    '3.10.14',
-    '3.9.41',
-    '3.9.40',
-].join("\n")
+//def ocprelease_choice = [
+//    '3.11.43',
+//    '3.11.16',
+//    '3.10.34',
+//    '3.10.14',
+//    '3.9.41',
+//    '3.9.40',
+//].join("\n")
 
 def region_choice = [
     'rhpds',
-    'global_gpte',
-    'na',
-    'emea',
-    'latam',
-    'apac',
+//    'global_gpte',
+//    'na',
+//    'emea',
+//    'latam',
+//    'apac',
 ].join("\n")
 
 pipeline {
@@ -64,11 +64,11 @@ pipeline {
             description: 'Catalog item',
             name: 'catalog_item',
         )
-        choice(
-            choices: ocprelease_choice,
-            description: 'Catalog item',
-            name: 'ocprelease',
-        )
+//        choice(
+//            choices: ocprelease_choice,
+//            description: 'Catalog item',
+//            name: 'ocprelease',
+//        )
         choice(
             choices: region_choice,
             description: 'Catalog item',
@@ -138,13 +138,14 @@ pipeline {
         }
         */
 
-        stage('Wait for last email and parse OpenShift location') {
+//        stage('Wait for last email and parse OpenShift location') {
+        stage('Wait for last email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
-                    branch: 'development'
+//                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+//                    branch: 'development'
 
                 script {
                     email = sh(
@@ -159,20 +160,21 @@ pipeline {
                     ).trim()
 
 
-                    def m = email =~ /To get started, please login with your OPENTLC credentials to: ([^ ]+) in your web browser/
-                    openshift_location = m[0][1]
+                    def m = email =~ /To get started, please login to ("http://codeready-codeready-workspaces-$GUID.apps.rhpds311.openshift.opentlc.com") in your web browser by using admin admin credentials/
+//                    def m = email =~ /To get started, please login with your OPENTLC credentials to: ([^ ]+) in your web browser/
+//                    openshift_location = m[0][1]
                 }
             }
         }
 
-        stage('Test OpenShift access') {
-            environment {
-                credentials = credentials("${opentlc_creds}")
-            }
-            steps {
-                sh "./tests/jenkins/downstream/openshift_client.sh '${openshift_location}'"
-            }
-        }
+//        stage('Test OpenShift access') {
+//            environment {
+//                credentials = credentials("${opentlc_creds}")
+//            }
+//            steps {
+//                sh "./tests/jenkins/downstream/openshift_client.sh '${openshift_location}'"
+//            }
+//        }
 
 //        stage('SSH') {
 //            steps {
