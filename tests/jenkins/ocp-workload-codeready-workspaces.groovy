@@ -28,14 +28,14 @@ def choices = [
     'DevOps Shared Cluster Development / DEV - Shared CodeReady Workspaces',
 ].join("\n")
 
-//def ocprelease_choice = [
-//    '3.11.43',
-//    '3.11.16',
-//    '3.10.34',
-//    '3.10.14',
-//    '3.9.41',
-//    '3.9.40',
-//].join("\n")
+def ocprelease_choice = [
+    '3.11.43',
+    '3.11.16',
+    '3.10.34',
+    '3.10.14',
+    '3.9.41',
+    '3.9.40',
+].join("\n")
 
 def region_choice = [
     'rhpds',
@@ -64,11 +64,11 @@ pipeline {
             description: 'Catalog item',
             name: 'catalog_item',
         )
-//        choice(
-//            choices: ocprelease_choice,
-//            description: 'Catalog item',
-//            name: 'ocprelease',
-//        )
+        choice(
+            choices: ocprelease_choice,
+            description: 'Catalog item',
+            name: 'ocprelease',
+        )
         choice(
             choices: region_choice,
             description: 'Catalog item',
