@@ -159,8 +159,6 @@ pipeline {
                         """
                     ).trim()
 
-
-                    def m = email =~ /To get started, please login to ("http://codeready-codeready-workspaces-$GUID.apps.rhpds311.openshift.opentlc.com") in your web browser by using admin admin credentials/
 //                    def m = email =~ /To get started, please login with your OPENTLC credentials to: ([^ ]+) in your web browser/
 //                    openshift_location = m[0][1]
                 }
