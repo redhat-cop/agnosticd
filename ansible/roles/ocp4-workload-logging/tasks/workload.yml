@@ -1,0 +1,174 @@
+# vim: set ft=ansible
+---
+# Implement your Workload deployment tasks here
+- name: logging project
+  k8s: 
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: openshift-logging
+        annotations:
+          openshift.io/node-selector: "" 
+        labels:
+          openshift.io/cluster-logging: "true"
+          openshift.io/cluster-monitoring: "true"
+
+- name: logging operatorgroup
+  k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: openshift-logging-operatorgroup
+        namespace: openshift-logging
+      spec:
+        targetNamespaces:
+        - openshift-logging
+
+### elastic catalog source config
+- name: catalog source config
+  k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: CatalogSourceConfig
+      metadata:
+        name: elasticsearch-operator
+        namespace: openshift-marketplace
+      spec:
+        packages: elasticsearch-operator
+        targetNamespace: openshift-operators
+
+### elastic subscription
+- name: elastic subscription
+  k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: elasticsearch-operator
+        namespace: openshift-operators
+      spec:
+        channel: preview
+        installPlanApproval: Automatic
+        name: elasticsearch-operator
+        source: elasticsearch-operator
+        sourceNamespace: openshift-operators
+        startingCSV: elasticsearch-operator.v4.1.0
+
+### logging catalog source config
+- name: logging catalog source config
+  k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: CatalogSourceConfig
+      metadata:
+        name: cluster-logging-operator
+        namespace: openshift-marketplace
+      spec:
+        packages: cluster-logging
+        targetNamespace: openshift-logging
+
+### logging subscription
+- name: logging subscription
+  k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: cluster-logging
+        namespace: openshift-logging
+      spec:
+        channel: preview
+        installPlanApproval: Automatic
+        name: cluster-logging
+        source: cluster-logging-operator
+        sourceNamespace: openshift-logging
+        startingCSV: clusterlogging.v4.1.0
+
+- name: wait for elasticsearch and logging crds
+  k8s_facts:
+    api_version: apiextensions.k8s.io/v1beta1
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  register: crd_exists
+  until: crd_exists.resources | list | length >= 1
+  retries: 10
+  delay: 30
+  with_items:
+    - "clusterloggings.logging.openshift.io"
+    - "elasticsearches.logging.openshift.io"
+
+- name: logging cr
+  k8s:
+    state: present
+    definition:
+      apiVersion: "logging.openshift.io/v1"
+      kind: "ClusterLogging"
+      metadata:
+        name: "instance"
+        namespace: "openshift-logging"
+      spec:
+        managementState: "Managed"
+        logStore:
+          type: "elasticsearch"
+          elasticsearch:
+            nodeCount: 3
+            storage: {}
+            redundancyPolicy: "SingleRedundancy"
+            nodeSelector: 
+              node-role.kubernetes.io/infra: ""
+            resources:
+              request:
+                memory: 4G
+        visualization:
+          type: "kibana"
+          kibana:
+            replicas: 1
+            nodeSelector: 
+              node-role.kubernetes.io/infra: ""
+        curation:
+          type: "curator"
+          curator:
+            schedule: "30 3 * * *"
+            nodeSelector: 
+              node-role.kubernetes.io/infra: ""
+        collection:
+          logs:
+            type: "fluentd"
+            fluentd: {}
+            nodeSelector: 
+              node-role.kubernetes.io/infra: ""
+
+- name: wait for elasticsearch deployments to exist
+  k8s_facts:
+    api_version: extensions/v1beta1
+    kind: Deployment
+    namespace: openshift-logging
+    label_selectors:
+      - component = elasticsearch
+  register: elastic_deployments
+  until: elastic_deployments.resources | list | length >= 1
+  retries: 10
+  delay: 60
+
+# could this also use k8s_facts in some way?
+- name: wait for running elasticsearch
+  shell: "oc get deployment {{ item.metadata.name }} -n openshift-logging -o jsonpath='{.status.readyReplicas}'"
+  register: replicas_out
+  retries: 10
+  delay: 60
+  with_items: "{{ elastic_deployments.resources }}"
+  until: replicas_out.stdout | int == 1
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
