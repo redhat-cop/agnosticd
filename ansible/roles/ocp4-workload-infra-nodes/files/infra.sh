@@ -10,5 +10,5 @@ oc get machineset -n openshift-machine-api -o json\
   | jq '.spec.template.spec.providerSpec.value.instanceType="m4.4xlarge"'\
   | jq 'del (.metadata.annotations)'\
   | jq '.metadata.labels += {"machineset":"infra"}'\
-  | jq '.spec.replicas=3'\
+  | jq '.spec.replicas=$2'\
   | oc create -f -
