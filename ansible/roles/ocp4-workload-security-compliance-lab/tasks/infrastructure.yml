@@ -21,6 +21,27 @@
     state: present
   delegate_to: "{{ bastion_internal }}"
 
+- name: retrieve registry route
+  shell: "{{ openshift_cli }} get routes --all-namespaces | grep registry | grep -v console | awk '{print $3}'"
+  register: image_route
+
+- name: enable ssh with password
+  replace:
+    regexp: "PasswordAuthentication no"
+    path: /etc/ssh/sshd_config 
+    replace: "PasswordAuthentication yes"
+  delegate_to: "{{ bastion_internal }}"
+
+- name: restart sshd
+  service:
+    name: sshd
+    state: restarted
+  delegate_to: "{{ bastion_internal }}"
+
+- name: set route name
+  set_fact:
+    ocp_registry_route: "{{ image_route.stdout }}"
+
 - name: Add exposed registry as insecure
   template:
     src: daemon.json.j2
@@ -63,6 +84,17 @@
   shell: "{{ openshift_cli }} get builds -n openshift | grep owasp-zap | grep Complete"
   register: result_owasp
   until: result_owasp.rc == 0
+  retries: 60
+  delay: 20
+
+- name: Create image management image
+  command: "{{ openshift_cli }} new-build --name image-management -l 'role=jenkins-slave' https://github.com/siamaksade/jenkins-slave-skopeo.git -n openshift"
+  ignore_errors: true
+
+- name: Wait for image mgmt build to finish
+  shell: "{{ openshift_cli }} get builds -n openshift | grep image-management | grep Complete"
+  register: result_mgmt
+  until: result_mgmt.rc == 0
   retries: 60
   delay: 20
 
@@ -191,7 +223,7 @@
   set_fact:
     nexus_project_name: "{{ admin_project }}"
     nexus_image_version: 3.10.0
-    nexus_volume_capacity: 100Gi
+    nexus_volume_capacity: 10Gi
     nexus_max_memory: 8Gi
     nexus_min_memory: 4Gi
     nexus_max_cpu: 4
@@ -241,11 +273,12 @@
   tags: che
 
 - name: Deploy Che
-  command: "./deploy.sh -d -p={{ che_project }}"
+  command: "./deploy.sh -d -p={{ che_project }} --enable-oauth"
   args:
     chdir: "{{ tmp_dir }}/files"
   when: che_project_result is failed
   tags: che
+  ignore_errors: true
 
 
 #
