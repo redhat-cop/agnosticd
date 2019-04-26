@@ -13,15 +13,34 @@
       - openscap-scanner
       - scap-security-guide
       - atomic
-      - python2-pip
-
-- name: Install docker python module
-  command: pip install docker-py
+  delegate_to: "{{ bastion_internal }}"
 
 - name: Ensure docker group exists
   group:
     name: docker
     state: present
+  delegate_to: "{{ bastion_internal }}"
+
+- name: retrieve registry route
+  shell: "{{ openshift_cli }} get routes --all-namespaces | grep registry | grep -v console | awk '{print $3}'"
+  register: image_route
+
+- name: enable ssh with password
+  replace:
+    regexp: "PasswordAuthentication no"
+    path: /etc/ssh/sshd_config 
+    replace: "PasswordAuthentication yes"
+  delegate_to: "{{ bastion_internal }}"
+
+- name: restart sshd
+  service:
+    name: sshd
+    state: restarted
+  delegate_to: "{{ bastion_internal }}"
+
+- name: set route name
+  set_fact:
+    ocp_registry_route: "{{ image_route.stdout }}"
 
 - name: Add exposed registry as insecure
   template:
@@ -29,12 +48,14 @@
     dest: /etc/docker/daemon.json
     mode: '0644'
     backup: yes
+  delegate_to: "{{ bastion_internal }}"
 
 - name: Enable / restart docker
   service: 
     name: docker
     enabled: yes
     state: restarted
+  delegate_to: "{{ bastion_internal }}"
 
 - name: Allow group to use oscap-docker without sudo password
   lineinfile:
@@ -42,6 +63,7 @@
     line: "%docker ALL=NOPASSWD: /usr/bin/oscap-docker"
     validate: '/usr/sbin/visudo -cf %s'
   become: true
+  delegate_to: "{{ bastion_internal }}"
 
 - name: Create custom jenkins image
   command: "{{ openshift_cli }} new-build -D 'FROM jenkins:latest\nUSER 0\nRUN curl -L https://updates.jenkins-ci.org/download/plugins/ssh-steps/1.2.1/ssh-steps.hpi -o /usr/lib/jenkins/ssh-steps.hpi && chmod 664 /usr/lib/jenkins/ssh-steps.hpi\nUSER 1000' --to=custom-jenkins -n openshift"
@@ -62,6 +84,17 @@
   shell: "{{ openshift_cli }} get builds -n openshift | grep owasp-zap | grep Complete"
   register: result_owasp
   until: result_owasp.rc == 0
+  retries: 60
+  delay: 20
+
+- name: Create image management image
+  command: "{{ openshift_cli }} new-build --name image-management -l 'role=jenkins-slave' https://github.com/siamaksade/jenkins-slave-skopeo.git -n openshift"
+  ignore_errors: true
+
+- name: Wait for image mgmt build to finish
+  shell: "{{ openshift_cli }} get builds -n openshift | grep image-management | grep Complete"
+  register: result_mgmt
+  until: result_mgmt.rc == 0
   retries: 60
   delay: 20
 
@@ -96,10 +129,10 @@
 #  tags: always
 
 # Deploy Gogs
-- import_role:
-    name: siamaksade.openshift_gogs
-  vars:
-    project_name: "{{ admin_project }}"
+
+- name: Set gogs facts
+  set_fact:
+    gogs_project_name: "{{ admin_project }}"
     gogs_route: "{{ gogs_hostname }}"
     gogs_image_version: 0.11.34
     gogs_admin_user: "{{ user_gogs_admin }}"
@@ -109,7 +142,25 @@
     gogs_generate_user_count: "{{ user_count_end }}"
     gogs_generate_user_format: "{{ user_format }}"
     clean_deploy: false
-  tags: gogs
+
+- name: Install gogs
+  import_tasks: ./gogs.yml
+  become: true
+
+#- import_role:
+#    name: siamaksade.openshift_gogs
+#  vars:
+#    project_name: "{{ admin_project }}"
+#    gogs_route: "{{ gogs_hostname }}"
+#    gogs_image_version: 0.11.34
+#    gogs_admin_user: "{{ user_gogs_admin }}"
+#    gogs_admin_password: "{{ user_gogs_password }}"
+#    gogs_user: "{{ user_gogs_user }}"
+#    gogs_password: "{{ user_gogs_password }}"
+#    gogs_generate_user_count: "{{ user_count_end }}"
+#    gogs_generate_user_format: "{{ user_format }}"
+#    clean_deploy: false
+#  tags: gogs
 
 # Deploy Firepad
 #- name: Create install etherpad resources
@@ -168,18 +219,35 @@
   when: quay_project_result is failed
   tags: quay
 
-# Deploy nexus
-- import_role:
-    name: siamaksade.openshift_sonatype_nexus
-  vars:
-    project_name: "{{ admin_project }}"
+- name: Set nexus facts
+  set_fact:
+    nexus_project_name: "{{ admin_project }}"
     nexus_image_version: 3.10.0
-    nexus_volume_capacity: 100Gi
+    nexus_volume_capacity: 10Gi
     nexus_max_memory: 8Gi
     nexus_min_memory: 4Gi
     nexus_max_cpu: 4
     nexus_min_cpu: 2
+
+# Deploy nexus
+- name: Deploy nexus
+  import_tasks: ./nexus.yml
+  become: true
   tags: nexus
+
+
+# Deploy nexus
+#- import_role:
+#    name: siamaksade.openshift_sonatype_nexus
+#  vars:
+#    project_name: "{{ admin_project }}"
+#    nexus_image_version: 3.10.0
+#    nexus_volume_capacity: 100Gi
+#    nexus_max_memory: 8Gi
+#    nexus_min_memory: 4Gi
+#    nexus_max_cpu: 4
+#    nexus_min_cpu: 2
+#  tags: nexus
 
 # Deploy sonarqube
 - name: Deploy Sonarqube
@@ -205,11 +273,12 @@
   tags: che
 
 - name: Deploy Che
-  command: "./deploy.sh -d -p={{ che_project }}"
+  command: "./deploy.sh -d -p={{ che_project }} --enable-oauth"
   args:
     chdir: "{{ tmp_dir }}/files"
   when: che_project_result is failed
   tags: che
+  ignore_errors: true
 
 
 #
