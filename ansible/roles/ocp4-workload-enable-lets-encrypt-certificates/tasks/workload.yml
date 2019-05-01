@@ -1,0 +1,99 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+# This also is in:
+# oc get infrastructures.config.openshift.io/cluster -o yaml
+# Although that's the entire URL. Need to strip out https:// and :6443
+
+- name: Determine API server hostname
+  shell: "oc whoami --show-server | cut -f 2 -d ':' | cut -f 3 -d '/' | sed 's/-api././'"
+  register: api_hostname
+
+- name: Determine Wildcard Domain
+  k8s_facts:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: ingress_controller
+
+- name: Print API and Wildcard Domain
+  debug:
+    msg: "API: {{ api_hostname.stdout }}, Wildcard Domain: {{ ingress_controller.resources[0].status.domain }}"
+
+# Determine if a Route53 Access Key exists. If so use that one.
+- name: Set AWS Credentials for use with Let's Encrypt to Route 53 credentials
+  set_fact:
+    le_aws_key: "{{ hostvars.localhost.route53user_access_key }}"
+    le_aws_secret_key: "{{ hostvars.localhost.route53user_secret_access_key }}"
+  when:
+  - hostvars.localhost.route53user is defined
+
+# No Route53 Access Key exists. Use Student Access Key
+- name: Set AWS Credentials for use with Let's Encrypt to student credentials
+  set_fact:
+    le_aws_key: "{{ hostvars.localhost.student_access_key_id }}"
+    le_aws_secret_key: "{{ hostvars.localhost.student_secret_access_key }}"
+  when:
+  - hostvars.localhost.route53user is not defined
+  - hostvars.localhost.student_access_key_id is defined
+
+# Fallback to enable local testing. This should never be true in an AgnosticD deployment
+- name: Set AWS Credentials for use with Let's Encrypt to fallback credentials
+  set_fact:
+    le_aws_key: "{{ student_access_key_id }}"
+    le_aws_secret_key: "{{ student_secret_access_key }}"
+  when:
+  - hostvars.localhost.route53user is not defined
+  - hostvars.localhost.student_access_key_id is not defined
+
+- name: Create Let's Encrypt Certificates
+  include_role:
+    name: host-lets-encrypt-certs
+  vars:
+  - acme_domain: "{{ api_hostname.stdout }}"
+  - acme_wildcard_domain: "*.{{ ingress_controller.resources[0].status.domain }}"
+  - acme_aws_access_key: "{{ le_aws_key }}"
+  - acme_aws_secret_access_key: "{{ le_aws_secret_key }}"
+  - acme_production: "{{ lets_encrypt_production|d(False)|bool}}"
+  - acme_remote_dir: "/home/ec2-user"
+  - acme_install_dir: "/home/ec2-user/certificates"
+  - acme_install_dir_owner: "ec2-user"
+  - acme_install_dir_group: "ec2-user"
+  - acme_renew_automatically: True
+  - acme_use_cache: False
+  - acme_force_issue: False
+
+- name: Read Certificate
+  slurp:
+    src: "$HOME/certificates/fullchain.pem"
+  register: server_cert
+
+- name: Read Key
+  slurp:
+    src: "$HOME/certificates/key.pem"
+  register: server_key
+
+- name: Create Router Certificate
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/router-certs.j2' ) | from_yaml }}"
+
+- name: Add Certs to Router
+  k8s:
+    state: present
+    definition: "{{ lookup('file', './files/router-with-certs.yaml' ) | from_yaml }}"
+
+# - name: Add Certificate to Ingress Controller
+#   shell: "oc patch ingresscontroller default -n openshift-ingress-operator --type=merge --patch='{\"spec\": { \"defaultCertificate\": { \"name\": \"router-certs\" }}}'"
+#   ignore_errors: True
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

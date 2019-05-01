@@ -1,0 +1,70 @@
+# vim: set ft=ansible
+---
+# Implement your Workload deployment tasks here
+
+- name: Create OpenShift Objects for Logging
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/namespace.yaml
+  - ./files/operatorgroup.yaml
+  - ./files/elasticsearch_catalog_source.yaml
+  - ./files/elasticsearch_subscription.yaml
+  - ./files/logging_catalog_source.yaml
+  - ./files/logging_subscription.yaml
+
+- name: Wait for Elasticsearch and Logging CRDs
+  k8s_facts:
+    api_version: apiextensions.k8s.io/v1beta1
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  register: crd_exists
+  until: crd_exists.resources | list | length >= 1
+  retries: 30
+  delay: 10
+  with_items:
+    - "clusterloggings.logging.openshift.io"
+    - "elasticsearches.logging.openshift.io"
+
+- name: Create OpenShift Objects for ClusterLogging
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/cluster_logging.j2
+ 
+- name: Wait for Elasticsearch Deployments to exist
+  k8s_facts:
+    api_version: extensions/v1beta1
+    kind: Deployment
+    namespace: openshift-logging
+    label_selectors:
+      - component = elasticsearch
+  register: elastic_deployments
+  until: elastic_deployments.resources | list | length >= 1
+  retries: 100
+  delay: 10
+
+# could this also use k8s_facts in some way?
+- name: wait for running elasticsearch
+  when:
+  - _logging_wait_for_deployment|bool
+  shell: "oc get deployment {{ item.metadata.name }} -n openshift-logging -o jsonpath='{.status.readyReplicas}'"
+  register: replicas_out
+  retries: 100
+  delay: 10
+  with_items: "{{ elastic_deployments.resources }}"
+  until: replicas_out.stdout | int == 1
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
