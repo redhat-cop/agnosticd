@@ -320,7 +320,7 @@ class AADSyntaxCheck(Command):
 
         print('#' * 60)
         print('Ansible Deprecation Checks')
-        exclude_dirs = ('adhoc', '.tox', 'archive')
+        exclude_dirs = ('adhoc', '.tox', 'archive', 'files')
         for yaml_file in find_files(
                 rootdir, exclude_dirs, None, r'\.ya?ml$'):
             with open(yaml_file, 'r') as contents:
