@@ -27,7 +27,7 @@ prompt_continue() {
         response=${response,,}
 
         case "${response}" in
-            yes|y) true ;;
+            yes|y|Y|Yes|YES) true ;;
             *) false ;;
         esac
     fi
