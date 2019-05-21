@@ -23,9 +23,6 @@ prompt_continue() {
     if [ -z "${response}" ]; then
         true
     else
-        # to lower
-        response=${response,,}
-
         case "${response}" in
             yes|y|Y|Yes|YES) true ;;
             *) false ;;
