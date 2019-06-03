@@ -1,0 +1,105 @@
+---
+- name: define ocp_project
+  set_fact:
+    ocp_project: "optaweb-vrp-{{guid}}"
+
+    # Templates come from here: https://raw.githubusercontent.com/jorgemoralespou/ose-sample-apps-layouts
+
+- name: Create project for Order IT HW demo
+  shell: |
+         oc new-project {{ocp_project}} \
+         --display-name="OptaPlanner Vehicle Routing Demo" \
+         --description="OptaPlanner Vehicle Routing Demo"
+  ignore_errors: true
+
+- name: "Label namespace"
+  command: "oc label namespace {{ocp_project}} AAD='{{guid}}'"
+
+#- name: Set project limit LimitRange
+#  shell: "oc create -f /tmp/{{guid}}//limit-range.yaml -n {{ocp_project}}"
+
+# Check whether the required ImageStreams are available in the "openshift" namespace.
+# If they are not, we import them.
+# We need to do this in the "openshift" namespace, in order to have the secret to pull from registry.redhat.io.
+- name: Check if OpenJDK ImageStreams exists
+  shell: oc get is/redhat-openjdk18-openshift -n openshift
+  register: openjdk_is_exists_result
+  ignore_errors: true
+
+- name: Import OpenJDK Image Streams into the cluster.
+  shell: "oc create -f {{openjdk_imagestreams_yml}} -n openshift"
+  when: openjdk_is_exists_result is failed
+  ignore_errors: true
+
+
+- name: Download the Boston OSM file.
+  get_url:
+    url: https://docs.google.com/uc?export=download&id=1zfCar7alWFvaZewm60Upy7E8gyxmfLlN
+    dest: /tmp/{{guid}}/boston.osm.pbf
+
+
+# TODO: This doesn't work because the file is too large. Instead, I think we need to chain builds:
+# 1) build the backend-application_name (Maven build)
+# 2) Create a runnable image using a Docker build which copies the Backend JAR and fetches the OSM file.
+
+- name: Create ConfigMap from OSM file
+  shell: "oc create configmap osm-config-map --from-file=/tmp/{{guid}}/boston.osm.pbf"
+
+- name: "Create OptaWeb VRP Backend Application"
+  shell: |
+          oc new-app java:8~https://github.com/kiegroup/optaweb-vehicle-routing#RHPDS \
+            --context-dir=optaweb-vehicle-routing-backend \
+            --name optaweb-vrp-backend \
+            -e GC_MAX_METASPACE_SIZE=192 -n {{ocp_project}}
+  # -e JAVA_OPTIONS="-Dorg.kie.server.repo=/data -Dorg.jbpm.document.storage=/data/docs -Dorder.service.location=http://rhpam7-oih-order-mgmt-app:8080 -Dorg.kie.server.controller.user=controllerUser -Dorg.kie.server.controller.pwd=test1234! -Dspring.profiles.active=openshift-rhpam" \
+
+- name: "Attach ConfigMap"
+  shell: "oc patch dc/optaweb-vrp-backend -p '{\"spec\":{\"template\":{\"spec\":{\"volumes\":[{\"name\": \"volume-osm-vrp-backend-app-1\", \"configMap\": {\"name\": \"osm-config-map\", \"defaultMode\": 420}}]}}}}'"
+
+- name: "Create OptaWeb VRP Backend Application Route"
+  shell: "oc expose svc/optaweb-vrp-backend"
+
+- name: "Get Backend Application Route"
+  shell: "oc get route optaweb-vrp-backend | awk 'FNR > 1 {print $2}'"
+  register: oc_get_route_output
+
+- name: "Set OptaWeb VRP Backend Route fact"
+  set_fact:
+    optaweb_vrp_backend_route: "{{ oc_get_route_output.stdout }}"
+
+- name: "Create OptaWeb Frontend ReactJS Template"
+  shell: "oc create -f https://raw.githubusercontent.com/DuncanDoyle/reactjs-openshift/master/create-react-app-openshift-template.yaml -n {{ocp_project}}"
+
+- name: "Create OptaWeb VRP Frontend application"
+  shell: "oc new-app -e OPTAWEB_VRP_BACKEND_URL=http://{{optaweb_vrp_backend_route}} \
+             --template react-web-app \
+             -p SOURCE_REPOSITORY_URL=https://github.com/kiegroup/optaweb-vehicle-routing \
+             -p SOURCE_REPOSITORY_REF=RHPDS \
+             -p SOURCE_REPOSITORY_DIR=optaweb-vehicle-routing-frontend"
+
+#### Wait for the build to complete before slapping on the quota ....
+- include_tasks: ./wait_for_build.yml
+  vars:
+    build_to_wait:
+      - optaweb-vrp-backend
+      - optaweb-vrp-frontend
+
+#### Wait for the deployment to complete before slapping on the quota ...
+- include_tasks: ./wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - optaweb-vrp-backend
+      - optaweb-vrp-frontend
+
+#- name: "Start build of BPM Process application"
+#  shell: "oc start-build co"
+
+- name: Annotate the completed project as requested by user
+  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
+
+- name: Give user access to the completed project
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete
