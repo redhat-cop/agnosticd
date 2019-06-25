@@ -1,0 +1,189 @@
+---
+- name: per user
+  become: true
+  block:
+    - set_fact:
+        my_user: "{{ item }}"
+
+    - name: per_user {{my_user}} Tasks Started
+      debug:
+        msg: "per_user {{my_user}} Tasks - Started"
+
+    # Create user project and make them admin
+    - name: check if workshop user's project for user "{{ my_user }}" exists
+      shell: "{{ openshift_cli }} get project {{ my_user }}"
+      register: user_project
+      ignore_errors: true
+      changed_when: false
+      tags: always
+
+    - name: Create workshop user's project for user "{{ my_user }}"
+      command: "{{ openshift_cli }} adm new-project {{ item }}"
+      when: user_project is failed
+      tags: always
+      with_items:
+        - "{{ my_user }}"
+        - "{{ my_user }}-stage"
+        - "{{ my_user }}-prod"
+
+    - name: Annotate the project as requested by user for user "{{ my_user }}"
+      command: "{{ openshift_cli }} annotate namespace {{ item }} openshift.io/requester={{ my_user }} --overwrite"
+      tags: always
+      with_items:
+        - "{{ my_user }}"
+        - "{{ my_user }}-stage"
+        - "{{ my_user }}-prod"
+        
+    - name: Award admin permission for user "{{ my_user }}"
+      command: "{{ openshift_cli }} adm policy add-role-to-user admin {{ my_user }} -n {{ item }}"
+      tags: always
+      with_items:
+        - "{{ my_user }}"
+        - "{{ my_user }}-stage"
+        - "{{ my_user }}-prod"
+
+    - name: Create docker secret for quay
+      command: "{{ openshift_cli }}  create secret docker-registry quay --docker-server=quay-secure-quay-enterprise.{{ ocp_apps_domain }} --docker-username=admin --docker-password=admin123 -n {{ my_user }}"
+
+    - name: Link secrets to service accounts
+      command: "{{ openshift_cli }} secrets link {{ item }} quay -n {{ my_user }}"
+      with_items:
+        - default
+        - builder
+
+    - name: Create configmap for OWASP ZAP agent pod
+      command: "{{ openshift_cli }} create -f {{ tmp_dir }}/files/owasp-cmap.yml -n {{ my_user }}"
+
+    - name: Create configmap for image management agent pod
+      command: "{{ openshift_cli }} create -f {{ tmp_dir }}/files/image-mgmt-cmap.yml -n {{ my_user }}"
+
+    - name: Create an ephemeral Jenkins instance
+      command: "{{ openshift_cli }} new-app jenkins-ephemeral -p MEMORY_LIMIT=4Gi -p JENKINS_IMAGE_STREAM_TAG=custom-jenkins:latest -n {{ my_user }}"
+      tags: always
+
+    - name: Allow proper formatting of archived html in jenkins and install plugins
+      command: "{{ openshift_cli }} set env dc/jenkins JENKINS_JAVA_OVERRIDES=-Dhudson.model.DirectoryBrowserSupport.CSP= -n {{ my_user }}"
+
+    - name: Populate buildconfig template
+      template:
+        src: buildconfig.yml.j2
+        dest: "{{tmp_dir}}/files/buildconfig.yaml"
+        mode: '0644'
+
+    - name: Create build template
+      command: "{{ openshift_cli }} create -f {{tmp_dir}}/files/buildconfig.yaml -n {{ my_user }}"
+      tags: always
+      ignore_errors: true
+
+    - name: Create jenkins pipeline
+      #command: "{{ openshift_cli }} new-app ecommerce-build-template -p GUID={{ guid }} -p GOGS_USER={{ my_user }} -p SSH_PASSWORD={{ user_password }} -n {{ my_user }}"
+      command: "{{ openshift_cli }} new-app ecommerce-build-template -p INTERNAL_REGISTRY={{ ocp_registry_route }} -p BASTION={{ ocp_bastion }} -p APP_DOMAIN={{ ocp_apps_domain }} -p API_ENDPOINT={{ openshift_master }} -p GUID={{ guid }} -p GOGS_USER={{ my_user }} -p SSH_PASSWORD={{ admin_password }} -n {{ my_user }}"
+      tags: always
+      ignore_errors: true
+
+#    Quotas caused issues (errors) in OCP4
+#    # Create cluster quota for the user to prevent abuse
+#    - name: Create user Quota definition - clusterresourcequota
+#      shell: >
+#            {{ openshift_cli }} create clusterquota clusterquota-"{{my_user}}"
+#            --project-annotation-selector=openshift.io/requester="{{my_user}}"
+#            --hard requests.cpu="{{quota_requests_cpu}}"
+#            --hard limits.cpu="{{quota_limits_cpu}}" 
+#            --hard requests.memory="{{quota_requests_memory}}"
+#            --hard limits.memory="{{quota_limits_memory}}"
+#            --hard configmaps="{{quota_configmaps}}"
+#            --hard pods="{{quota_pods}}"
+#            --hard persistentvolumeclaims="{{quota_persistentvolumeclaims}}"
+#            --hard services="{{quota_services}}"
+#            --hard secrets="{{quota_secrets}}"
+#            --hard requests.storage="{{quota_requests_storage}}"
+#            --dry-run -o yaml > clusterquota-{{ my_user }}.yml
+#      args:
+#        chdir: "{{ git_dir.path }}"
+#      tags: always
+#
+#    - name: Apply user Quota - clusterresourcequota
+#      command: "{{ openshift_cli }} apply -f clusterquota-{{ my_user }}.yml"
+#      args:
+#        chdir: "{{ git_dir.path }}"
+#      tags: always
+
+    # Clone required project in Gogs
+    #
+
+    - name: check if repository exists in git for user "{{ my_user }}"
+      uri:
+        url: http://{{ gogs_hostname }}/api/v1/repos/{{ my_user }}/{{ reponame_local }}
+        user: "{{ my_user }}"
+        password: "{{ user_gogs_password }}"
+        force_basic_auth: true
+        status_code: 200,404
+      register: repo_result
+      tags: gogs
+
+    - name: create git repository for user "{{ my_user }}"
+      uri:
+        url: http://{{ gogs_hostname }}/api/v1/user/repos
+        method: POST
+        body: '{"name": "{{ reponame_local }}", "private": false}'
+        body_format: json
+        user: "{{ my_user }}"
+        password: "{{ user_gogs_password }}"
+        status_code: 200,201
+        force_basic_auth: true
+      when: repo_result.status != 200
+      tags: gogs
+
+    - name: Update the pom.xml file
+      replace:
+        path: "{{ git_dir.path }}/{{ reponame }}/{{ demoapp_location }}/pom.xml"
+        regexp: "user(.+)"
+        replace: "{{ my_user }}</groupId>"
+      tags: gogs
+
+    - name: Remove git metadata
+      shell: |
+        rm -fr .git
+      args:
+        chdir: "{{ git_dir.path }}/{{ reponame }}"
+      tags: gogs
+
+    - name: Create new git repo
+      shell: |
+        rm -fr .git || true
+        git init .
+        git add *
+        git commit -am "Initial checkin"
+      args:
+        chdir: "{{ git_dir.path }}/{{ reponame }}/{{ demoapp_location }}"
+      tags: gogs
+
+    - name: push catalog to git repository in Gogs for user "{{ my_user }}"
+      shell: |
+        git remote add {{ my_user }} http://{{ my_user }}:{{ user_gogs_password }}@{{ gogs_hostname }}/{{ my_user }}/{{ reponame_local }}.git
+        git config --local user.email "{{ my_user }}@example.com"
+        git config --local user.name "{{ my_user }}"
+        git push -f --all {{ my_user }}
+      args:
+        chdir: "{{ git_dir.path }}/{{ reponame }}/{{ demoapp_location }}"
+      when: repo_result.status != 200
+      tags: gogs
+
+    - name: create user on bastion for openscap
+      user:
+        name: "{{ my_user }}"
+        password: "{{ admin_password | password_hash('sha512') }}"
+        password_lock: no
+        state: present
+        append: yes
+        groups:
+          - docker
+      delegate_to: "{{ bastion_internal }}"
+      ignore_errors: true
+
+    # TODO - create che users
+    # https://stackoverflow.com/questions/52440546/create-user-on-keycloack-from-curl-command
+
+    - name: per_user {{my_user}} Tasks Complete
+      debug:
+        msg: "per_user {{my_user}} Tasks - Completed"

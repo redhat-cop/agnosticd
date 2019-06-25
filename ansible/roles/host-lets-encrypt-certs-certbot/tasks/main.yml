@@ -1,0 +1,184 @@
+---
+## Request Let's Encrypt Certificates for a host
+- name: Set Certbot directory
+  set_fact:
+    _certbot_dir: "{{ _certbot_remote_dir }}/certbot"
+
+- name: Verify if AWS Credentials exist on the host
+  when: _certbot_dns_provider is match('route53')
+  stat:
+    path: "{{ _certbot_remote_dir }}/.aws/credentials"
+  register: aws_credentials_result
+
+- name: Fail if AWS Credentials are not on the host
+  fail:
+    msg: AWS Credentials are required when requesting certificates for a wildcard domain
+  when:
+  - _certbot_dns_provider is match('route53')
+  - aws_credentials_result.stat.exists == False 
+
+- name: Set _certbot_wildcard_certs fact
+  set_fact:
+    _certbot_wildcard_certs: "{{ (_certbot_wildcard_domain|length|int>0)|ternary('true','false') }}"
+
+- name: Test if Let's Encrypt Certificates are already there
+  stat:
+    path: "{{ _certbot_install_dir }}/fullchain.pem"
+  register: cacert
+
+- name: No Certificates on host or _certbot_force_issue=true -> set up Let's Encrypt Certificates
+  when:
+    - cacert.stat.exists|bool == false or _certbot_force_issue|bool
+  block:
+    - name: Install certbot packages
+      become: True
+      yum:
+        name:
+        - certbot
+        - "python2-certbot-dns-{{ _certbot_dns_provider }}"
+        state: latest
+
+    - name: Check if cached certificate archive exists
+      stat:
+        path: "{{ _certbot_cache_archive_file }}"
+      delegate_to: localhost
+      register: cache_archive_file
+
+    - name: Restore entire certificate archive
+      when:
+      - _certbot_use_cache|bool
+      - cache_archive_file.stat.exists|bool
+      - not _certbot_force_issue|bool
+      block:
+      - name: Upload certificate archive
+        unarchive:
+          src: "{{ _certbot_cache_archive_file }}"
+          dest: "{{ _certbot_remote_dir }}"
+          owner: "{{ _certbot_install_dir_owner }}"
+          keep_newer: yes
+      - name: Set _certbot_setup_complete=true
+        set_fact:
+          _certbot_setup_complete: true
+
+    - name: Ensure Certbot Directories are present
+      file:
+        name: "{{ item }}"
+        state: directory
+        owner: "{{ _certbot_remote_dir_owner }}"
+        mode: 0775
+      loop:
+      - "{{ _certbot_dir }}"
+      - "{{ _certbot_dir }}/config"
+      - "{{ _certbot_dir }}/work"
+      - "{{ _certbot_dir }}/logs"
+      - "{{ _certbot_dir }}/renewal-hooks"
+      - "{{ _certbot_dir }}/renewal-hooks/deploy"
+
+    - name: Install redeploy hook scripts
+      copy:
+        src: ./files/deploy_certs.sh
+        dest: "{{ _certbot_dir }}/renewal-hooks/deploy/deploy_certs.sh"
+        mode: 0775
+        owner: "{{ _certbot_remote_dir_owner }}"
+    - name: Install redeploy hook playbook and cert secret template
+      copy:
+        src: "./files/{{ item }}"
+        dest: "{{ _certbot_dir }}/renewal-hooks/deploy/{{ item }}"
+        mode: 0664
+        owner: "{{ _certbot_remote_dir_owner }}"
+      loop:
+      - deploy_certs.yml
+      - router-certs.j2
+
+    - name: Request Certificates from Let's Encrypt (force or no cache)
+      when:
+      - _certbot_force_issue|bool or not _certbot_setup_complete|bool
+      block:
+      # Get Intermediary CA Certificate.
+      # This is also used in the SSO configuration!
+      - name: Get Let's Encrypt Intermediary CA Certificate
+        get_url:
+          url: https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.pem.txt
+          dest: "{{ _certbot_dir }}/lets-encrypt-x3-cross-signed.pem"
+      - name: Print Shell Command
+        debug:
+          msg: >-
+            About to request certificates using the following command:
+            certbot certonly -n --agree-tos --email {{ _certbot_le_email }} 
+            -d {{ _certbot_domain }}
+            {{ (_certbot_wildcard_domain|length>0)|ternary('-d','')}} {{ (_certbot_wildcard_domain|length>0)|ternary(_certbot_wildcard_domain,'')}}
+            {{ (_certbot_production|bool)|ternary('','--test-cert') }}
+            {{ _certbot_additional_args|d(_certbot_args)|d('') }}
+            {{ (_certbot_wildcard_certs|bool)|ternary('--dns-'+_certbot_dns_provider, '') }}
+            --config-dir={{ _certbot_dir }}/config
+            --work-dir={{ _certbot_dir }}/work
+            --logs-dir={{ _certbot_dir }}/logs
+
+      - name: Request API and Wildcard Certificates
+        become: False
+        shell: >-
+          certbot certonly -n --agree-tos --email {{ _certbot_le_email }} 
+          -d {{ _certbot_domain }}
+          {{ (_certbot_wildcard_domain|length>0)|ternary('-d','')}} {{ (_certbot_wildcard_domain|length>0)|ternary(_certbot_wildcard_domain,'')}}
+          {{ (_certbot_production|bool)|ternary('','--test-cert') }}
+          {{ _certbot_additional_args|d(_certbot_args)|d('') }}
+          {{ (_certbot_wildcard_certs|bool)|ternary('--dns-'+_certbot_dns_provider, '') }}
+          --config-dir={{ _certbot_dir }}/config
+          --work-dir={{ _certbot_dir }}/work
+          --logs-dir={{ _certbot_dir }}/logs
+        retries: 5
+        delay: 30
+        register: r_request_le
+        until: r_request_le is succeeded
+
+      - name: Save certificates to cache
+        when:
+        - _certbot_use_cache|bool
+        - _certbot_cache_archive_file is defined
+        - _certbot_cache_archive_file|trim != ""
+        block:
+        - name: Create archive of certbot directory for cache
+          archive:
+            path: "{{ _certbot_dir }}"
+            dest: "/tmp/certbot.tgz"
+        - name: Save certbot archive to cache
+          fetch:
+            src: "/tmp/certbot.tgz"
+            dest: "{{ _certbot_cache_archive_file }}"
+            flat: yes
+        - name: Remove archive from server
+          file:
+            name: "/tmp/certbot.tgz"
+            state: absent
+
+- name: Install the certificates into {{ _certbot_install_dir }}
+  block:
+  - name: Ensure {{ _certbot_install_dir }} exists
+    file:
+      path: "{{ _certbot_install_dir }}"
+      state: directory
+      owner: "{{ _certbot_install_dir_owner }}"
+      mode: 0775
+  - name: Install certificates
+    copy:
+      src: "{{ _certbot_dir }}/config/live/{{ _certbot_domain }}/{{ item }}"
+      dest: "{{ _certbot_install_dir }}/{{ item }}"
+      remote_src: yes
+    loop:
+    - "cert.pem"
+    - "fullchain.pem"
+    - "chain.pem"
+    - "privkey.pem"
+
+- name: Install Automatic renewals of Certificates
+  when:
+  - _certbot_renew_automatically|bool
+  block:
+  - name: Install crontab to renew certificates when they expire
+    become: False
+    cron:
+      name: LETS_ENCRYPT_RENEW
+      special_time: daily
+      job: "certbot renew {{ _certbot_additional_args|d(_certbot_args)|d('') }} --config-dir={{ _certbot_dir }}/config --work-dir={{ _certbot_dir }}/work --logs-dir={{ _certbot_dir }}/logs --quiet > /dev/null"
+# --deploy-hook /path/to/deploy-hook-script
+# You can also specify hooks by placing files in subdirectories of Certbot’s configuration directory. Assuming your configuration directory is /etc/letsencrypt, any executable files found in /etc/letsencrypt/renewal-hooks/pre, /etc/letsencrypt/renewal-hooks/deploy, and /etc/letsencrypt/renewal-hooks/post will be run as pre, deploy, and post hooks respectively when any certificate is renewed with the renew subcommand. These hooks are run in alphabetical order and are not run for other subcommands. (The order the hooks are run is determined by the byte value of the characters in their filenames and is not dependent on your locale.)

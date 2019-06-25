@@ -12,15 +12,14 @@ def notification_email = 'cbomman@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
-//def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
+def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
 
 // Admin host ssh location is in a credential too
-//def ssh_admin_host = 'admin-host-na'
+def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-//def ssh_location = ''
-
+def openshift_location = ''
 
 // Catalog items
 def choices = [
@@ -34,7 +33,7 @@ def ocprelease_choice = [
     '3.11.16',
     '3.10.34',
     '3.10.14',
-    '3.9.41'
+    '3.9.41',
     '3.9.40',
 ].join("\n")
 
@@ -137,13 +136,13 @@ pipeline {
             }
         }
         */
-//        stage('Wait for last email and parse SSH location') {
-        stage('Wait for last email') {
+
+        stage('Wait for last email and parse OpenShift location') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
                 script {
@@ -153,15 +152,24 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 90 \
+                          --timeout 30 \
                           --filter 'has completed'
                         """
                     ).trim()
 
-//                    def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
-//                    ssh_location = m[0][1]
-//                    echo "ssh_location = '${ssh_location}'"
+
+                    def m = email =~ /To get started, please login with your OPENTLC credentials to: ([^ ]+) in your web browser/
+                    openshift_location = m[0][1]
                 }
+            }
+        }
+
+        stage('Test OpenShift access') {
+            environment {
+                credentials = credentials("${opentlc_creds}")
+            }
+            steps {
+                sh "./tests/jenkins/downstream/openshift_client.sh '${openshift_location}'"
             }
         }
 
@@ -229,7 +237,7 @@ pipeline {
         }
         stage('Wait for deletion email') {
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
                 withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
@@ -284,6 +292,27 @@ pipeline {
                     from: credentials.split(':')[0]
               )
             }
+
+	    withCredentials([
+                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
+                sshUserPrivateKey(
+                    credentialsId: ssh_creds,
+                    keyFileVariable: 'ssh_key',
+                    usernameVariable: 'ssh_username')
+            ]) {
+                script {
+                  // I haven't tested this, but it gives you the idea
+                  // Be careful with commands executed on admin host, make sure it's 'read-only' commands
+                  def retstring = sh("""
+                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
+                    "find deployer_logs -name '*${guid}*log' | xargs -n1 grep OKTODELETE"
+                    exit 0
+                  """.trim()
+                  )
+                  assert retstring.contains("OKTODELETE")
+                }
+            }
+
             withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
                 sh(
                     """

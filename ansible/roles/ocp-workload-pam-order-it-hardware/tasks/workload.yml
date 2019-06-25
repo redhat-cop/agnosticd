@@ -18,14 +18,28 @@
 #- name: Set project limit LimitRange
 #  shell: "oc create -f /tmp/{{guid}}//limit-range.yaml -n {{ocp_project}}"
 
-- name: Import ImageStreams OpenJDK
-  shell: "oc create -f {{openjdk_imagestreams_yml}} -n {{ocp_project}}"
+# Check whether the required ImageStreams are available in the "openshift" namespace.
+# If they are not, we import them.
+# We need to do this in the "openshift" namespace, in order to have the secret to pull from registry.redhat.io.
+- name: Check if PAM ImageStreams exists
+  shell: oc get is/rhpam73-businesscentral-openshift -n openshift
+  register: rhpam_is_exists_result
+  ignore_errors: true
 
-- name: Import ImageStreams PAM
-  shell: "oc create -f {{pam_imagestreams_yml}} -n {{ocp_project}}"
+- name: Import the RHPAM73 ImageStreams into the cluster.
+  shell: "oc create -f {{pam_imagestreams_yml}} -n openshift"
+  when: rhpam_is_exists_result is failed
+  ignore_errors: true
 
-- name: Patch KIE-Server Image stream
-  shell: "oc patch is/rhpam71-kieserver-openshift --type='json' -p '[{\"op\": \"replace\", \"path\": \"/spec/tags/0/from/name\", \"value\": \"registry.access.redhat.com/rhpam-7/rhpam71-kieserver-openshift:1.0\"}]'"
+- name: Check if OpenJDK ImageStreams exists
+  shell: oc get is/redhat-openjdk18-openshift -n openshift
+  register: openjdk_is_exists_result
+  ignore_errors: true
+
+- name: Import OpenJDK Image Streams into the cluster.
+  shell: "oc create -f {{openjdk_imagestreams_yml}} -n openshift"
+  when: openjdk_is_exists_result is failed
+  ignore_errors: true
 
 - name: Import PAM Authoring template
   shell: "oc create -f {{pam_template_yml}} -n {{ocp_project}}"
@@ -52,11 +66,11 @@
   shell: oc create configmap rhpam-bc-setup-config-map --from-file=/tmp/{{guid}}/bc-clone-git-repository.sh,/tmp/{{guid}}/provision-properties-static.sh -n {{ocp_project}}
 
 - name: Create custom RHPAM 7 Business Central build with users.
-  shell: oc process -f /tmp/{{guid}}/rhpam71-businesscentral-openshift-with-users.yaml -p DOCKERFILE_REPOSITORY="https://github.com/jbossdemocentral/rhpam7-order-it-hw-demo-rhpamcentr" -p DOCKERFILE_REF="master" -p DOCKERFILE_CONTEXT="." -n {{ocp_project}} | oc create -n {{ocp_project}} -f -
+  shell: oc process -f /tmp/{{guid}}/rhpam73-businesscentral-openshift-with-users.yaml -p DOCKERFILE_REPOSITORY="https://github.com/jbossdemocentral/rhpam7-order-it-hw-demo-rhpamcentr" -p DOCKERFILE_REF="master" -p DOCKERFILE_CONTEXT="." -n {{ocp_project}} | oc create -n {{ocp_project}} -f -
 
 - name: Create PAM7 Authoring environment
   shell: |
-          oc new-app --template=rhpam71-authoring \
+          oc new-app --template=rhpam73-authoring \
             -p APPLICATION_NAME="rhpam7-oih" \
             -p KIE_ADMIN_USER="adminUser" \
             -p KIE_ADMIN_PWD="test1234!" \
@@ -66,22 +80,22 @@
             -p KIE_SERVER_PWD="test1234!" \
             -p BUSINESS_CENTRAL_HTTPS_SECRET="businesscentral-app-secret" \
             -p KIE_SERVER_HTTPS_SECRET="kieserver-app-secret" \
-            -p MAVEN_REPO_URL="http://nexus:8081/content/groups/public/" \
-            -p MAVEN_REPO_USERNAME="deployment" \
-            -p MAVEN_REPO_PASSWORD="deployment123" \
             -p BUSINESS_CENTRAL_MAVEN_USERNAME="mavenUser" \
             -p BUSINESS_CENTRAL_MAVEN_PASSWORD="test1234!" \
             -p BUSINESS_CENTRAL_MEMORY_LIMIT="2Gi" \
-            -p IMAGE_STREAM_NAMESPACE={{ocp_project}} -n {{ocp_project}}
+            -p IMAGE_STREAM_NAMESPACE=openshift -n {{ocp_project}}
 
 - name: "Add ConfigMap as Volume to Business Central DC"
-  shell: oc volume dc/rhpam7-oih-rhpamcentr --add --name=config-volume --configmap-name=rhpam-bc-setup-config-map --mount-path=/tmp/config-files
+  shell: oc set volume dc/rhpam7-oih-rhpamcentr --add --name=config-volume --configmap-name=rhpam-bc-setup-config-map --mount-path=/tmp/config-files
 
 - name: "Add BC deployment hook."
   shell: oc set deployment-hook dc/rhpam7-oih-rhpamcentr --post -c rhpam7-oih-rhpamcentr -e BC_URL="http://rhpam7-oih-rhpamcentr:8080" -v config-volume --failure-policy=abort -- /bin/bash /tmp/config-files/bc-clone-git-repository.sh
 
 - name: "Configure Business Central ImageStream"
-  shell: "oc patch dc/rhpam7-oih-rhpamcentr --type='json' -p '[{\"op\": \"replace\", \"path\": \"/spec/triggers/0/imageChangeParams/from/name\", \"value\": \"rhpam71-businesscentral-openshift-with-users:latest\"}]'"
+  shell: "oc patch dc/rhpam7-oih-rhpamcentr --type='json' -p '[{\"op\": \"replace\", \"path\": \"/spec/triggers/0/imageChangeParams/from/name\", \"value\": \"rhpam73-businesscentral-openshift-with-users:latest\"}]'"
+
+- name: "Configure Business Central ImageStream Namespace"
+  shell: "oc patch dc/rhpam7-oih-rhpamcentr --type='json' -p '[{\"op\": \"replace\", \"path\": \"/spec/triggers/0/imageChangeParams/from/namespace\", \"value\": \"{{ocp_project}}\"}]'"
 
 #- name: "Create secrets and service accounts"
 #  shell: "oc process -f /tmp/{{guid}}/secrets-and-accounts.yaml | oc create -n {{ocp_project}} -f  -"
@@ -103,10 +117,10 @@
   shell: "oc create configmap rhpam7-oih-order-app-settings-config-map --from-file=/tmp/{{guid}}/settings.xml -n {{ocp_project}}"
 
 - name: "Add ConfigMap as Volume to Order IT Hardware App DC"
-  shell: "oc volume dc/rhpam7-oih-order-app --add -m /home/jboss/.m2 -t configmap --configmap-name=rhpam7-oih-order-app-settings-config-map -n {{ocp_project}}"
+  shell: "oc set volume dc/rhpam7-oih-order-app --add -m /home/jboss/.m2 -t configmap --configmap-name=rhpam7-oih-order-app-settings-config-map -n {{ocp_project}}"
 
 - name: "Add Data Persistent Volume"
-  shell: "oc volume dc/rhpam7-oih-order-app --add --claim-size 100Mi --mount-path /data --name rhpam7-oih-order-app-data -n {{ocp_project}}"
+  shell: "oc set volume dc/rhpam7-oih-order-app --add --claim-size 100Mi --mount-path /data --name rhpam7-oih-order-app-data -n {{ocp_project}}"
 
 - name: "Expose Order IT HW App as service"
   shell: "oc expose service rhpam7-oih-order-app -n {{ocp_project}}"
@@ -129,7 +143,7 @@
   shell: "oc create configmap rhpam7-oih-order-app-properties-config-map --from-file=/tmp/{{guid}}/application-openshift-rhpam.properties -n {{ocp_project}}"
 
 - name: "Add SpringBoot ConfigMap as Volume to Order IT Hardware App DC"
-  shell: "oc volume dc/rhpam7-oih-order-app --add -m /deployments/config -t configmap --configmap-name=rhpam7-oih-order-app-properties-config-map -n {{ocp_project}}"
+  shell: "oc set volume dc/rhpam7-oih-order-app --add -m /deployments/config -t configmap --configmap-name=rhpam7-oih-order-app-properties-config-map -n {{ocp_project}}"
 
 #- name: "Configure application-openshift-rhpam.properties kie-server route"
 #  shell: "sed \"s/.*kieserver_host.*/\ \ \ \ \'kieserver_host\'\ :\ \'{{kie_server_route}}\',/g\" /tmp/{{guid}}/config.js.orig > /tmp/{{guid}}/config.js"
@@ -147,16 +161,14 @@
 
 #### Wait for the build to complete before slapping on the quota ....
 - include_tasks: ./wait_for_build.yml
-  static: no
   vars:
     build_to_wait:
       - rhpam7-oih-order-app
       - rhpam7-oih-order-mgmt-app
-      - rhpam71-businesscentral-openshift-with-users
+      - rhpam73-businesscentral-openshift-with-users
 
 #### Wait for the deployment to complete before slapping on the quota ...
 - include_tasks: ./wait_for_deploy.yml
-  static: no
   vars:
     pod_to_wait:
       - rhpam7-oih-order-app

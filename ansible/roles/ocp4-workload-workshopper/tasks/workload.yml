@@ -1,0 +1,91 @@
+# vim: set ft=ansible
+---
+# Implement your Workload deployment tasks here
+
+- name: create labguide project
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: labguide
+
+- name: check if guide is deployed
+  k8s_facts:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    name: "{{ _deployed_guide_name }}"
+    namespace: labguide
+  register: guide_exists
+
+- name: extract the cluster_domain
+  k8s_facts:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: cluster_domain
+
+- name: cat the kubeadmin-password
+  shell: "cat /home/ec2-user/cluster-{{ guid }}/auth/kubeadmin-password"
+  register: kubeadmin_password
+
+- name: set cluster route domain as fact
+  set_fact:
+    apps_base_domain: "{{ cluster_domain.resources[0].status.domain }}"
+
+- name: set cluster base domain as fact
+  set_fact:
+    base_domain: "{{ apps_base_domain.split('.')[1:] | join('.') }}"
+
+- name: extract the sandbox id
+  shell: "echo {{ base_domain }} | cut -d. -f2"
+  register: sandbox_id
+
+- name: fetch the string for passing to new-app
+  uri: 
+    url: "{{ _deployed_guide_string_url }}"
+    return_content: true
+  register: newapp_string
+  when:
+    - guide_exists.resources | list | length < 1
+
+- name: deploy workshopper using the fetched string and calculated vars
+  shell: |
+    oc new-app -n labguide --name {{ _deployed_guide_name }} \
+    {{ newapp_string.content }} -e API_URL=https://api.{{ base_domain }}:6443 \
+    -e MASTER_URL=https://console-openshift-console.{{ apps_base_domain }} \
+    -e KUBEADMIN_PASSWORD={{ kubeadmin_password.stdout }} \
+    -e BASTION_FQDN=bastion.{{ guid }}.{{ sandbox_id.stdout }}.opentlc.com \
+    -e GUID={{ guid }} \
+    -e ROUTE_SUBDOMAIN={{ apps_base_domain }}
+  when:
+    - guide_exists.resources | list | length < 1
+
+- name: lab guide route
+  k8s:
+    state: present
+    definition:
+      apiVersion: route.openshift.io/v1
+      kind: Route
+      metadata:
+        labels:
+          app: "{{ _deployed_guide_name }}"
+        name: "{{ _deployed_guide_name }}"
+        namespace: labguide
+      spec:
+        port:
+          targetPort: 8080-tcp
+        to:
+          kind: Service
+          name: "{{ _deployed_guide_name }}"
+          weight: 100
+        wildcardPolicy: None
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
+

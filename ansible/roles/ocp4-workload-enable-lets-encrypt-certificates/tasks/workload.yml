@@ -1,0 +1,76 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Only execute the role when install_lets_encrypt_certificates is not set to false
+  when: install_lets_encrypt_certificates | d(true) | bool
+  block:
+
+  # This also is in:
+  # oc get infrastructures.config.openshift.io/cluster -o yaml
+  # Although that's the entire URL. Need to strip out https:// and :6443
+  - name: Determine API server hostname
+    shell: "oc whoami --show-server | cut -f 2 -d ':' | cut -f 3 -d '/' | sed 's/-api././'"
+    register: api_hostname
+
+  - name: Determine Wildcard Domain
+    k8s_facts:
+      api_version: operator.openshift.io/v1
+      kind: IngressController
+      name: default
+      namespace: openshift-ingress-operator
+    register: ingress_controller
+
+  - name: Print API and Wildcard Domain
+    debug:
+      msg: "API: {{ api_hostname.stdout }}, Wildcard Domain: {{ ingress_controller.resources[0].status.domain }}"
+
+  # /home/{{ ansible_user }}/.aws/credentials needs to exist before calling this role
+  - name: Create Let's Encrypt Certificates
+    include_role:
+      name: host-lets-encrypt-certs-certbot
+    vars:
+    - _certbot_domain: "{{ api_hostname.stdout }}"
+    - _certbot_wildcard_domain: "*.{{ ingress_controller.resources[0].status.domain }}"
+    - _certbot_dns_provider: "route53"
+    - _certbot_remote_dir: "/home/{{ ansible_user }}"
+    - _certbot_remote_dir_owner: "{{ ansible_user }}"
+    - _certbot_install_dir: "/home/{{ ansible_user }}/certificates"
+    - _certbot_install_dir_owner: "{{ ansible_user }}"
+    - _certbot_cache_archive_file: "{{ output_dir|d('/tmp') }}/{{ guid }}-certs.tar.gz"
+    - _certbot_renew_automatically: True
+    - _certbot_use_cache: True
+    - _certbot_force_issue: False
+    - _certbot_production: True
+    # production false results in unusable certificates
+    # (not possible to login to OCP)
+    # - _certbot_production: "{{ lets_encrypt_production|d(False)|bool}}"
+
+  - name: Read Certificate
+    slurp:
+      src: "$HOME/certificates/fullchain.pem"
+    register: server_cert
+
+  - name: Read Key
+    slurp:
+      src: "$HOME/certificates/privkey.pem"
+    register: server_key
+
+  - name: Create Router Certificate
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './templates/router-certs.j2' ) | from_yaml }}"
+
+  - name: Add Certs to Router
+    k8s:
+      state: present
+      definition: "{{ lookup('file', './files/router-with-certs.yaml' ) | from_yaml }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
