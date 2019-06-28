@@ -1,0 +1,276 @@
+# vim: set ft=ansible
+---
+
+# Implement your Workload deployment tasks here
+
+## Based on https://github.com/openshift-labs/workshop-dashboard/blob/2.14.4/templates/production.json
+## Parameters according to https://github.com/kaovilai/openshift-cns-testdrive/
+
+- name: create the labguide Project
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: labguide
+        annotations: 
+          openshift.io/requester: kube:admin
+      status:
+        phase: active
+
+- name: create ServiceAccount
+  k8s:
+    state: present
+    definition:
+      kind: ServiceAccount
+      apiVersion: v1
+      metadata:
+        name: "admin-user"
+        namespace: labguide
+        labels:
+          app: "admin"
+        annotations:
+          serviceaccounts.openshift.io/oauth-redirectreference.first: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"admin"}}'
+          serviceaccounts.openshift.io/oauth-redirecturi.first: oauth_callback
+          serviceaccounts.openshift.io/oauth-want-challenges: 'false'
+
+- name: create RoleBinding
+  k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        labels:
+          app: admin
+        name: admin-admin
+        namespace: labguide
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: admin
+      subjects:
+      - kind: ServiceAccount
+        name: admin-user
+
+- name: create ImageStream
+  k8s:
+    state: present
+    definition:
+      kind: ImageStream
+      apiVersion: v1
+      metadata:
+        name: "admin"
+        namespace: labguide
+        labels:
+          app: "admin"
+      spec:
+        lookupPolicy:
+          local: true
+        tags:
+        - name: latest
+          referencePolicy:
+            type: Source
+          from:
+            kind: DockerImage
+            name: "quay.io/openshiftlabs/workshop-dashboard:2.14.4"
+
+- name: cat the kubeadmin-password
+  shell: "cat /home/{{ ansible_user }}/cluster-{{ guid }}/auth/kubeadmin-password"
+  register: kubeadmin_password
+
+- name: extract the sandbox id
+  shell: "echo {{ target_host }} | cut -d. -f3"
+  register: sandbox_id
+
+- name: create ConfigMap
+  k8s:
+    state: present
+    definition:
+      kind: ConfigMap
+      apiVersion: v1
+      metadata:
+        name: "admin-env"
+        namespace: labguide
+        labels:
+          app: "admin"
+      data:
+        # terminal.sh: "${TERMINAL_ENVVARS}"
+        workshop.sh: "API_URL=https://api.{{ target_host }}:6443 \
+         MASTER_URL=https://console-openshift-console.apps.cluster-{{ guid }}.{{ sandbox_id.stdout }}.opentlc.com \
+         KUBEADMIN_PASSWORD={{ kubeadmin_password.stdout }} \
+         SSH_PASSWORD={{ target_host_password }} \
+         BASTION_FQDN={{ target_host }} \
+         GUID={{ guid }} \
+         ROUTE_SUBDOMAIN=apps.cluster-{{ guid }}.{{ sandbox_id.stdout }}.opentlc.com \
+         HOME_PATH=/opt/app-root/src"
+        # gateway.sh: "${GATEWAY_ENVVARS}"
+
+- name: create DeploymentConfig
+  k8s:
+    state: present
+    definition:
+      kind: DeploymentConfig
+      apiVersion: v1
+      metadata:
+        name: "admin"
+        namespace: labguide
+        labels:
+          app: "admin"
+      spec:
+        strategy:
+          type: Recreate
+        triggers:
+        - type: ConfigChange
+        - type: ImageChange
+          imageChangeParams:
+            automatic: true
+            containerNames:
+            - terminal
+            from:
+              kind: ImageStreamTag
+              name: "admin:latest"
+        replicas: 1
+        selector:
+          app: "admin"
+          deploymentconfig: "admin"
+        template:
+          metadata:
+            labels:
+              app: "admin"
+              deploymentconfig: "admin"
+          spec:
+            serviceAccountName: "admin-user"
+            initContainers:
+            - name: setup-console
+              image: "quay.io/openshiftlabs/workshop-dashboard:2.14.4"
+              command:
+              - "/opt/workshop/bin/setup-console.sh"
+              env:
+              - name: OPENSHIFT_USERNAME
+                value: "{{ ocp_username }}"
+              - name: OPENSHIFT_PASSWORD
+                value: "{{ kubeadmin_password.stdout }}"
+              # - name: OPENSHIFT_TOKEN
+              #   value: "${OPENSHIFT_TOKEN}"
+              # - name: OC_VERSION
+              #   value: "${OC_VERSION}"
+              # - name: ODO_VERSION
+              #   value: "${ODO_VERSION}"
+              # - name: KUBECTL_VERSION
+              #   value: "${KUBECTL_VERSION}"
+              volumeMounts:
+              - name: shared
+                mountPath: "/var/run/workshop"
+            containers:
+            - name: terminal
+              image: "admin:latest"
+              ports:
+              - containerPort: 10080
+                protocol: TCP
+              env:
+              - name: PROJECT_NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: APPLICATION_NAME
+                value: "admin"
+              - name: AUTH_USERNAME
+                value: "{{ ocp_username }}"
+              - name: AUTH_PASSWORD
+                value: "{{ kubeadmin_password.stdout }}"
+              - name: OAUTH_SERVICE_ACCOUNT
+                value: "admin-user"
+              - name: WORKSHOPPER_URLS
+                value: "https://raw.githubusercontent.com/openshift/openshift-cns-testdrive/ocp4-dev/labguide/_ocp_admin_testdrive.yaml"
+              - name: CONSOLE_URL
+                value: http://0.0.0.0:10083
+              # - name: OC_VERSION
+              #   value: "${OC_VERSION}"
+              # - name: ODO_VERSION
+              #   value: "${ODO_VERSION}"
+              # - name: KUBECTL_VERSION
+              #   value: "${KUBECTL_VERSION}"
+              volumeMounts:
+              - name: envvars
+                mountPath: "/opt/workshop/envvars"
+              - name: shared
+                mountPath: "/var/run/workshop"
+            - name: console
+              image: quay.io/openshift/origin-console:4.2.0
+              command:
+              - "/var/run/workshop/start-console.sh"
+              env:
+              - name: BRIDGE_K8S_MODE
+                value: in-cluster
+              - name: BRIDGE_LISTEN
+                value: http://0.0.0.0:10083
+              - name: BRIDGE_BASE_PATH
+                value: "/console/"
+              - name: BRIDGE_PUBLIC_DIR
+                value: "/opt/bridge/static"
+              - name: BRIDGE_USER_AUTH
+                value: disabled
+              - name: BRIDGE_BRANDING
+                value: "openshift"
+              volumeMounts:
+              - name: shared
+                mountPath: "/var/run/workshop"
+            volumes:
+            - name: envvars
+              configMap:
+                name: "admin-env"
+                defaultMode: 420
+            - name: shared
+              emptyDir: {}
+
+- name: create Service
+  k8s:
+    state: present
+    definition:
+      kind: Service
+      apiVersion: v1
+      metadata:
+        name: "admin"
+        namespace: "labguide"
+        labels:
+          app: "admin"
+      spec:
+        ports:
+        - name: 10080-tcp
+          protocol: TCP
+          port: 10080
+          targetPort: 10080
+        selector:
+          app: "admin"
+          deploymentconfig: "admin"
+
+- name: create Route
+  k8s:
+    state: present
+    definition:
+      kind: Route
+      apiVersion: v1
+      metadata:
+        name: "admin"
+        namespace: labguide
+        labels:
+          app: "admin"
+      spec:
+        to:
+          kind: Service
+          name: "admin"
+          weight: 100
+        port:
+          targetPort: 10080-tcp
+        tls:
+          termination: edge
+          insecureEdgeTerminationPolicy: Redirect
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
+
