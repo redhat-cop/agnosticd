@@ -1,130 +1,77 @@
-# vim: set ft=ansible:
 ---
-- name: Step 003 - Prepare Ansible Host Files
-  hosts: localhost
-  connection: local
-  become: False
+- name: Step 00xxxxx software
+  hosts: bastions[0]
   gather_facts: False
-
-
-
-  tags:
-    - generate_ansible_hosts_file
-  tasks:
-    - name: generate ansible hosts file
-      template:
-        src: "../configs/{{ env_type }}/files/hosts_template.j2"
-        dest: "{{output_dir}}/hosts-{{ env_type }}-{{ guid }}"
-    - name: generate ansible tower hosts file
-      template:
-        src: "../configs/{{ env_type }}/files/tower_hosts_template.j2"
-        dest: "{{output_dir}}/tower_hosts-{{ env_type }}-{{ guid }}"
-
-- name: Prepare bastion for Tower Deployment
-  hosts: bastions
   become: true
-  gather_facts: False
-
-
-
-  vars:
-    tower_inventory_path: /root/tower_hosts
-
-  tags:
-    - install_tower
   tasks:
-    - name: Ensure directory /opt/tower
-      file:
-        path: /opt/tower
-        state: directory
-
-    - name: Copy over ansible hosts file
+    - debug:
+        msg: "Software tasks Started"
+    # This probably needs to get removed.
+    # - name: Place Tower License from env_secret_vars on bastion
+    #   blockinfile:
+    #     create: yes
+    #     path: /root/tower_license.txt
+    #     block: "{{tower_license}}"
+    #   when: tower_license is defined
+    - name: Copy Tower License File
       copy:
-        src: "{{output_dir}}/hosts-{{ env_type }}-{{ guid }}"
-        dest: /etc/ansible/hosts
+        content: "{{ tower_license | from_json }}"
+        dest: /root/license.txt
 
-    - name: Copy over ansible tower hosts file
-      copy:
-        src: "{{output_dir}}/tower_hosts-{{ env_type }}-{{ guid }}"
-        dest: "{{tower_inventory_path}}"
-    - name: unarchive the latest tower software
+    - name: Download Tower Setup file
       unarchive:
-        src: "https://releases.ansible.com/ansible-tower/setup/ansible-tower-setup-{{ tower_setup_version | default('latest') }}.tar.gz"
-        dest: /opt/tower
+        src: "https://releases.ansible.com/ansible-tower/setup/ansible-tower-setup-{{tower_version}}.tar.gz"
+        dest: /root/
         remote_src: yes
-
-    - name: list current repository files
-      shell: "ls /opt/tower/ansible-tower-setup-*/setup.sh"
-      register: tower_installer_path
-
-    - name: print out tower Installer
-      debug:
-        var: tower_installer_path
-
-    - name: Add log path to Ansible configuration
-      lineinfile:
-        regexp: "^#log_path"
-        dest: "/etc/ansible/ansible.cfg"
-        line: "log_path = /root/ansible.log"
-        state: present
       tags:
-        - ansible_log_enable
+        - install-tower
 
-    - name: print out tower Installer
-      debug:
-        msg: "{{tower_installer_path.stdout}} -i {{tower_inventory_path}}"
-    - name: run the tower installer
-      shell: "{{tower_installer_path.stdout}} -i {{tower_inventory_path}}"
+    - name: Remove directory if it exists
+      file:
+       path: /root/ansible-tower-setup-latest
+       state: absent
+    #It's not latest, it's whatever we installed, this should be removed.
+    - name: Rename the ansible tower setup directory name
+      shell: mv /root/ansible-tower-setup-* /root/ansible-tower-setup-latest
 
+    # we can put this as /etc/ansible/hosts
+    - name: Create Tower Inventory file
+      template:
+        src: "../configs/{{ env_type }}/files/tower_template_inventory.j2"
+        dest: /root/ansible-tower-setup-latest/inventory
+      tags:
+        - create_tower_inventory
+    # when we move inventory to /etc/ansible/hosts we can add -i to the setup.sh file
+    - name: Run Ansible Tower setup
+      shell: ./setup.sh
+      args:
+        chdir: /root/ansible-tower-setup-latest
+      async: 3600
+      poll: 36
+      tags:
+        - install-tower
 
-
-- name: Prepare bastion for Tower Deployment
-  hosts: towers[0]
-  become: true
-  gather_facts: False
-
-
-
-  vars:
-    tower_inventory_path: /root/tower_hosts
-
-  tags:
-    - install_tower_post
-  tasks:
-    - name: install pip via yum
-      yum:
-       name: python-pip
-
-    - name: Install Tower cli
+    - name: Install tower-cli
       pip:
-       name: 'ansible-tower-cli'
-    #   version: '3.1.8'
-
-    - name: Configure the tower cli file
-      blockinfile:
-        path: "~/.tower_cli.cfg"
-        create: true
-        block: |
-          [general]
-          host = tower1.{{guid}}.example.opentlc.com
-          username = admin
-          password = {{tower_admin_password}}
+        name: ansible-tower-cli
+        state: latest
 
     - name: Configure the tower cli file
       template:
         src: "../configs/{{ env_type }}/files/tower_cli.j2"
-        dest: "~/.tower_cli.cfg"
-        mode: 0640
-    - name: Download Licence file
-      get_url:
-        url: "{{license_file_url}}"
-        dest: /root/license.txt
-    - name: Append file
-      lineinfile:
-        path: /root/license.txt
-        insertbefore: '"company_name.*"'
-        line: '"eula_accepted" : "true",'
+        dest: "/root/.tower_cli.cfg"
+        mode: 0600
 
     - name: Add the tower license
-      command: |
-        tower-cli setting modify LICENSE @/root/license.txt {{ tower_cli_insecure_flag | d() }}
+      command: tower-cli setting modify LICENSE @/root/license.txt --insecure
+
+- name: Software flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Software checks completed successfully"
