@@ -1,83 +1,46 @@
 # vim: set ft=ansible
 ---
 # Implement your Workload removal tasks here
+
 - name: remove istio controlplane cr
   k8s:
+    namespace: istio-system
     state: absent
     definition:
-      apiVersion: istio.openshift.com/v1alpha3
-      kind: ControlPlane
+      apiVersion: maistra.io/v1
+      kind: ServiceMeshControlPlane
       metadata:
         name: basic-install
-        namespace: istio-system
 
-# operator nukes all pods once cr is gone
-# waiting for just one to remain is a bit of a hack
-- name: wait for no pods in istio-system
+- name: Ensure istio controlplane cr terminates before continuing
   k8s_facts:
-    api_version: v1
-    kind: Pod
-    namespace: istio-system
-  register: istio_pods
-  until: istio_pods.resources | list | length < 1
-  retries: 100
-  delay: 10
+    api_version: maistra.io/v1
+    kind: ServiceMeshControlPlane
+  register: result
+  failed_when: result.resources | length > 0
+  retries: 3
+  until: result.resources | length == 0
 
-- name: remove istio operator deployment
-  k8s:
-    state: absent
-    definition:
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: istio-operator
-        namespace: istio-operator
-        
-- name: remove istio operator cluster role binding
-  k8s:
-    state: absent
-    definition:
-      kind: ClusterRoleBinding
-      apiVersion: rbac.authorization.k8s.io/v1beta1
-      metadata:
-        name: istio-operator-account-istio-operator-cluster-role-binding
-
-- name: remove istio operator sa
-  k8s:
-    state: absent
-    definition:
-      apiVersion: v1
-      kind: ServiceAccount
-      metadata:
-        name: istio-operator
-        namespace: istio-operator
-
-- name: remove istio operator rbac
-  k8s:
-    state: absent
-    definition:
-      apiVersion: rbac.authorization.k8s.io/v1
-      kind: ClusterRole
-      metadata:
-        name: istio-operator
-
-- name: remove istio controlplane crd
-  k8s:
-    state: absent
-    definition:
-      apiVersion: apiextensions.k8s.io/v1beta1
-      kind: CustomResourceDefinition
-      metadata:
-        name: controlplanes.istio.openshift.com
-
-- name: remove installation crd (to be removed in subsequent release)
-  k8s:
-    state: absent
-    definition:
-      apiVersion: apiextensions.k8s.io/v1beta1
-      kind: CustomResourceDefinition
-      metadata:
-        name: installations.istio.openshift.com
+- name: unapply servicemesh-operator.yaml
+  block:
+  - name: unapply servicemesh-operator.yaml
+    k8s:
+      state: absent
+      definition: "{{ lookup('file','/tmp/istio-install/servicemesh-operator.yaml') }}"
+  rescue:
+  - name: create temp directory
+    file:
+      state: directory
+      path: "/tmp/istio-install"
+  - name: get servicemesh-operator.yaml
+    get_url:
+      force: yes
+      url: "https://raw.githubusercontent.com/Maistra/istio-operator/maistra-0.11/deploy/servicemesh-operator.yaml"
+      dest: "/tmp/istio-install/servicemesh-operator.yaml"
+  - name: unapply servicemesh-operator.yaml
+    k8s:
+      state: absent
+      definition: "{{ lookup('file','/tmp/istio-install/servicemesh-operator.yaml') }}"
 
 - name: remove istio-system and istio-operator projects
   k8s:
@@ -90,6 +53,24 @@
   with_items:
     - istio-system
     - istio-operator
+
+- name: remove temp directory
+  file:
+    state: absent
+    path: "/tmp/istio-install"
+
+- name: Ensure project istio-system istio-operator is done terminating if it was being terminated
+  k8s_facts:
+    api_version: project.openshift.io/v1
+    kind: Project
+    name: "{{ item }}"
+  with_items:
+    - istio-system
+    - istio-operator
+  register: result
+  failed_when: result.resources | length > 0
+  retries: 60
+  until: result.resources | length == 0
 
 # Leave this as the last task in the playbook.
 - name: remove_workload tasks complete
