@@ -50,7 +50,8 @@
               group: opentlc-mgr
               mode: 0600
 
-          - when: install_student_user | bool
+          - name: Set up Student User
+            when: install_student_user | bool
             block:
               - name: Create .kube for {{ student_name }} user
                 file:
@@ -65,6 +66,15 @@
                   remote_src: yes
                   owner: "{{ student_name }}"
                   mode: 0600
+
+              - name: Setup mount bind for cluster directory
+                become: yes
+                mount:
+                  path: /home/{{ student_name }}/{{ cluster_name }}
+                  src: /home/{{ remote_user }}/{{ cluster_name }}
+                  fstype: none
+                  opts: defaults,bind,ro
+                  state: mounted
 
           - name: Create OpenShift Bash completion file
             shell: oc completion bash >/etc/bash_completion.d/openshift
@@ -173,10 +183,16 @@
           mode: 0664
       - name: Update OAuth Configuration
         shell: "oc apply -f /home/{{ ansible_user }}/oauth-opentlc-ldap.yaml"
+
     - name: Set up Admin User
-      when:
-      - admin_user is defined
+      when: admin_user is defined
       shell: "oc adm policy add-cluster-role-to-user cluster-admin {{ admin_user }}"
+      # try for 5 minutes
+      retries: 30
+      delay: 10
+      register: r_setup_admin_user
+      until: r_setup_admin_user is succeeded
+
     - name: Remove kubeadmin User
       when:
       - admin_user is defined
@@ -198,6 +214,25 @@
         KUBECONFIG: "{{ cluster_name }}/auth/kubeconfig"
       ignore_errors: yes
       block:
+        - name: Get API for command line
+          command: oc whoami --show-server
+          register: showserver
+
+        - when: webconsole is not defined
+          block:
+            - name: Get console route
+              command: oc get route -n openshift-console console -o json
+              register: routeconsole
+              retries: 10
+              delay: 30
+              until: routeconsole is succeeded
+              ignore_errors: yes
+
+            - name: Set webconsole address
+              set_fact:
+                webconsole: "http://{{ routeconsole.stdout | from_json | json_query('spec.host') }}"
+              when: routeconsole is succeeded
+
         - name: Check DNS webconsole
           command: nslookup "{{ webconsole | urlsplit('hostname') }}"
           register: checkdnswebconsole
