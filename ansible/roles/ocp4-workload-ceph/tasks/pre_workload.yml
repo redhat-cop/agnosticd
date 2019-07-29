@@ -1,0 +1,68 @@
+---
+- name: Ensuring AWS credentials are present
+  fail:
+    msg: "This workload requires AWS credentials defined. Exiting..."
+  when: aws_secret_access_key is not defined or aws_access_key_id is not defined or aws_region is not defined
+
+- name: Discovering worker nodes
+  k8s_facts:
+    api_version: machine.openshift.io/v1beta1
+    kind: Machine
+    label_selectors:
+    - machine.openshift.io/cluster-api-machine-role = worker
+    namespace: "{{ ceph_mahineset_namespace }}"
+  register: machines
+
+- name: Registering target worker nodes
+  set_fact:
+    ceph_worker_nodes: |
+      {% set workers = [] -%}
+      {% for machine in machines['resources'] -%}
+        {% set ignored = workers.extend([{'name' : machine['status']['providerStatus']['instanceId'], 'aZone': machine['spec']['providerSpec']['value']['placement']['availabilityZone']}]) -%}
+      {%- endfor %}
+      {{ workers }}
+    ceph_cluster_id: "{{ machines['resources'][0]['metadata']['labels']['machine.openshift.io/cluster-api-cluster']  }}"
+
+- name: Provisioning new ebs volumes for worker nodes
+  ec2_vol:
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    region: "{{ aws_region }}"
+    instance: "{{ item.name }}"
+    volume_size: 100
+    name: "ceph-vol-{{ item.name }}-{{ item.aZone }}"
+    tags:
+      ceph-cluster-id: "{{ ceph_cluster_id }}"
+  loop: "{{ ceph_worker_nodes }}"
+  when: not ceph_workload_destroy
+
+- name: Cleaning up ebs volumes from worker nodes
+  block:
+  - name: Discovering Ceph volumes to delete
+    ec2_vol_facts:
+      aws_access_key: "{{ aws_access_key_id }}"
+      aws_secret_key: "{{ aws_secret_access_key }}"
+      region: "{{ aws_region }}"
+      filters:
+        "tag:ceph-cluster-id": "{{ ceph_cluster_id }}"
+        "tag:Name": "ceph-vol-*"
+    register: ceph_discovered_vols
+
+  - name: Detaching Ceph volumes
+    ec2_vol:
+      aws_access_key: "{{ aws_access_key_id }}"
+      aws_secret_key: "{{ aws_secret_access_key }}"
+      region: "{{ aws_region }}"
+      id: "{{ item.id }}"
+      instance: None
+    loop: "{{ ceph_discovered_vols.volumes }}"
+
+  - name: Deleting Ceph volumes
+    ec2_vol:
+      aws_access_key: "{{ aws_access_key_id }}"
+      aws_secret_key: "{{ aws_secret_access_key }}"
+      region: "{{ aws_region }}"
+      id: "{{ item.id }}"
+      state: absent
+    loop: "{{ ceph_discovered_vols.volumes }}"
+  when: ceph_workload_destroy
