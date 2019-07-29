@@ -25,6 +25,7 @@
     project_name: labguide
     app_name: admin #don't forget to replace this value under ServiceAccount.metadata.annotations.
     terminal_image: quay.io/openshiftlabs/workshop-dashboard:3.5.0
+    # console_version: 4.1.0 replaced by grabbing exact quay image.
     workshop_env: "API_URL={{ api_url }} \
           MASTER_URL={{ master_url }} \
           KUBEADMIN_PASSWORD={{ kubeadmin_password }} \
@@ -72,15 +73,15 @@
     var: ServiceAccount
   when: not silent|bool
 
-- name: "create the RoleBinding {{ app_name }}-admin"
+- name: "create the ClusterRoleBinding {{ app_name }}-admin"
   k8s:
     namespace: "{{ project_name }}"
     state: present
     definition:
       apiVersion: rbac.authorization.k8s.io/v1
-      kind: RoleBinding
+      kind: ClusterRoleBinding
       metadata:
-        name: "{{ app_name }}-admin"
+        name: "{{ app_name }}-cluster-admin"
         labels:
           app: "{{ app_name }}"
       subjects:
@@ -90,10 +91,10 @@
       roleRef:
         apiVersion: rbac.authorization.k8s.io/v1
         kind: ClusterRole
-        name: admin
-  register: RoleBinding
+        name: cluster-admin
+  register: ClusterRoleBinding
 - debug:
-    var: RoleBinding
+    var: ClusterRoleBinding
   when: not silent|bool
 
 - name: create the ImageStream
@@ -137,11 +138,25 @@
     var: ConfigMap
   when: not silent|bool
 
+- name: Grab openshift-console console quay.io image to be embedded in homeroom
+  k8s_facts:
+    kind: Deployment
+    api_version: apps/v1
+    namespace: openshift-console
+    name: console
+  register: console_image_url_raw
+- debug:
+    var: console_image_url_raw.resources[0].spec.template.spec.containers[0].image
+- name: set fact console_image_url
+  set_fact:
+    console_image_url: "{{ console_image_url_raw.resources[0].spec.template.spec.containers[0].image }}"
+
 - name: create the DeploymentConfig
   k8s:
     namespace: "{{ project_name }}"
     definition:
       kind: DeploymentConfig
+      apiVersion: v1
       metadata:
         name: "{{ app_name }}"
         labels:
@@ -170,6 +185,27 @@
               deploymentconfig: "{{ app_name }}"
           spec:
             serviceAccountName: "{{ app_name }}-user"
+            initContainers:
+            - name: setup-console
+              image: "{{ terminal_image }}"
+              command:
+              - "/opt/workshop/bin/setup-console.sh"
+              # env:
+              # - name: OPENSHIFT_USERNAME
+              #   value: "${OPENSHIFT_USERNAME}"
+              # - name: OPENSHIFT_PASSWORD
+              #   value: "${OPENSHIFT_PASSWORD}"
+              # - name: OPENSHIFT_TOKEN
+              #   value: "${OPENSHIFT_TOKEN}"
+              # - name: OC_VERSION
+              #   value: "${OC_VERSION}"
+              # - name: ODO_VERSION
+              #   value: "${ODO_VERSION}"
+              # - name: KUBECTL_VERSION
+              #   value: "${KUBECTL_VERSION}"
+              volumeMounts:
+              - name: shared
+                mountPath: "/var/run/workshop"
             containers:
             - name: terminal
               image: "{{ app_name }}:latest"
@@ -177,57 +213,66 @@
               - containerPort: 10080
                 protocol: TCP
               env:
-              # - name: PROJECT_NAMESPACE
-              #   valueFrom:
-              #     fieldRef:
-              #       fieldPath: metadata.namespace
+              - name: PROJECT_NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
               - name: APPLICATION_NAME
                 value: "{{ app_name }}"
+              # - name: AUTH_USERNAME
+              #   value: "${AUTH_USERNAME}"
+              # - name: AUTH_PASSWORD
+              #   value: "${AUTH_PASSWORD}"
+              - name: OAUTH_SERVICE_ACCOUNT
+                value: "{{ app_name }}-user"
               - name: DOWNLOAD_URL
                 value: "{{ download_url }}"
               - name: WORKSHOP_FILE
                 value: "{{ workshop_file }}"
-              # - name: AUTH_USERNAME
-              #   value: "{AUTH_USERNAME}"
-              # - name: AUTH_PASSWORD
-              #   value: "{AUTH_PASSWORD}"
-              - name: OAUTH_SERVICE_ACCOUNT
-                value: "{{ app_name }}-user"
               # - name: WORKSHOPPER_URLS
-              #   value: "{{ workshopper_urls }}"
-              # - name: CONSOLE_URL
-              #   value: http://0.0.0.0:10083
+              #   value: "${WORKSHOPPER_URLS}"
+              - name: CONSOLE_URL
+                value: http://0.0.0.0:10083
               # - name: OC_VERSION
-              #   value: "{OC_VERSION}"
+              #   value: "${OC_VERSION}"
               # - name: ODO_VERSION
-              #   value: "{ODO_VERSION}"
+              #   value: "${ODO_VERSION}"
               # - name: KUBECTL_VERSION
-              #   value: "{KUBECTL_VERSION}"
+              #   value: "${KUBECTL_VERSION}"
               volumeMounts:
               - name: envvars
                 mountPath: "/opt/workshop/envvars"
-            # - name: console
-            #   image: quay.io/openshift/origin-console:4.2.0
-            #   command:
-            #   - "/opt/bridge/bin/bridge"
-            #   env:
-            #   - name: BRIDGE_K8S_MODE
-            #     value: in-cluster
-            #   - name: BRIDGE_LISTEN
-            #     value: http://0.0.0.0:10083
-            #   - name: BRIDGE_BASE_PATH
-            #     value: "/console/"
-            #   - name: BRIDGE_PUBLIC_DIR
-            #     value: "/opt/bridge/static"
-            #   - name: BRIDGE_USER_AUTH
-            #     value: disabled
-            #   - name: BRIDGE_BRANDING
-            #     value: "openshift"
+              - name: shared
+                mountPath: "/var/run/workshop"
+            - name: console
+              image: "{{ console_image_url }}"
+              #image: "quay.io/openshift/origin-console:{{ console_version }}"
+              command:
+              - "/var/run/workshop/start-console.sh"
+              env:
+              - name: BRIDGE_K8S_MODE
+                value: in-cluster
+              - name: BRIDGE_LISTEN
+                value: http://0.0.0.0:10083
+              - name: BRIDGE_BASE_PATH
+                value: "/console/"
+              - name: BRIDGE_PUBLIC_DIR
+                value: "/opt/bridge/static"
+              - name: BRIDGE_USER_AUTH
+                value: disabled
+              - name: BRIDGE_BRANDING
+                value: "openshift"
+              volumeMounts:
+              - name: shared
+                mountPath: "/var/run/workshop"
             volumes:
             - name: envvars
               configMap:
                 name: "{{ app_name }}-env"
                 defaultMode: 420
+            - name: shared
+              emptyDir: {}
+
   register: DeploymentConfig
 - debug:
     var: DeploymentConfig
