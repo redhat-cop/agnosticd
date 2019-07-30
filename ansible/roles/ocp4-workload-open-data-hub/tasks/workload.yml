@@ -2,49 +2,7 @@
 ---
 
 # Implement your Workload deployment tasks here
-
 ### all following based on files at https://github.com/kaovilai/rook/blob/0.9.3/cluster/examples/kubernetes/ceph/
-
-- name: Verify user can create projects
-  command: "oc auth can-i create project"
-  register: canicreateprojects
-  failed_when: canicreateprojects.stdout != 'yes'
-
-- name: create temp directory
-  file:
-    state: directory
-    path: "/tmp/{{ item }}"
-  loop:
-    - open-data-hub
-    - open-data-hub/rook
-    - open-data-hub/odh
-    - open-data-hub/odh/crds
-
-- name: Curling Rook resources
-  get_url:
-    force: yes
-    url: "https://raw.githubusercontent.com/kaovilai/rook/0.9.3/cluster/examples/kubernetes/ceph/{{ item }}"
-    dest: "/tmp/open-data-hub/rook/{{ item }}"
-  loop:
-    - scc.yaml
-    - operator.yaml
-    - cluster.yaml
-    - toolbox.yaml
-    - object.yaml
-    - object-user.yaml
-
-- name: Curling ODH resources
-  get_url:
-    force: yes
-    url: "https://gitlab.com/opendatahub/opendatahub-operator/raw/v0.3.0/deploy/{{ item }}"
-    dest: "/tmp/open-data-hub/odh/{{ item }}"
-  loop:
-    - crds/opendatahub_v1alpha1_opendatahub_crd.yaml
-    - service_account.yaml
-    - role.yaml
-    - role_binding.yaml
-    - operator.yaml
-    - crds/opendatahub_v1alpha1_opendatahub_cr.yaml
 
 
 - name: apply scc.yaml, operator.yaml
@@ -114,158 +72,18 @@
   until: rookcephrgwport.stderr.find("Error from server (NotFound)") != 0
   retries: 30
 
-- name: Create CephObjectStoreUsers as needed applying object-user.yaml
-  k8s:
-    state: present
-    src: "/tmp/open-data-hub/rook/object-user.yaml"
-
-## obtain secrets for each user
-- name: new-obtain my-user secrets - AccessKey
-  k8s_facts:
-    name: rook-ceph-object-user-my-store-my-user
-    namespace: rook-ceph
-    kind: Secret
-  register: secret
-
 - debug:
-    var: "{{ item }}"
-  loop:
-    - secret.resources[0].data.AccessKey
-    - secret.resources[0].data.SecretKey
+    msg:
+    - "user.info: S3 URL http://{{ rookcephrgwip.stdout }}:{{ rookcephrgwport.stdout }}"
 
-## Open Data Hub
-
-  #Manual Open Data Hub Operator deploy https://gitlab.com/opendatahub/opendatahub-operator/raw/v0.3.0/deploy/crds/opendatahub_v1alpha1_opendatahub_crd.yaml
 - name: Apply opendatahub_v1alpha1_opendatahub_crd.yaml
   command: oc apply -f https://gitlab.com/opendatahub/opendatahub-operator/raw/v0.3.0/deploy/crds/opendatahub_v1alpha1_opendatahub_crd.yaml
 
-- name: Make sure project open-data-hub is not there
-  k8s:
-    state: absent
-    name: "open-data-hub"
-    kind: Project
-    api_version: project.openshift.io/v1
-
-- name: Ensure project is done terminating if it was being terminated
-  k8s_facts:
-    api_version: project.openshift.io/v1
-    kind: Project
-    name: open-data-hub
-  register: result
-  failed_when: result.resources | length > 0
-  retries: 60
-  until: result.resources | length == 0
-
-- name: create the Project
-  k8s:
-    state: present
-    name: "open-data-hub"
-    kind: ProjectRequest
-    api_version: project.openshift.io/v1
-
-- name: apply service_account.yaml role.yaml role_binding.yaml operator.yaml
-  k8s:
-    state: present
-    namespace: open-data-hub
-    src: "/tmp/open-data-hub/odh/{{ item }}"
-  loop:
-    - service_account.yaml
-    - role.yaml
-    - role_binding.yaml
-    # - operator.yaml
-
-# - name: WORKAROUND add ServiceAccount to RoleBinding admin enabling route access #remove when https://gitlab.com/opendatahub/opendatahub-operator/merge_requests/32 pulled
-#   k8s:
-#     namespace: open-data-hub
-#     name: admin
-#     state: present
-#     definition:
-#       apiVersion: rbac.authorization.k8s.io/v1
-#       kind: RoleBinding
-#       subjects:
-#       - kind: ServiceAccount
-#         name: opendatahub-operator
-#       roleRef:
-#         apiVersion: rbac.authorization.k8s.io/v1
-#         kind: ClusterRole
-#         name: admin
-
-- name: apply ODH operator temporary image
-  k8s:
-    state: present
-    namespace: open-data-hub
-    definition:
-      apiVersion: apps/v1
-      kind: Deployment
-      metadata:
-        name: opendatahub-operator
-      spec:
-        replicas: 1
-        selector:
-          matchLabels:
-            name: opendatahub-operator
-        template:
-          metadata:
-            labels:
-              name: opendatahub-operator
-          spec:
-            serviceAccountName: opendatahub-operator
-            containers:
-              - name: opendatahub-operator
-                image: "quay.io/llasmith/opendatahub-operator:test-jupyterhub-rbac" #switch to quay.io/opendatahub/opendatahub-operator:master when the following pulled in https://gitlab.com/opendatahub/opendatahub-operator/merge_requests/32
-                imagePullPolicy: "Always"
-                env:
-                  - name: WATCH_NAMESPACE
-                    valueFrom:
-                      fieldRef:
-                        fieldPath: metadata.namespace
-                  - name: POD_NAME
-                    valueFrom:
-                      fieldRef:
-                        fieldPath: metadata.name
-                  - name: OPERATOR_NAME
-                    value: "opendatahub-operator"
-
-# Modifying https://gitlab.com/opendatahub/opendatahub-operator/raw/v0.3.0/deploy/crds/opendatahub_v1alpha1_opendatahub_cr.yaml
-- name: create ODH Custom Resource object
-  k8s:
-    state: present
-    namespace: open-data-hub
-    src: "/tmp/open-data-hub/odh/crds/opendatahub_v1alpha1_opendatahub_cr.yaml"
-- name: apply ODH custom resource object customization
-  k8s:
-    state: present
-    merge_type: merge
-    name: example-opendatahub
-    namespace: open-data-hub
-    api_version: opendatahub.io/v1alpha1
-    kind: OpenDataHub
-    definition:
-      spec:
-        monitoring:
-          odh_deploy: false
-        aicoe-jupyterhub:
-          s3_endpoint_url: "http://{{ rookcephrgwip.stdout }}:{{ rookcephrgwport.stdout }}"
-        jupyter-on-openshift:
-          jupyterhub_config: "c.KubeSpawner.env_keep = ['S3_ENDPOINT_URL', 'S3_ACCESS_KEY', 'S3_SECRET_KEY']"
-          extra_env_vars:
-            S3_ENDPOINT_URL: "http://{{ rookcephrgwip.stdout }}:{{ rookcephrgwport.stdout }}"
-            S3_ACCESS_KEY: "{{ secret.resources[0].data.AccessKey | b64decode }}"
-            S3_SECRET_KEY: "{{ secret.resources[0].data.SecretKey | b64decode }}"
-  register: result
-- debug:
-    var: result
-
-- name: delete temporary ODH custom resource
-  file:
-    state: absent
-    path: /tmp/open-data-hub/
-
-- debug:
-    msg:
-    - "http://{{ rookcephrgwip.stdout }}:{{ rookcephrgwport.stdout }}"
-    - "{{ secret.resources[0].data.AccessKey | b64decode }}"
-    - "{{ secret.resources[0].data.SecretKey | b64decode }}"
+- name: include per user workload
+  include_tasks: 
+    file: ./per_user_workload.yml
+    apply:
+      become: "{{ become_override | bool }}"
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
