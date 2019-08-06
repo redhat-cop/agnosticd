@@ -28,12 +28,13 @@
   - ./templates/operator_group.j2
   - ./templates/catalog_source.j2
   - ./templates/subscription.j2
+  - ./templates/cluster_role_binding.j2
 
 - name: Wait until CSV is Installed
-  command: oc get csv "{{ _broker_subscription_csv }}" -o jsonpath --template='{.status.phase}' -n "{{ _broker_project }}"
+  command: oc get csv -o jsonpath --template='{$.items[:1].status.phase}' -n "{{ _tsb_broker_project }}"
   register: csv
-  retries: 30
-  delay: 10
+  retries: 60
+  delay: 20
   until: csv.stdout == "Succeeded"
 
 - name: Create Template Service Broker
@@ -46,13 +47,49 @@
   loop:
   - ./templates/template_service_broker.j2
 
-- name: Grant Template Service Broker Service Account admin on all projects
+- name: Wait for Template Service Broker DeploymentConfig to appear
+  k8s_facts:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    namespace: "{{ _tsb_broker_project }}"
+    name: apiserver
+  register: r_tsb_dc
+  retries: 60
+  delay: 20
+  until: r_tsb_dc.resources | list | length >= 1
+
+- name: Wait for Template Service Broker to be running
+  k8s_facts:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    namespace: "{{ _tsb_broker_project }}"
+    name: apiserver
+  register: r_tsb
+  retries: 60
+  delay: 10
+  until: r_tsb.resources[0].status.availableReplicas | int == 1
+
+# Workaround to make Operator Pod pick up permissions from the service
+# account. Without this the TSB will be running but not
+# displaying any Templates in the Developer Catalog.
+# Somehow killing the pod (and have it recreated via the Deployment)
+# fixes the issue.
+- name: Workaround - Get Operator Pod
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ _tsb_broker_project }}"
+    label_selectors:
+    - name = openshift-template-service-broker-operator-alm-owned
+  register: r_operator_pod
+
+- name: Workaround - Kill Operator Pod
   k8s:
-    state: present
-    merge_type:
-    - strategic-merge
-    - merge
-    definition: "{{ lookup('template', './templates/cluster_role_binding.j2' ) | from_yaml }}"
+    state: absent
+    api_version: v1
+    kind: Pod
+    namespace: "{{ _tsb_broker_project }}"
+    name: "{{ r_operator_pod.resources[0].metadata.name }}"
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
