@@ -1,0 +1,176 @@
+---
+- name: define ocp_project
+  set_fact:
+    ocp_project: dm7-red-{{guid}}
+
+    # Templates come from here: https://raw.githubusercontent.com/jorgemoralespou/ose-sample-apps-layouts
+
+- name: Create project for rhdm7 realtime event decisioning demo
+  shell: |
+         oc new-project {{ocp_project}} \
+         --display-name="RHDM7 Realtime Event Decisioning Demo" \
+         --description="Red Hat Decision Manager 7 Realtime Event Decisioning Demo"
+  ignore_errors: true
+
+#- name: Set project limit LimitRange
+#  shell: "oc create -f /tmp/{{guid}}//limit-range.yaml -n {{ocp_project}}"
+
+# Check whether the required ImageStreams are available in the "openshift" namespace.
+# If they are not, we import them.
+# We need to do this in the "openshift" namespace, in order to have the secret to pull from registry.redhat.io.
+- name: Check if DM ImageStreams exists
+  shell: oc get is/rhdm73-decisioncentral-openshift -n openshift
+  register: rhdm_is_exists_result
+  ignore_errors: true
+
+- name: Import the RHDM73 ImageStreams into the cluster.
+  shell: "oc create -f {{dm_imagestreams_yml}} -n openshift"
+  when: rhdm_is_exists_result is failed
+  ignore_errors: true
+
+- name: "Import templates"
+  shell: "oc create -f {{dm_template_yml}} -n {{ocp_project}}"
+
+- name: "Create decision-central secret and service account"
+  shell: "oc process -f {{dm_secrets_template_yml}} -p SECRET_NAME=decisioncentral-app-secret | oc create -f - -n {{ocp_project}}"
+
+- name: "Create KIE-Server secret and service account"
+  shell: "oc process -f {{dm_secrets_template_yml}} -p SECRET_NAME=kieserver-app-secret | oc create -f - -n {{ocp_project}}"
+
+
+- name: Create ConfigMap Decision Central
+  shell: oc create configmap rhdm-dc-setup-config-map --from-file=/tmp/{{guid}}/dc-clone-git-repository.sh,/tmp/{{guid}}/provision-properties-static.sh -n {{ocp_project}}
+
+- name: "Create the Decision Manager application."
+  shell: |
+          oc new-app --template=rhdm73-authoring \
+            -p APPLICATION_NAME={{application_name}} \
+            -p KIE_ADMIN_USER={{kie_admin_user}} \
+            -p KIE_ADMIN_PWD={{kie_admin_pwd}} \
+            -p KIE_SERVER_CONTROLLER_USER={{kie_server_controller_user}} \
+            -p KIE_SERVER_CONTROLLER_PWD={{kie_server_controller_pwd}} \
+            -p KIE_SERVER_USER={{kie_server_user}} \
+            -p KIE_SERVER_PWD={{kie_server_pwd}} \
+            -p DECISION_CENTRAL_HTTPS_SECRET="decisioncentral-app-secret" \
+            -p KIE_SERVER_HTTPS_SECRET="kieserver-app-secret" \
+            -p MAVEN_REPO_USERNAME={{kie_admin_user}} \
+            -p MAVEN_REPO_PASSWORD={{kie_admin_pwd}} \
+            -p DECISION_CENTRAL_MEMORY_LIMIT="2Gi" \
+            -p DECISION_CENTRAL_VOLUME_CAPACITY={{pv_capacity}} \
+            -p IMAGE_STREAM_NAMESPACE=openshift -n {{ocp_project}}
+
+- name: "Add ConfigMap as Volume to Decision Central DC"
+  shell: oc set volume dc/rhdm7-red-rhdmcentr --add --name=config-volume --configmap-name=rhdm-dc-setup-config-map --mount-path=/tmp/config-files
+
+- name: "Add DC deployment hook."
+  shell: oc set deployment-hook dc/rhdm7-red-rhdmcentr --post -c rhdm7-red-rhdmcentr -e DC_URL="http://rhdm7-red-rhdmcentr:8080" -v config-volume --failure-policy=abort -- /bin/bash /tmp/config-files/dc-clone-git-repository.sh
+
+##### Provision Nexus ####
+- name: "Create Nexus template"
+  shell: "oc create -f https://raw.githubusercontent.com/OpenShiftDemos/nexus/master/nexus3-template.yaml -n {{ocp_project}}"
+
+- name: "Create Nexus persistent template"
+  shell: "oc create -f https://raw.githubusercontent.com/monodot/openshift-nexus/master/nexus3-persistent-template.yaml -n {{ocp_project}}"
+
+- name: "Create Nexus Persistent application."
+  shell: "oc new-app nexus3-persistent -n {{ ocp_project }}"
+
+####### Provision Kafka #######
+- name: "Import Kafka/Strimzi templates."
+  shell: "oc apply -f /tmp/{{guid}}/templates/cluster-operator -n {{ocp_project}}"
+
+- name: "Create Strimzi cluster operator role binding."
+  shell: "oc adm policy add-cluster-role-to-user strimzi-cluster-operator-namespaced --serviceaccount strimzi-cluster-operator -n {{ocp_project}}"
+
+- name: "Create Strimzi entity operator role binding."
+  shell: "oc adm policy add-cluster-role-to-user strimzi-entity-operator --serviceaccount strimzi-cluster-operator -n {{ocp_project}}"
+
+- name: "Create Strimzi topic operator role binding. "
+  shell: "oc adm policy add-cluster-role-to-user strimzi-topic-operator --serviceaccount strimzi-cluster-operator -n {{ocp_project}}"
+
+- name: "Install Strimzi cluster operator."
+  shell: "oc apply -f /tmp/{{guid}}/install/cluster-operator -n {{ocp_project}}"
+
+- name: "Create ephemeral Kafka cluster"
+  shell: "oc apply -f /tmp/{{guid}}/examples/kafka/kafka-ephemeral.yaml -n {{ocp_project}}"
+
+- name: "Create OpenJDK ImageStream."
+  shell: "oc create -f https://raw.githubusercontent.com/jboss-openshift/application-templates/ose-v1.4.15/openjdk/openjdk18-image-stream.json -n {{ocp_project}}"
+
+- name: "Create Kafka Topic."
+  shell: "oc apply -f /tmp/{{guid}}/examples/topic/kafka-topic.yaml -n {{ocp_project}}"
+
+######## Create Application ########
+
+# Wait for the Nexus deployment
+- include_tasks: ./wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - nexus
+
+### Run the KJAR build ###
+- name: "Create KJAR Build Config"
+  shell: "oc process -f /tmp/{{guid}}/personalization-rules-build-config-template.json -p NEXUSREPO=\"http://nexus.{{ocp_project}}.svc.cluster.local:8081\" | oc create -f - -n {{ocp_project}}"
+
+#- name: "Wait for build config to be created"
+#  shell: sleep 5
+
+- name: "Start KJAR Build."
+  shell: "oc start-build personalization-dm -n {{ocp_project}}"
+
+#### Wait for the KJAR build to complete before we build the other projects which require the KJAR to be available in Nexus.
+- include_tasks: ./wait_for_build.yml
+  vars:
+    build_to_wait:
+      - personalization-dm
+
+- name: "Create Event Emitter application"
+  shell: |
+        oc new-app centos/python-36-centos7~https://github.com/jbossdemocentral/rhdm-realtime-event-decisioning-demo-event-emitter \
+          --name=event-emitter \
+          -e KAFKA_BROKERS=my-cluster-kafka-brokers \
+          -e KAFKA_TOPIC=event-input-stream\
+          -e RATE=1 \
+          --name=emitter -n {{ocp_project}}
+
+- name: "Create Event Analysis application"
+  shell: "oc new-app java:8~https://github.com/jbossdemocentral/rhdm-realtime-event-decisioning-demo-event-analysis.git --name=event-analysis --build-env=\"NEXUSREPO=http://nexus.{{ocp_project}}.svc.cluster.local:8081\" -n {{ocp_project}}"
+
+- name: "Create alert fraud pattern"
+  shell: "oc new-app java:8~https://github.com/jbossdemocentral/rhdm-realtime-event-decisioning-demo-alert-fraud-pattern.git --name=alert-fraud-pattern -n {{ocp_project}}"
+
+- name: "Create event analysis webapp"
+  shell: "oc new-app java:8~https://github.com/jbossdemocentral/rhdm-realtime-event-decisioning-demo-event-analysis-webapp.git --name=event-analysis-webapp -e JAVA_APP_JAR=event-analysis-web-1.0.0-fat.jar --build-env=\"NEXUSREPO=http://nexus.{{ocp_project}}.svc.cluster.local:8081\" -n {{ocp_project}}"
+
+- name: "Expose event analysis webapp"
+  shell: "oc expose service event-analysis-webapp -n {{ocp_project}}"
+
+#### Wait for the build to complete before slapping on the quota ....
+- include_tasks: ./wait_for_build.yml
+  vars:
+    build_to_wait:
+      - alert-fraud-pattern
+      - emitter
+      - event-analysis
+      - event-analysis-webapp
+
+#### Wait for the deployment to complete before slapping on the quota ...
+- include_tasks: ./wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - rhdm7-red-kieserver
+      - rhdm7-red-rhdmcentr
+      - alert-fraud-pattern
+      - emitter
+      - event-analysis
+      - event-analysis-webapp
+
+- name: Annotate the completed project as requested by user
+  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
+
+- name: Give user access to the completed project
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete
