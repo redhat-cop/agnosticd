@@ -1,7 +1,7 @@
 FROM openshift3/apb-base
 
 LABEL "com.redhat.apb.spec"=\
-"dmVyc2lvbjogMS4wCm5hbWU6IGRlcGxveS1jb250YWluZXJzLWFwYgpkZXNjcmlwdGlvbjogVGhp\
+"dmVyc2lvbjogMS4xCm5hbWU6IGRlcGxveS1jb250YWluZXJzLWFwYgpkZXNjcmlwdGlvbjogVGhp\
 cyBpcyBhIHNhbXBsZSBBUEIgYXBwbGljYXRpb24gdGhhdCBkZXBsb3lzIGNvbnRhaW5lcnMgb24g\
 cmVtb3RlIGhvc3QKYmluZGFibGU6IEZhbHNlCmFzeW5jOiBvcHRpb25hbAptZXRhZGF0YToKICBk\
 aXNwbGF5TmFtZTogSW9UIFJlbW90ZSBDb250YWluZXIgRGVwbG95ZXIgLSBUZXN0aW5nCiAgaW1h\
@@ -10,12 +10,12 @@ MDAucG5nCnBsYW5zOgogIC0gbmFtZTogZGVmYXVsdAogICAgZGVzY3JpcHRpb246IFRoaXMgZGVm\
 YXVsdCBwbGFuIGRlcGxveXMgZGVwbG95LWNvbnRhaW5lcnMtYXBiCiAgICBmcmVlOiBUcnVlCiAg\
 ICBtZXRhZGF0YToge30KICAgIHBhcmFtZXRlcnM6IAogICAgICAtIG5hbWU6IHRhcmdldF9ob3N0\
 IAogICAgICAgIHRpdGxlOiBUYXJnZXQgSG9zdCBmb3IgY29udGFpbmVycyBwcm92aXNpb25pbmcK\
-ICAgICAgICB0eXBlOiBzdHJpbmcKICAgICAgICBkZWZhdWx0OiAxNzIuMTYuMC43CiAgICAgICAg\
+ICAgICAgICB0eXBlOiBzdHJpbmcKICAgICAgICBkZWZhdWx0OiAxNzIuMTcuMC4xCiAgICAgICAg\
 cmVxdWlyZWQ6IHRydWUK"
 
 COPY playbooks /opt/apb/actions
 COPY roles /opt/ansible/roles
-COPY id_rsa /opt/apb/ 
+#COPY id_rsa /opt/apb/ 
 RUN echo "host_key_checking = False" >> /opt/apb/ansible.cfg
 RUN chmod -R g=u /opt/{ansible,apb}
 USER apb
