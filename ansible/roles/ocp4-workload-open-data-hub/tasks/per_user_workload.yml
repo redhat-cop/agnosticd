@@ -1,0 +1,136 @@
+---
+
+
+- name: "modify and apply rook object-user.yaml for {{ item }}"
+  k8s:
+    state: present
+    definition:
+      apiVersion: ceph.rook.io/v1
+      kind: CephObjectStoreUser
+      metadata:
+        labels:
+          user: "{{ item }}"
+        name: "{{ item }}"
+        namespace: rook-ceph
+      spec:
+        store: my-store
+        displayName: "my display name"
+    merge_type: merge
+  with_list: "{{ users }}"
+
+## obtain secrets for each user
+- name: "new-obtain {{ item }} secrets"
+  k8s_facts:
+    name: "rook-ceph-object-user-my-store-{{ item }}"
+    namespace: rook-ceph
+    kind: Secret
+  register: secret
+  with_list: "{{ users }}"
+
+- debug:
+    msg: "{{ secret }}"
+
+- name: create the Project
+  k8s:
+    state: present
+    name: "open-data-hub-{{ item }}"
+    kind: ProjectRequest
+    api_version: project.openshift.io/v1
+    definition:
+      metadata:
+        labels:
+          user: "{{ item }}"
+  with_list: "{{ users }}"
+
+- name: apply service_account.yaml
+  k8s:
+    state: present
+    namespace: "open-data-hub-{{ item }}"
+    src: "/tmp/open-data-hub/odh/service_account.yaml"
+  with_list: "{{ users }}"
+
+- name: apply role.yaml
+  k8s:
+    state: present
+    namespace: "open-data-hub-{{ item }}"
+    src: "/tmp/open-data-hub/odh/role.yaml"
+  with_list: "{{ users }}"
+
+- name: apply role_binding.yaml
+  k8s:
+    state: present
+    namespace: "open-data-hub-{{ item }}"
+    src: "/tmp/open-data-hub/odh/role_binding.yaml"
+  with_list: "{{ users }}"
+
+- name: apply operator.yaml
+  k8s:
+    state: present
+    namespace: "open-data-hub-{{ item }}"
+    src: "/tmp/open-data-hub/odh/operator.yaml"
+  with_list: "{{ users }}"
+
+# Modifying https://gitlab.com/opendatahub/opendatahub-operator/raw/v0.3.0/deploy/crds/opendatahub_v1alpha1_opendatahub_cr.yaml
+- name: create ODH Custom Resource object
+  k8s:
+    state: present
+    namespace: "open-data-hub-{{ item }}"
+    src: "/tmp/open-data-hub/odh/crds/opendatahub_v1alpha1_opendatahub_cr.yaml"
+  with_list: "{{ users }}"
+- name: apply ODH custom resource object customization
+  k8s:
+    state: present
+    merge_type: merge
+    name: example-opendatahub
+    namespace: "open-data-hub-user{{ item + 1 }}"
+    api_version: opendatahub.io/v1alpha1
+    kind: OpenDataHub
+    definition:
+      spec:
+        monitoring:
+          odh_deploy: false
+        aicoe-jupyterhub:
+          odh_deploy: false
+          s3_endpoint_url: "http://{{ rookcephrgwip.stdout }}:{{ rookcephrgwport.stdout }}"
+        jupyter-on-openshift:
+          odh_deploy: true
+          jupyterhub_config: "c.KubeSpawner.env_keep = ['S3_ENDPOINT_URL', 'S3_ACCESS_KEY', 'S3_SECRET_KEY']"
+          extra_env_vars:
+            S3_ENDPOINT_URL: "http://{{ rookcephrgwip.stdout }}:{{ rookcephrgwport.stdout }}"
+            S3_ACCESS_KEY: "{{ secret.results[item].resources[0].data.AccessKey | b64decode }}"
+            S3_SECRET_KEY: "{{ secret.results[item].resources[0].data.SecretKey | b64decode }}"
+  with_list: "{{ range(0,user_count | int) | list }}"
+
+  register: result
+- debug:
+    var: result
+
+- name: get route for jupyterhub
+  k8s_facts:
+    kind: Route
+    name: jupyterhub
+    namespace: "open-data-hub-{{ item }}"
+  register: Route
+  with_list: "{{ users }}"
+  failed_when: Route.resources | length == 0
+  retries: 60
+  until: Route.resources | length > 0
+
+- debug:
+    msg:
+    - "user.info: "
+    - "user.info: user{{ item + 1 }} Route {{ Route.results[item].resources[0].spec.host }}"
+    - "user.info: user{{ item + 1 }} AccessKey {{ secret.results[item].resources[0].data.AccessKey | b64decode }}"
+    - "user.info: user{{ item + 1 }} SecretKey {{ secret.results[item].resources[0].data.SecretKey | b64decode }}"
+  with_list: "{{ range(0,user_count | int) | list }}"
+
+# - debug:
+#     msg:
+#     - "user.info: {{ Route.results[item].resources[0].spec.host }}"
+#   with_list: "{{ users }}"
+
+# Leave this as the last task in the playbook.
+- name: per user workload tasks complete
+  debug:
+    msg: "Per User Workload Tasks completed successfully."
+  when: not silent|bool
