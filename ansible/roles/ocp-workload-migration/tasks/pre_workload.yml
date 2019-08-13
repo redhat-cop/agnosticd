@@ -1,54 +1,65 @@
 ---
-- name: "Ensuring SSH directory"
-  file:
-    path: "/home/{{ student_name }}/.ssh"
-    state: directory
-    owner: "{{ student_name }}"
-  delegate_to: "bastion.{{ guid }}.internal"
-  when: student_name is defined
+- wait_for:
+    port: 25
+    host: "bastion.{{ guid }}.internal"
+    timeout: 5
+  register: status
+  ignore_errors: true
 
-- name: "Checking if SSH keys exist on bastion"
-  stat: 
-    path: /home/{{ student_name }}/.ssh/openshift_key
-  register: ssh_key
-  delegate_to: "bastion.{{ guid }}.internal"
-  when: student_name is defined
+- block:
+  - name: "Ensuring SSH directory"
+    file:
+      path: "/home/{{ student_name }}/.ssh"
+      state: directory
+      owner: "{{ student_name }}"
 
-- name: "Creating SSH keys on bastion"
-  shell: "ssh-keygen -q -t rsa -f /home/{{ student_name }}/.ssh/openshift_key -C '' -N ''"
-  delegate_to: "bastion.{{ guid }}.internal"
-  when: student_name is defined and not ssh_key.stat.exists|d('false')
+  - name: "Checking if SSH keys exist on bastion"
+    stat: 
+      path: /home/{{ student_name }}/.ssh/openshift_key
+    register: ssh_key
 
-- name: "Fixing permissions of SSH key"
-  file:
-    path: "/home/{{ student_name }}/.ssh/{{ item }}"
-    owner: "{{ student_name }}"
-    mode: "0644"
-  loop:
-    - "openshift_key"
-    - "openshift_key.pub"
-  delegate_to: "bastion.{{ guid }}.internal"
-  when: student_name is defined and ssh_key.stat.exists|d('false')
+  - name: "Creating SSH keys on bastion"
+    shell: "ssh-keygen -q -t rsa -f /home/{{ student_name }}/.ssh/openshift_key -C '' -N ''"
+    when: not ssh_key.stat.exists|d('false')
 
-- name: "Finding SSH key"
-  stat: 
-    path: /home/{{ student_name }}/.ssh/openshift_key.pub
-  register: public_key
-  delegate_to: "bastion.{{ guid }}.internal"
-  when: student_name is defined
+  - name: "Fixing permissions of SSH key"
+    file:
+      path: "/home/{{ student_name }}/.ssh/{{ item }}"
+      owner: "{{ student_name }}"
+      mode: "0644"
+    loop:
+      - "openshift_key"
+      - "openshift_key.pub"
+    when: ssh_key.stat.exists|d('false')
 
-- name: "Reading public key"
-  shell: "cat /home/{{ student_name }}/.ssh/openshift_key.pub"
-  register: pub_key_contents
+  - name: "Finding SSH key"
+    stat: 
+      path: /home/{{ student_name }}/.ssh/openshift_key.pub
+    register: public_key
+
+  - name: "Reading public key"
+    shell: "cat /home/{{ student_name }}/.ssh/openshift_key.pub"
+    register: pub_key_contents
+    when: public_key.stat.exists|d('false')
+
+  - name: "Copying CORS playbook to bastion"
+    get_url:
+      url: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      owner: "{{ student_name }}"
+      mode: "u+rwx"
+    loop:
+      - { dest: "/home/{{ student_name }}/cors.yaml", src: "https://raw.githubusercontent.com/fusor/mig-agnosticd/master/demos/2019_RHTE/scripts/cors.yaml" }
+      - { dest: "/home/{{ student_name }}/cpma", src: "https://cpma.s3.us-east-2.amazonaws.com/cpma" }
   delegate_to: "bastion.{{ guid }}.internal"
-  when: public_key.stat.exists|d('false') and student_name is defined
+  when: student_name is defined and not status.failed
 
 - name: "Adding public key to authorized_keys"
   authorized_key:
     user: "{{ migration_master_user_name | d('ec2-user') }}"
     state: present
     key: "{{ pub_key_contents.stdout }}"
-  when: pub_key_contents is defined and student_name is defined
+  when: pub_key_contents.stdout is defined and student_name is defined
 
 - name: "Creating temp directory for operator repo"
   tempfile: 
@@ -92,18 +103,6 @@
     - { key: mig_controller_limits_memory, val: "{{ mig_controller_limits_memory }}" }
     - { key: mig_controller_requests_memory, val: "{{ mig_controller_requests_memory }}" }
   when: not migration_workload_destroy|bool
-
-- name: "Copying CORS playbook to bastion"
-  get_url:
-    url: "{{ item.src }}"
-    dest: "{{ item.dest }}"
-    owner: "{{ student_name }}"
-    mode: "u+rwx"
-  loop:
-    - { dest: "/home/{{ student_name }}/cors.yaml", src: "https://raw.githubusercontent.com/fusor/mig-agnosticd/master/demos/2019_RHTE/scripts/cors.yaml" }
-    - { dest: "/home/{{ student_name }}/cpma", src: "https://cpma.s3.us-east-2.amazonaws.com/cpma" }
-  delegate_to: "bastion.{{ guid }}.internal"
-  when: student_name is defined
 
 # Leave this as the last task in the playbook.
 - name: pre_workload tasks complete
