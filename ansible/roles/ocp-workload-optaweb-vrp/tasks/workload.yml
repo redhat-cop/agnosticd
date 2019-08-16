@@ -1,0 +1,76 @@
+---
+- name: define ocp_project
+  set_fact:
+    ocp_project: "optaweb-vrp-{{guid}}"
+
+    # Templates come from here: https://raw.githubusercontent.com/jorgemoralespou/ose-sample-apps-layouts
+
+- name: Create project for OptaPlanner Vehicle Routing Demo
+  shell: |
+         oc new-project {{ocp_project}} \
+         --display-name="OptaPlanner Vehicle Routing Demo" \
+         --description="OptaPlanner Vehicle Routing Demo"
+  ignore_errors: true
+
+- name: "Label namespace"
+  command: "oc label namespace {{ocp_project}} AAD='{{guid}}'"
+
+#- name: Set project limit LimitRange
+#  shell: "oc create -f /tmp/{{guid}}//limit-range.yaml -n {{ocp_project}}"
+
+# Check whether the required ImageStreams are available in the "openshift" namespace.
+# If they are not, we import them.
+# We need to do this in the "openshift" namespace, in order to have the secret to pull from registry.redhat.io.
+
+- name: "Import ReactJS WebApp Template"
+  shell: "oc create -f https://raw.githubusercontent.com/DuncanDoyle/reactjs-openshift/master/create-react-app-openshift-template.yaml -n {{ocp_project}}"
+
+- name: "Create OptaWeb backend app"
+  shell: "oc new-app quay.io/optaplanner/optaweb-vrp-backend -n {{ocp_project}}"
+
+- name: "Expose backend service"
+  shell: "oc expose svc/optaweb-vrp-backend -n {{ocp_project}}"
+
+- name: "Get OptaWeb backend Route"
+  shell: "oc get route optaweb-vrp-backend -n {{ocp_project}} | awk 'FNR > 1 {print $2}'"
+  register: oc_get_route_output
+
+- name: "Set OptaWeb backend Route fact"
+  set_fact:
+    optaweb_vrp_backend_route: "{{ oc_get_route_output.stdout }}"
+
+- name: "Create OptaWeb VRP front-end ReactJS app"
+  shell: "oc new-app --name=optaweb-vrp-frontend -e REACT_APP_BACKEND_URL=http://{{optaweb_vrp_backend_route}} \
+            --template react-web-app \
+            -p APPLICATION_NAME=optaweb-vrp-frontend \
+            -p SOURCE_REPOSITORY_URL={{optaweb_vrp_git_repository}} \
+            -p SOURCE_REPOSITORY_REF=RHPDS \
+            -p SOURCE_REPOSITORY_DIR=optaweb-vehicle-routing-frontend -n {{ocp_project}}"
+
+- name: Wait 10 seconds for the builds to be defined
+  pause:
+    seconds: 10
+
+#### Wait for the build to complete before slapping on the quota ....
+- include_tasks: ./wait_for_build.yml
+  vars:
+    build_to_wait:
+      - optaweb-vrp-frontend-builder
+      - optaweb-vrp-frontend-runtime
+
+#### Wait for the deployment to complete before slapping on the quota ...
+- include_tasks: ./wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - optaweb-vrp-backend
+      - optaweb-vrp-frontend
+
+- name: Annotate the completed project as requested by user
+  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
+
+- name: Give user access to the completed project
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete

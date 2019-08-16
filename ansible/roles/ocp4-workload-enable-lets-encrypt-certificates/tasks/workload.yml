@@ -45,10 +45,35 @@
     - _certbot_use_cache: True
     - _certbot_force_issue: False
     - _certbot_production: True
+    - _certbot_cron_job_name: LETS_ENCRYPT_RENEW
     # production false results in unusable certificates
     # (not possible to login to OCP)
     # - _certbot_production: "{{ lets_encrypt_production|d(False)|bool}}"
 
+  - name: Install redeploy hook scripts
+    copy:
+      src: ./files/deploy_certs.sh
+      dest: "/home/{{ ansible_user }}/certbot/renewal-hooks/deploy/deploy_certs.sh"
+      mode: 0775
+      owner: "{{ ansible_user }}"
+  - name: Install redeploy hook playbook
+    copy:
+      src: "./files/{{ item }}"
+      dest: "/home/{{ ansible_user }}/certbot/renewal-hooks/deploy/{{ item }}"
+      mode: 0664
+      owner: "{{ ansible_user }}"
+    loop:
+    - deploy_certs.yml
+  - name: Install redeploy secret templates
+    copy:
+      src: "./templates/{{ item }}"
+      dest: "/home/{{ ansible_user }}/certbot/renewal-hooks/deploy/{{ item }}"
+      mode: 0664
+      owner: "{{ ansible_user }}"
+    loop:
+    - api-certs.j2
+    - router-certs.j2
+    
   - name: Read Certificate
     slurp:
       src: "$HOME/certificates/fullchain.pem"
@@ -68,6 +93,59 @@
     k8s:
       state: present
       definition: "{{ lookup('file', './files/router-with-certs.yaml' ) | from_yaml }}"
+
+  - name: Install API Certificates
+    when: _lets_encrypt_certificates_install_api|bool
+    block:
+    - name: Create API Certificate
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './templates/api-certs.j2' ) | from_yaml }}"
+
+    - name: Add Certs to API Server
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './templates/api-server.j2' ) | from_yaml }}"
+
+    # Sleep 5 minutes per David Eads.
+    # It takes about 70 seconds per API Server to
+    # restart with certificates (due to AWS
+    # Load Balancer). Therefore sleep
+    # 5 minutes to give the kube-apiserver
+    # cluster operator enough time to progress.
+    - name: Wait 5m for all APIservers to be back up
+      pause:
+        minutes: 5
+
+    - name: Find all Kube Configs
+      become: yes
+      find:
+        file_type: file
+        hidden: true
+        paths:
+        - /root
+        - /home
+        contains: "^ +certificate-authority-data:"
+        patterns: "*config*"
+        recurse: yes
+      register: r_config_files
+
+    - name: Fix Kube Configs
+      become: yes
+      replace:
+        path: "{{ item.path }}"
+        regexp: "^ +certificate-authority-data:.*"
+      loop: "{{r_config_files.files}}"
+
+    - name: Make sure API Calls succeed
+      k8s_facts:
+        api_version: config.openshift.io/v1
+        kind: Ingress
+        name: cluster
+      register: r_ingress_config
+      retries: 30
+      delay: 10
+      until: not r_ingress_config.failed
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete

@@ -1,0 +1,197 @@
+# vim: set ft=ansible
+---
+
+# Implement your Workload deployment tasks here
+### all following based on files at https://github.com/kaovilai/rook/blob/0.9.3/cluster/examples/kubernetes/ceph/
+
+
+- name: wait for deploy rook-ceph-rgw-my-store
+  command: "oc rollout status deployment rook-ceph-rgw-my-store -n rook-ceph -w"
+  register: result
+  until: result.stderr.find("Error from server (NotFound)") != 0
+  retries: 120
+
+- name: obtain rook-ceph-rgw ip address
+  shell: "oc get svc rook-ceph-rgw-my-store -o json -n rook-ceph | jq -r '.spec.clusterIP'"
+  register: rookcephrgwip
+  until: rookcephrgwip.stderr.find("Error from server (NotFound)") != 0
+  retries: 30
+
+- name: obtain rook-ceph-rgw port
+  shell: "oc get svc rook-ceph-rgw-my-store -o json -n rook-ceph | jq -r '.spec.ports[0].port'"
+  register: rookcephrgwport
+  until: rookcephrgwport.stderr.find("Error from server (NotFound)") != 0
+  retries: 30
+
+- name: "modify and apply rook object-user.yaml for student"
+  k8s:
+    state: present
+    definition:
+      apiVersion: ceph.rook.io/v1
+      kind: CephObjectStoreUser
+      metadata:
+        labels:
+          user: "{{ ocp_username }}"
+        name: "{{ ocp_username }}"
+        namespace: rook-ceph
+      spec:
+        store: my-store
+        displayName: "my display name"
+
+## obtain secrets for each user
+- name: "new-obtain {{ ocp_username }} secrets"
+  k8s_facts:
+    name: "rook-ceph-object-user-my-store-{{ ocp_username }}"
+    namespace: rook-ceph
+    kind: Secret
+  register: secret
+
+- debug:
+    msg: "{{ secret }}"
+
+- name: create the Project
+  k8s:
+    state: present
+    name: "open-data-hub-{{ ocp_username }}"
+    kind: ProjectRequest
+    api_version: project.openshift.io/v1
+    definition:
+      metadata:
+        labels:
+          user: "{{ ocp_username }}"
+
+- name: apply service_account.yaml
+  k8s:
+    state: present
+    namespace: "open-data-hub-{{ ocp_username }}"
+    src: "/tmp/open-data-hub/odh/service_account.yaml"
+
+- name: apply role.yaml
+  k8s:
+    state: present
+    namespace: "open-data-hub-{{ ocp_username }}"
+    src: "/tmp/open-data-hub/odh/role.yaml"
+
+- name: apply role_binding.yaml
+  k8s:
+    state: present
+    namespace: "open-data-hub-{{ ocp_username }}"
+    src: "/tmp/open-data-hub/odh/role_binding.yaml"
+
+- name: apply operator.yaml
+  k8s:
+    state: present
+    namespace: "open-data-hub-{{ ocp_username }}"
+    src: "/tmp/open-data-hub/odh/operator.yaml"
+
+# Modifying https://gitlab.com/opendatahub/opendatahub-operator/raw/v0.3.0/deploy/crds/opendatahub_v1alpha1_opendatahub_cr.yaml
+- name: create ODH Custom Resource object
+  k8s:
+    state: present
+    namespace: "open-data-hub-{{ ocp_username }}"
+    definition:
+      apiVersion: opendatahub.io/v1alpha1
+      kind: OpenDataHub
+      metadata:
+        name: example-opendatahub
+      spec:
+        # JupyterHub deployment developed by Graham Dumpleton - https://github.com/aicoe/jupyterhub-ocp-oauth
+        aicoe-jupyterhub:
+          # Deploy the ODH aicoe-jupyterhub role if True
+          odh_deploy: true
+          notebook_memory: 2Gi
+          deploy_all_notebooks: False
+          registry: ''
+          repository: ''
+          storage_class: ''
+          db_memory: 1Gi
+          jupyterhub_memory: 1Gi
+          notebook_image: 's2i-minimal-notebook:3.6'
+          notebook_memory: 1Gi
+          s3_endpoint_url: "http://{{ rookcephrgwip.stdout }}:{{ rookcephrgwport.stdout }}"
+
+          # Name of the configmap that will be used when spawning a notebook for the single user
+          spark_configmap_template: 'jupyterhub-spark-operator-configmap'
+          # PYSPARK args to use in the notebook pod
+          # These submit args should be customized for the values passed for spark_memory and spark_cpu. You'll need to account for the available memory on the spark work nodes
+          spark_pyspark_submit_args: "--conf spark.cores.max=6 --conf spark.executor.instances=2 --conf spark.executor.memory=3G --conf spark.executor.cores=3 --conf spark.driver.memory=4G --packages com.amazonaws:aws-java-sdk:1.7.4,org.apache.hadoop:hadoop-aws:2.7.3 pyspark-shell"
+          spark_pyspark_driver_python: "jupyter"
+          spark_pyspark_driver_python_opts: "notebook"
+          spark_home: "/opt/app-root/lib/python3.6/site-packages/pyspark/"
+          spark_pythonpath: "$PYTHONPATH:/opt/app-root/lib/python3.6/site-packages/:/opt/app-root/lib/python3.6/site-packages/pyspark/python/:/opt/app-root/lib/python3.6/site-packages/pyspark/python/lib/py4j-0.8.2.1-src.zip"
+
+          # Number of master and worker nodes for the spark cluster
+          spark_worker_nodes: 2
+          spark_master_nodes: 1
+
+          # Amount of cpu & memory to allocate to the each node in the cluster.
+          # This value will be applied to all worker and master nodes
+          spark_memory: 4Gi
+          spark_cpu: 3
+          # Spark image to use in the cluster
+          spark_image: "quay.io/opendatahub/spark-cluster-image:spark22python36"
+
+        # Spark operator developed by radanalyticsio - https://github.com/radanalyticsio/spark-operator
+        spark-operator:
+          # Deploy the ODH spark-operator role if True
+          odh_deploy: true
+          master_node_count: 0
+          master_memory: 1Gi
+          master_cpu: 1
+          worker_node_count: 0
+          worker_memory: 2Gi
+          worker_cpu: 2
+
+        # Seldon Delployment
+        seldon:
+          odh_deploy: false
+
+        # JupyterHub deployment developed by Graham Dumpleton - https://github.com/jupyter-on-openshift/jupyterhub-quickstart
+        jupyter-on-openshift:
+          # Deploy the ODH jupyter-on-openshift role if True
+          odh_deploy: false
+          notebook_memory: 2Gi
+          # Add these whitelisted environment variables from JupyterHub to the user's notebook pod
+          jupyterhub_config: |
+            c.KubeSpawner.env_keep = ['S3_ENDPOINT_URL', 'S3_ACCESS_KEY', 'S3_SECRET_KEY']
+          # Environment variables that will be set on the JupyterHub pod
+          extra_env_vars:
+            S3_ENDPOINT_URL: "http://{{ rookcephrgwip.stdout }}:{{ rookcephrgwport.stdout }}"
+            S3_ACCESS_KEY: "{{ secret.resources[0].data.AccessKey | b64decode }}"
+            S3_SECRET_KEY: "{{ secret.resources[0].data.SecretKey | b64decode }}"
+
+        # Deployment of Prometheus and Grafana for Monitoring of ODH
+        monitoring:
+          odh_deploy: true
+
+        # Deployment of Two Sigma's BeakerX Jupyter notebook
+        beakerx:
+          odh_deploy: false
+
+  register: result
+- debug:
+    var: result
+
+- name: get route for jupyterhub
+  k8s_facts:
+    kind: Route
+    name: jupyterhub
+    namespace: "open-data-hub-{{ ocp_username }}"
+  register: Route
+  failed_when: Route.resources | length == 0
+  retries: 60
+  until: Route.resources | length > 0
+
+- debug:
+    msg:
+    - "user.info: "
+    - "user.info: {{ ocp_username }} Route {{ Route.resources[0].spec.host }}"
+    - "user.info: {{ ocp_username }} AccessKey {{ secret.resources[0].data.AccessKey | b64decode }}"
+    - "user.info: {{ ocp_username }} SecretKey {{ secret.resources[0].data.SecretKey | b64decode }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
+

@@ -1,0 +1,366 @@
+# vim: set ft=ansible
+---
+
+# Implement your Workload deployment tasks here
+
+# Equivalent instruction to the following
+# oc new-app https://raw.githubusercontent.com/openshift-labs/workshop-dashboard/3.5.0/templates/production-cluster-admin.json -n labguide \
+#    --param APPLICATION_NAME=admin \
+#    --param WORKSHOPPER_URLS=https://raw.githubusercontent.com/openshift/openshift-cns-testdrive/ocp4-prod/labguide/_ocp_admin_testdrive.yaml \
+#    --param PROJECT_NAME=labguide \
+#    --param WORKSHOP_ENVVARS="
+# API_URL=$API_URL \
+# MASTER_URL=$MASTER_URL \
+# KUBEADMIN_PASSWORD=$KUBEADMIN_PASSWORD \
+# SSH_USERNAME=$SSH_USERNAME \
+# SSH_PASSWORD=$SSH_PASSWORD \
+# BASTION_FQDN=$BASTION_FQDN \
+# GUID=$GUID \
+# ROUTE_SUBDOMAIN=$ROUTE_SUBDOMAIN \
+# HOME_PATH=$HOME_PATH"
+#
+
+- name: set variables
+  set_fact:
+    project_name: labguide
+    app_name: admin #don't forget to replace this value under ServiceAccount.metadata.annotations.
+    terminal_image: quay.io/openshiftlabs/workshop-dashboard:3.5.0
+    # console_version: 4.1.0 replaced by grabbing exact quay image.
+    workshop_env: "API_URL={{ api_url }} \
+          MASTER_URL={{ master_url }} \
+          KUBEADMIN_PASSWORD={{ kubeadmin_password }} \
+          SSH_USERNAME={{ student_name }} \
+          SSH_PASSWORD={{ student_password }} \
+          BASTION_FQDN={{ bastion_fqdn }} \
+          GUID={{ guid }} \
+          ROUTE_SUBDOMAIN={{ route_subdomain }} \
+          HOME_PATH=/opt/app-root/src"
+    serviceaccounts_oauth_redirectref_first: "'{\"kind\":\"OAuthRedirectReference\",\"apiVersion\":\"v1\",\"reference\":{\"kind\":\"Route\",\"name\":\"admin\"}}'"
+    download_url: https://raw.githubusercontent.com/openshift/openshift-cns-testdrive/ocp4-prod/labguide
+    workshop_file: _ocp_admin_testdrive.yaml
+  register: facts_set
+- debug:
+    var: facts_set
+
+- name: create the Project
+  k8s:
+    state: present
+    name: "{{ project_name }}"
+    kind: ProjectRequest
+    api_version: project.openshift.io/v1
+  register: ProjectRequest
+- debug:
+    var: ProjectRequest
+  when: not silent|bool
+
+- name: create the ServiceAccount
+  k8s:
+    namespace: "{{ project_name }}"
+    state: present
+    api_version: v1
+    definition:
+      kind: ServiceAccount
+      metadata:
+        name: "{{ app_name }}-user"
+        labels:
+          app: "{{ app_name }}"
+        annotations:
+          serviceaccounts.openshift.io/oauth-redirectreference.first: "{\"kind\":\"OAuthRedirectReference\",\"apiVersion\":\"v1\",\"reference\":{\"kind\":\"Route\",\"name\":\"admin\"}}"
+          serviceaccounts.openshift.io/oauth-redirecturi.first: oauth_callback
+          serviceaccounts.openshift.io/oauth-want-challenges: 'false'
+  register: ServiceAccount
+- debug:
+    var: ServiceAccount
+  when: not silent|bool
+
+- name: "create the ClusterRoleBinding {{ app_name }}-admin"
+  k8s:
+    namespace: "{{ project_name }}"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: "{{ app_name }}-cluster-admin"
+        labels:
+          app: "{{ app_name }}"
+      subjects:
+      - kind: ServiceAccount
+        name: "{{ app_name }}-user"
+        namespace: "{{ project_name }}"
+      roleRef:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        name: cluster-admin
+  register: ClusterRoleBinding
+- debug:
+    var: ClusterRoleBinding
+  when: not silent|bool
+
+- name: create the ImageStream
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition:
+      apiVersion: image.openshift.io/v1
+      kind: ImageStream
+      metadata:
+        name: "{{ app_name }}"
+        labels:
+          app: "{{ app_name }}"
+      spec:
+        lookupPolicy:
+          local: true
+        tags:
+        - name: latest
+          from:
+            kind: DockerImage
+            name: "{{ terminal_image }}"
+  register: ImageStream
+- debug:
+    var: ImageStream
+  when: not silent|bool
+
+- name: create the ConfigMap
+  k8s:
+    namespace: "{{ project_name }}"
+    state: present
+    definition:
+      kind: ConfigMap
+      metadata:
+        name: "{{ app_name }}-env"
+        labels:
+          app: "{{ app_name }}"
+      data:
+        workshop.sh: "{{ workshop_env }}"
+  register: ConfigMap
+- debug:
+    var: ConfigMap
+  when: not silent|bool
+
+- name: Grab openshift-console console quay.io image to be embedded in homeroom
+  k8s_facts:
+    kind: Deployment
+    api_version: apps/v1
+    namespace: openshift-console
+    name: console
+  register: console_image_url_raw
+- debug:
+    var: console_image_url_raw.resources[0].spec.template.spec.containers[0].image
+- name: set fact console_image_url
+  set_fact:
+    console_image_url: "{{ console_image_url_raw.resources[0].spec.template.spec.containers[0].image }}"
+
+- name: create the DeploymentConfig
+  k8s:
+    namespace: "{{ project_name }}"
+    definition:
+      kind: DeploymentConfig
+      apiVersion: v1
+      metadata:
+        name: "{{ app_name }}"
+        labels:
+          app: "{{ app_name }}"
+      spec:
+        strategy:
+          type: Recreate
+        triggers:
+        - type: ConfigChange
+        - type: ImageChange
+          imageChangeParams:
+            automatic: true
+            containerNames:
+            - terminal
+            from:
+              kind: ImageStreamTag
+              name: "{{ app_name }}:latest"
+        replicas: 1
+        selector:
+          app: "{{ app_name }}"
+          deploymentconfig: "{{ app_name }}"
+        template:
+          metadata:
+            labels:
+              app: "{{ app_name }}"
+              deploymentconfig: "{{ app_name }}"
+          spec:
+            serviceAccountName: "{{ app_name }}-user"
+            initContainers:
+            - name: setup-console
+              image: "{{ terminal_image }}"
+              command:
+              - "/opt/workshop/bin/setup-console.sh"
+              # env:
+              # - name: OPENSHIFT_USERNAME
+              #   value: "${OPENSHIFT_USERNAME}"
+              # - name: OPENSHIFT_PASSWORD
+              #   value: "${OPENSHIFT_PASSWORD}"
+              # - name: OPENSHIFT_TOKEN
+              #   value: "${OPENSHIFT_TOKEN}"
+              # - name: OC_VERSION
+              #   value: "${OC_VERSION}"
+              # - name: ODO_VERSION
+              #   value: "${ODO_VERSION}"
+              # - name: KUBECTL_VERSION
+              #   value: "${KUBECTL_VERSION}"
+              volumeMounts:
+              - name: shared
+                mountPath: "/var/run/workshop"
+            containers:
+            - name: terminal
+              image: "{{ app_name }}:latest"
+              ports:
+              - containerPort: 10080
+                protocol: TCP
+              env:
+              - name: PROJECT_NAMESPACE
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: APPLICATION_NAME
+                value: "{{ app_name }}"
+              # - name: AUTH_USERNAME
+              #   value: "${AUTH_USERNAME}"
+              # - name: AUTH_PASSWORD
+              #   value: "${AUTH_PASSWORD}"
+              - name: OAUTH_SERVICE_ACCOUNT
+                value: "{{ app_name }}-user"
+              - name: DOWNLOAD_URL
+                value: "{{ download_url }}"
+              - name: WORKSHOP_FILE
+                value: "{{ workshop_file }}"
+              # - name: WORKSHOPPER_URLS
+              #   value: "${WORKSHOPPER_URLS}"
+              - name: CONSOLE_URL
+                value: http://0.0.0.0:10083
+              # - name: OC_VERSION
+              #   value: "${OC_VERSION}"
+              # - name: ODO_VERSION
+              #   value: "${ODO_VERSION}"
+              # - name: KUBECTL_VERSION
+              #   value: "${KUBECTL_VERSION}"
+              volumeMounts:
+              - name: envvars
+                mountPath: "/opt/workshop/envvars"
+              - name: shared
+                mountPath: "/var/run/workshop"
+            - name: console
+              image: "{{ console_image_url }}"
+              #image: "quay.io/openshift/origin-console:{{ console_version }}"
+              command:
+              - "/var/run/workshop/start-console.sh"
+              env:
+              - name: BRIDGE_K8S_MODE
+                value: in-cluster
+              - name: BRIDGE_LISTEN
+                value: http://0.0.0.0:10083
+              - name: BRIDGE_BASE_PATH
+                value: "/console/"
+              - name: BRIDGE_PUBLIC_DIR
+                value: "/opt/bridge/static"
+              - name: BRIDGE_USER_AUTH
+                value: disabled
+              - name: BRIDGE_BRANDING
+                value: "openshift"
+              volumeMounts:
+              - name: shared
+                mountPath: "/var/run/workshop"
+            volumes:
+            - name: envvars
+              configMap:
+                name: "{{ app_name }}-env"
+                defaultMode: 420
+            - name: shared
+              emptyDir: {}
+
+  register: DeploymentConfig
+- debug:
+    var: DeploymentConfig
+  when: not silent|bool
+
+- name: create the Service
+  k8s:
+    namespace: "{{ project_name }}"
+    state: present
+    kind: Service
+    definition:
+      metadata:
+        name: "{{ app_name }}"
+        labels:
+          app: "{{ app_name }}"
+      spec:
+        ports:
+        - name: 10080-tcp
+          protocol: TCP
+          port: 10080
+          targetPort: 10080
+        selector:
+          app: "{{ app_name }}"
+          deploymentconfig: "{{ app_name }}"
+  register: Service
+- debug:
+    var: Service
+  when: not silent|bool
+
+- name: create the Route
+  k8s:
+    namespace: "{{ project_name }}"
+    state: present
+    kind: Route
+    definition:
+      metadata:
+        name: "{{ app_name }}"
+        labels:
+          app: "{{ app_name }}"
+      spec:
+        host: ''
+        to:
+          kind: Service
+          name: "{{ app_name }}"
+          weight: 100
+        port:
+          targetPort: 10080-tcp
+        tls:
+          termination: edge
+          insecureEdgeTerminationPolicy: Redirect
+  register: Route
+
+- name: add kubeadmin to RoleBinding admin enabling route access
+  k8s:
+    namespace: "{{ project_name }}"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: "{{ app_name }}"
+        labels:
+          app: "{{ app_name }}"
+      subjects:
+      - kind: User
+        apiGroup: rbac.authorization.k8s.io
+        name: 'kube:admin'
+      roleRef:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        name: admin
+  register: RoleBinding
+- debug:
+    var: RoleBinding
+  when: not silent|bool
+
+- debug:
+    msg:
+    - "user.info: "
+    - "user.info: Access the workshop at '{{ Route.result.spec.host }}'"
+    - "user.info: Login with 'kubeadmin' and '{{ kubeadmin_password }}'"
+    - "user.info: "
+    - "user.info: Workshop may not be accessible until rollout finishes shortly."
+  when: not silent|bool
+
+# Leave this as the last task in the playbook.
+
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
