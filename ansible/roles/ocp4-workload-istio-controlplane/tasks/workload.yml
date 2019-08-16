@@ -55,9 +55,10 @@
       force: yes
       url: "https://git.io/getLatestKialiOperator"
       dest: "/tmp/istio-install/kiali-operator-install.sh"
+      mode: u+x #enable execution of the script
 
   - name: run kiali-operator-install.sh
-    script: /tmp/istio-install/kiali-operator-install.sh --operator-image-version v1.0.0 --operator-watch-namespace '**' --accessible-namespaces '**' --operator-install-kiali false
+    command: /tmp/istio-install/kiali-operator-install.sh --operator-image-version v1.0.0 --operator-watch-namespace '**' --accessible-namespaces '**' --operator-install-kiali false
 #############################################################
 ###############Installing the Jaeger Operator################
 #############################################################
@@ -71,7 +72,7 @@
   k8s:
     state: present
     namespace: observability
-    definition: "{{ lookup('file','/tmp/istio-install/{{ item }}') }}"
+    src: "/tmp/istio-install/{{ item }}"
   register: result
   loop: "{{ jaegertracing_list }}"
 - debug: var=result
@@ -120,7 +121,6 @@
       metadata:
         name: "{{ item }}"
   with_items:
-    - istio-system
     - istio-operator
 
 # Do not use until https://issues.jboss.org/browse/MAISTRA-670?_sscc=t closes
@@ -136,27 +136,6 @@
     command: oc create -n istio-operator -f /tmp/istio-install/maistra-operator.yaml
   rescue:
   - debug: msg="There is an existing maistra-operator. Deleting."
-  - name: remove istio controlplane cr finalizers
-    k8s:
-      namespace: istio-system
-      name: basic-install
-      state: present
-      definition:
-        apiVersion: maistra.io/v1
-        kind: ServiceMeshControlPlane
-        metadata:
-          finalizers: null
-      merge_type: merge
-    ignore_errors: yes
-  - name: remove istio controlplane cr
-    k8s:
-      namespace: istio-system
-      name: basic-install
-      state: absent
-      definition:
-        apiVersion: maistra.io/v1
-        kind: ServiceMeshControlPlane
-    ignore_errors: yes
   - name: deleting existing maistra-operator.yaml
     command: oc delete -n istio-operator -f /tmp/istio-install/maistra-operator.yaml --wait
     ignore_errors: yes
@@ -184,12 +163,21 @@
   retries: 60
   until: "'Running' in result.resources[0].status.phase"
 #############################################################
-###############Installing the Controlplane CR################
+###############Deploying the ServiceMeshControlplane CR######
 #############################################################
 # from https://maistra.io/docs/getting_started/install/
-- name: istio controlplane cr
+- name: facts for servicemeshcontrolplane
+  set_fact:
+    smcp_project_name: "smcp-{{ ocp_username }}"
+- name: create project to contain servicemeshcontrolplane
   k8s:
-    namespace: istio-system
+    state: present
+    kind: Namespace
+    name: "{{ smcp_project_name }}"
+
+- name: istio servicemeshcontrolplane cr
+  k8s:
+    namespace: "{{ smcp_project_name }}"
     state: present
     definition:
       apiVersion: maistra.io/v1
@@ -200,9 +188,11 @@
         threeScale:
           enabled: false
         istio:
+          istio_cni:
+            enabled: true
           global:
-            disablePolicyCheck: false
-            multitenant: false
+            disablePolicyChecks: false
+            multitenant: true
             proxy: # constrain resources for use in smaller environments
               resources:
                 requests:
@@ -251,7 +241,7 @@
   delay: 60
 
 - name: wait up to 8 minutes for the elasticsearch statefulset to exist
-  shell: "oc get statefulset elasticsearch -n istio-system"
+  shell: "oc get statefulset elasticsearch -n {{ smcp_project_name }}"
   register: elasticsearch_set_status
   until: elasticsearch_set_status.rc == 0
   retries: 8
@@ -262,7 +252,7 @@
     api_version: route.openshift.io/v1
     kind: Route
     name: kiali
-    namespace: istio-system
+    namespace: "{{ smcp_project_name }}"
   register: result
   failed_when: result.resources | length == 0
   retries: 120
@@ -272,6 +262,28 @@
   file:
     state: absent
     path: "/tmp/istio-install"
+
+- name: pass env var to homeroom
+  block:
+  - name: setting variables to be added to homeroom workshop_env
+    set_fact:
+      adding_to_homeroom: "SMCP_PROJECT_NAME={{ smcp_project_name }}"
+  - fail:
+    when: workshop_env is defined
+    #workshop_env undefined here so lets make a new one
+  - name: start fact workshop_env
+    set_fact:
+      workshop_env: "{{ adding_to_homeroom }}"
+    register: result
+  rescue:
+  # append instead of replace variable
+  - name: append to fact workshop_env
+    set_fact:
+      workshop_env: "{{ workshop_env }} \\
+      {{ adding_to_homeroom }}"
+    register: result
+- debug: var=result
+
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
   debug:
