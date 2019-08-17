@@ -21,6 +21,14 @@ for proj in $(oc get projects -o name | grep 'user*' | cut -d/ -f2) ; do
   oc delete project $proj
 done
 
+# delete dummy projects
+for proj in $(oc get projects -o name | grep 'dummy*' | cut -d/ -f2) ; do
+  oc delete project $proj
+done
+
+# delete json files
+rm -rf *.json
+
 # scale back down
 for i in $(oc get machinesets -n openshift-machine-api -o name | grep worker| cut -d'/' -f 2) ; do
   echo "Scaling $i to 1 replica"

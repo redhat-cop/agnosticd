@@ -7,10 +7,14 @@ function usage() {
     echo "usage: $(basename $0) [-c/--count usercount] -m/--module-type module_type"
 }
 
-#exec > logfile.txt
+file_name=logfile.txt
+current_time=$(date "+%Y.%m.%d-%H.%M.%S")
+new_fileName=$file_name.$current_time
+
+exec > $new_fileName
 
 # Defaults
-USERCOUNT=10
+USERCOUNT=50
 MODULE_TYPE=m1
 REQUESTED_CPU=2
 REQUESTED_MEMORY=4Gi
@@ -90,13 +94,13 @@ echo -e "HOSTNAME_SUFFIX: $HOSTNAME_SUFFIX \n"
 oc project labs-infra
 
 # create templates for labs
-oc create -f $MYDIR/../files/template-binary.json -n openshift
-oc create -f $MYDIR/../files/template-prod.json -n openshift
-oc create -f $MYDIR/../files/ccn-sso72-template.json -n openshift
+oc create -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/template-binary.json -n openshift
+oc create -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/template-prod.json -n openshift
+oc create -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/ccn-sso72-template.json -n openshift
 
 # deploy rhamt
 if [ -z "${MODULE_TYPE##*m1*}" ] ; then
-  oc process -f $MYDIR/../files/web-template-empty-dir-executor.json \
+  oc process -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/web-template-empty-dir-executor.json \
       -p WEB_CONSOLE_REQUESTED_CPU=$REQUESTED_CPU \
       -p WEB_CONSOLE_REQUESTED_MEMORY=$REQUESTED_MEMORY \
       -p EXECUTOR_REQUESTED_CPU=$REQUESTED_CPU \
@@ -104,12 +108,11 @@ if [ -z "${MODULE_TYPE##*m1*}" ] ; then
 fi
 
 # deploy gogs
-oc -n labs-infra new-app -f $MYDIR/../files/gogs-template.yaml \
+oc -n labs-infra new-app -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/gogs-template.yaml \
       -p HOSTNAME=gogs-labs-infra.$HOSTNAME_SUFFIX \
       -p GOGS_VERSION=0.11.34 \
       -p SKIP_TLS_VERIFY=true \
       -p APPLICATION_NAME=gogs
-# oc set resources dc/gogs --limits=cpu=400m,memory=512Mi --requests=cpu=100m,memory=128Mi
 
 # Wait for gogs postgresql to be running
 echo -e "Waiting for gogs postgresql to be running... \n"
@@ -174,7 +177,7 @@ if [ $RESULT -eq 0 ]; then
 elif [ -z "${MODULE_TYPE##*m3*}" ] ; then
   echo -e "Installing istio-operator..."
   oc new-project istio-operator
-  oc apply -n istio-operator -f $MYDIR/../files/servicemesh-operator.yaml
+  oc apply -n istio-operator -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/servicemesh-operator.yaml
 fi
 
 oc get project istio-system 
@@ -184,7 +187,7 @@ if [ $RESULT -eq 0 ]; then
 elif [ -z "${MODULE_TYPE##*m3*}" ] ; then
   echo -e "Deploying the Istio Control Plane with Single-Tenant..."
   oc new-project istio-system
-  oc create -n istio-system -f $MYDIR/../files/servicemeshcontrolplane.yaml
+  oc create -n istio-system -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/servicemeshcontrolplane.yaml
   # bash <(curl -L https://git.io/getLatestKialiOperator) --operator-image-version v1.0.0 --operator-watch-namespace '**' --accessible-namespaces '**' --operator-install-kiali false
   # oc apply -n istio-system -f https://raw.githubusercontent.com/kiali/kiali/v1.0.0/operator/deploy/kiali/kiali_cr.yaml
 fi
@@ -233,7 +236,7 @@ done
 
 # update Jenkins templates and create Jenkins project
 if [ -z "${MODULE_TYPE##*m2*}" ] ; then
-  oc replace -f $MYDIR/../files/jenkins-ephemeral.yml -n openshift
+  oc replace -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/jenkins-ephemeral.yml -n openshift
   oc get project jenkins
   RESULT=$? 
   if [ $RESULT -eq 0 ]; then
@@ -245,6 +248,17 @@ if [ -z "${MODULE_TYPE##*m2*}" ] ; then
     oc set resources dc/jenkins --limits=cpu=1,memory=2Gi --requests=cpu=1,memory=512Mi
   fi
 fi
+
+# Wait for rhamt to be running
+echo -e "Waiting for rhamt to be running... \n"
+while [ 1 ]; do
+  STAT=$(curl -s -w '%{http_code}' -o /dev/null http://rhamt-web-console-labs-infra.$HOSTNAME_SUFFIX)
+  if [ "$STAT" = 200 ] ; then
+    break
+  fi
+  echo -n .
+  sleep 10
+done
 
 # Configure RHAMT Keycloak
 if [ -z "${MODULE_TYPE##*m1*}" ] ; then
@@ -445,15 +459,16 @@ SSO_TOKEN=$(curl -s -d "username=${KEYCLOAK_USER}&password=${KEYCLOAK_PASSWORD}&
   jq  -r '.access_token')
 
 # Import realm 
-curl -v -H "Authorization: Bearer ${SSO_TOKEN}" -H "Content-Type:application/json" -d @../files/ccnrd-realm.json \
+wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/ccnrd-realm.json
+curl -v -H "Authorization: Bearer ${SSO_TOKEN}" -H "Content-Type:application/json" -d @ccnrd-realm.json \
   -X POST "http://keycloak-labs-infra.$HOSTNAME_SUFFIX/auth/admin/realms"
 
 ## MANUALLY add ProtocolMapper to map User Roles to "groups" prefix for JWT claims
 echo "Keycloak credentials: $KEYCLOAK_USER / $KEYCLOAK_PASSWORD"
-echo "URL: http://keycloak-labs-infra.${HOTSNAME_SUFFIX}"
+echo "URL: http://keycloak-labs-infra.${HOSTNAME_SUFFIX}"
 
 # import stack image
-oc create -n openshift -f $MYDIR/../files/stack.imagestream.yaml
+oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/stack.imagestream.yaml
 oc import-image --all quarkus-stack -n openshift
 
 # Import stack definition
@@ -461,11 +476,15 @@ SSO_CHE_TOKEN=$(curl -s -d "username=admin&password=admin&grant_type=password&cl
   -X POST http://keycloak-labs-infra.$HOSTNAME_SUFFIX/auth/realms/codeready/protocol/openid-connect/token | \
   jq  -r '.access_token')
 
+wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/stack-ccn.json
 STACK_RESULT=$(curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json' \
-    --header "Authorization: Bearer ${SSO_CHE_TOKEN}" -d @files/stack-ccn.json \
+    --header "Authorization: Bearer ${SSO_CHE_TOKEN}" -d @stack-ccn.json \
     "http://codeready-labs-infra.$HOSTNAME_SUFFIX/api/stack")
 
+echo -e "STACK_RESULT: $STACK_RESULT"
+
 STACK_ID=$(echo $STACK_RESULT | jq -r '.id')
+echo -e "STACK_ID: $STACK_ID"
 
 # Give all users access to the stack
 echo -e "Giving all users access to the stack...\n"
