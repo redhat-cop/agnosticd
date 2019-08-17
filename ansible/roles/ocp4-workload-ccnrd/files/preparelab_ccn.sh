@@ -7,7 +7,7 @@ function usage() {
     echo "usage: $(basename $0) [-c/--count usercount] -m/--module-type module_type"
 }
 
-# Create a log file
+# Create the log file
 file_name=logfile.txt
 current_time=$(date "+%Y.%m.%d-%H.%M.%S")
 new_fileName=$file_name.$current_time
