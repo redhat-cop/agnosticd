@@ -15,7 +15,7 @@ new_fileName=$file_name.$current_time
 exec > $new_fileName
 
 # Defaults
-USERCOUNT=50
+USERCOUNT=100
 MODULE_TYPE=m1
 REQUESTED_CPU=2
 REQUESTED_MEMORY=4Gi
