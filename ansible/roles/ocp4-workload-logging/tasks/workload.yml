@@ -18,55 +18,72 @@
   - ./files/logging_catalog_source.yaml
   - ./files/logging_subscription.yaml
 
-- name: Wait for Elasticsearch and Logging CRDs
-  ignore_errors: yes
+- name: Wait for Elasticsearch CRD
   k8s_facts:
     api_version: apiextensions.k8s.io/v1beta1
     kind: CustomResourceDefinition
-    name: "{{ item }}"
-  register: crd_exists
-  until: crd_exists.resources | list | length >= 1
-  retries: 30
+    name: elasticsearches.logging.openshift.io
+  register: r_elasticsearch_crd
+  retries: 20
   delay: 10
-  with_items:
-    - "clusterloggings.logging.openshift.io"
-    - "elasticsearches.logging.openshift.io"
+  ignore_errors: yes
+  until: r_elasticsearch_crd.resources | list | length == 1
 
-- name: Create OpenShift Objects for ClusterLogging
-  ignore_errors: yes
-  k8s:
-    state: present
-    merge_type:
-    - strategic-merge
-    - merge
-    definition: "{{ lookup('template', item ) | from_yaml }}"
-  loop:
-  - ./templates/cluster_logging.j2
- 
-- name: Wait for Elasticsearch Deployments to exist
-  ignore_errors: yes
+- name: Notify user if Elasticsearch deployment failed
+  when: not r_elasticsearch_crd.resources | list | length == 1
+  debug:
+    msg: "user.info: *** Elasticsearch operator could not be installed ***"
+
+- name: Wait for Logging CRD
   k8s_facts:
-    api_version: extensions/v1beta1
-    kind: Deployment
-    namespace: openshift-logging
-    label_selectors:
-      - component = elasticsearch
-  register: elastic_deployments
-  until: elastic_deployments.resources | list | length >= 1
-  retries: 100
+    api_version: apiextensions.k8s.io/v1beta1
+    kind: CustomResourceDefinition
+    name: clusterloggings.logging.openshift.io
+  register: r_logging_crd
+  retries: 20
   delay: 10
-
-# could this also use k8s_facts in some way?
-- name: wait for running elasticsearch
   ignore_errors: yes
+  until: r_logging_crd.resources | list | length == 1
+
+- name: Notify user if Logging deployment failed
+  when: not r_logging_crd.resources | list | length == 1
+  debug:
+    msg: "user.info: *** Logging operator could not be installed ***"
+
+- name: Deploy Logging
   when:
-  - _logging_wait_for_deployment|bool
-  shell: "oc get deployment {{ item.metadata.name }} -n openshift-logging -o jsonpath='{.status.readyReplicas}'"
-  register: replicas_out
-  retries: 100
-  delay: 10
-  with_items: "{{ elastic_deployments.resources }}"
-  until: replicas_out.stdout | int == 1
+  - r_logging_crd.resources | list | length == 1
+  - r_elasticsearch_crd.resources | list | length == 1
+  block:
+  - name: Create OpenShift Objects for ClusterLogging
+    k8s:
+      state: present
+      merge_type:
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    ignore_errors: yes
+    loop:
+    - ./templates/cluster_logging.j2
+
+  - name: Sleep to give the status field a chance to populate
+    when: _logging_wait_for_deployment | bool
+    pause:
+      seconds: 60
+  
+  - name: Wait until Elasticsearch Cluster Status is green
+    when: _logging_wait_for_deployment| bool
+    k8s_facts:
+      api_version: logging.openshift.io/v1
+      kind: ClusterLogging
+      name: instance
+      namespace: openshift-logging
+    register: r_logging
+    retries: 30
+    delay: 10
+    ignore_errors: yes
+    until: 
+    - r_logging.resources[0].status.logStore.elasticsearchStatus[0].clusterHealth == "green"
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
