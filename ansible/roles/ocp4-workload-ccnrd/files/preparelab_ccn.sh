@@ -437,7 +437,8 @@ while [ 1 ]; do
 done
 
 # workaround for PVC problem
-oc get --export cm/custom -n labs-infra -o yaml | yq w - 'data.CHE_INFRA_KUBERNETES_PVC_WAIT__BOUND' \"false\" | oc apply -f - -n labs-infra
+wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/cm-custom-codeready.yaml
+oc apply -f cm-custom-codeready.yaml -n labs-infra
 oc scale -n labs-infra deployment/codeready --replicas=0
 oc scale -n labs-infra deployment/codeready --replicas=1
 
