@@ -175,7 +175,7 @@ oc get project istio-operator
 RESULT=$? 
 if [ $RESULT -eq 0 ]; then
   echo -e "istio-operator already exists..."
-elif [ -z "${MODULE_TYPE##*m3*}" ] ; then
+elif [ -z "${MODULE_TYPE##*m3*}" || [ -z "${MODULE_TYPE##*m4*}" ] ; then
   echo -e "Installing istio-operator..."
   oc new-project istio-operator
   oc apply -n istio-operator -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/servicemesh-operator.yaml
@@ -185,7 +185,7 @@ oc get project istio-system
 RESULT=$? 
 if [ $RESULT -eq 0 ]; then
   echo -e "istio-system already exists..."
-elif [ -z "${MODULE_TYPE##*m3*}" ] ; then
+elif [ -z "${MODULE_TYPE##*m3*}" || [ -z "${MODULE_TYPE##*m4*}" ] ; then
   echo -e "Deploying the Istio Control Plane with Single-Tenant..."
   oc new-project istio-system
   oc create -n istio-system -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/servicemeshcontrolplane.yaml
@@ -215,6 +215,8 @@ for i in $(eval echo "{0..$USERCOUNT}") ; do
   fi
   if [ -z "${MODULE_TYPE##*m4*}" ] ; then
     oc new-project user$i-cloudnativeapps 
+    oc adm policy add-scc-to-user anyuid -z default -n user$i-cloudnativeapps 
+    oc adm policy add-scc-to-user privileged -z default -n user$i-cloudnativeapps 
     oc adm policy add-role-to-user admin user$i -n user$i-cloudnativeapps 
   fi
 done
@@ -250,19 +252,17 @@ if [ -z "${MODULE_TYPE##*m2*}" ] ; then
   fi
 fi
 
-# Wait for rhamt to be running
-echo -e "Waiting for rhamt to be running... \n"
-while [ 1 ]; do
-  STAT=$(curl -s -w '%{http_code}' -o /dev/null http://rhamt-web-console-labs-infra.$HOSTNAME_SUFFIX)
-  if [ "$STAT" = 200 ] ; then
-    break
-  fi
-  echo -n .
-  sleep 10
-done
-
 # Configure RHAMT Keycloak
 if [ -z "${MODULE_TYPE##*m1*}" ] ; then
+  echo -e "Waiting for rhamt to be running... \n"
+  while [ 1 ]; do
+    STAT=$(curl -s -w '%{http_code}' -o /dev/null http://rhamt-web-console-labs-infra.$HOSTNAME_SUFFIX)
+    if [ "$STAT" = 200 ] ; then
+      break
+    fi
+    echo -n .
+    sleep 10
+  done
   echo -e "Getting access token to update RH-SSO theme \n"
   RESULT_TOKEN=$(curl -k -X POST https://secure-rhamt-web-console-labs-infra.$HOSTNAME_SUFFIX/auth/realms/master/protocol/openid-connect/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
