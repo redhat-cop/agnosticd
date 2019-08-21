@@ -456,9 +456,23 @@ done
 # get keycloak admin password
 KEYCLOAK_USER="$(oc set env deployment/keycloak --list -n labs-infra|grep SSO_ADMIN_USERNAME | cut -d= -f2)"
 KEYCLOAK_PASSWORD="$(oc set env deployment/keycloak --list -n labs-infra|grep SSO_ADMIN_PASSWORD | cut -d= -f2)"
+
+# Wait for che to be back up
+echo "Waiting for keycloak to come up..."
+while [ 1 ]; do
+  STAT=$(curl -s -w '%{http_code}' -o /dev/null http://keycloak-labs-infra.$HOSTNAME_SUFFIX/auth/)
+  if [ "$STAT" = 200 ] ; then
+    break
+  fi
+  echo -n .
+  sleep 10
+done
+
 SSO_TOKEN=$(curl -s -d "username=${KEYCLOAK_USER}&password=${KEYCLOAK_PASSWORD}&grant_type=password&client_id=admin-cli" \
   -X POST http://keycloak-labs-infra.$HOSTNAME_SUFFIX/auth/realms/master/protocol/openid-connect/token | \
   jq  -r '.access_token')
+
+echo -e "SSO_TOKEN: $SSO_TOKEN"
 
 # Import realm 
 wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/ccnrd-realm.json
