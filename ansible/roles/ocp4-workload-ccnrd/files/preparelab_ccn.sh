@@ -478,14 +478,11 @@ echo -e "SSO_TOKEN: $SSO_TOKEN"
 wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/ccnrd-realm.json
 curl -v -H "Authorization: Bearer ${SSO_TOKEN}" -H "Content-Type:application/json" -d @ccnrd-realm.json \
   -X POST "http://keycloak-labs-infra.$HOSTNAME_SUFFIX/auth/admin/realms"
+rm -rf ccnrd-realm.json
 
 ## MANUALLY add ProtocolMapper to map User Roles to "groups" prefix for JWT claims
 echo "Keycloak credentials: $KEYCLOAK_USER / $KEYCLOAK_PASSWORD"
 echo "URL: http://keycloak-labs-infra.${HOSTNAME_SUFFIX}"
-
-# import stack image
-oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/stack.imagestream.yaml
-oc import-image --all quarkus-stack -n openshift
 
 # Import stack definition
 SSO_CHE_TOKEN=$(curl -s -d "username=admin&password=admin&grant_type=password&client_id=admin-cli" \
@@ -496,8 +493,7 @@ wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-
 STACK_RESULT=$(curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json' \
     --header "Authorization: Bearer ${SSO_CHE_TOKEN}" -d @stack-ccn.json \
     "http://codeready-labs-infra.$HOSTNAME_SUFFIX/api/stack")
-
-echo -e "STACK_RESULT: $STACK_RESULT"
+rm -rf stack-ccn.json
 
 STACK_ID=$(echo $STACK_RESULT | jq -r '.id')
 echo -e "STACK_ID: $STACK_ID"
