@@ -1,0 +1,146 @@
+---
+- environment:
+    AWS_ACCESS_KEY_ID: "{{ pool_manager_aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ pool_manager_aws_secret_access_key }}"
+  block:
+    - name: Check if sandbox is already associated
+      vars:
+        _expression: >-
+          available = :a
+          and guid = :g
+          and envtype = :e
+          and attribute_exists(aws_access_key_id)
+          and attribute_exists(aws_secret_access_key)
+          and attribute_exists(hosted_zone_id)
+          and attribute_exists(#Z)
+          and attribute_exists(account_id)
+        _data:
+          ":a":
+            BOOL: false
+          ":g":
+            S: "{{ guid }}"
+          ":e":
+            S: "{{ env_type }}"
+      command: >-
+        aws
+        --region "{{ pool_region }}"
+        dynamodb scan
+        --table-name {{ pool_table }}
+        --filter-expression '{{ _expression }}'
+        --expression-attribute-values '{{ _data | to_json }}'
+        --expression-attribute-names '{"#Z": "zone"}'
+        --max-item 1
+      register: r_associated
+
+    - set_fact:
+        query1: "{{ r_associated.stdout | from_json }}"
+
+    - when: query1.Count == 1
+      block:
+        - debug:
+            msg: "{{ query1.Items[0].account_id.S }} already associated"
+
+        - vars:
+            vaulted_text: "{{ query1.Items[0].aws_secret_access_key.S }}"
+          include_tasks: unvault.yml
+
+        - name: Save sandbox variables
+          set_fact:
+            sandbox_name: "{{ query1.Items[0].name.S }}"
+            sandbox_zone: "{{ query1.Items[0].zone.S }}"
+            sandbox_hosted_zone_id: "{{ query1.Items[0].hosted_zone_id.S }}"
+            sandbox_account: "{{ query1.Items[0].name.S }}"
+            sandbox_aws_access_key_id: "{{ query1.Items[0].aws_access_key_id.S }}"
+
+    - when: query1.Count == 0
+      block:
+        - name: Get first free sandboxes
+          command: >-
+            aws
+            --region {{ pool_region }}
+            dynamodb scan
+            --table-name {{ pool_table }}
+            --filter-expression 'available = :a and attribute_exists(aws_access_key_id) and attribute_exists(aws_secret_access_key) and attribute_exists(hosted_zone_id) and attribute_exists(#Z) and attribute_exists(account_id)'
+            --expression-attribute-values '{":a":{"BOOL":true}}'
+            --expression-attribute-names '{"#Z": "zone"}'
+            --max-item {{ buffer }}
+          register: r_shortlist
+
+        - name: Save the list of the first free sandboxes
+          set_fact:
+            sandbox_shortlist: "{{ r_shortlist.stdout | from_json | json_query('Items[*].name.S') }}"
+
+        - name: Book a sandbox among the list
+          vars:
+            _data:
+              ":av":
+                BOOL: false
+              ":currval":
+                BOOL: true
+              ":gu":
+                S: "{{ guid }}"
+              ":en":
+                S: "{{ env_type }}"
+              ":ow":
+                S: "{{ student_name | default('unknown') }}"
+              ":email":
+                S: "{{ email | default('unknown') }}"
+          shell: >-
+            for sandbox_name in {{ sandbox_shortlist | join(' ') }}; do
+            aws --region {{ pool_region }}
+            dynamodb update-item
+            --table-name {{ pool_table }}
+            --key "{\"name\": {\"S\": \"${sandbox_name}\"}}"
+            --condition-expression "available = :currval"
+            --update-expression
+            "SET available = :av,
+            guid = :gu, envtype = :en,
+            #o = :ow, owner_email = :email"
+            --expression-attribute-values '{{ _data | to_json }}'
+            --expression-attribute-names '{"#o":"owner"}';
+            if [ $? = 0 ]; then echo $sandbox_name; break; fi;
+            done;
+          register: _putaccount
+
+        - debug:
+            var: r_shortlist
+            verbosity: 2
+
+        - debug:
+            var: _putaccount
+            verbosity: 2
+
+        - set_fact:
+            sandbox_picked: >-
+              {{ r_shortlist.stdout
+              | from_json
+              | json_query('Items[*]')
+              | selectattr('name.S', 'equalto', _putaccount.stdout)
+              | list }}
+
+        - when: sandbox_picked | length == 0
+          fail:
+            msg: Could not get a sandbox. Probably too many concurrent requests.
+
+        - set_fact:
+            sandbox_name: "{{ _item.name.S }}"
+            sandbox_account: "{{ _item.account_id.S }}"
+            sandbox_zone: "{{ _item.zone.S }}"
+            sandbox_hosted_zone_id: "{{ _item.hosted_zone_id.S }}"
+            sandbox_aws_access_key_id: "{{ _item.aws_access_key_id.S }}"
+            sandbox_aws_secret_access_key: "{{ _item.aws_secret_access_key.S }}"
+          vars:
+            _item: "{{ sandbox_picked | first }}"
+
+        - vars:
+            vaulted_text: "{{ sandbox_aws_secret_access_key }}"
+          include_tasks: unvault.yml
+
+- debug:
+    msg: |-
+      INFO: sandbox_name: {{ sandbox_name }}
+      INFO: sandbox_zone: {{ sandbox_zone }}
+      INFO: sandbox_hosted_zone_id: {{ sandbox_hosted_zone_id }}
+      INFO: sandbox_account: {{ sandbox_account }}
+      INFO: sandbox_aws_access_key_id: {{ sandbox_aws_access_key_id }}
+      INFO: sandbox_aws_secret_access_key: {{ sandbox_aws_secret_access_key }}
