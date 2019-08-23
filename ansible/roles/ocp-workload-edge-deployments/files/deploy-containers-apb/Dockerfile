@@ -17,6 +17,7 @@ COPY playbooks /opt/apb/actions
 COPY roles /opt/ansible/roles
 COPY id_rsa.pub /opt/apb/
 COPY id_rsa /opt/apb/
+RUN echo "[defaults]" >> /opt/apb/ansible.cfg
 RUN echo "host_key_checking = False" >> /opt/apb/ansible.cfg
 RUN chmod -R g=u /opt/{ansible,apb}
 USER apb
