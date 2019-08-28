@@ -1,0 +1,137 @@
+---
+- name: Disable firewall for Domain, Public, and Private profiles
+  win_firewall:
+    state: disabled
+    profiles:
+    - Domain
+    - Private
+    - Public
+
+- name: Set hostname
+  win_hostname:
+    name: "{{ inventory_hostname }}"
+  register: win_hostname
+
+- name: Reboot if required
+  win_reboot:
+  when: win_hostname.reboot_required
+
+- name: Install AD-Domain-Services
+  win_feature:
+    name: AD-Domain-Services
+    state: present
+    include_management_tools: True
+    include_sub_features: True
+  register: winfeature
+
+- name: Reboot if needed
+  win_reboot:
+  when: winfeature.changed
+
+- name: Create DNS Domain
+  win_domain:
+    dns_domain_name: "{{ dns_domain_name }}"
+    safe_mode_password: "{{ windows_password }}"
+  register: windomain
+
+- name: Reboot if needed
+  win_reboot:
+  when:
+    - windomain.reboot_required
+
+- name: Wait for Active Directory Web Services port
+  win_wait_for:
+    host: localhost
+    port: 9389
+    timeout: 600
+
+- name: Ensure AD Services are started
+  win_service:
+    name: "{{ item }}"
+    state: started
+    start_mode: auto
+  with_items:
+    - dns
+    - adws
+
+- name: Set Reverse Lookup Zone
+  win_ad_reverse_dnszone:
+    subnet: "{{ ptr_zone_cidr }}"
+    zonename: "{{ ptr_zone_name }}"
+    state: present
+  register: reverse
+  until: reverse is not failed
+  retries: 100
+
+- name: Create DNS A record for gitlab
+  win_ad_dnsrecord:
+    hostname: gitlab
+    zone: "{{ dns_domain_name }}"
+    ipaddr: "{{ hostvars['gitlab']['private_ip_address'] }}"
+    state: present
+
+- name: Create DNS A record for Tower
+  win_ad_dnsrecord:
+    hostname: tower
+    zone: "{{ dns_domain_name }}"
+    ipaddr: "{{ hostvars['tower']['private_ip_address'] }}"
+    state: present
+
+- name: Create DNS A record for Win1
+  win_ad_dnsrecord:
+    hostname: win1
+    zone: "{{ dns_domain_name }}"
+    ipaddr: "{{ hostvars['win1']['private_ip_address'] }}"
+    state: present
+
+- name: Create DNS A record for Win2
+  win_ad_dnsrecord:
+    hostname: win2
+    zone: "{{ dns_domain_name }}"
+    ipaddr: "{{ hostvars['win2']['private_ip_address'] }}"
+    state: present
+
+#TODO: fix adding this group to administrators, s/b regular users
+- name: Add windows group
+  win_domain_group:
+    name: Ansible Users
+    scope: global
+
+- name: Add windows domain admin
+  win_domain_user:
+    name: "Admin"
+    upn: "Admin@{{ dns_domain_name }}"
+    state: present
+    enabled: yes
+    account_locked: no
+    groups:
+      - Domain Admins
+    password: "{{ windows_password }}"
+    update_password: on_create
+    password_expired: false
+    firstname: admin
+    surname: user
+    company: Training
+    email: "Admin@{{ dns_domain_name }}"
+
+- name: Add windows AD users
+  win_domain_user:
+    name: "{{ user_prefix }}"
+    upn: "{{ user_prefix }}@{{ dns_domain_name }}"
+    state: present
+    enabled: yes
+    account_locked: no
+    groups:
+      - Ansible Users
+    password: "{{ windows_password }}"
+    update_password: on_create
+    password_expired: false
+    firstname: "{{ user_prefix }}"
+    surname: "student"
+    company: Training
+    email: "{{ user_prefix }}@{{ dns_domain_name }}"
+
+- name: Set DNS search string to {{ dns_domain_name }}
+  win_dns_searchsuffix:
+    suffixes:
+      - "{{ dns_domain_name }}"
