@@ -1,0 +1,117 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Generate Quay Superuser Password
+  set_fact:
+    _quay_superuser_password: "{{ lookup('password', '/dev/null length=12 chars=ascii_letters') }}"
+  when:
+  - _quay_superuser_password is not defined or _quay_superuser_password|length == 0
+
+- name: Check if key file exist on bastion VM
+  become: yes
+  become_user: root
+  when: _quay_ssl_key | length == 0
+  block:
+  - name: Check for Key file on Bastion
+    stat:
+      path: "/home/ec2-user/certificates/privkey.pem"
+    register: r_ssl_key
+  - name: Read Key file from Bastion
+    when: r_ssl_key.stat.exists
+    slurp:
+      src: "/home/ec2-user/certificates/privkey.pem"
+    register: _quay_ssl_key_file
+  - name: Set _quay_ssl_key
+    when: r_ssl_key.stat.exists
+    set_fact:
+      _quay_ssl_key: "{{ _quay_ssl_key_file['content'] }}"
+
+- name: Check if certificate file exist on bastion VM
+  become: yes
+  become_user: root
+  when: _quay_ssl_certificate | length == 0
+  block:
+  - name: Check for Certificate file on Bastion
+    stat:
+      path: "/home/ec2-user/certificates/fullchain.pem"
+    register: r_ssl_cert
+  - name: Read Certificate file from Bastion
+    when: r_ssl_cert.stat.exists
+    slurp:
+      src: "/home/ec2-user/certificates/fullchain.pem"
+    register: _quay_ssl_cert_file
+  - name: Set _quay_ssl_certificate
+    when: r_ssl_cert.stat.exists
+    set_fact:
+      _quay_ssl_certificate: "{{ _quay_ssl_cert_file['content'] }}"
+
+- name: Determine Cluster Base Domain for Quay Route
+  k8s_facts:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: r_ingress_config
+
+- name: Set the Base Domain for Quay
+  set_fact:
+    _quay_route: "quay-{{ guid }}.{{ r_ingress_config.resources[0].spec.domain }}"
+
+- name: Create OpenShift Objects for Red Hat Quay Registry prerequisites
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/project.j2
+  - ./templates/crd.j2
+  - ./templates/service_account.j2
+  - ./templates/cluster_role.j2
+  - ./templates/cluster_role_binding.j2
+  - ./templates/role.j2
+  - ./templates/role_binding.j2
+  - ./templates/operator.j2
+  - ./templates/pull_secret.j2
+  - ./templates/quay_superuser_secret.j2
+  - ./templates/quay_config_secret.j2
+
+- name: Create OpenShift Objects for Red Hat Quay Registry Certificates
+  when:
+  - _quay_ssl_certificate | length > 0
+  - _quay_ssl_key | length > 0
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/quay_ssl_certificate_secret.j2
+
+- name: Create OpenShift Objects for Red Hat Quay Registry
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/quay.j2
+
+- name: Print Student as user.info
+  debug:
+    msg: "{{ item }}"
+  with_items:
+  - "user.info: Quay is available at https://{{ _quay_route }}. It may take 5 to 10 minutes for this route to respond."
+  - "user.info: The Quay Super User is {{ _quay_superuser_username }} with password {{ _quay_superuser_password }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

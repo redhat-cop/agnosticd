@@ -3,121 +3,164 @@
 
 # Implement your Workload deployment tasks here
 
-## Based on https://github.com/openshift-labs/workshop-dashboard/blob/2.14.4/templates/production.json
-## Parameters according to https://github.com/kaovilai/openshift-cns-testdrive/
+# Equivalent instruction to the following
+# oc new-app https://raw.githubusercontent.com/openshift-labs/workshop-dashboard/3.5.0/templates/production-cluster-admin.json -n labguide \
+#    --param APPLICATION_NAME=admin \
+#    --param WORKSHOPPER_URLS=https://raw.githubusercontent.com/openshift/openshift-cns-testdrive/ocp4-prod/labguide/_ocp_admin_testdrive.yaml \
+#    --param PROJECT_NAME=labguide \
+#    --param WORKSHOP_ENVVARS="
+# API_URL=$API_URL \
+# MASTER_URL=$MASTER_URL \
+# KUBEADMIN_PASSWORD=$KUBEADMIN_PASSWORD \
+# SSH_USERNAME=$SSH_USERNAME \
+# SSH_PASSWORD=$SSH_PASSWORD \
+# BASTION_FQDN=$BASTION_FQDN \
+# GUID=$GUID \
+# ROUTE_SUBDOMAIN=$ROUTE_SUBDOMAIN \
+# HOME_PATH=$HOME_PATH"
+#
 
-- name: create the labguide Project
+- name: set variables
+  set_fact:
+    project_name: labguide
+    app_name: admin #don't forget to replace this value under ServiceAccount.metadata.annotations.
+    terminal_image: quay.io/openshiftlabs/workshop-dashboard:3.5.0
+    # console_version: 4.1.0 replaced by grabbing exact quay image.
+    workshop_env: "API_URL={{ api_url }} \
+          MASTER_URL={{ master_url }} \
+          KUBEADMIN_PASSWORD={{ kubeadmin_password }} \
+          SSH_USERNAME={{ student_name }} \
+          SSH_PASSWORD={{ student_password }} \
+          BASTION_FQDN={{ bastion_fqdn }} \
+          GUID={{ guid }} \
+          ROUTE_SUBDOMAIN={{ route_subdomain }} \
+          HOME_PATH=/opt/app-root/src"
+    serviceaccounts_oauth_redirectref_first: "'{\"kind\":\"OAuthRedirectReference\",\"apiVersion\":\"v1\",\"reference\":{\"kind\":\"Route\",\"name\":\"admin\"}}'"
+    download_url: https://raw.githubusercontent.com/openshift/openshift-cns-testdrive/ocp4-prod/labguide
+    workshop_file: _ocp_admin_testdrive.yaml
+  register: facts_set
+- debug:
+    var: facts_set
+
+- name: create the Project
   k8s:
     state: present
-    definition:
-      apiVersion: project.openshift.io/v1
-      kind: Project
-      metadata:
-        name: labguide
-        annotations: 
-          openshift.io/requester: kube:admin
-      status:
-        phase: active
+    name: "{{ project_name }}"
+    kind: ProjectRequest
+    api_version: project.openshift.io/v1
+  register: ProjectRequest
+- debug:
+    var: ProjectRequest
+  when: not silent|bool
 
-- name: create ServiceAccount
+- name: create the ServiceAccount
   k8s:
+    namespace: "{{ project_name }}"
     state: present
+    api_version: v1
     definition:
       kind: ServiceAccount
-      apiVersion: v1
       metadata:
-        name: "admin-user"
-        namespace: labguide
+        name: "{{ app_name }}-user"
         labels:
-          app: "admin"
+          app: "{{ app_name }}"
         annotations:
-          serviceaccounts.openshift.io/oauth-redirectreference.first: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"admin"}}'
+          serviceaccounts.openshift.io/oauth-redirectreference.first: "{\"kind\":\"OAuthRedirectReference\",\"apiVersion\":\"v1\",\"reference\":{\"kind\":\"Route\",\"name\":\"admin\"}}"
           serviceaccounts.openshift.io/oauth-redirecturi.first: oauth_callback
           serviceaccounts.openshift.io/oauth-want-challenges: 'false'
+  register: ServiceAccount
+- debug:
+    var: ServiceAccount
+  when: not silent|bool
 
-- name: create RoleBinding
+- name: "create the ClusterRoleBinding {{ app_name }}-admin"
   k8s:
+    namespace: "{{ project_name }}"
     state: present
     definition:
       apiVersion: rbac.authorization.k8s.io/v1
-      kind: RoleBinding
+      kind: ClusterRoleBinding
       metadata:
+        name: "{{ app_name }}-cluster-admin"
         labels:
-          app: admin
-        name: admin-admin
-        namespace: labguide
-      roleRef:
-        apiGroup: rbac.authorization.k8s.io
-        kind: ClusterRole
-        name: admin
+          app: "{{ app_name }}"
       subjects:
       - kind: ServiceAccount
-        name: admin-user
+        name: "{{ app_name }}-user"
+        namespace: "{{ project_name }}"
+      roleRef:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        name: cluster-admin
+  register: ClusterRoleBinding
+- debug:
+    var: ClusterRoleBinding
+  when: not silent|bool
 
-- name: create ImageStream
+- name: create the ImageStream
   k8s:
     state: present
+    namespace: "{{ project_name }}"
     definition:
+      apiVersion: image.openshift.io/v1
       kind: ImageStream
-      apiVersion: v1
       metadata:
-        name: "admin"
-        namespace: labguide
+        name: "{{ app_name }}"
         labels:
-          app: "admin"
+          app: "{{ app_name }}"
       spec:
         lookupPolicy:
           local: true
         tags:
         - name: latest
-          referencePolicy:
-            type: Source
           from:
             kind: DockerImage
-            name: "quay.io/openshiftlabs/workshop-dashboard:2.14.4"
+            name: "{{ terminal_image }}"
+  register: ImageStream
+- debug:
+    var: ImageStream
+  when: not silent|bool
 
-- name: cat the kubeadmin-password
-  shell: "cat /home/{{ ansible_user }}/cluster-{{ guid }}/auth/kubeadmin-password"
-  register: kubeadmin_password
-
-- name: extract the sandbox id
-  shell: "echo {{ target_host }} | cut -d. -f3"
-  register: sandbox_id
-
-- name: create ConfigMap
+- name: create the ConfigMap
   k8s:
+    namespace: "{{ project_name }}"
     state: present
     definition:
       kind: ConfigMap
-      apiVersion: v1
       metadata:
-        name: "admin-env"
-        namespace: labguide
+        name: "{{ app_name }}-env"
         labels:
-          app: "admin"
+          app: "{{ app_name }}"
       data:
-        # terminal.sh: "${TERMINAL_ENVVARS}"
-        workshop.sh: "API_URL=https://api.{{ target_host }}:6443 \
-         MASTER_URL=https://console-openshift-console.apps.cluster-{{ guid }}.{{ sandbox_id.stdout }}.opentlc.com \
-         KUBEADMIN_PASSWORD={{ kubeadmin_password.stdout }} \
-         SSH_PASSWORD={{ target_host_password }} \
-         BASTION_FQDN={{ target_host }} \
-         GUID={{ guid }} \
-         ROUTE_SUBDOMAIN=apps.cluster-{{ guid }}.{{ sandbox_id.stdout }}.opentlc.com \
-         HOME_PATH=/opt/app-root/src"
-        # gateway.sh: "${GATEWAY_ENVVARS}"
+        workshop.sh: "{{ workshop_env }}"
+  register: ConfigMap
+- debug:
+    var: ConfigMap
+  when: not silent|bool
 
-- name: create DeploymentConfig
+- name: Grab openshift-console console quay.io image to be embedded in homeroom
+  k8s_facts:
+    kind: Deployment
+    api_version: apps/v1
+    namespace: openshift-console
+    name: console
+  register: console_image_url_raw
+- debug:
+    var: console_image_url_raw.resources[0].spec.template.spec.containers[0].image
+- name: set fact console_image_url
+  set_fact:
+    console_image_url: "{{ console_image_url_raw.resources[0].spec.template.spec.containers[0].image }}"
+
+- name: create the DeploymentConfig
   k8s:
-    state: present
+    namespace: "{{ project_name }}"
     definition:
       kind: DeploymentConfig
       apiVersion: v1
       metadata:
-        name: "admin"
-        namespace: labguide
+        name: "{{ app_name }}"
         labels:
-          app: "admin"
+          app: "{{ app_name }}"
       spec:
         strategy:
           type: Recreate
@@ -130,28 +173,28 @@
             - terminal
             from:
               kind: ImageStreamTag
-              name: "admin:latest"
+              name: "{{ app_name }}:latest"
         replicas: 1
         selector:
-          app: "admin"
-          deploymentconfig: "admin"
+          app: "{{ app_name }}"
+          deploymentconfig: "{{ app_name }}"
         template:
           metadata:
             labels:
-              app: "admin"
-              deploymentconfig: "admin"
+              app: "{{ app_name }}"
+              deploymentconfig: "{{ app_name }}"
           spec:
-            serviceAccountName: "admin-user"
+            serviceAccountName: "{{ app_name }}-user"
             initContainers:
             - name: setup-console
-              image: "quay.io/openshiftlabs/workshop-dashboard:2.14.4"
+              image: "{{ terminal_image }}"
               command:
               - "/opt/workshop/bin/setup-console.sh"
-              env:
-              - name: OPENSHIFT_USERNAME
-                value: "{{ ocp_username }}"
-              - name: OPENSHIFT_PASSWORD
-                value: "{{ kubeadmin_password.stdout }}"
+              # env:
+              # - name: OPENSHIFT_USERNAME
+              #   value: "${OPENSHIFT_USERNAME}"
+              # - name: OPENSHIFT_PASSWORD
+              #   value: "${OPENSHIFT_PASSWORD}"
               # - name: OPENSHIFT_TOKEN
               #   value: "${OPENSHIFT_TOKEN}"
               # - name: OC_VERSION
@@ -165,7 +208,7 @@
                 mountPath: "/var/run/workshop"
             containers:
             - name: terminal
-              image: "admin:latest"
+              image: "{{ app_name }}:latest"
               ports:
               - containerPort: 10080
                 protocol: TCP
@@ -175,15 +218,19 @@
                   fieldRef:
                     fieldPath: metadata.namespace
               - name: APPLICATION_NAME
-                value: "admin"
-              - name: AUTH_USERNAME
-                value: "{{ ocp_username }}"
-              - name: AUTH_PASSWORD
-                value: "{{ kubeadmin_password.stdout }}"
+                value: "{{ app_name }}"
+              # - name: AUTH_USERNAME
+              #   value: "${AUTH_USERNAME}"
+              # - name: AUTH_PASSWORD
+              #   value: "${AUTH_PASSWORD}"
               - name: OAUTH_SERVICE_ACCOUNT
-                value: "admin-user"
-              - name: WORKSHOPPER_URLS
-                value: "https://raw.githubusercontent.com/openshift/openshift-cns-testdrive/ocp4-dev/labguide/_ocp_admin_testdrive.yaml"
+                value: "{{ app_name }}-user"
+              - name: DOWNLOAD_URL
+                value: "{{ download_url }}"
+              - name: WORKSHOP_FILE
+                value: "{{ workshop_file }}"
+              # - name: WORKSHOPPER_URLS
+              #   value: "${WORKSHOPPER_URLS}"
               - name: CONSOLE_URL
                 value: http://0.0.0.0:10083
               # - name: OC_VERSION
@@ -198,7 +245,8 @@
               - name: shared
                 mountPath: "/var/run/workshop"
             - name: console
-              image: quay.io/openshift/origin-console:4.2.0
+              image: "{{ console_image_url }}"
+              #image: "quay.io/openshift/origin-console:{{ console_version }}"
               command:
               - "/var/run/workshop/start-console.sh"
               env:
@@ -220,22 +268,26 @@
             volumes:
             - name: envvars
               configMap:
-                name: "admin-env"
+                name: "{{ app_name }}-env"
                 defaultMode: 420
             - name: shared
               emptyDir: {}
 
-- name: create Service
+  register: DeploymentConfig
+- debug:
+    var: DeploymentConfig
+  when: not silent|bool
+
+- name: create the Service
   k8s:
+    namespace: "{{ project_name }}"
     state: present
+    kind: Service
     definition:
-      kind: Service
-      apiVersion: v1
       metadata:
-        name: "admin"
-        namespace: "labguide"
+        name: "{{ app_name }}"
         labels:
-          app: "admin"
+          app: "{{ app_name }}"
       spec:
         ports:
         - name: 10080-tcp
@@ -243,34 +295,72 @@
           port: 10080
           targetPort: 10080
         selector:
-          app: "admin"
-          deploymentconfig: "admin"
+          app: "{{ app_name }}"
+          deploymentconfig: "{{ app_name }}"
+  register: Service
+- debug:
+    var: Service
+  when: not silent|bool
 
-- name: create Route
+- name: create the Route
   k8s:
+    namespace: "{{ project_name }}"
     state: present
+    kind: Route
     definition:
-      kind: Route
-      apiVersion: v1
       metadata:
-        name: "admin"
-        namespace: labguide
+        name: "{{ app_name }}"
         labels:
-          app: "admin"
+          app: "{{ app_name }}"
       spec:
+        host: ''
         to:
           kind: Service
-          name: "admin"
+          name: "{{ app_name }}"
           weight: 100
         port:
           targetPort: 10080-tcp
         tls:
           termination: edge
           insecureEdgeTerminationPolicy: Redirect
+  register: Route
+
+- name: add kubeadmin to RoleBinding admin enabling route access
+  k8s:
+    namespace: "{{ project_name }}"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: "{{ app_name }}"
+        labels:
+          app: "{{ app_name }}"
+      subjects:
+      - kind: User
+        apiGroup: rbac.authorization.k8s.io
+        name: 'kube:admin'
+      roleRef:
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        name: admin
+  register: RoleBinding
+- debug:
+    var: RoleBinding
+  when: not silent|bool
+
+- debug:
+    msg:
+    - "user.info: "
+    - "user.info: Access the workshop at '{{ Route.result.spec.host }}'"
+    - "user.info: Login with 'kubeadmin' and '{{ kubeadmin_password }}'"
+    - "user.info: "
+    - "user.info: Workshop may not be accessible until rollout finishes shortly."
+  when: not silent|bool
 
 # Leave this as the last task in the playbook.
+
 - name: workload tasks complete
   debug:
     msg: "Workload Tasks completed successfully."
   when: not silent|bool
-

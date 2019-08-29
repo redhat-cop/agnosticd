@@ -1,0 +1,62 @@
+---
+# Implement your Workload removal tasks here
+
+# Find IP of bastion
+- name: Gather VPC facts
+  ec2_vpc_net_facts:
+    filters:
+      tag:Name: "{{ aws_vpc_name }}"
+    region: "{{ aws_region_final | default(aws_region) }}"
+  register: vpc
+
+- name: Get instance facts
+  ec2_instance_facts:
+    filters:
+# FIXME - find a better way to discover the bastion name
+      "tag:Name": "{{ instances[0].name }}"
+    region: "{{ aws_region_final | default(aws_region) }}"
+  register: instancesr
+  failed_when: instancesr|length == 0
+
+- name: Get non-terminated instance
+  set_fact:
+    ec2instance: "{{ item }}"
+  with_items:
+  - "{{ instancesr.instances }}"
+  when: not item.state.name == 'terminated'
+  failed_when: ec2instance is undefined
+
+# Remove external DNS of MySQL in OpenShift cluster private zone
+- name: Get cluster metadata
+  slurp:
+    path: "{{ cluster_name }}/metadata.json"
+  register: metadata
+
+- name: Get cluster infrastructure ID
+  set_fact:
+    cluster_vpc_name: "{{ metadata.content | b64decode | from_json | json_query('infraID')}}-vpc"
+
+- name: Gather Cluster VPC facts
+  ec2_vpc_net_facts:
+    filters:
+      tag:Name: "{{ cluster_vpc_name }}"
+    region: "{{ aws_region_final | default(aws_region) }}"
+  register: cluster_vpc
+  failed_when: cluster_vpc.vpcs | length == 0
+
+- name: Remove Private DNS Entry for MySQL in cluster private zone
+  route53:
+    state: absent
+    private_zone: yes
+    record: "{{ mysql_dns_name }}"
+    type: A
+    ttl: 60
+    value: "{{ ec2instance.public_ip_address }}"
+    zone: "{{ cluster_name }}{{ subdomain_base_suffix }}."
+    vpc_id: "{{ cluster_vpc.vpcs[0].vpc_id }}"
+
+# Leave this as the last task in the playbook.
+- name: remove_workload tasks complete
+  debug:
+    msg: "Remove Workload tasks completed successfully."
+  when: not silent|bool

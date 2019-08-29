@@ -1,0 +1,183 @@
+# vim: set ft=ansible
+---
+# Implement your Workload deployment tasks here
+
+# Target: OCP4.1, Tech Preview 12
+# Source install instruction from https://maistra.io/docs/getting_started/install/
+
+
+- name: create temp directory
+  file:
+    state: directory
+    path: "/tmp/istio-install/{{ item }}"
+  loop:
+  -
+  - jaegertracing
+  - jaegertracing/jaeger-operator
+  - jaegertracing/jaeger-operator/v1.13.1
+  - jaegertracing/jaeger-operator/v1.13.1/deploy
+  - jaegertracing/jaeger-operator/v1.13.1/deploy/crds
+
+- name: set fact jaegertracing
+  set_fact:
+      jaegertracing_list:
+      - jaegertracing/jaeger-operator/v1.13.1/deploy/crds/jaegertracing_v1_jaeger_crd.yaml
+      - jaegertracing/jaeger-operator/v1.13.1/deploy/service_account.yaml
+      - jaegertracing/jaeger-operator/v1.13.1/deploy/role.yaml
+      - jaegertracing/jaeger-operator/v1.13.1/deploy/role_binding.yaml
+      - jaegertracing/jaeger-operator/v1.13.1/deploy/operator.yaml
+
+- name: get remote yamls
+  get_url:
+    force: yes
+    url: "https://raw.githubusercontent.com/{{ item }}"
+    dest: "/tmp/istio-install/{{ item }}"
+  loop: "{{ jaegertracing_list }}"
+
+#############################################################
+###############Installing the Kiali Operator#################
+#############################################################
+# bash <(curl -L https://git.io/getLatestKialiOperator) --operator-image-version v1.0.0 --operator-watch-namespace '**' --accessible-namespaces '**' --operator-install-kiali false
+- name: Check if kiali is installed, if not run the script
+  block:
+  - name: check if kiali is installed
+    k8s_facts:
+        kind: Deployment # required. Use to specify an object model. Use in conjunction with I(api_version), I(name), and I(namespace) to identify a specific object.
+        name: kiali-operator # not required. Use to specify an object name.  Use in conjunction with I(api_version), I(kind) and I(namespace) to identify a specific object.
+        namespace: kiali-operator # not required. Use to specify an object namespace. Use in conjunction with I(api_version), I(kind), and I(name) to identify a specfic object.
+        api_version: extensions/v1beta1 # not required. Use to specify the API version. in conjunction with I(kind), I(name), and I(namespace) to identify a specific object.
+    register: result
+    failed_when: result.resources | length == 0
+  rescue:
+  - debug: var=result
+  - name: get remote script for kiali
+    get_url:
+      force: yes
+      url: "https://git.io/getLatestKialiOperator"
+      dest: "/tmp/istio-install/kiali-operator-install.sh"
+      mode: u+x #enable execution of the script
+
+  - name: run kiali-operator-install.sh
+    command: /tmp/istio-install/kiali-operator-install.sh --operator-image-version v1.0.0 --operator-watch-namespace '**' --accessible-namespaces '**' --operator-install-kiali false
+#############################################################
+###############Installing the Jaeger Operator################
+#############################################################
+- name: create new project observability
+  k8s:
+    state: present
+    kind: Namespace
+    name: observability
+
+- name: apply jaegertracing yamls
+  k8s:
+    state: present
+    namespace: observability
+    src: "/tmp/istio-install/{{ item }}"
+  register: result
+  loop: "{{ jaegertracing_list }}"
+- debug: var=result
+
+- name: Wait for running jaeger-operator pods to exist
+  k8s_facts:
+    kind: Pod
+    label_selectors:
+    - name = jaeger-operator
+  register: result
+  failed_when: result.resources | length == 0
+  retries: 60
+  until: result.resources | length > 0
+- debug: var=result
+- debug:
+    msg:
+    - "{{ result.resources[0] }}"
+    - "{{ result.resources[0].status }}"
+    - "{{ result.resources[0].status.phase }}"
+    - "{{ result.resources[0].status.phase == 'Running' }}"
+
+- name: Wait for running jaeger-operator pods to get to state of running
+  k8s_facts:
+    kind: Pod
+    label_selectors:
+    - name = jaeger-operator
+  register: result
+  failed_when: "not 'Running' in result.resources[0].status.phase"
+  retries: 60
+  until: "'Running' in result.resources[0].status.phase"
+#############################################################
+###############Installing the ISTIO Operator#################
+#############################################################
+- name: get maistra-operator.yaml
+  get_url:
+    force: yes
+    url: "https://raw.githubusercontent.com/Maistra/istio-operator/maistra-0.12/deploy/maistra-operator.yaml"
+    dest: "/tmp/istio-install/maistra-operator.yaml"
+
+- name: create istio-system and istio-operator projects
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: "{{ item }}"
+  with_items:
+    - istio-operator
+
+# Do not use until https://issues.jboss.org/browse/MAISTRA-670?_sscc=t closes
+# - name: apply maistra-operator.yaml
+#   k8s:
+#     state: present
+#     definition: "{{ lookup('file','/tmp/istio-install/maistra-operator.yaml') }}"
+#   register: result
+# - debug: var=result
+- name: create maistra-operator.yaml
+  block:
+  - name: create maistra-operator.yaml
+    command: oc create -n istio-operator -f /tmp/istio-install/maistra-operator.yaml
+  rescue:
+  - debug: msg="There is an existing maistra-operator. Deleting."
+  - name: deleting existing maistra-operator.yaml
+    command: oc delete -n istio-operator -f /tmp/istio-install/maistra-operator.yaml --wait
+    ignore_errors: yes
+  - name: create maistra-operator.yaml
+    command: oc create -n istio-operator -f /tmp/istio-install/maistra-operator.yaml
+
+- name: Wait for maistra-operator.yaml pods to exist
+  k8s_facts:
+    kind: Pod
+    namespace: istio-operator
+    label_selectors:
+    - name = istio-operator
+  register: result
+  failed_when: result.resources | length == 0
+  retries: 60
+  until: result.resources | length > 0
+- name: Wait for running maistra-operator.yaml pods
+  k8s_facts:
+    kind: Pod
+    namespace: istio-operator
+    label_selectors:
+    - name = istio-operator
+  register: result
+  failed_when: "not 'Running' in result.resources[0].status.phase"
+  retries: 60
+  until: "'Running' in result.resources[0].status.phase"
+
+- name: wait up to 5 minutes for istio operator pod to be ready
+  shell: "oc get deployment -n istio-operator istio-operator -o jsonpath='{.status.readyReplicas}'"
+  register: istio_deployment_status
+  until: "istio_deployment_status.stdout | int >= 1"
+  retries: 5
+  delay: 60
+
+- name: remove temp directory
+  file:
+    state: absent
+    path: "/tmp/istio-install"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
+
