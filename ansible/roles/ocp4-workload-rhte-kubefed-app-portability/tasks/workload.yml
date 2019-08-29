@@ -5,7 +5,15 @@
   debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
-- name: Ensure OpenShift Objects for KubeFed are Created
+- name: Get cluster wildcard domain from ingresses config
+  shell: oc get ingresses.config.openshift.io cluster -o jsonpath='{ .spec.domain }'
+  register: wildcarddomain
+
+- set_fact:
+    gogs_route_hostname: "gogs.{{ wildcarddomain.stdout }}"
+    argocd_route_hostname: "argocd.{{ wildcarddomain.stdout }}"
+
+- name: Ensure OpenShift Objects for ArgoCD are Created
   k8s:
     state: present
     merge_type:
@@ -13,49 +21,101 @@
     - merge
     definition: "{{ lookup('template', item ) | from_yaml }}"
   loop:
-    - ./templates/kubefed_project.j2
-    - ./templates/catalog_source_config.j2
-    - ./templates/operator_group.j2
-    - ./templates/subscription.j2
+    - ./templates/argocd_project.j2
 
-- name: Wait until InstallPlan is Created
-  shell: oc get installplan -o name -n "{{ _kubefed_project }}" | awk -F "/" '{print $2}'
-  register: install_plan
-  retries: 30
-  delay: 10
-  until: install_plan.stdout != ""
+- name: Ensure ArgoCD template is present
+  template:
+    src: ./templates/argocd_install.j2
+    dest: /tmp/argocd_install.yaml
+    mode: 0666
 
-- name: Ensure InstallPlan is Approved
-  command: oc patch installplan "{{ install_plan.stdout }}" --type merge -p '{"spec":{"approved":true}}' -n "{{ _kubefed_project }}"
+- name: Ensure ArgoCD template is instantiated
+  shell: oc -n "{{ _argocd_project }}" apply -f /tmp/argocd_install.yaml
 
-- name: Wait until CSV is Installed
-  command: oc get csv "{{ _kubefed_subscription_csv }}" -o jsonpath='{.status.phase}' -n "{{ _kubefed_project }}"
-  register: csv
-  retries: 30
-  delay: 10
-  until: csv.stdout == "Succeeded"
-
-- name: Get KubeFed Operator Deployment Desired Replicas
-  command: oc get deployment "{{ _kubefed_operator_deployment }}" -o jsonpath='{.status.replicas}' -n "{{ _kubefed_project }}"
-  register: kubefed_operator_desired_replicas
-  retries: 30
-  delay: 10
-  until: kubefed_operator_desired_replicas.stdout != ""
-
-- name: Wait until KubeFed Operator Deployment is Ready
-  command: oc get deployment "{{ _kubefed_operator_deployment }}" -o jsonpath='{.status.readyReplicas}' -n "{{ _kubefed_project }}" 
-  register: kubefed_operator_ready_replicas
-  retries: 30
-  delay: 10
-  until: kubefed_operator_ready_replicas.stdout == kubefed_operator_desired_replicas.stdout
-
-- name: Ensure kubefedctl Tool is Downloaded
-  unarchive: 
-    src: "https://github.com/kubernetes-sigs/kubefed/releases/download/v{{ _kubefedctl_release }}/kubefedctl-{{ _kubefedctl_release }}-linux-amd64.tgz"
-    dest: /usr/local/bin
-    remote_src: yes
+- name: Ensure argocd Tool is Downloaded
+  get_url:
+    url: "https://github.com/argoproj/argo-cd/releases/download/{{ _argocd_release }}/argocd-linux-amd64"
+    dest: /usr/local/bin/argocd
     mode: 0755
   become: true
+
+- name: Get ArgoCD Server Deployment Desired Replicas
+  command: oc get deployment "{{ _argocd_server_deployment }}" -o jsonpath='{.status.replicas}' -n "{{ _argocd_project }}"
+  register: argocd_server_desired_replicas
+  retries: 30
+  delay: 10
+  until: argocd_server_desired_replicas.stdout != "" and argocd_server_desired_replicas.stdout != "0"
+
+- name: Wait until ArgoCD Server Deployment is Ready
+  command: oc get deployment "{{ _argocd_server_deployment }}" -o jsonpath='{.status.readyReplicas}' -n "{{ _argocd_project }}"
+  register: argocd_server_ready_replicas
+  retries: 30
+  delay: 10
+  until: argocd_server_ready_replicas.stdout == argocd_server_desired_replicas.stdout
+
+- name: Get ArgoCD Server Pod name
+  command: oc get pod -l app.kubernetes.io/name=argocd-server -o jsonpath='{.items[*].metadata.name}' -n "{{ _argocd_project }}"
+  register: argocd_server_pod_name
+  retries: 30
+  delay: 10
+  until: argocd_server_pod_name.stdout != ""
+
+- name: Ensure ArgoCD default user is initialized - Login into ArgoCD Server
+  shell: /usr/local/bin/argocd --insecure --grpc-web login "{{ argocd_route_hostname }}":443 --username "{{ _argocd_default_user }}" --password "{{ argocd_server_pod_name.stdout }}"
+  args:
+    chdir: "/home/{{ _clientvm_student_user }}"
+  become: true
+  become_user: "{{ _clientvm_student_user }}"
+  
+- name: Esure ArgoCD default user is initialized - Update default ArgoCD Password
+  shell: /usr/local/bin/argocd --insecure --grpc-web --server "{{ argocd_route_hostname }}":443 account update-password --current-password "{{ argocd_server_pod_name.stdout }}" --new-password "{{ _argocd_default_user_password }}"
+  args:
+    chdir: "/home/{{ _clientvm_student_user }}"
+  become: true
+  become_user: "{{ _clientvm_student_user }}"
+
+- name: Ensure OpenShift Objects for Gogs are Created
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+    - ./templates/gogs_project.j2
+
+- name: Ensure gogs template is present
+  template:
+    src: ./templates/gogs-persistent-template.j2
+    dest: /tmp/gogs-persistent-template.yaml
+    mode: 0666
+
+- name: Ensure gogs template is instantiated
+  shell: oc process -f /tmp/gogs-persistent-template.yaml -p HOSTNAME="{{ gogs_route_hostname }}"  | oc -n "{{ _gogs_project }}" apply -f -
+
+- name: Get Gogs Server Deployment Desired Replicas
+  command: oc get deploymentconfig "{{ _gogs_server_deployment }}" -o jsonpath='{.status.replicas}' -n "{{ _gogs_project }}"
+  register: gogs_server_desired_replicas
+  retries: 30
+  delay: 10
+  until: gogs_server_desired_replicas.stdout != "" and gogs_server_desired_replicas.stdout != "0"
+
+- name: Wait until Gogs Server Deployment is Ready
+  command: oc get deploymentconfig "{{ _gogs_server_deployment }}" -o jsonpath='{.status.readyReplicas}' -n "{{ _gogs_project }}"
+  register: gogs_server_ready_replicas
+  retries: 30
+  delay: 10
+  until: gogs_server_ready_replicas.stdout == gogs_server_desired_replicas.stdout
+
+- name: Get Gogs Server Pod name
+  command: oc get pod -l app=gogs -o jsonpath='{.items[*].metadata.name}' -n "{{ _gogs_project }}"
+  register: gogs_server_pod_name
+  retries: 30
+  delay: 10
+  until: gogs_server_pod_name.stdout != ""
+
+- name: Ensure Gogs default user is initialized
+  command: oc -n "{{ _gogs_project }}" exec "{{ gogs_server_pod_name.stdout }}" init-gogs "{{ _gogs_default_user }}" "{{ _gogs_default_user_password }}" "{{ _gogs_default_user_mail }}"
 
 - name: Ensure cfssl Tool is Downloaded
   get_url:
@@ -79,10 +139,11 @@
   become: true
   loop:
     - ./files/gen-mongo-certs
-    - ./files/init-lab
+    - ./files/argocd-add-clusters
     - ./files/wait-for-deployment
     - ./files/namespace-cleanup
     - ./files/wait-for-mongo-replicaset
+    - ./files/wait-for-argo-app
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
