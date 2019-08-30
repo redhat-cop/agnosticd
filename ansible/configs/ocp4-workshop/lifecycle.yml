@@ -1,0 +1,66 @@
+---
+# Start / Stop Logic for OCP 4 Clusters
+
+- import_playbook: ../../setup_runtime.yml
+
+- name: Run stop/start/status/... actions
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: no
+  tasks:
+  - name: Check for project_tag
+    when: project_tag is not defined or project_tag == ''
+    fail:
+      msg: "project_tag is not defined"
+
+  - name: Check for ACTION
+    when: ACTION is not defined
+    fail:
+      msg: "ACTION is not defined"
+
+  - name: Start / Stop VMs on AWS
+    when: cloud_provider == 'ec2'
+    environment:
+      AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+      AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+      AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+    block:
+    - name: Stop instances by (guid,env_type) tags
+      when: ACTION == 'stop'
+      ec2_instance:
+        state: stopped
+        wait: no
+        filters:
+          "tag:guid": "{{ guid }}"
+          "tag:env_type": "{{ env_type }}"
+
+    - name: Start instances by (guid, env_type) tags
+      when: ACTION == 'start'
+      ec2_instance:
+        state: started
+        wait: yes
+        filters:
+          "tag:guid": "{{ guid }}"
+          "tag:env_type": "{{ env_type }}"
+
+- name: Run recover cluster actions
+  hosts: bastions
+  run_once: True
+  gather_facts: False
+  become: no
+  tasks:
+  - name: Recover cluster if it missed cert rotation
+    when: ACTION == 'start'
+    # environment:
+    #   KUBECONFIG: "cluster-{{ guid }}/auth/kubeconfig"     
+    block:
+    - name: Wait 5 minutes for Nodes to settle and pods to start
+      pause:
+        minutes: 5
+    - name: Get Node Readiness status
+      shell: "oc get nodes|grep -v AGE|awk -c '{print $2}'"
+      register: r_nodestatus
+    - name: Approve CSRs if Nodes show NotReady
+      when: r_nodestatus.stdout_lines | select('match', 'NotReady' ) | list | length > 0
+      shell: "oc get csr -oname | xargs oc adm certificate approve"
