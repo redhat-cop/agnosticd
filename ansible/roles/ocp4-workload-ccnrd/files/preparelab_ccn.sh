@@ -218,8 +218,155 @@ for i in $(eval echo "{0..$USERCOUNT}") ; do
     oc adm policy add-scc-to-user anyuid -z default -n user$i-cloudnativeapps 
     oc adm policy add-scc-to-user privileged -z default -n user$i-cloudnativeapps 
     oc adm policy add-role-to-user admin user$i -n user$i-cloudnativeapps 
+    oc adm policy add-role-to-user view user$i -n istio-system  
   fi
 done
+
+# Install Custom Resource Definitions, Knative Serving, Knative Eventing
+if [ -z "${MODULE_TYPE##*m4*}" ] ; then
+  echo -e "Installing Knative Subscriptions..."
+  oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/catalog-sources.yaml
+  
+  echo -e "Installing Knative Serving..."
+  oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-serving-subscription.yaml
+ 
+  echo -e "Installing Knative Eventing..."
+  oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-eventing-subscription.yaml
+
+  for i in $(eval echo "{0..$USERCOUNT}") ; do
+    oc adm policy add-role-to-user view user$i -n knative-serving
+  done
+  
+echo -e "Creating Role, Group, and assign Users"
+for i in $(eval echo "{0..$USERCOUNT}") ; do
+cat <<EOF | oc apply -n user$i-cloudnativeapps -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workshop-student$i
+rules:
+  - apiGroups: ["serving.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["eventing.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["sources.eventing.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["messaging.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["networking.internal.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["autoscaling.internal.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["caching.internal.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["tekton.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+EOF
+sleep 2
+oc policy add-role-to-user workshop-student$i user$i --role-namespace=user$i-cloudnativeapps -n user$i-cloudnativeapps
+done
+
+# Install AMQ Streams operator for all namespaces
+cat <<EOF | oc apply -n openshift-marketplace -f -
+apiVersion: operators.coreos.com/v1
+kind: CatalogSourceConfig
+metadata:
+  finalizers:
+  - finalizer.catalogsourceconfigs.operators.coreos.com
+  name: installed-redhat-openshift-operators
+  namespace: openshift-marketplace
+spec:
+  csDisplayName: Red Hat Operators
+  csPublisher: Red Hat
+  packages: amq-streams
+  targetNamespace: openshift-operators
+EOF
+
+cat <<EOF | oc apply -n openshift-operators -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  labels:
+    csc-owner-name: installed-redhat-openshift-operators
+    csc-owner-namespace: openshift-marketplace
+  name: amq-streams
+  namespace: openshift-operators
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: amq-streams
+  source: installed-redhat-openshift-operators
+  sourceNamespace: openshift-operators
+EOF
+
+# Install Knative Kafka operator for all namespaces
+cat <<EOF | oc apply -n openshift-marketplace -f -
+apiVersion: operators.coreos.com/v1
+kind: CatalogSourceConfig
+metadata:
+  finalizers:
+  - finalizer.catalogsourceconfigs.operators.coreos.com
+  name: installed-community-openshift-operators
+  namespace: openshift-marketplace
+spec:
+  csDisplayName: Community Operators
+  csPublisher: Community
+  packages: knative-kafka-operator
+  targetNamespace: openshift-operators
+EOF
+
+cat <<EOF | oc apply -n openshift-operators -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  labels:
+    csc-owner-name: installed-community-openshift-operators
+    csc-owner-namespace: openshift-marketplace
+  name: knative-kafka-operator
+  namespace: openshift-operators
+spec:
+  channel: alpha
+  installPlanApproval: Automatic
+  name: knative-kafka-operator
+  source: installed-community-openshift-operators
+  sourceNamespace: openshift-operators
+EOF
+
+# cat <<EOF | oc create -f -
+# apiVersion: eventing.knative.dev/v1alpha1
+# kind: KnativeEventingKafka
+# metadata:
+#   name: knative-eventing-kafka
+#   namespace: knative-eventing
+# spec:
+#   bootstrapServers: "DUMMY:9092"
+#   setAsDefaultChannelProvisioner: no
+# EOF
+
+echo -e "Installing Tekton pipelines"
+oc new-project tekton-pipelines
+oc adm policy add-scc-to-user anyuid -z tekton-pipelines-controller
+oc apply --filename https://storage.googleapis.com/tekton-releases/latest/release.yaml
+
+echo -e "Creating new test-pipeline projects"
+for i in $(eval echo "{0..$USERCOUNT}") ; do
+  oc new-project user$i-cloudnative-pipeline
+  oc create serviceaccount pipeline
+  oc adm policy add-scc-to-user privileged -z pipeline
+  oc adm policy add-role-to-user edit -z pipeline
+  oc delete limitranges user$i-cloudnative-pipeline-core-resource-limits
+  oc adm policy add-role-to-user admin user$i -n user$i-cloudnative-pipeline
+done
+
+fi
 
 # deploy guides
 for MODULE in $(echo $MODULE_TYPE | sed "s/,/ /g") ; do
