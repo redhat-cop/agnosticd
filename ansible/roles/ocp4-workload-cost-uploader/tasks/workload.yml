@@ -1,0 +1,111 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: install insights-client
+  become: true
+  yum:
+    name: 
+      - insights-client
+      - unzip
+    state: present
+
+- name: get latest stable insights-client egg
+  become: true
+  get_url:
+    url: https://api.access.redhat.com/r/insights/v1/static/core/insights-core.egg
+    dest: "/var/lib/insights/last_stable.egg"
+
+- name: get latest stable insights-client egg.asc
+  become: true
+  get_url:
+    url: https://api.access.redhat.com/r/insights/v1/static/core/insights-core.egg.asc
+    dest: "/var/lib/insights/last_stable.egg.asc"
+
+- name: create insights-client.conf
+  become: true
+  copy:
+    src: ../files/insights-client.conf
+    dest: "/etc/insights-client/insights-client.conf"
+
+- name: insights-client - setup run to get latest eggs
+  become: true
+  command: insights-client --version
+
+- name: create .config and directory
+  file:
+    path: "/home/ec2-user/.config"
+    state: directory
+
+- name: Login as system:admin
+  command: oc login -u system:admin
+
+#- name: get cluster ID
+#  command: oc get clusterversion version -o=jsonpath="{.spec.clusterID}"
+#  register: r_CLUSTER_ID
+
+- name: Get API endpoint
+  command: oc whoami --show-server
+  register: r_API_ENDPOINT
+
+- name: Get Metering Route
+  command: oc get route -n openshift-metering metering -o=jsonpath='{.status.ingress[0].host}'
+  register: r_METERING_ROUTE
+  retries: 30
+  delay: 10
+  until: r_METERING_ROUTE.rc == 0
+
+- name: Get token credentials of metering service account
+  command: oc -n openshift-metering serviceaccounts get-token reporting-operator
+  register: r_OCP_SERVICEACCOUNT_TOKEN
+
+- name: Create Token File
+  copy:
+    content: "{{ r_OCP_SERVICEACCOUNT_TOKEN.stdout }}"
+    dest: "/home/ec2-user/{{ guid }}.token"
+
+- name: Download Korekuta
+  get_url:
+    url: https://github.com/project-koku/korekuta/archive/master.zip
+    dest: "/home/ec2-user/"
+
+- name: Unzip master.zip
+  unarchive:
+    remote_src: yes
+    src: "/home/ec2-user/korekuta-master.zip"
+    dest: "/home/ec2-user/"
+    creates: "/home/ec2-user/korekuta-master/"
+
+- name: Run Korekuta Setup for this cluster
+  command: |
+    /home/ec2-user/korekuta-master/ocp_usage.sh --setup 
+    -e OCP_API='{{ r_API_ENDPOINT.stdout }}' 
+    -e OCP_METERING_NAMESPACE='openshift-metering' 
+    -e OCP_TOKEN_PATH='/home/ec2-user/{{ guid }}.token' 
+    -e METERING_API='https://{{ r_METERING_ROUTE.stdout }}'
+
+- name: Get Korekuta cluster identifier
+  shell: |
+    ls /home/ec2-user/.config/ocp_usage/ |
+    sed 's/\///g'
+  register: r_CLUSTER_ID
+
+- name: Create Korekuta Cronjob
+  cron:
+    name: korekuta
+    minute: "*/45"
+    job: "/home/ec2-user/korekuta-master/ocp_usage.sh --collect --e OCP_CLUSTER_ID={{ r_CLUSTER_ID.stdout }}"
+
+- name: Login as system:admin
+  command: oc login -u system:admin
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
+
+
