@@ -425,7 +425,7 @@ for MODULE in $(echo $MODULE_TYPE | sed "s/,/ /g") ; do
       -e CHE_USER_PASSWORD=${GOGS_PWD} \
       -e OPENSHIFT_USER_NAME=userXX \
       -e OPENSHIFT_USER_PASSWORD=${GOGS_PWD} \
-      -e RHAMT_URL=rhamt-web-console-labs-infra.$HOSTNAME_SUFFIX \
+      -e RHAMT_URL=http://rhamt-web-console-labs-infra.$HOSTNAME_SUFFIX \
       -e LOG_TO_STDOUT=true
   oc -n labs-infra expose svc/guides-$MODULE
 done
@@ -715,14 +715,16 @@ oc import-image --all quarkus-stack -n openshift
 # Pre-create workspaces for users
 for i in $(eval echo "{0..$USERCOUNT}") ; do
     SSO_CHE_TOKEN=$(curl -s -d "username=user${i}&password=${GOGS_PWD}&grant_type=password&client_id=admin-cli" \
-        -X POST http://keycloak-che.${HOSTNAME_SUFFIX}/auth/realms/codeready/protocol/openid-connect/token | jq  -r '.access_token')
+        -X POST http://keycloak-labs-infra.${HOSTNAME_SUFFIX}/auth/realms/codeready/protocol/openid-connect/token | jq  -r '.access_token')
 
     TMPWORK=$(mktemp)
-    sed 's/WORKSPACENAME/WORKSPACE'${i}'/g' https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/workspace.json > $TMPWORK
+    wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/workspace.json
+    sed 's/WORKSPACENAME/WORKSPACE'${i}'/g' workspace.json > $TMPWORK
+    rm -rf workspace.json
 
     curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json' \
     --header "Authorization: Bearer ${SSO_CHE_TOKEN}" -d @${TMPWORK} \
-    "http://codeready-che.${HOSTNAME_SUFFIX}/api/workspace?start-after-create=true&namespace=user${i}"
+    "http://codeready-labs-infra.${HOSTNAME_SUFFIX}/api/workspace?start-after-create=true&namespace=user${i}"
     rm -f $TMPWORK
 done
 
