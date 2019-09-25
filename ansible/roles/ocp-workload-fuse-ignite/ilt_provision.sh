@@ -2,7 +2,7 @@
 
 END_PROJECT_NUM=1
 START_PROJECT_NUM=1
-WORKLOAD="ocp-workload-fuse-ignite"
+WORKLOAD="ocp-workload-fuse-online"
 LOG_FILE=/tmp/$WORKLOAD
 
 POSTGRESQL_MEMORY_LIMIT=512Mi
@@ -49,7 +49,7 @@ function help() {
 function login() {
 
     echo -en "\nHOST_GUID=$HOST_GUID\n" >> $LOG_FILE
-    oc login https://master.$HOST_GUID.openshift.opentlc.com -u opentlc-mgr -p r3dh4t1!
+    oc login https://master.$HOST_GUID.open.redhat.com -u opentlc-mgr -p r3dh4t1!
 }
 
 
@@ -94,4 +94,3 @@ function executeAnsibleViaLocalhost() {
 ensurePreReqs
 login
 executeLoop
-
