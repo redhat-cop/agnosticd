@@ -699,6 +699,12 @@ rm -rf stack-ccn.json
 STACK_ID=$(echo $STACK_RESULT | jq -r '.id')
 echo -e "STACK_ID: $STACK_ID"
 
+# Give all users access to the stack
+echo -e "Giving all users access to the stack...\n"
+curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json' \
+    --header "Authorization: Bearer ${SSO_CHE_TOKEN}" -d '{"userId": "*", "domainId": "stack", "instanceId": "'"$STACK_ID"'", "actions": [ "read", "search" ]}' \
+    "http://codeready-labs-infra.$HOSTNAME_SUFFIX/api/permissions"
+
 # Scale the cluster
 WORKERCOUNT=$(oc get nodes|grep worker | wc -l)
 if [ "$WORKERCOUNT" -lt 10 ] ; then
