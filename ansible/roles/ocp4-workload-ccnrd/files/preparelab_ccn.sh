@@ -705,15 +705,6 @@ curl -X POST --header 'Content-Type: application/json' --header 'Accept: applica
     --header "Authorization: Bearer ${SSO_CHE_TOKEN}" -d '{"userId": "*", "domainId": "stack", "instanceId": "'"$STACK_ID"'", "actions": [ "read", "search" ]}' \
     "http://codeready-labs-infra.$HOSTNAME_SUFFIX/api/permissions"
 
-# Scale the cluster
-WORKERCOUNT=$(oc get nodes|grep worker | wc -l)
-if [ "$WORKERCOUNT" -lt 10 ] ; then
-    for i in $(oc get machinesets -n openshift-machine-api -o name | grep worker| cut -d'/' -f 2) ; do
-      echo "Scaling $i to 11 replicas"
-      oc patch -n openshift-machine-api machineset/$i -p '{"spec":{"replicas": 11}}' --type=merge
-    done
-fi
-
 # import stack image
 oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/stack.imagestream.yaml
 oc import-image --all quarkus-stack -n openshift
