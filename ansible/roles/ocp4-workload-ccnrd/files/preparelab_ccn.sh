@@ -699,14 +699,11 @@ rm -rf stack-ccn.json
 STACK_ID=$(echo $STACK_RESULT | jq -r '.id')
 echo -e "STACK_ID: $STACK_ID"
 
-# Scale the cluster
-WORKERCOUNT=$(oc get nodes|grep worker | wc -l)
-if [ "$WORKERCOUNT" -lt 10 ] ; then
-    for i in $(oc get machinesets -n openshift-machine-api -o name | grep worker| cut -d'/' -f 2) ; do
-      echo "Scaling $i to 11 replicas"
-      oc patch -n openshift-machine-api machineset/$i -p '{"spec":{"replicas": 11}}' --type=merge
-    done
-fi
+# Give all users access to the stack
+echo -e "Giving all users access to the stack...\n"
+curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json' \
+    --header "Authorization: Bearer ${SSO_CHE_TOKEN}" -d '{"userId": "*", "domainId": "stack", "instanceId": "'"$STACK_ID"'", "actions": [ "read", "search" ]}' \
+    "http://codeready-labs-infra.$HOSTNAME_SUFFIX/api/permissions"
 
 # import stack image
 oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/stack.imagestream.yaml
