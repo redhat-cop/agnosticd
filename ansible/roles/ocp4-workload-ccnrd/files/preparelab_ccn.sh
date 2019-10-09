@@ -634,18 +634,7 @@ wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-
 oc apply -f cm-custom-codeready.yaml -n labs-infra
 
 oc scale -n labs-infra deployment/codeready --replicas=0
-
-# Wait for che to be up after --replicas=0
-echo "Waiting for Che to come up after --replicas=0"
-while [ 1 ]; do
-  STAT=$(curl -s -w '%{http_code}' -o /dev/null http://codeready-labs-infra.$HOSTNAME_SUFFIX/dashboard/)
-  if [ "$STAT" = 200 ] ; then
-    break
-  fi
-  echo -n .
-  sleep 10
-done
-
+sleep 10
 oc scale -n labs-infra deployment/codeready --replicas=1
 
 # Wait for che to be back up
