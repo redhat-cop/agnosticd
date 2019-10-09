@@ -648,16 +648,6 @@ done
 
 oc scale -n labs-infra deployment/codeready --replicas=1
 
-echo "Waiting for Che to come back up after --replicas=1..."
-while [ 1 ]; do
-  STAT=$(curl -s -w '%{http_code}' -o /dev/null http://codeready-labs-infra.$HOSTNAME_SUFFIX/dashboard/)
-  if [ "$STAT" = 200 ] ; then
-    break
-  fi
-  echo -n .
-  sleep 10
-done
-
 # Wait for che to be back up
 echo "Waiting for Che to come back up..."
 while [ 1 ]; do
