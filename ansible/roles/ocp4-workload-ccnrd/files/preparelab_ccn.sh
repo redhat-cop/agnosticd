@@ -632,8 +632,31 @@ done
 # workaround for PVC problem
 wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/cm-custom-codeready.yaml
 oc apply -f cm-custom-codeready.yaml -n labs-infra
+
 oc scale -n labs-infra deployment/codeready --replicas=0
+
+# Wait for che to be up after --replicas=0
+echo "Waiting for Che to come up after --replicas=0"
+while [ 1 ]; do
+  STAT=$(curl -s -w '%{http_code}' -o /dev/null http://codeready-labs-infra.$HOSTNAME_SUFFIX/dashboard/)
+  if [ "$STAT" = 200 ] ; then
+    break
+  fi
+  echo -n .
+  sleep 10
+done
+
 oc scale -n labs-infra deployment/codeready --replicas=1
+
+echo "Waiting for Che to come back up after --replicas=1..."
+while [ 1 ]; do
+  STAT=$(curl -s -w '%{http_code}' -o /dev/null http://codeready-labs-infra.$HOSTNAME_SUFFIX/dashboard/)
+  if [ "$STAT" = 200 ] ; then
+    break
+  fi
+  echo -n .
+  sleep 10
+done
 
 # Wait for che to be back up
 echo "Waiting for Che to come back up..."
@@ -708,6 +731,17 @@ curl -X POST --header 'Content-Type: application/json' --header 'Accept: applica
 # import stack image
 oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/stack.imagestream.yaml
 oc import-image --all quarkus-stack -n openshift
+
+# Checking if che is up
+echo "Checking if che is up..."
+while [ 1 ]; do
+  STAT=$(curl -s -w '%{http_code}' -o /dev/null http://codeready-labs-infra.$HOSTNAME_SUFFIX/dashboard/)
+  if [ "$STAT" = 200 ] ; then
+    break
+  fi
+  echo -n .
+  sleep 10
+done
 
 # Pre-create workspaces for users
 for i in $(eval echo "{0..$USERCOUNT}") ; do
