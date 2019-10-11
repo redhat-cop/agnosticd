@@ -218,8 +218,196 @@ for i in $(eval echo "{0..$USERCOUNT}") ; do
     oc adm policy add-scc-to-user anyuid -z default -n user$i-cloudnativeapps 
     oc adm policy add-scc-to-user privileged -z default -n user$i-cloudnativeapps 
     oc adm policy add-role-to-user admin user$i -n user$i-cloudnativeapps 
+    oc adm policy add-role-to-user view user$i -n istio-system  
   fi
 done
+
+# Install Custom Resource Definitions, Knative Serving, Knative Eventing
+if [ -z "${MODULE_TYPE##*m4*}" ] ; then
+  echo -e "Installing Knative Subscriptions..."
+  oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/catalog-sources.yaml
+  
+  echo -e "Installing Knative Serving..."
+  oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-serving-subscription.yaml
+ 
+  echo -e "Installing Knative Eventing..."
+  oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-eventing-subscription.yaml
+
+  for i in $(eval echo "{0..$USERCOUNT}") ; do
+    oc adm policy add-role-to-user view user$i -n knative-serving
+  done
+  
+echo -e "Creating Role, Group, and assign Users"
+for i in $(eval echo "{0..$USERCOUNT}") ; do
+cat <<EOF | oc apply -n user$i-cloudnativeapps -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workshop-student$i
+rules:
+  - apiGroups: ["serving.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["eventing.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["sources.eventing.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["messaging.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["networking.internal.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["autoscaling.internal.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["caching.internal.knative.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: ["tekton.dev"]
+    resources: ["*"]
+    verbs: ["*"]
+EOF
+sleep 2
+oc policy add-role-to-user workshop-student$i user$i --role-namespace=user$i-cloudnativeapps -n user$i-cloudnativeapps
+done
+
+# Install AMQ Streams operator for all namespaces
+cat <<EOF | oc apply -n openshift-marketplace -f -
+apiVersion: operators.coreos.com/v1
+kind: CatalogSourceConfig
+metadata:
+  finalizers:
+  - finalizer.catalogsourceconfigs.operators.coreos.com
+  name: installed-redhat-openshift-operators
+  namespace: openshift-marketplace
+spec:
+  csDisplayName: Red Hat Operators
+  csPublisher: Red Hat
+  packages: amq-streams
+  targetNamespace: openshift-operators
+EOF
+
+cat <<EOF | oc apply -n openshift-operators -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  labels:
+    csc-owner-name: installed-redhat-openshift-operators
+    csc-owner-namespace: openshift-marketplace
+  name: amq-streams
+  namespace: openshift-operators
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: amq-streams
+  source: installed-redhat-openshift-operators
+  sourceNamespace: openshift-operators
+EOF
+
+# Install Knative Kafka operator for all namespaces
+cat <<EOF | oc apply -n openshift-marketplace -f -
+apiVersion: operators.coreos.com/v1
+kind: CatalogSourceConfig
+metadata:
+  finalizers:
+  - finalizer.catalogsourceconfigs.operators.coreos.com
+  name: installed-community-openshift-operators
+  namespace: openshift-marketplace
+spec:
+  csDisplayName: Community Operators
+  csPublisher: Community
+  packages: knative-kafka-operator
+  targetNamespace: openshift-operators
+EOF
+
+cat <<EOF | oc apply -n openshift-operators -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  labels:
+    csc-owner-name: installed-community-openshift-operators
+    csc-owner-namespace: openshift-marketplace
+  name: knative-kafka-operator
+  namespace: openshift-operators
+spec:
+  channel: alpha
+  installPlanApproval: Automatic
+  name: knative-kafka-operator
+  source: installed-community-openshift-operators
+  sourceNamespace: openshift-operators
+EOF
+
+# Install Kafka cluster in Knative-eventing
+cat <<EOF | oc create -f -
+apiVersion: kafka.strimzi.io/v1beta1
+kind: Kafka
+metadata:
+  name: my-cluster
+  namespace: knative-eventing
+spec:
+  kafka:
+    version: 2.2.1
+    replicas: 3
+    listeners:
+      plain: {}
+      tls: {}
+    config:
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      log.message.format.version: '2.2'
+    storage:
+      type: ephemeral
+  zookeeper:
+    replicas: 3
+    storage:
+      type: ephemeral
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}
+EOF
+
+# Wait for checluster to be a thing
+echo "Waiting for Kafka CRD"
+while [ true ] ; do
+  if [ "$(oc explain kafka -n knative-eventing)" ] ; then
+    break
+  fi
+  echo -n .
+  sleep 10
+done
+
+# Create KnativeEventingKafka in Knative-eventing
+cat <<EOF | oc create -f -
+apiVersion: eventing.knative.dev/v1alpha1
+kind: KnativeEventingKafka
+metadata:
+  name: knative-eventing-kafka
+  namespace: knative-eventing
+spec:
+  bootstrapServers: 'my-cluster-kafka-bootstrap:9092'
+  setAsDefaultChannelProvisioner: false
+EOF
+
+echo -e "Installing Tekton pipelines"
+oc new-project tekton-pipelines
+oc adm policy add-scc-to-user anyuid -z tekton-pipelines-controller
+oc apply --filename https://storage.googleapis.com/tekton-releases/latest/release.yaml
+
+echo -e "Creating new test-pipeline projects"
+for i in $(eval echo "{0..$USERCOUNT}") ; do
+  oc new-project user$i-cloudnative-pipeline
+  oc create serviceaccount pipeline
+  oc adm policy add-scc-to-user privileged -z pipeline
+  oc adm policy add-role-to-user edit -z pipeline
+  oc delete limitranges user$i-cloudnative-pipeline-core-resource-limits
+  oc adm policy add-role-to-user admin user$i -n user$i-cloudnative-pipeline
+done
+
+fi
 
 # deploy guides
 for MODULE in $(echo $MODULE_TYPE | sed "s/,/ /g") ; do
@@ -233,6 +421,11 @@ for MODULE in $(echo $MODULE_TYPE | sed "s/,/ /g") ; do
       -e ROUTE_SUBDOMAIN=$HOSTNAME_SUFFIX \
       -e CONTENT_URL_PREFIX="https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2$MODULE-guides/master" \
       -e WORKSHOPS_URLS="https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2$MODULE-guides/master/_cloud-native-workshop-module$MODULE_NO.yml" \
+      -e CHE_USER_NAME=userXX \
+      -e CHE_USER_PASSWORD=${GOGS_PWD} \
+      -e OPENSHIFT_USER_NAME=userXX \
+      -e OPENSHIFT_USER_PASSWORD=${GOGS_PWD} \
+      -e RHAMT_URL=http://rhamt-web-console-labs-infra.$HOSTNAME_SUFFIX \
       -e LOG_TO_STDOUT=true
   oc -n labs-infra expose svc/guides-$MODULE
 done
@@ -439,7 +632,9 @@ done
 # workaround for PVC problem
 wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/cm-custom-codeready.yaml
 oc apply -f cm-custom-codeready.yaml -n labs-infra
+
 oc scale -n labs-infra deployment/codeready --replicas=0
+sleep 10
 oc scale -n labs-infra deployment/codeready --replicas=1
 
 # Wait for che to be back up
@@ -484,6 +679,14 @@ rm -rf ccnrd-realm.json
 echo "Keycloak credentials: $KEYCLOAK_USER / $KEYCLOAK_PASSWORD"
 echo "URL: http://keycloak-labs-infra.${HOSTNAME_SUFFIX}"
 
+# Create Che users
+for i in $(eval echo "{0..$USERCOUNT}") ; do
+    USERNAME=user${i}
+    FIRSTNAME=User${i}
+    LASTNAME=Developer
+    curl -v -H "Authorization: Bearer ${SSO_TOKEN}" -H "Content-Type:application/json" -d '{"username":"user'${i}'","enabled":true,"emailVerified": true,"firstName": "User'${i}'","lastName": "Developer","email": "user'${i}'@no-reply.com", "credentials":[{"type":"password","value":"'${GOGS_PWD}'","temporary":false}]}' -X POST "http://keycloak-labs-infra.${HOSTNAME_SUFFIX}/auth/admin/realms/codeready/users"
+done
+
 # Import stack definition
 SSO_CHE_TOKEN=$(curl -s -d "username=admin&password=admin&grant_type=password&client_id=admin-cli" \
   -X POST http://keycloak-labs-infra.$HOSTNAME_SUFFIX/auth/realms/codeready/protocol/openid-connect/token | \
@@ -504,14 +707,36 @@ curl -X POST --header 'Content-Type: application/json' --header 'Accept: applica
     --header "Authorization: Bearer ${SSO_CHE_TOKEN}" -d '{"userId": "*", "domainId": "stack", "instanceId": "'"$STACK_ID"'", "actions": [ "read", "search" ]}' \
     "http://codeready-labs-infra.$HOSTNAME_SUFFIX/api/permissions"
 
-# Scale the cluster
-WORKERCOUNT=$(oc get nodes|grep worker | wc -l)
-if [ "$WORKERCOUNT" -lt 10 ] ; then
-    for i in $(oc get machinesets -n openshift-machine-api -o name | grep worker| cut -d'/' -f 2) ; do
-      echo "Scaling $i to 3 replicas"
-      oc patch -n openshift-machine-api machineset/$i -p '{"spec":{"replicas": 3}}' --type=merge
-    done
-fi
+# import stack image
+oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/stack.imagestream.yaml
+oc import-image --all quarkus-stack -n openshift
+
+# Checking if che is up
+echo "Checking if che is up..."
+while [ 1 ]; do
+  STAT=$(curl -s -w '%{http_code}' -o /dev/null http://codeready-labs-infra.$HOSTNAME_SUFFIX/dashboard/)
+  if [ "$STAT" = 200 ] ; then
+    break
+  fi
+  echo -n .
+  sleep 10
+done
+
+# Pre-create workspaces for users
+for i in $(eval echo "{0..$USERCOUNT}") ; do
+    SSO_CHE_TOKEN=$(curl -s -d "username=user${i}&password=${GOGS_PWD}&grant_type=password&client_id=admin-cli" \
+        -X POST http://keycloak-labs-infra.${HOSTNAME_SUFFIX}/auth/realms/codeready/protocol/openid-connect/token | jq  -r '.access_token')
+
+    TMPWORK=$(mktemp)
+    wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/workspace.json
+    sed 's/WORKSPACENAME/WORKSPACE'${i}'/g' workspace.json > $TMPWORK
+    rm -rf workspace.json
+
+    curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json' \
+    --header "Authorization: Bearer ${SSO_CHE_TOKEN}" -d @${TMPWORK} \
+    "http://codeready-labs-infra.${HOSTNAME_SUFFIX}/api/workspace?start-after-create=true&namespace=user${i}"
+    rm -f $TMPWORK
+done
 
 end_time=$SECONDS
 elapsed_time_sec=$(( end_time - start_time ))
