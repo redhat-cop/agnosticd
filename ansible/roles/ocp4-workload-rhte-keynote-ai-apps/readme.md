@@ -15,7 +15,7 @@
 - Install the ODH role in each of three projects:
   - `ansible-playbook -i bastion.${RHPDS_GUID}.open.redhat.com, -u ${RHPDS_USER} configs/ocp-workloads/ocp-workload.yml -e"ansible_user=${RHPDS_USER}" -e"ocp_username=opentlc-mgr" -e"ocp_workload=ocp4-workload-rhte-keynote-ai-odh-setup" -e"silent=True" -e"guid=$RHPDS_GUID" -e"ACTION=create" -e"num_users=3"`
 - Install the notebook image and Kafka apps:
-  - `ansible-playbook -i bastion.${RHPDS_GUID}.open.redhat.com, -u ${RHPDS_USER} configs/ocp-workloads/ocp-workload.yml -e"ansible_user=${RHPDS_USER}" -e"ocp_username=opentlc-mgr" -e"ocp_workload=ocp4-workload-rhte-keynote-ai-odh-apps" -e"silent=True" -e"guid=$RHPDS_GUID" -e"ACTION=create" -e"num_users=3"`
+  - `ansible-playbook -i bastion.${RHPDS_GUID}.open.redhat.com, -u ${RHPDS_USER} configs/ocp-workloads/ocp-workload.yml -e"ansible_user=${RHPDS_USER}" -e"ocp_username=opentlc-mgr" -e"ocp_workload=ocp4-workload-rhte-keynote-ai-apps" -e"silent=True" -e"guid=$RHPDS_GUID" -e"ACTION=create" -e"num_users=3"`
 
 ## How to set up for a run
 
