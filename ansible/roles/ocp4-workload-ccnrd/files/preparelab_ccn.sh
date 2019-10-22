@@ -232,10 +232,6 @@ if [ -z "${MODULE_TYPE##*m4*}" ] ; then
  
   echo -e "Installing Knative Eventing..."
   oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-eventing-subscription.yaml
-
-  for i in $(eval echo "{0..$USERCOUNT}") ; do
-    oc adm policy add-role-to-user view user$i -n knative-serving
-  done
   
 echo -e "Creating Role, Group, and assign Users"
 for i in $(eval echo "{0..$USERCOUNT}") ; do
@@ -405,6 +401,10 @@ for i in $(eval echo "{0..$USERCOUNT}") ; do
   oc adm policy add-role-to-user edit -z pipeline
   oc delete limitranges user$i-cloudnative-pipeline-core-resource-limits
   oc adm policy add-role-to-user admin user$i -n user$i-cloudnative-pipeline
+done
+
+for i in $(eval echo "{0..$USERCOUNT}") ; do
+  oc adm policy add-role-to-user view user$i -n knative-serving
 done
 
 fi
@@ -632,7 +632,9 @@ done
 # workaround for PVC problem
 wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/cm-custom-codeready.yaml
 oc apply -f cm-custom-codeready.yaml -n labs-infra
+
 oc scale -n labs-infra deployment/codeready --replicas=0
+sleep 10
 oc scale -n labs-infra deployment/codeready --replicas=1
 
 # Wait for che to be back up
@@ -707,7 +709,19 @@ curl -X POST --header 'Content-Type: application/json' --header 'Accept: applica
 
 # import stack image
 oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/stack.imagestream.yaml
+sleep 5
 oc import-image --all quarkus-stack -n openshift
+
+# Checking if che is up
+echo "Checking if che is up..."
+while [ 1 ]; do
+  STAT=$(curl -s -w '%{http_code}' -o /dev/null http://codeready-labs-infra.$HOSTNAME_SUFFIX/dashboard/)
+  if [ "$STAT" = 200 ] ; then
+    break
+  fi
+  echo -n .
+  sleep 10
+done
 
 # Pre-create workspaces for users
 for i in $(eval echo "{0..$USERCOUNT}") ; do
