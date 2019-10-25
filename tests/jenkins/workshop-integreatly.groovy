@@ -111,7 +111,7 @@ pipeline {
                         'check=t',
                         'check2=t',
                         'quotacheck=t',
-                        'app_version=${integreatly}',
+                        "app_version=${integreatly}",
                         "ocprelease=${ocprelease}",
                         'notes=devops_automation_jenkins',
                     ].join(',').trim()
