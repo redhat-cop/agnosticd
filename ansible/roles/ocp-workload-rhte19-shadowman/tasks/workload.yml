@@ -18,13 +18,8 @@
 - name: Create Kafka Cluster
   shell: oc apply -f https://raw.githubusercontent.com/roller1187/kafka-workshop/master/setup/my-cluster.yaml -n {{ocp_project}}
 
-- name: Make Temp Directory
-  file:
-      path: /tmp/certs/
-      state: directory
-
-- name: Extract Secret
-  shell: oc extract -n {{ocp_project}} secret/my-cluster-cluster-ca-cert --keys=ca.crt --to=- > /tmp/certs/ca.crt
+- name: Extract Kafka Secret
+  shell: oc extract -n {{ocp_project}} secret/my-cluster-cluster-ca-cert --keys=ca.crt --confirm=true
   register: result
   until: result.rc == 0
   retries: 5
@@ -32,7 +27,7 @@
 
 # Directive Producer
 - name: Create ConfigMap for Kafka
-  shell: oc -n {{ocp_project}} create configmap kafka-cert --from-file=/tmp/certs/ca.crt -n {{ocp_project}}
+  shell: oc -n {{ocp_project}} create configmap kafka-cert --from-file=./ca.crt -n {{ocp_project}}
 
 - name: Get Kafka Route
   shell: oc -n {{ocp_project}} get route/my-cluster-kafka-bootstrap -o jsonpath='{.spec.host}'
@@ -100,6 +95,20 @@
 - name: Expose demojam-zombie
   shell: oc -n {{ocp_project}} expose svc/demojam-zombie
 
+- name: Get demojam-zombie Route
+  shell: oc -n {{ocp_project}} get route/demojam-zombie -o jsonpath='{.spec.host}'
+  register: demojam_url
+  until: demojam_url.rc == 0
+  retries: 5
+  delay: 10
+
+- name: Find demojam-zombie Pod Name
+  command: "oc get pods -l app=demojam-zombie -o jsonpath={.items[0].metadata.name} -n {{ ocp_project }}"
+  register: demojam_zombie_name
+  until: demojam_zombie_name.rc == 0
+  retries: 5
+  delay: 10
+
 # Data Grid
 - name: Load Data Grid Template
   shell: |
@@ -118,7 +127,63 @@
 - name: Expose datagrid-service ping
   shell: oc -n {{ocp_project}} expose svc/datagrid-service-ping
 
+- name: Extract Datagrid Secret
+  command: oc extract secret/service-certs --keys=tls.crt --confirm=true -n {{ ocp_project }}
+  register: result
+  until: result.rc == 0
+  retries: 5
+  delay: 10
 
+- name: Get Datagrid Route
+  shell: oc -n {{ocp_project}} get route/datagrid-service-hotrod -o jsonpath='{.spec.host}'
+  register: datagrid_url
+  until: datagrid_url.rc == 0
+  retries: 5
+  delay: 10
+
+- name: Find Directive Producer Pod Name
+  command: "oc get pods -l app=directive-producer -o jsonpath={.items[0].metadata.name} -n {{ ocp_project }}"
+  register: directive_producer_name
+  until: directive_producer_name.rc == 0
+  retries: 5
+  delay: 10
+
+- name: Wait Until Directive Producer is Ready
+  command: "oc get pods -l app=directive-producer -o jsonpath={.items[0].status.containerStatuses[0].ready} -n {{ ocp_project }}"
+  register: producer_container
+  until: producer_container.stdout == "true"
+  retries: 5
+  delay: 10
+
+- name: Download Directive Consumer Jar
+  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- curl -Lo ./directive-consumer.jar https://github.com/andykrohg/directive-consumer/releases/download/1.0/directive-consumer-1.0.0.jar
+
+- name: Extract Directive Consumer Jar
+  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- jar -xf directive-consumer.jar BOOT-INF/classes
+
+- name: Copy ca.crt into Directive Consumer Jar
+  command: oc cp ./ca.crt {{ ocp_project }}/{{ directive_producer_name.stdout }}:/home/jboss/BOOT-INF/classes/ca.crt
+
+- name: Copy tls.crt into Directive Consumer Jar
+  command: oc cp ./tls.crt {{ ocp_project }}/{{ directive_producer_name.stdout }}:/home/jboss/BOOT-INF/classes/tls.crt
+
+- name: Update Kafka Properties
+  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- sed s/{kafka-host}/{{ kafka_url.stdout }}/g -i ./BOOT-INF/classes/kafka.properties
+
+- name: Update Datagrid Properties
+  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- sed s/{datagrid-host}/{{ datagrid_url.stdout }}/g -i ./BOOT-INF/classes/datagrid.properties
+
+- name: Update Game Properties
+  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- sed s/{game-url}/http:\\/\\/{{ demojam_url.stdout }}/g -i ./BOOT-INF/classes/game.properties
+
+- name: Update Directive Consumer Jar
+  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- jar -uf ./directive-consumer.jar BOOT-INF/classes
+
+- name: Download Updated Jar from Directive Consumer
+  command: oc rsync -n {{ ocp_project }} {{ directive_producer_name.stdout }}:/home/jboss/directive-consumer.jar .
+
+- name: Serve Directive Consumer from demojam-zombie App
+  command: oc cp ./directive-consumer.jar {{ ocp_project }}/{{ demojam_zombie_name.stdout }}:/opt/app-root/src/
 
 
 - name: workload Tasks Complete
