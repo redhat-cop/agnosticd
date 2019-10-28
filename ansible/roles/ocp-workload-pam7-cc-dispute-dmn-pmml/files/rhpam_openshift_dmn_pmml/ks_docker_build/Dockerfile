@@ -1,4 +1,4 @@
-FROM docker-registry.default.svc:5000/openshift/rhpam75-kieserver-openshift:1.0
+FROM docker-registry.default.svc:5000/openshift/rhpam-kieserver-rhel8:7.5.0
 
 # jPMML
 ADD https://search.maven.org/remotecontent?filepath=org/jpmml/pmml-evaluator/1.4.9/pmml-evaluator-1.4.9.jar /opt/eap/standalone/deployments/ROOT.war/WEB-INF/lib/pmml-evaluator-1.4.9.jar
