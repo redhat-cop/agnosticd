@@ -69,46 +69,6 @@
 - name: Expose Landing Page
   shell: oc -n {{ocp_project}} expose svc/landing-page
 
-# DemoJam Zombie App
-- name: Create proxy.conf
-  shell: echo -e RewriteRule ^/camel/rest/gameover/\(.*\) http://directive-producer:8080/camel/rest/gameOver/\$1 [P]\\nProxyPass \"/camel/rest/gameover/\" \"http://directive-producer:8080/camel/rest/gameOver/\" nocanon\\nProxyPassReverse \"/camel/rest/gameover/\"  \"http://directive-producer:8080/camel/rest/gameOver/\"\\nProxyRequests     Off\\nAllowEncodedSlashes NoDecode > ./proxy.conf
-
-- name: Create Httpd ConfigMap 
-  shell: oc create -n {{ocp_project}} configmap producer-url --from-file=./proxy.conf
-
-- name: Get Landing Page Route
-  shell: oc -n {{ocp_project}} get route/landing-page -o jsonpath='{.spec.host}'
-  register: join_link
-
-- name: Create Join Link ConfigMap
-  shell: oc -n {{ocp_project}} create configmap join-link --from-literal=link.txt=http://{{join_link.stdout}}
-
-- name: Create Application demojam-zombie
-  shell: oc new-app -n {{ocp_project}} httpd:2.4~https://github.com/andykrohg/demojam-zombie.git
-
-- name: Mount Httpd ConfigMap into demojam-zombie
-  shell: oc -n {{ocp_project}} set volume dc/demojam-zombie --add --type=configmap --configmap-name=producer-url --mount-path=/opt/app-root/etc/httpd.d
-
-- name: Mount Join Link ConfigMap into demojam-zombie
-  shell: oc -n {{ocp_project}} set volume dc/demojam-zombie --add --type=configmap --configmap-name=join-link --mount-path=/opt/app-root/src/config
-
-- name: Expose demojam-zombie
-  shell: oc -n {{ocp_project}} expose svc/demojam-zombie
-
-- name: Get demojam-zombie Route
-  shell: oc -n {{ocp_project}} get route/demojam-zombie -o jsonpath='{.spec.host}'
-  register: demojam_url
-  until: demojam_url.rc == 0
-  retries: 5
-  delay: 10
-
-- name: Find demojam-zombie Pod Name
-  command: "oc get pods -l app=demojam-zombie -o jsonpath={.items[0].metadata.name} -n {{ ocp_project }}"
-  register: demojam_zombie_name
-  until: demojam_zombie_name.rc == 0
-  retries: 5
-  delay: 10
-
 # Data Grid
 - name: Load Data Grid Template
   shell: |
@@ -134,6 +94,9 @@
   retries: 5
   delay: 10
 
+- name: Create Datagrid ConfigMap
+  shell: oc -n {{ocp_project}} create configmap datagrid-cert --from-file=./tls.crt -n {{ocp_project}} 
+
 - name: Get Datagrid Route
   shell: oc -n {{ocp_project}} get route/datagrid-service-hotrod -o jsonpath='{.spec.host}'
   register: datagrid_url
@@ -141,50 +104,28 @@
   retries: 5
   delay: 10
 
-- name: Find Directive Producer Pod Name
-  command: "oc get pods -l app=directive-producer -o jsonpath={.items[0].metadata.name} -n {{ ocp_project }}"
-  register: directive_producer_name
-  until: directive_producer_name.rc == 0
-  retries: 5
-  delay: 10
+# Directive Consumer
+- name: Create Directive Consumer Project
+  shell: oc -n {{ocp_project}} new-app java:8~https://github.com/andykrohg/directive-consumer.git -e KAFKA_BROKERS={{kafka_url.stdout}}:443 -e DATAGRID_HOST={{datagrid_url.stdout}}
 
-- name: Wait Until Directive Producer is Ready
-  command: "oc get pods -l app=directive-producer -o jsonpath={.items[0].status.containerStatuses[0].ready} -n {{ ocp_project }}"
-  register: producer_container
-  until: producer_container.stdout == "true"
-  retries: 5
-  delay: 10
+- name: Get Landing Page Route
+  shell: oc -n {{ocp_project}} get route/landing-page -o jsonpath='{.spec.host}'
+  register: join_link
 
-- name: Download Directive Consumer Jar
-  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- curl -Lo ./directive-consumer.jar https://github.com/andykrohg/directive-consumer/releases/download/1.0/directive-consumer-1.0.0.jar
+- name: Create Join Link ConfigMap
+  shell: oc -n {{ocp_project}} create configmap join-link --from-literal=link.txt=http://{{join_link.stdout}}
 
-- name: Extract Directive Consumer Jar
-  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- jar -xf directive-consumer.jar BOOT-INF/classes
+- name: Mount Join Link ConfigMap into the consumer
+  shell: oc -n {{ocp_project}} set volume dc/directive-consumer --add --type=configmap --configmap-name=join-link --mount-path=/tmp/src/src/main/resources/static/config
 
-- name: Copy ca.crt into Directive Consumer Jar
-  command: oc cp ./ca.crt {{ ocp_project }}/{{ directive_producer_name.stdout }}:/home/jboss/BOOT-INF/classes/ca.crt
+- name: Add Kafka ConfigMap to Consumer
+  shell: oc -n {{ocp_project}} set volume dc/directive-consumer --add --type=configmap --configmap-name=kafka-cert --mount-path=/tmp/certs/kafka
 
-- name: Copy tls.crt into Directive Consumer Jar
-  command: oc cp ./tls.crt {{ ocp_project }}/{{ directive_producer_name.stdout }}:/home/jboss/BOOT-INF/classes/tls.crt
+- name: Add Datagrid ConfigMap to Consumer
+  shell: oc -n {{ocp_project}} set volume dc/directive-consumer --add --type=configmap --configmap-name=datagrid-cert --mount-path=/tmp/certs/datagrid
 
-- name: Update Kafka Properties
-  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- sed s/{kafka-host}/{{ kafka_url.stdout }}/g -i ./BOOT-INF/classes/kafka.properties
-
-- name: Update Datagrid Properties
-  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- sed s/{datagrid-host}/{{ datagrid_url.stdout }}/g -i ./BOOT-INF/classes/datagrid.properties
-
-- name: Update Game Properties
-  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- sed s/{game-url}/http:\\/\\/{{ demojam_url.stdout }}/g -i ./BOOT-INF/classes/game.properties
-
-- name: Update Directive Consumer Jar
-  command: oc exec {{ directive_producer_name.stdout }} -n {{ ocp_project }} -- jar -uf ./directive-consumer.jar BOOT-INF/classes
-
-- name: Download Updated Jar from Directive Consumer
-  command: oc rsync -n {{ ocp_project }} {{ directive_producer_name.stdout }}:/home/jboss/directive-consumer.jar .
-
-- name: Serve Directive Consumer from demojam-zombie App
-  command: oc cp ./directive-consumer.jar {{ ocp_project }}/{{ demojam_zombie_name.stdout }}:/opt/app-root/src/
-
+- name: Expose Consumer Route
+  shell: oc -n {{ocp_project}} expose svc/directive-consumer
 
 - name: workload Tasks Complete
   debug:
