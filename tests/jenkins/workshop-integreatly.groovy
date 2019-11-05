@@ -32,11 +32,10 @@ def choices = [
 
 def ocprelease_choice = [
     '3.11.104',
-    '3.11.16',
-    '3.10.14',
+    '3.11.43',
 ].join("\n")
 
-def integreatly_choice = [
+def ig_version_choice = [
     '1.5.1',
     '1.5.0',
     '1.4.1',
@@ -72,9 +71,9 @@ pipeline {
             name: 'ocprelease',
         )
         choice(
-            choices: integreatly_choice,
+            choices: ig_version_choice,
             description: 'Catalog item',
-            name: 'integreatly',
+            name: 'ig_version',
         )
         choice(
             choices: region_choice,
@@ -98,7 +97,7 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def integreatly = params.integreatly.trim()
+                    def ig_version = params.ig_version.trim()
                     def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
                     def cfparams = [
@@ -111,7 +110,7 @@ pipeline {
                         'check=t',
                         'check2=t',
                         'quotacheck=t',
-                        "app_version=${integreatly}",
+                        "app_version=${ig_version}",
                         "ocprelease=${ocprelease}",
                         'notes=devops_automation_jenkins',
                     ].join(',').trim()
