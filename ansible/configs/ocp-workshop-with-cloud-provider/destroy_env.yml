@@ -1,0 +1,106 @@
+---
+- import_playbook: ../../include_vars.yml
+
+- name: Delete Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: no
+  tasks:
+    - name: Delete S3 bucket
+      environment:
+        AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+        AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+        AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+      s3_bucket:
+        name: "{{ env_type }}-{{ guid }}"
+        state: absent
+        force: yes
+        region: "{{ aws_region_final|d(aws_region) }}"
+      tags:
+        - remove_s3
+      register: s3_result
+      until: s3_result is succeeded
+      retries: 5
+      delay: 60
+      ignore_errors: yes
+      when: cloud_provider == 'ec2'
+
+    - name: report s3 error
+      fail:
+        msg: "FAIL {{ project_tag }} delete s3"
+      when:
+        - s3_result is not succeeded
+        - cloud_provider == 'ec2'
+
+    - name: Delete ec2 cloud provider created resources
+      environment:
+        AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+        AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+        AWS_DEFAULT_REGION: "{{ aws_region_final|d(aws_region) }}"
+      block:
+      - name: Finding ELBs
+        action:
+          module: ec2_elb_facts
+        register: elbs
+
+      - set_fact:
+          cloud_provider_aws_elb_names: "{{ elbs | json_query(query) }}"
+        vars:
+          query: "elbs[?tags.\"kubernetes.io/cluster/{{ guid }}\" == 'owned'].name"
+
+      - name: Deleting ELBs provisioned by cloud provider
+        ec2_elb_lb:
+          name: "{{ item }}"
+          state: absent
+        loop: "{{ cloud_provider_aws_elb_names }}"
+
+      - name: Finding Sec Groups provisioned by cloud provider
+        action:
+          module: ec2_group_facts
+        register: cloud_provider_aws_groups
+
+      - set_fact:
+          cloud_provider_aws_group_ids: "{{ cloud_provider_aws_groups | json_query(query) }}"
+        vars:
+          query: "security_groups[?tags.\"kubernetes.io/cluster/{{ guid }}\" == 'owned'].group_id"
+
+      - name: Deleting Sec Groups provisioned by cloud provider
+        ec2_group:
+          group_id: "{{ item }}"
+          state: absent
+        loop: "{{ cloud_provider_aws_group_ids }}"
+      when: cloud_provider == 'ec2' and install_cloud_provider|d(false)|bool
+
+    - name: Run infra-ec2-template-destroy
+      include_role:
+        name: "infra-{{cloud_provider}}-template-destroy"
+      when: cloud_provider == 'ec2'
+
+    - block:
+      - name: Detecting EBS volumes
+        action:
+          module: ec2_vol_facts
+        register: cloud_provider_aws_ebs_vols
+      
+      - set_fact:
+          cloud_provider_aws_ebs_vol_ids: "{{ cloud_provider_aws_ebs_vols | json_query(query) }}"
+        vars:
+          query: "volumes[?tags.\"kubernetes.io/cluster/{{ guid }}\" == 'owned'].id"
+
+      - name: Detaching EBS volumes provisioned by cloud provider
+        ec2_vol:
+          instance: None
+          id: "{{ item }}"
+        loop: "{{ cloud_provider_aws_ebs_vol_ids }}"
+       
+      - name: Deleting EBS volumes provisioned by cloud provider
+        ec2_vol: 
+          state: absent
+          id: "{{ item }}"
+        loop: "{{ cloud_provider_aws_ebs_vol_ids }}"
+      when: cloud_provider == 'ec2' and install_cloud_provider|d(false)|bool
+ 
+- name: Import default azure destroy playbook
+  import_playbook: ../../cloud_providers/azure_destroy_env.yml
+  when: cloud_provider == 'azure'
