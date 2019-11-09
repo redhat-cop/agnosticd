@@ -6,17 +6,72 @@
     OS_PROJECT_NAME: "{{ osp_project_name }}"
     OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
     OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
-  block:
-    - name: Delete Heat stack
-      #command: openstack stack delete -y {{ guid }}-base-stack
-      os_stack:
-        name: "{{ guid }}-base-stack"
-        state: absent
-        wait: true
-      retries: "{{ osp_stack_delete_retries }}"
-      delay: 10
-      until: r_hot_out is succeeded
-      register: r_hot_out
 
-    - debug:
-        var: r_hot_out
+  tasks:
+    - name: Get project information
+    # This changes to os_project_info in Ansible 2.9
+      os_project_facts:
+        name: "{{ osp_project_name }}"
+      register: r_osp_project
+
+    - set_fact:
+        osp_project_info: "{{ r_osp_project.ansible_facts.openstack_projects }}"
+    
+# Need a conditional or assertion or something here I think to validate the project exists before continuing
+    - name: Cleanup OpenStack resources
+      environment:
+        OS_PROJECT_ID: "{{ osp_project_info[0].id }}"
+      block:
+        - name: Do dry-run of compute and storage purge
+          command: |
+            openstack project purge --dry-run --keep-project --project {{ osp_project_name }}
+          register: project_purge_out
+
+        - name: Purge compute and storage
+          command: |
+            openstack project purge --keep-project --project {{ osp_project_name }}
+          when: project_purge_out is succeeded
+        
+        - name: Purge network resources
+          command: |
+            neutron purge --project {{ osp_project_info[0].id }}
+
+        - name: Check if Heat stack already exists
+          command: >-
+            openstack stack show -f json {{ guid }}-base-stack
+          register: r_show
+          failed_when: false
+          changed_when: false
+          tags: heat
+
+        - name: Delete Heat stack if it exists
+          os_stack:
+            name: "{{ guid }}-base-stack"
+            state: absent
+            wait: true
+          when: r_show.rc == 0
+          retries: "{{ osp_stack_delete_retries }}"
+          delay: 10
+          until: r_hot_out is succeeded
+          register: r_hot_out
+
+        - name: Cleanup the keypairs
+          debug:
+            msg: "Stub task until we figure out how to delete keypairs"
+
+        - name: Delete the project
+          os_project:
+            name: "{{ guid }}-project"
+            state: absent
+          tags:
+            - full_delete
+
+    - name: Remove bastion DNS record
+      nsupdate:
+          server: "{{ ocp_cluster_dns_server }}"
+          zone: "{{ ocp_cluster_dns_zone }}"
+          record: bastion.{{ guid }} #.{{ ocp_cluster_dns_zone }}
+          type: A
+          key_name: "{{ ddns_key_name }}"
+          key_secret: "{{ ddns_key_secret }}"
+          state: absent
