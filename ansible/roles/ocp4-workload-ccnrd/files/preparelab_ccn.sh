@@ -175,7 +175,7 @@ oc get project istio-operator
 RESULT=$? 
 if [ $RESULT -eq 0 ]; then
   echo -e "istio-operator already exists..."
-elif [ -z "${MODULE_TYPE##*m3*}" || [ -z "${MODULE_TYPE##*m4*}" ] ; then
+elif [ -z "${MODULE_TYPE##*m3*}" ] || [ -z "${MODULE_TYPE##*m4*}" ] ; then
   echo -e "Installing istio-operator..."
   oc new-project istio-operator
   oc apply -n istio-operator -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/servicemesh-operator.yaml
@@ -185,7 +185,7 @@ oc get project istio-system
 RESULT=$? 
 if [ $RESULT -eq 0 ]; then
   echo -e "istio-system already exists..."
-elif [ -z "${MODULE_TYPE##*m3*}" || [ -z "${MODULE_TYPE##*m4*}" ] ; then
+elif [ -z "${MODULE_TYPE##*m3*}" ] || [ -z "${MODULE_TYPE##*m4*}" ] ; then
   echo -e "Deploying the Istio Control Plane with Single-Tenant..."
   oc new-project istio-system
   oc create -n istio-system -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/servicemeshcontrolplane.yaml
@@ -366,7 +366,7 @@ spec:
     userOperator: {}
 EOF
 
-# Wait for checluster to be a thing
+# Waiting for Kafka CRD
 echo "Waiting for Kafka CRD"
 while [ true ] ; do
   if [ "$(oc explain kafka -n knative-eventing)" ] ; then
@@ -708,7 +708,7 @@ curl -X POST --header 'Content-Type: application/json' --header 'Accept: applica
     "http://codeready-labs-infra.$HOSTNAME_SUFFIX/api/permissions"
 
 # import stack image
-oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/stack.imagestream.yaml
+oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.2/files/stack.imagestream.yaml
 sleep 5
 oc import-image --all quarkus-stack -n openshift
 
@@ -729,7 +729,7 @@ for i in $(eval echo "{0..$USERCOUNT}") ; do
         -X POST http://keycloak-labs-infra.${HOSTNAME_SUFFIX}/auth/realms/codeready/protocol/openid-connect/token | jq  -r '.access_token')
 
     TMPWORK=$(mktemp)
-    wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/workspace.json
+    wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.2/files/workspace.json
     sed 's/WORKSPACENAME/WORKSPACE'${i}'/g' workspace.json > $TMPWORK
     rm -rf workspace.json
 
