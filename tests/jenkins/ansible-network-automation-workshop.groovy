@@ -36,10 +36,10 @@ def student_workloads_choice = [
 ].join("\n")
 
 def region_choice = [
+    'na_ansiblebu',
     'apac_ansiblebu',
     'emea_ansiblebu',
     'japan_ansiblebu',
-    'na_ansiblebu',
 ].join("\n")
 
 pipeline {
