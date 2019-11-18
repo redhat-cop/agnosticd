@@ -19,8 +19,7 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def openshift_location = ''
-def webapp_location = ''
+def rhdemo_location = ''
 
 
 // Catalog items
@@ -159,16 +158,9 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (https:\/\/master\.[^ ]+)/
-                        openshift_location = m[0][1]
-                        echo "openshift_location = '${openshift_location}'"
-
-                        m = email =~ /Web App URL: (https:\/\/[^ \n]+)/
-                        webapp_location = m[0][1]
-                        echo "webapp_location = '${openshift_location}'"
-
-                        m = email =~ /Cluster Admin User: ([^ \n]+ \/ [^ \n]+)/
-                        echo "Custer Admin User: ${m[0][1]}"
+                        def m = email =~ /The list of VMs for this workshop is available at: (http:\/\/[^ \n]+)/
+                        rhdemo_location = m[0][1]
+                        echo "rhdemo_location = '${rhdemo_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
