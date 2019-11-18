@@ -35,6 +35,7 @@ def choices = [
 def student_workloads_choice = [
     'linklight_networking_v2_allcisco_tower',
     'linklight_networking_f5_tower',
+    'linklight_engine_tower',
 ].join("\n")
 
 def region_choice = [
