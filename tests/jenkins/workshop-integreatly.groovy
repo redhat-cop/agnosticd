@@ -176,7 +176,7 @@ pipeline {
 
                         m = email =~ /Web App URL: (https:\/\/[^ \n]+)/
                         webapp_location = m[0][1]
-                        echo "webapp_location = '${openshift_location}'"
+                        echo "webapp_location = '${webapp_location}'"
 
                         m = email =~ /Cluster Admin User: ([^ \n]+ \/ [^ \n]+)/
                         echo "Custer Admin User: ${m[0][1]}"
