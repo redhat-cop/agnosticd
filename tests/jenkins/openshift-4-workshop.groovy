@@ -143,7 +143,7 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (https:\/\/[^ \n]+)/
+                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
                         openshift_location = m[0][1]
                         echo "openshift_location = '${openshift_location}'"
                     } catch(Exception ex) {
