@@ -123,7 +123,7 @@ pipeline {
         }
         //
 
-        stage('Wait for last email') {
+        stage('Wait for updated email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
@@ -136,7 +136,7 @@ pipeline {
                     --server '${imap_server}' \
                     --guid ${guid} \
                     --timeout 20 \
-                    --filter 'has started'"""
+                    --filter 'has updated.'"""
             }
         }
 
