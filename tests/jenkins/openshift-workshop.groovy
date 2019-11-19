@@ -102,7 +102,7 @@ pipeline {
                         'salesforce=test',
                         'notes=devops_automation_jenkins',
                         'users=2',
-                        'use_letsencrypt=f'
+                        'use_letsencrypt=f',
                         "ocprelease=${ocprelease}",
                     ].join(',').trim()
 
