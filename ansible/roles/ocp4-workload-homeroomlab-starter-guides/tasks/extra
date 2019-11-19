@@ -1,0 +1,59 @@
+    - name: Get lab route to add to homeroom (fact)
+      k8s_facts:
+        api_version: "route.openshift.io/v1"
+        kind: Route
+        name: "{{ item }}"
+        namespace: "{{ project_name }}"
+      register: __lab_route
+
+    - name: Get lab route (value)
+      debug: 
+        var: __lab_route
+        verbosity: 1
+        
+    - name: Set lab route
+      set_fact:
+        __lab_url: "https://{{ __lab_route.resources[0].spec.host }}"
+
+    - name: Set this workshop json
+      set_fact:
+        this_workshop_json: 
+          - title: "{{ item }}"
+            description: "{{ item }}-description"
+            url: "{{ __lab_url }}"
+
+    - name: Get homeroom configmap content
+      shell: oc get cm/homeroom-cfg -o jsonpath='{ .data.workshops\.json }' -n {{ project_name }}
+      register: __homeroom_cm_data
+
+    - name: Get contents of configmap as json
+      set_fact:
+        __homeroom_cm_json: "{{ __homeroom_cm_data.stdout | from_json }}"
+
+    - name: Calculate if workshop is already configured
+      set_fact:
+        __workshop_present: "{{ __homeroom_cm_json | json_query(my_query) }}"
+      vars:
+        my_query: "[?title=='{{ workshop_app_name }}']"
+
+    # If it's there do nothing, else, add it
+    - name: Set the list of workshops to reconfigure
+      set_fact:
+        __workshop_list: "{{ ( __homeroom_cm_json | union(this_workshop_json)) | default(__homeroom_cm_json) }}"
+      when: not __workshop_present
+
+    - name: Write homeroom configuration to a file
+      copy:
+        dest: "{{ tmp_dir }}/configmap.json"
+        content: "{{ __workshop_list | to_nice_json }}"
+      when: __workshop_list is defined
+
+    - name: Update homeroom ConfigMap
+      shell: oc create configmap homeroom-cfg --from-file=workshops.json={{ tmp_dir }}/configmap.json --dry-run -o yaml | oc replace -n {{ project_name }} -f -
+      when: __workshop_list is defined
+
+    - name: Rollout homeroom to pickup config changes
+      command: oc rollout latest dc/homeroom -n {{ project_name }}
+
+    - name: Wait for homeroom to be ready again
+      command: oc rollout status dc/homeroom -n {{ project_name }}
