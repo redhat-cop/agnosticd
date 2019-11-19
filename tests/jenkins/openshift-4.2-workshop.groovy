@@ -20,24 +20,17 @@ def ssh_admin_host = 'admin-host-na'
 // state variables
 def guid=''
 def openshift_location = ''
+def webapp_location = ''
 
 // Catalog items
 def choices = [
-    'OpenShift Demos / OpenShift 4 Preview',
-    'DevOps Team Testing Catalog / TEST - OCP4 Preview',
-    'DevOps Team Development Catalog / DEV - OCP 4 Preview',
-].join("\n")
-
-def ocprelease_choice = [
-    '4.0.22',
+    'Workshops / OpenShift 4.2 Workshop',
 ].join("\n")
 
 def region_choice = [
-    'global_gpte',
-    'na',
-    'emea',
-    'latam',
-    'apac',
+    'na_gpte',
+    'apac_gpte',
+    'emea_gpte',
 ].join("\n")
 
 pipeline {
@@ -57,11 +50,6 @@ pipeline {
             choices: choices,
             description: 'Catalog item',
             name: 'catalog_item',
-        )
-        choice(
-            choices: ocprelease_choice,
-            description: 'Catalog item',
-            name: 'ocprelease',
         )
         choice(
             choices: region_choice,
@@ -85,20 +73,19 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
                     def cfparams = [
                         'check=t',
-                        'quotacheck=t',
-                        "ocprelease=${ocprelease}",
-                        "region=${region}",
+                        'check2=t',
+                        'salesforce=test',
+                        'city=rhpds',
+                        'notes=devops_automation_jenkins',
                         'expiration=7',
                         'runtime=8',
-                        'nodes=2',
+                        'quotacheck=t',
                         'users=2',
-                        'city=jenkinsccicd',
-                        'salesforce=test',
-                        'notes=devops_automation_jenkins',
+                        "region=${region}",
+                        'use_letsencrypt=f',
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
@@ -139,66 +126,59 @@ pipeline {
             environment {
                 credentials=credentials("${imap_creds}")
             }
-            steps { 
+            steps {
                 git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
-              
-                withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
-                    sh """./tests/jenkins/downstream/poll_email.py \
-                        --guid ${guid} \
-                        --timeout 60 \
-                        --server '${imap_server}' \
-                        --filter 'has completed'"""
-                }
+
+
+                sh """./tests/jenkins/downstream/poll_email.py \
+                    --server '${imap_server}' \
+                    --guid ${guid} \
+                    --timeout 20 \
+                    --filter 'has started'"""
             }
         }
 
-//            steps {
-//                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
-//                    branch: 'development'
+        stage('Wait for last email and parse OpenShift and App location') {
+            environment {
+                credentials=credentials("${imap_creds}")
+            }
+            steps {
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                    branch: 'development'
 
-//                script {
-//                    email = sh(
-//                        returnStdout: true,
-//                        script: """./tests/jenkins/downstream/poll_email.py \
-//                          --server '${imap_server}' \
-//                          --guid ${guid} \
-//                          --timeout 60 \
-//                          --filter 'has completed'"""
-//                    ).trim()
+                script {
+                    email = sh(
+                        returnStdout: true,
+                        script: """
+                          ./tests/jenkins/downstream/poll_email.py \
+                          --server '${imap_server}' \
+                          --guid ${guid} \
+                          --timeout 120 \
+                          --filter 'has completed'
+                        """
+                    ).trim()
 
-//                    def m = email =~ /To get started, please login with your OPENTLC credentials to: ([^ ]+) in your web browser/
-//                    openshift_location = m[0][1]
-//                      def m = email =~ /Openshift Master Console: (https:\/\/master\.[^ ]+)/
-//                      openshift_location = m[0][1]
-//                      echo "openshift_location = '${openshift_location}'"
-//                }
-//            }
-//        }
+                    try {
+                        def m = email =~ /Openshift Master Console: (https:\/\/master\.[^ ]+)/
+                        openshift_location = m[0][1]
+                        echo "openshift_location = '${openshift_location}'"
 
-//        stage('Test OpenShift access') {
-//            environment {
-//                credentials = credentials("${opentlc_creds}")
-//            }
-//            steps {
-//                sh "./tests/jenkins/downstream/openshift_client.sh '${openshift_location}'"
-//            }
-//        }
+                        m = email =~ /Web App URL: (https:\/\/[^ \n]+)/
+                        webapp_location = m[0][1]
+                        echo "webapp_location = '${webapp_location}'"
 
-//        stage('SSH') {
-//            steps {
-//                withCredentials([
-//                    sshUserPrivateKey(
-//                        credentialsId: ssh_creds,
-//                        keyFileVariable: 'ssh_key',
-//                        usernameVariable: 'ssh_username')
-//                ]) {
-//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
-//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} sudo ansible -m ping all"
-//                }
-//            }
-//        }
+                        m = email =~ /Cluster Admin User: ([^ \n]+ \/ [^ \n]+)/
+                        echo "Custer Admin User: ${m[0][1]}"
+                    } catch(Exception ex) {
+                        echo "Could not parse email:"
+                        echo email
+                        echo ex.toString()
+                        throw ex
+                    }
+                }
+            }
+        }
 
         stage('Confirm before retiring') {
             when {
@@ -281,19 +261,19 @@ pipeline {
             }
 
             /* Print ansible logs */
-//            withCredentials([
-//                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
-//                sshUserPrivateKey(
-//                    credentialsId: ssh_creds,
-//                    keyFileVariable: 'ssh_key',
-//                    usernameVariable: 'ssh_username')
-//            ]) {
-//                sh("""
-//                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
-//                    "find deployer_logs -name '*${guid}*log' | xargs cat"
-//                """.trim()
-//                )
-//            }
+            withCredentials([
+                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
+                sshUserPrivateKey(
+                    credentialsId: ssh_creds,
+                    keyFileVariable: 'ssh_key',
+                    usernameVariable: 'ssh_username')
+            ]) {
+                sh("""
+                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
+                    "bin/logs.sh ${guid}" || true
+                """.trim()
+                )
+            }
 
             withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
                 mail(
@@ -304,26 +284,6 @@ pipeline {
                     from: credentials.split(':')[0]
               )
             }
-
-	    withCredentials([
-                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
-                sshUserPrivateKey(
-                    credentialsId: ssh_creds,
-                    keyFileVariable: 'ssh_key',
-                    usernameVariable: 'ssh_username')
-            ]) {
-                script {
-                  // Be careful with commands executed on admin host, make sure it's 'read-only' commands
-                  def retstring = sh("""
-                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
-                    "find deployer_logs -name '*${guid}*log' | xargs -n1 grep OKTODELETE"
-                    exit 0
-                  """.trim()
-                  )
-                  assert retstring.contains("OKTODELETE")
-                }
-            }
-
             withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
                 sh(
                     """
