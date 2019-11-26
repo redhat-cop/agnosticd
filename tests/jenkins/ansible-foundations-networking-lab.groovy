@@ -19,7 +19,7 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def rhdemo_location = ''
+def ssh_location = ''
 
 
 // Catalog items
@@ -137,9 +137,9 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /The list of VMs for this workshop is available at: (http:\/\/[^ \n]+)/
-                        rhdemo_location = m[0][1]
-                        echo "rhdemo_location = '${rhdemo_location}'"
+                        def m = email =~ /Login is ssh (.*)/
+                        ssh_location = m[0]
+                        echo "User instructed: '${ssh_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
