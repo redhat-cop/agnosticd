@@ -1,3 +1,5 @@
+#jinja2: lstrip_blocks: "True"
+---
 heat_template_version: 2018-03-02
 
 description: Top level HOT for creating new project, network resources, and instances. This template relies on ResourceGroups and a nested template that is called to provision instances, ports, & floating IPs.
@@ -64,7 +66,7 @@ resources:
 {% endif %}
 {% endfor %}
 
-{% for security_group in security_groups %}
+{% for security_group in security_groups | list + default_security_groups | list %}
   {{ security_group['name'] }}:
     type: OS::Neutron::SecurityGroup
     properties:
@@ -75,35 +77,55 @@ resources:
 
 {% for rule in security_group.rules %}
 {% if rule['name'] is defined %}
-  {{ security_group['name'] }}-rule_{{ rule['name'] }}:
+  {{ guid }}-{{ security_group['name'] }}-rule_{{ rule['name'] }}:
 {% else %}
-  {{ security_group['name'] }}-rule_{{ lookup('password', '/dev/null length=5 chars=ascii_letters,digits') }}:
+  {{ guid }}-{{ security_group['name'] }}-rule_{{ lookup('password', '/dev/null length=5 chars=ascii_letters,digits') }}:
 {% endif %}
     type: OS::Neutron::SecurityGroupRule
     properties:
       security_group: { get_resource: {{ security_group['name'] }} }
-      direction: {{ rule['direction'] }}
-      protocol: {{ rule['protocol'] }}
+      direction: {{ rule['direction'] | default(rule.rule_type) | lower }}
+      protocol: {{ rule['protocol'] | lower }}
 {% if rule['description'] is defined %}
       description: {{ rule['description'] }}
 {% endif %}
-{% if rule['port_range_min'] is defined %}
-      port_range_min: {{ rule['port_range_min'] }}
+{% if rule['port_range_min'] is defined or
+  rule.from_port is defined %}
+      port_range_min: {{ rule['port_range_min'] | default(rule.from_port) }}
 {% endif %}
-{% if rule['port_range_max'] is defined %}
-      port_range_max: {{ rule['port_range_max'] }}
+{% if rule['port_range_max'] is defined or
+  rule.to_port is defined %}
+      port_range_max: {{ rule['port_range_max'] | default(rule.to_port) }}
 {% endif %}
-{% if rule['remote_ip_prefix'] is defined %}
-      remote_ip_prefix: {{ rule['remote_ip_prefix'] }}
+{% if rule['remote_ip_prefix'] is defined or
+  rule.cidr is defined %}
+      remote_ip_prefix: {{ rule['remote_ip_prefix'] | default(rule.cidr) }}
 {% endif %}
-{% if rule['remote_group'] is defined %}
-      remote_group: { get_resource: {{ rule['remote_group'] }} }
+{% if rule['remote_group'] is defined or
+  rule.from_group is defined %}
+      remote_group: { get_resource: {{ rule['remote_group'] | default(rule.from_group) }} }
 {% endif %}
     depends_on: {{ security_group['name'] }}
 {% endfor %}
 {% endfor %}
 
 {% for instance in instances %}
+{% if instance.volumes is defined %}
+{% for volume in instance.volumes %}
+  {% set loopvolume = loop %}
+  {% for myinstanceindex in range(instance.count|int) %}
+    {% set iname = instance.name if instance.count == 1 else instance.name + loop.index0 %}
+    {% set vname = ["volume", iname, loopvolume.index] | join('_') %}
+  {{ vname }}:
+    type: OS::Cinder::Volume
+    properties:
+      size: {{ volume.volume_size }}
+    {% if volume.volume_name is defined %}
+      name: {{ volume.volume_name }}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+{% endif %}
   {{instance['name']}}:
     type: OS::Heat::ResourceGroup
     properties:
@@ -111,67 +133,63 @@ resources:
       resource_def:
         type: {{ heat_nested_template }}
         properties:
-          network_private: { get_resource: {{ instance['network'] }}-network }
+          network_private: { get_resource: {{ instance['network'] | default('default') }}-network }
           volume_size: {{ instance['rootfs_size'] | default(osp_default_rootfs_size) }}
+{% for volume in instance.volumes %}
+  {% set loopvolume = loop %}
+  {% for myinstanceindex in range(instance.count|int) %}
+    {% set iname = instance.name if instance.count == 1 else instance.name + loop.index0 %}
+    {% set vname = ["volume", iname, loopvolume.index] | join('_') %}
+          add_vol_{{ vname }}: { get_resource: {{ vname }} }
+  {% endfor %}
+{% endfor %}
           key_name: { get_resource: {{ guid }}-infra_key }
+{% if 'security_groups' in instance %}
           security_groups:
 {% for security_group in instance.security_groups %}
             - {{ guid }}-{{ security_group }}
 {% endfor %}
-          provider_network: {{ provider_network}}
+{% endif %}
+          provider_network: {{ provider_network }}
 {% if instance['count'] > 1 %}
-          instance_name: {{ instance['name'] }}_%index%
+          instance_name: {{ instance['name'] }}%index%
 {% else %}
           instance_name: {{ instance['name'] }}
 {% endif %}
           instance_flavor: {{ instance['flavor'].osp }}
           instance_image: {{ instance['image_id'] }}
-{% if instance.floating_ip %}
+{% if instance.floating_ip | default(false) or instance.public_dns | default(false) %}
           instance_fip: true
 {% else %}
           instance_fip: false
 {% endif %}
+{% if instance['metadata'] is defined %}
+          instance_metadata: {{ instance.metadata | combine(default_metadata) | to_json }}
+{% endif %}
+
+          # Convert EC2 tags
+{% if instance.tags is defined %}
           instance_metadata:
-            guid: "{{ guid }}"
-            env_type: "{{ env_type }}"
-{% if instance['metadata'] %}
-{% for data in instance['metadata'] %}
-{% for key, value in data.items() %}
-            {{ key }}: {{ value }}
+{% for key, value in default_metadata.items() %}
+            '{{ key }}': {{ value | to_json }}
 {% endfor %}
+{% for tag in instance.tags %}
+            '{{ tag.key }}': {{ tag.value | to_json }}
 {% endfor %}
 {% endif %}
+
+
     depends_on:
-      - {{ instance['network'] }}-router_private_interface
+      - {{ instance['network'] | default('default') }}-router_private_interface
+{% if 'security_group' in instance %}
 {% for security_group in instance.security_groups %}
       - {{ security_group }}
 {% endfor %}
-{% endfor %}
-
-{% if openshift_fip_provision %}
-  ocp_api_fip:
-    type: OS::Neutron::FloatingIP
-    properties:
-      floating_network: "{{ provider_network }}"
-
-  ocp_ingress_fip:
-    type: OS::Neutron::FloatingIP
-    properties:
-      floating_network: "{{ provider_network }}"
 {% endif %}
+{% endfor %}
 
 outputs:
 
   {{ guid }}-infra_key:
     description: The SSH infra key
     value: { get_attr: [ {{ guid }}-infra_key, private_key ] }
-
-{% if openshift_fip_provision %}
-  ocp_api_fip:
-    description: The floating IP of the OpenShift API
-    value: { get_attr: [ ocp_api_fip, floating_ip_address ] }
-
-  ocp_ingress_fip:
-    description: The floating IP of the OpenShift ingress
-    value: { get_attr: [ ocp_ingress_fip, floating_ip_address ] }
-{% endif %}
