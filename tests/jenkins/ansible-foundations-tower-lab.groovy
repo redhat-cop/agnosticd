@@ -137,8 +137,8 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
-                        ssh_location = m[0][1]
+                        def m = email =~ /Login is ssh (.*)/
+                        ssh_location = m[0]
                         echo "User instructed: '${ssh_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
@@ -146,21 +146,6 @@ pipeline {
                         echo ex.toString()
                         throw ex
                     }
-                }
-            }
-        }
-        
-        stage('SSH') {
-            steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: ssh_creds,
-                        keyFileVariable: 'ssh_key',
-                        usernameVariable: 'ssh_username')
-                ]) {
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} sudo ansible -m ping all"
                 }
             }
         }
