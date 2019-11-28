@@ -149,7 +149,7 @@ pipeline {
             }
         }
         
-        stage('SSH') {
+        stage('Test SSH') {
             steps {
                 withCredentials([
                     sshUserPrivateKey(
@@ -160,6 +160,10 @@ pipeline {
                     sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
                     sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
                     sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} sudo ansible -m ping all"
+                    
+                    echo "Tested SSH command: ssh -o StrictHostKeyChecking=no -i ${ssh_key} '${ssh_location}' w"
+                    echo "Tested SSH command: ssh -o StrictHostKeyChecking=no -i ${ssh_key} '${ssh_location}' oc version"
+                    echo "Tested SSH command: ssh -o StrictHostKeyChecking=no -i ${ssh_key} '${ssh_location}' sudo ansible -m ping all"
                 }
             }
         }
