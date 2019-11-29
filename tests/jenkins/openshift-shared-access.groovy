@@ -163,10 +163,17 @@ pipeline {
                         """
                     ).trim()
 
+                    try {
+                        def m = email =~ /Connect to the shared cluster by pointing your web browser to (https:\/\/master\.[^ ]+)/
+                        openshift_location = m[0][1]
+                        echo "openshift_location = '${openshift_location}'"
 
-                    def m = email =~ /Connect to the shared cluster by pointing your web browser to (https:\/\/master\.[^ ]+)/
-                    openshift_location = m[0]
-                    echo "openshift_location = '${openshift_location}'"
+                    } catch(Exception ex) {
+                        echo "Could not parse email:"
+                        echo email
+                        echo ex.toString()
+                        throw ex
+                    }
                 }
             }
         }
