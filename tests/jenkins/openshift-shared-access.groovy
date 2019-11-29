@@ -165,7 +165,7 @@ pipeline {
 
 
                     def m = email =~ /Connect to the shared cluster by pointing your web browser to (https:\/\/master\.[^ ]+)/
-                    openshift_location = m[0][1]
+                    openshift_location = m[0]
                     echo "openshift_location = '${openshift_location}'"
                 }
             }
