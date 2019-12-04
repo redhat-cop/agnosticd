@@ -27,7 +27,7 @@ Both `my_sample_vars.yml` `my_secret.vars.yml` are in the `.gitignore` configura
 
 ### Run the Ansible playbooks
 
-From the ./ansible directory run following commands:
+From the `./ansible` directory run following commands:
 
 #### Install
 
