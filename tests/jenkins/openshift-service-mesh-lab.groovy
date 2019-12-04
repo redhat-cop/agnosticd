@@ -246,21 +246,6 @@ pipeline {
                 """
             }
 
-            /* Print ansible logs */
-            withCredentials([
-                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
-                sshUserPrivateKey(
-                    credentialsId: ssh_creds,
-                    keyFileVariable: 'ssh_key',
-                    usernameVariable: 'ssh_username')
-            ]) {
-                sh("""
-                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
-                    "find deployer_logs -name '*${guid}*log' | xargs cat"
-                """.trim()
-                )
-            }
-
             withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
                 mail(
                     subject: "${env.JOB_NAME} (${env.BUILD_NUMBER}) failed GUID=${guid}",
