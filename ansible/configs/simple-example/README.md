@@ -2,13 +2,6 @@
 
 A simple deplyoment creating a bastion host and two *worker nodes*. It can't get simpler ...
 
-## Setup
-
-Deployment to the following cloud providers is supported:
-
-* AWS
-* Azure
-
 ### Environment variables
 
 Deployment is controlled by two configuration files: 
@@ -32,17 +25,17 @@ NOTE:
 
 Both `my_sample_vars.yml` `my_secret.vars.yml` are in the `.gitignore` configuration which SHOULD protect you from adding them to git.
 
-## Run the Ansible playbooks
+### Run the Ansible playbooks
 
 From the ./ansible directory run following commands:
 
-To deploy
+#### Install
 
 ```shell
 ansible-playbook main.yml -e @configs/simple-example/my_sample_vars.yml -e @my_secret_vars.yml
 ```
 
-To undeploy
+#### Uninstall
 
 ```shell
 ansible-playbook destroy.yml -e @configs/simple-example/my_sample_vars.yml -e @my_secret_vars.yml
