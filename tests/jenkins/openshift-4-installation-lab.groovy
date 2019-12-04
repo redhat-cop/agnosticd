@@ -123,14 +123,14 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 40 \
+                          --timeout 20 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
                     	def m = email =~ /ssh [^\n]*/
-                    	ssh_location = m[0][1]
+                    	ssh_location = m[0]
                     	echo "ssh_location = '${ssh_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
