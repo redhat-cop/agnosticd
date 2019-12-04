@@ -28,11 +28,14 @@ Start by creating a copy of `sample_vars.yml` and name it e.g. `my_sample_vars.y
 
 #### Secrets
 
-Some deployments need **secrets** e.g. your AWS aws_access_key_id or other API access tokens. DO NOT add these to git !
+Some deployments need **secrets** e.g. your AWS aws_access_key_id or other API access tokens. 
+
+DO NOT add these to git !
 
 Instead create a file called e.g. `my_secret_vars.yml` and place all *secrets* in there.
 
-Note: both `my_sample_vars.yml` `my_secret.vars.yml` are in the `.gitignore` configuration which SHOULD protect you from adding them to git.
+NOTE:  
+Both `my_sample_vars.yml` `my_secret.vars.yml` are in the `.gitignore` configuration which SHOULD protect you from adding them to git.
 
 ## Run the Ansible playbooks
 
