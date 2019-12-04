@@ -1,10 +1,6 @@
 # Simple example
 
-As the name says ...
-
-## Overview
-
-TBD
+A simple deplyoment creating a bastion host and two *worker nodes*. It can't get more simplier.
 
 ## Setup
 
@@ -28,7 +24,7 @@ Start by creating a copy of `sample_vars.yml` and name it e.g. `my_sample_vars.y
 
 #### Secrets
 
-Some deployments need **secrets** e.g. your AWS aws_access_key_id or other API access tokens. 
+Some deployments need **secrets** e.g. your AWS credentials or other API access tokens. 
 
 DO NOT add these to git !
 
