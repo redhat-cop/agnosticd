@@ -128,9 +128,20 @@ pipeline {
                     ).trim()
 
                     try {
-                    	def m = email =~ /<pre>. *ssh [^ ]+ *([^ <]+?) *<\/pre>/
-                    	ssh_location = m[0][1]
-                    	echo "ssh_location = '${ssh_location}'"
+                    	def m = email =~ /Openshift Master Console: (.*)/
+                    	openshift_location = m[0][1]
+                    	echo "Openshift Master Console: ${openshift_location}"
+                    
+                    	m = email =~ /This cluster has authentication enabled. (.*)/
+                    	echo "Cluster authentication:  ${m[0][1]}"
+                        
+                    	m = email =~ /SSH Access: (.*)/
+						ssh_location = m[0][1]
+						echo "SSH Access: ${ssh_location}"
+						
+						m = email =~ /SSH password: (.*)/
+						ssh_p =​ m[0][1]
+						echo "SSH password: ${ssh_p}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email

@@ -142,16 +142,20 @@ pipeline {
                     ).trim()
 
                     try {
-                    	def m = email =~ /Openshift Master Console: (https:\/\/master\.[^ ]+)/
+                    	def m = email =~ /Openshift Master Console: (.*)/
                     	openshift_location = m[0][1]
-                    	echo "openshift_location = '${openshift_location}'"
+                    	echo "Openshift Master Console: ${openshift_location}"
                     
-                    	m = email =~ /Kubeadmin user \/ password: ([^ \n]+ \/ [^ \n]+)/
+                    	m = email =~ /Kubeadmin user \/ password: (.*)/
                     	echo "Kubeadmin user / password:  ${m[0][1]}"
                         
-                    	m = email =~ /<pre>. *ssh [^ ]+ *([^ <]+?) *<\/pre>/
-                    	ssh_location = m[0][1]
-                    	echo "ssh_location = '${ssh_location}'"
+                    	m = email =~ /SSH Access: (.*)/
+						ssh_location = m[0][1]
+						echo "SSH Access: ${ssh_location}"
+						
+						m = email =~ /SSH password: (.*)/
+						ssh_p =​ m[0][1]
+						echo "SSH password: ${ssh_p}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -159,20 +163,6 @@ pipeline {
                         throw ex
                     }
 
-                }
-            }
-        }
-
-        stage('SSH') {
-            steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: ssh_creds,
-                        keyFileVariable: 'ssh_key',
-                        usernameVariable: 'ssh_username')
-                ]) {
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
                 }
             }
         }
