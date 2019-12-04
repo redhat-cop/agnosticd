@@ -141,16 +141,24 @@ pipeline {
                         """
                     ).trim()
 
-                    def m = email =~ /Openshift Master Console: (https:\/\/master\.[^ ]+)/
-                    openshift_location = m[0][1]
-                    echo "openshift_location = '${openshift_location}'"
+                    try {
+                    	def m = email =~ /Openshift Master Console: (https:\/\/master\.[^ ]+)/
+                    	openshift_location = m[0][1]
+                    	echo "openshift_location = '${openshift_location}'"
                     
-                    m = email =~ /Kubeadmin user \/ password: ([^ \n]+ \/ [^ \n]+)/
-                    echo "Kubeadmin user / password:  ${m[0][1]}"
+                    	m = email =~ /Kubeadmin user \/ password: ([^ \n]+ \/ [^ \n]+)/
+                    	echo "Kubeadmin user / password:  ${m[0][1]}"
                         
-                    m = email =~ /<pre>. *ssh [^ ]+ *([^ <]+?) *<\/pre>/
-                    ssh_location = m[0][1]
-                    echo "ssh_location = '${ssh_location}'"
+                    	m = email =~ /<pre>. *ssh [^ ]+ *([^ <]+?) *<\/pre>/
+                    	ssh_location = m[0][1]
+                    	echo "ssh_location = '${ssh_location}'"
+                    } catch(Exception ex) {
+                        echo "Could not parse email:"
+                        echo email
+                        echo ex.toString()
+                        throw ex
+                    }
+
                 }
             }
         }
