@@ -1,12 +1,10 @@
 # Simple example
 
-A simple deplyoment creating a bastion host and two *worker nodes*. It can't get more simplier.
+A simple deplyoment creating a bastion host and two *worker nodes*. It can't get simpler ...
 
 ## Setup
 
-### Supported cloud providers
-
-The following cloud providers are supported:
+Deployment to the following cloud providers is supported:
 
 * AWS
 * Azure
