@@ -1,0 +1,71 @@
+
+- name: Get kubeadmin password
+  slurp:
+    path: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeadmin-password
+  register: kubeadminr
+
+- name: Get console route
+  environment:
+    KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+  command: oc get route -n openshift-console console -o json
+  register: routeconsole
+  retries: 10
+  delay: 30
+  until: routeconsole is succeeded
+  ignore_errors: yes
+
+# Adjust for clusters with just one worker. Default is two routers with antiAffinity rules.
+# Which means that one router is pending. This doesn't work with Certificates
+- name: Set number of Ingress Controller replicas to 1 if only one worker node deployed
+  when: worker_instance_count == 1
+  environment:
+    KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+  shell: "oc patch ingresscontroller default --type=merge --patch='{\"spec\": { \"replicas\": 1 }}' -n openshift-ingress-operator"
+  ignore_errors: yes
+
+- name: Set webconsole address
+  set_fact:
+    webconsole: "http://{{ routeconsole.stdout | from_json | json_query('spec.host') }}"
+  when: routeconsole is succeeded
+
+# sometimes the route is not ready, guess it
+- name: Guess webconsole address
+  set_fact:
+    webconsole: "http://console-openshift-console.apps.{{ cluster_name }}.{{ guid }}.{{ subdomain_base }}"
+  when: routeconsole is failed
+
+- name: Get API for command line
+  environment:
+    KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+  command: oc whoami --show-server
+  register: showserver
+
+- name: Print Overview
+  debug:
+    msg: "{{ item }}"
+  with_items:
+    - "user.info: Openshift Master Console: {{ webconsole }}"
+    - "user.info: Openshift API for command line 'oc' client: {{ showserver.stdout | trim }}"
+    - "user.info: Download oc client from {{ ocp4_client_url }}"
+
+- name: Output htpasswd
+  debug:
+    msg: "user.info: This cluster has authentication enabled. You can use '{{ admin_user }}' with password '{{ admin_password }}' to access your cluster"
+  when:
+    - admin_password is defined
+    - install_idm == "htpasswd"
+
+- name: Output kubeadmin
+  debug:
+    msg: "user.info: Kubeadmin user / password: kubeadmin / {{ kubeadminr.content | b64decode }}"
+  when: >-
+    install_idm is not defined
+    or install_idm != "htpasswd"
+
+- name: Print SSH warning
+  debug:
+    msg: "{{ item }}"
+  with_items:
+    - "user.info: "
+    - "user.info: You *CANNOT* SSH into this environment"
+  when: not install_student_user | bool
