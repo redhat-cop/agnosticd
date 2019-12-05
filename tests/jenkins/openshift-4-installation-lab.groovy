@@ -20,7 +20,7 @@ def ssh_admin_host = 'admin-host-na'
 // state variables
 def guid=''
 def ssh_location = ''
-def ssh_p = ''
+def ssh_pas = ''
 
 
 // Catalog items
@@ -135,8 +135,9 @@ pipeline {
 						echo "SSH Access: ${ssh_location}"
 						
 						m = email =~ /SSH password: (.*)/
-						ssh_p =​ m[0][1]
-						echo "SSH password: ${ssh_p}"
+						echo "${m}"
+						ssh_pas =​ m[0]
+						echo "SSH password: ${ssh_pas}, ${m}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
