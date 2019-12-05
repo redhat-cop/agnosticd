@@ -20,6 +20,7 @@ def ssh_admin_host = 'admin-host-na'
 // state variables
 def guid=''
 def ssh_location = ''
+def ssh_p = ''
 
 
 // Catalog items
