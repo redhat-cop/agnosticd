@@ -140,13 +140,6 @@ pipeline {
                 }
             }
         }
-        
-        stage('SSH') {
-            steps {
-                sh "sshpass -p ${ssh_p} ssh -o StrictHostKeyChecking=no ${ssh_location} w"
-                sh "sshpass -p ${ssh_p} ssh -o StrictHostKeyChecking=no ${ssh_location} oc version"
-            }
-        }
 
         stage('Confirm before retiring') {
             when {
