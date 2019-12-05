@@ -20,6 +20,7 @@ def ssh_admin_host = 'admin-host-na'
 // state variables
 def guid=''
 def ssh_location = ''
+def ssh_p = ''
 
 
 // Catalog items
@@ -143,6 +144,13 @@ pipeline {
                         throw ex
                     }
                 }
+            }
+        }
+        
+        stage('SSH') {
+            steps {
+                sh "sshpass -p ${ssh_p} ssh -o StrictHostKeyChecking=no ${ssh_location} w"
+                sh "sshpass -p ${ssh_p} ssh -o StrictHostKeyChecking=no ${ssh_location} oc version"
             }
         }
 
