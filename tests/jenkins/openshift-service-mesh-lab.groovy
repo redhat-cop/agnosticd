@@ -19,7 +19,9 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ssh_location = ''
+def openshift_location = ''
+//def ssh_location = ''
+//def ssh_p = ''
 
 
 // Catalog items
@@ -132,16 +134,16 @@ pipeline {
                     	openshift_location = m[0][1]
                     	echo "Openshift Master Console: ${openshift_location}"
                     
-                    	m = email =~ /This cluster has authentication enabled. (.*)/
-                    	echo "Cluster authentication:  ${m[0][1]}"
-                        
-                    	m = email =~ /SSH Access: (.*)/
-						ssh_location = m[0][1]
-						echo "SSH Access: ${ssh_location}"
+//						m = email =~ /This cluster has authentication enabled. (.*)/
+//						echo "Cluster authentication:  ${m[0][1]}"
+                      
+//                    	m = email =~ /SSH Access: (.*)/
+//						ssh_location = m[0][1]
+//						echo "SSH Access: ${ssh_location}"
 						
-						m = email =~ /SSH password: (.*)/
-						ssh_p =​ m[0][1]
-						echo "SSH password: ${ssh_p}"
+//						m = email =~ /SSH password: (.*)/
+//						ssh_p =​ m[0][1]
+//						echo "SSH password: ${ssh_p}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -152,19 +154,19 @@ pipeline {
             }
         }
 
-        stage('SSH') {
-            steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: ssh_creds,
-                        keyFileVariable: 'ssh_key',
-                        usernameVariable: 'ssh_username')
-                ]) {
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
-                }
-            }
-        }
+//        stage('SSH') {
+//            steps {
+//                withCredentials([
+//                    sshUserPrivateKey(
+//                        credentialsId: ssh_creds,
+//                        keyFileVariable: 'ssh_key',
+//                        usernameVariable: 'ssh_username')
+//                ]) {
+//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
+//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
+//                }
+//            }
+//        }
 
         stage('Confirm before retiring') {
             when {

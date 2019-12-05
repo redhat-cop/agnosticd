@@ -20,7 +20,8 @@ def ssh_admin_host = 'admin-host-na'
 // state variables
 def guid=''
 def openshift_location = ''
-def ssh_location = ''
+//def ssh_location = ''
+//def ssh_p = ''
 
 // Catalog items
 def choices = [
@@ -144,18 +145,18 @@ pipeline {
                     try {
                     	def m = email =~ /Openshift Master Console: (.*)/
                     	openshift_location = m[0][1]
-                    	echo "Openshift Master Console: ${openshift_location}"
+                    	echo "openshift_location = '${openshift_location}'"
                     
-                    	m = email =~ /Kubeadmin user \/ password: (.*)/
-                    	echo "Kubeadmin user / password:  ${m[0][1]}"
+//                    	m = email =~ /Kubeadmin user \/ password: (.*)/
+//                    	echo "Kubeadmin user / password:  ${m[0][1]}"
                         
-                    	m = email =~ /SSH Access: (.*)/
-						ssh_location = m[0][1]
-						echo "SSH Access: ${ssh_location}"
+//                    	m = email =~ /SSH Access: (.*)/
+//						ssh_location = m[0][1]
+//						echo "SSH Access: ${ssh_location}"
 						
-						m = email =~ /SSH password: (.*)/
-						ssh_p =​ m[0][1]
-						echo "SSH password: ${ssh_p}"
+//						m = email =~ /SSH password: (.*)/
+//						ssh_p =​ m[0][1]
+//						echo "SSH password: ${ssh_p}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -166,6 +167,13 @@ pipeline {
                 }
             }
         }
+
+//        stage('SSH') {
+//            steps {
+//                sh "sshpass -p ${ssh_p} ssh -o StrictHostKeyChecking=no ${ssh_location} w"
+//                sh "sshpass -p ${ssh_p} ssh -o StrictHostKeyChecking=no ${ssh_location} oc version"
+//            }
+//        }
 
         stage('Confirm before retiring') {
             when {
@@ -245,6 +253,21 @@ pipeline {
                 export DEBUG=true
                 ./opentlc/delete_svc_guid.sh '${guid}'
                 """
+            }
+
+            /* Print ansible logs */
+            withCredentials([
+                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
+                sshUserPrivateKey(
+                    credentialsId: ssh_creds,
+                    keyFileVariable: 'ssh_key',
+                    usernameVariable: 'ssh_username')
+            ]) {
+                sh("""
+                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
+                    "find deployer_logs -name '*${guid}*log' | xargs cat"
+                """.trim()
+                )
             }
 
             withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
