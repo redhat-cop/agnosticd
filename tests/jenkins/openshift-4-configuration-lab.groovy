@@ -90,6 +90,14 @@ pipeline {
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
                     def environment = params.environment.trim()
+                    def cfparams = [
+                        'check=t',
+                        'expiration=7',
+                        'runtime=10',
+                        "region=${region}",
+                        "environment=${environment}",
+                    ].join(',').trim()
+
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -98,7 +106,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,expiration=7,runtime=10,region=${region},environment=${environment}'
+                          -d '${cfparams}' \
                         """
                     ).trim()
 
@@ -107,7 +115,7 @@ pipeline {
             }
         }
         /* Skip this step because sometimes the completed email arrives
-         before the 'has started' email
+         before the 'has started' email */
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -121,7 +129,7 @@ pipeline {
                     --filter 'has started'"""
             }
         }
-        */
+        
         stage('Wait for last email and parse SSH location') {
             environment {
                 credentials=credentials("${imap_creds}")
