@@ -19,15 +19,15 @@ Some deployments need **secrets** e.g. your AWS credentials or API tokens.
 
 DO NOT add these to git !
 
-Instead create a file called e.g. `my_secret_vars.yml` and place all *secrets* in there.
+Instead create a file called e.g. `./ansible/my_secret_vars.yml` and place all *secrets* in there.
 
 NOTE:  
 
-Both `my_sample_vars.yml` `my_secret.vars.yml` are in the `.gitignore` configuration which SHOULD protect you from adding them to git.
+Both `my_sample_vars.yml` `my_secret.vars.yml` are in the `.gitignore` configuration which SHOULD protect you from adding them to git!
 
 ### Run the Ansible playbooks
 
-From the `./ansible` directory run following commands:
+Run follwoing commands from the `./ansible` folder:
 
 #### Install
 
