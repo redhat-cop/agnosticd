@@ -19,7 +19,7 @@ Some deployments need **secrets** e.g. your AWS credentials or API tokens.
 
 DO NOT add these to git !
 
-Instead create a file called e.g. `./ansible/my_secret_vars.yml` and place all *secrets* in there.
+Instead create a file called e.g. `./ansible/my_secret_vars.yml` and store all secrets etc. there. This file can also be reused for other deplyoments.
 
 NOTE:  
 
