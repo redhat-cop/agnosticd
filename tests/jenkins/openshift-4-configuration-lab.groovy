@@ -114,7 +114,7 @@ pipeline {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
 
@@ -149,7 +149,7 @@ pipeline {
                     try {
                     	def m = email =~ /Openshift Master Console: (.*)/
                     	openshift_location = m[0][1]
-                    	echo "openshift_location = '${openshift_location}'"
+                    	echo "openshift_location = ${openshift_location}"
                     
 //                    	m = email =~ /Kubeadmin user \/ password: (.*)/
 //                    	echo "Kubeadmin user / password:  ${m[0][1]}"

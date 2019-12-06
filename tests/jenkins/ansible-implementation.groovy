@@ -156,7 +156,6 @@ pipeline {
                         usernameVariable: 'ssh_username')
                 ]) {
                     sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
                 }
             }
         }
