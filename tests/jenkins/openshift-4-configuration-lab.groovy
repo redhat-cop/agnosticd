@@ -90,13 +90,6 @@ pipeline {
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
                     def environment = params.environment.trim()
-                    def cfparams = [
-                        'check=t',
-                        'expiration=7',
-                        'runtime=10',
-                        "region=${region}",
-                        "environment=${environment}",
-                    ].join(',').trim()
 
                     echo "'${catalog}' '${item}'"
                     guid = sh(
@@ -106,7 +99,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d '${cfparams}' \
+                          -d 'check=t,expiration=7,runtime=10,region=${region},environment=${environment}'
                         """
                     ).trim()
 
@@ -121,6 +114,9 @@ pipeline {
                 credentials=credentials("${imap_creds}")
             }
             steps {
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                    branch: 'development'
+
 
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \

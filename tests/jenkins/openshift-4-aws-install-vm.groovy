@@ -92,12 +92,15 @@ pipeline {
             }
         }
         /* Skip this step because sometimes the completed email arrives
-         before the 'has started' email
+         before the 'has started' email */
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
+                git url: 'https://github.com/redhat-cop/agnosticd',
+                    branch: 'development'
+
 
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
@@ -106,7 +109,7 @@ pipeline {
                     --filter 'has started'"""
             }
         }
-        */
+        
         stage('Wait for last email and parse SSH location') {
             environment {
                 credentials=credentials("${imap_creds}")
