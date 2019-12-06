@@ -11,7 +11,6 @@ Deployment is controlled by two configuration files:
 
 `env_vars.yml` defines all configuration parameters that COULD be modified, whereas `sample_vars.yml` is a *template* for all environment specific values that HAVE to be changed.
 
-##### Step 1
 Start by creating a copy of `sample_vars.yml` and rename it (e.g. `my_sample_vars.yml`). Then modifiy all parameters to match your environment.
 
 #### Secrets
@@ -20,7 +19,6 @@ Some deployments need **secrets** e.g. your AWS credentials or API tokens.
 
 DO NOT add these to git !
 
-##### Step 2
 Instead create a file called e.g. `my_secret_vars.yml` and place all *secrets* in there.
 
 NOTE:  
