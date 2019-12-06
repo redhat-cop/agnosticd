@@ -19,7 +19,7 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def guid_instance = ''
+def ssh_location = ''
 
 
 // Catalog items
@@ -135,15 +135,28 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /Your assigned GUID for this instance is (.*)/
-                        guid_instance = m[0]
-                        echo "User instructed: '${guid_instance}'"
+                        def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
+                    	ssh_location = m[0][1]
+                    	echo "ssh_location = ${ssh_location}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
                         echo ex.toString()
                         throw ex
                     }
+                }
+            }
+        }
+        stage('SSH') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: ssh_creds,
+                        keyFileVariable: 'ssh_key',
+                        usernameVariable: 'ssh_username')
+                ]) {
+                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
+                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
                 }
             }
         }
