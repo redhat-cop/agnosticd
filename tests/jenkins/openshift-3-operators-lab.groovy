@@ -27,10 +27,6 @@ def choices = [
     'OPENTLC OpenShift Labs / OpenShift 3 Operations Lab',
 ].join("\n")
 
-def ocprelease_choice = [
-    '3.11.129',
-].join("\n")
-
 def region_choice = [
     'na',
     'emea',
@@ -94,7 +90,6 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
                     def nodes = params.nodes.trim()
                     echo "'${catalog}' '${item}'"
