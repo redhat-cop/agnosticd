@@ -71,8 +71,8 @@ done
 oc new-project labs-infra
 
 # adjust limits for admin
-oc get userquota/default 
-RESULT=$? 
+oc get userquota/default
+RESULT=$?
 if [ $RESULT -eq 0 ]; then
   oc delete userquota/default
 else
@@ -171,21 +171,21 @@ for MODULE in $(echo $MODULE_TYPE | sed "s/,/ /g") ; do
 done
 
 # Setup Istio Service Mesh
-oc get project istio-operator 
-RESULT=$? 
+oc get project istio-operator
+RESULT=$?
 if [ $RESULT -eq 0 ]; then
   echo -e "istio-operator already exists..."
-elif [ -z "${MODULE_TYPE##*m3*}" || [ -z "${MODULE_TYPE##*m4*}" ] ; then
+elif [ -z "${MODULE_TYPE##*m3*}" ] || [ -z "${MODULE_TYPE##*m4*}" ] ; then
   echo -e "Installing istio-operator..."
   oc new-project istio-operator
   oc apply -n istio-operator -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/servicemesh-operator.yaml
 fi
 
-oc get project istio-system 
-RESULT=$? 
+oc get project istio-system
+RESULT=$?
 if [ $RESULT -eq 0 ]; then
   echo -e "istio-system already exists..."
-elif [ -z "${MODULE_TYPE##*m3*}" || [ -z "${MODULE_TYPE##*m4*}" ] ; then
+elif [ -z "${MODULE_TYPE##*m3*}" ] || [ -z "${MODULE_TYPE##*m4*}" ] ; then
   echo -e "Deploying the Istio Control Plane with Single-Tenant..."
   oc new-project istio-system
   oc create -n istio-system -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/servicemeshcontrolplane.yaml
@@ -198,27 +198,27 @@ echo -e "Creating coolstore & bookinfo projects for each user... \n"
 for i in $(eval echo "{0..$USERCOUNT}") ; do
   if [ -z "${MODULE_TYPE##*m1*}" ] || [ -z "${MODULE_TYPE##*m2*}" ] || [ -z "${MODULE_TYPE##*m3*}" ] ; then
     oc new-project user$i-inventory
-    oc adm policy add-scc-to-user anyuid -z default -n user$i-inventory 
-    oc adm policy add-scc-to-user privileged -z default -n user$i-inventory 
+    oc adm policy add-scc-to-user anyuid -z default -n user$i-inventory
+    oc adm policy add-scc-to-user privileged -z default -n user$i-inventory
     oc adm policy add-role-to-user admin user$i -n user$i-inventory
     oc new-project user$i-catalog
-    oc adm policy add-scc-to-user anyuid -z default -n user$i-catalog 
-    oc adm policy add-scc-to-user privileged -z default -n user$i-catalog 
-    oc adm policy add-role-to-user admin user$i -n user$i-catalog 
+    oc adm policy add-scc-to-user anyuid -z default -n user$i-catalog
+    oc adm policy add-scc-to-user privileged -z default -n user$i-catalog
+    oc adm policy add-role-to-user admin user$i -n user$i-catalog
   fi
   if [ -z "${MODULE_TYPE##*m3*}" ] ; then
-    oc new-project user$i-bookinfo 
-    oc adm policy add-scc-to-user anyuid -z default -n user$i-bookinfo 
-    oc adm policy add-scc-to-user privileged -z default -n user$i-bookinfo 
-    oc adm policy add-role-to-user admin user$i -n user$i-bookinfo 
-    oc adm policy add-role-to-user view user$i -n istio-system 
+    oc new-project user$i-bookinfo
+    oc adm policy add-scc-to-user anyuid -z default -n user$i-bookinfo
+    oc adm policy add-scc-to-user privileged -z default -n user$i-bookinfo
+    oc adm policy add-role-to-user admin user$i -n user$i-bookinfo
+    oc adm policy add-role-to-user view user$i -n istio-system
   fi
   if [ -z "${MODULE_TYPE##*m4*}" ] ; then
-    oc new-project user$i-cloudnativeapps 
-    oc adm policy add-scc-to-user anyuid -z default -n user$i-cloudnativeapps 
-    oc adm policy add-scc-to-user privileged -z default -n user$i-cloudnativeapps 
-    oc adm policy add-role-to-user admin user$i -n user$i-cloudnativeapps 
-    oc adm policy add-role-to-user view user$i -n istio-system  
+    oc new-project user$i-cloudnativeapps
+    oc adm policy add-scc-to-user anyuid -z default -n user$i-cloudnativeapps
+    oc adm policy add-scc-to-user privileged -z default -n user$i-cloudnativeapps
+    oc adm policy add-role-to-user admin user$i -n user$i-cloudnativeapps
+    oc adm policy add-role-to-user view user$i -n istio-system
   fi
 done
 
@@ -226,13 +226,13 @@ done
 if [ -z "${MODULE_TYPE##*m4*}" ] ; then
   echo -e "Installing Knative Subscriptions..."
   oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/catalog-sources.yaml
-  
+
   echo -e "Installing Knative Serving..."
   oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-serving-subscription.yaml
- 
+
   echo -e "Installing Knative Eventing..."
   oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-eventing-subscription.yaml
-  
+
 echo -e "Creating Role, Group, and assign Users"
 for i in $(eval echo "{0..$USERCOUNT}") ; do
 cat <<EOF | oc apply -n user$i-cloudnativeapps -f -
@@ -336,6 +336,16 @@ spec:
   sourceNamespace: openshift-operators
 EOF
 
+# Waiting for Kafka CRD
+echo "Waiting for Kafka CRD"
+while [ true ] ; do
+  if [ "$(oc explain kafka -n knative-eventing)" ] ; then
+    break
+  fi
+  echo -n .
+  sleep 10
+done
+
 # Install Kafka cluster in Knative-eventing
 cat <<EOF | oc create -f -
 apiVersion: kafka.strimzi.io/v1beta1
@@ -365,16 +375,6 @@ spec:
     topicOperator: {}
     userOperator: {}
 EOF
-
-# Wait for checluster to be a thing
-echo "Waiting for Kafka CRD"
-while [ true ] ; do
-  if [ "$(oc explain kafka -n knative-eventing)" ] ; then
-    break
-  fi
-  echo -n .
-  sleep 10
-done
 
 # Create KnativeEventingKafka in Knative-eventing
 cat <<EOF | oc create -f -
@@ -434,7 +434,7 @@ done
 if [ -z "${MODULE_TYPE##*m2*}" ] ; then
   oc replace -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/jenkins-ephemeral.yml -n openshift
   oc get project jenkins
-  RESULT=$? 
+  RESULT=$?
   if [ $RESULT -eq 0 ]; then
     echo -e "jenkins project already exists..."
   elif [ -z "${MODULE_TYPE##*m2*}" ] ; then
@@ -510,7 +510,7 @@ if [ -z "${MODULE_TYPE##*m1*}" ] ; then
   for i in $(jq '. | keys | .[]' <<< "$USER_ID_LIST"); do
     USER_ID=$(jq -r ".[$i].id" <<< "$USER_ID_LIST")
     USER_NAME=$(jq -r ".[$i].username" <<< "$USER_ID_LIST")
-    if [ "$USER_NAME" != "rhamt" ] ; then 
+    if [ "$USER_NAME" != "rhamt" ] ; then
       RES=$(curl -s -w '%{http_code}' -o /dev/null -k -X PUT https://secure-rhamt-web-console-labs-infra.$HOSTNAME_SUFFIX/auth/admin/realms/rhamt/users/$USER_ID/reset-password \
         -H "Content-Type: application/json" \
         -H "Accept: application/json" \
@@ -535,7 +535,7 @@ kind: CatalogSourceConfig
 metadata:
   finalizers:
   - finalizer.catalogsourceconfigs.operators.coreos.com
-  name: installed-redhat-che
+  name: installed-redhat-codeready
   namespace: openshift-marketplace
 spec:
   targetNamespace: labs-infra
@@ -548,9 +548,9 @@ cat <<EOF | oc apply -n labs-infra -f -
 apiVersion: operators.coreos.com/v1alpha2
 kind: OperatorGroup
 metadata:
-  name: che-operator-group
+  name: codeready-operator-group
   namespace: labs-infra
-  generateName: che-
+  generateName: codeready-
   annotations:
     olm.providedAPIs: CheCluster.v1.org.eclipse.che
 spec:
@@ -565,15 +565,15 @@ metadata:
   name: codeready-workspaces
   namespace: labs-infra
   labels:
-    csc-owner-name: installed-redhat-che
+    csc-owner-name: installed-redhat-codeready
     csc-owner-namespace: openshift-marketplace
 spec:
-  channel: final
+  channel: previous
   installPlanApproval: Automatic
   name: codeready-workspaces
-  source: installed-redhat-che
+  source: installed-redhat-codeready
   sourceNamespace: labs-infra
-  startingCSV: crwoperator.v1.2.0
+  startingCSV: crwoperator.v1.2.2
 EOF
 
 # Wait for checluster to be a thing
@@ -669,7 +669,7 @@ SSO_TOKEN=$(curl -s -d "username=${KEYCLOAK_USER}&password=${KEYCLOAK_PASSWORD}&
 
 echo -e "SSO_TOKEN: $SSO_TOKEN"
 
-# Import realm 
+# Import realm
 wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/ccnrd-realm.json
 curl -v -H "Authorization: Bearer ${SSO_TOKEN}" -H "Content-Type:application/json" -d @ccnrd-realm.json \
   -X POST "http://keycloak-labs-infra.$HOSTNAME_SUFFIX/auth/admin/realms"
@@ -708,7 +708,7 @@ curl -X POST --header 'Content-Type: application/json' --header 'Accept: applica
     "http://codeready-labs-infra.$HOSTNAME_SUFFIX/api/permissions"
 
 # import stack image
-oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/stack.imagestream.yaml
+oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.2/files/stack.imagestream.yaml
 sleep 5
 oc import-image --all quarkus-stack -n openshift
 
@@ -729,7 +729,7 @@ for i in $(eval echo "{0..$USERCOUNT}") ; do
         -X POST http://keycloak-labs-infra.${HOSTNAME_SUFFIX}/auth/realms/codeready/protocol/openid-connect/token | jq  -r '.access_token')
 
     TMPWORK=$(mktemp)
-    wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/workspace.json
+    wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.2/files/workspace.json
     sed 's/WORKSPACENAME/WORKSPACE'${i}'/g' workspace.json > $TMPWORK
     rm -rf workspace.json
 

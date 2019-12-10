@@ -1,0 +1,226 @@
+---
+- name: define ocp_project
+  set_fact:
+    OCP_PROJECT: rhpam7-dmn-pmml-{{guid}}
+
+    # Templates come from here: https://raw.githubusercontent.com/jorgemoralespou/ose-sample-apps-layouts
+
+- name: Create project for rhpam7 cc dispute DMN PMML demo
+  shell: |
+         oc new-project {{ OCP_PROJECT }} \
+         --display-name="RHPAM7 CC Dispute DMN PMML Demo" \
+         --description="Red Hat Process Automation Manager 7 Credit Card Dispute DMN PMML Demo"
+  ignore_errors: true
+
+#- name: Set project limit LimitRange
+#  shell: "oc create -f /tmp/{{guid}}//limit-range.yaml -n {{ocp_project}}"
+
+# Check whether the required ImageStreams are available in the "openshift" namespace.
+# If they are not, we import them.
+# We need to do this in the "openshift" namespace, in order to have the secret to pull from registry.redhat.io.
+- name: Check if PAM ImageStreams exists
+  shell: oc get is/rhpam-businesscentral-rhel8 -n openshift
+  register: rhpam_is_exists_result
+  ignore_errors: true
+
+- name: Import the RHPAM ImageStreams into the cluster.
+  shell: "oc create -f {{pam_imagestreams_yml}} -n openshift"
+  when: rhpam_is_exists_result is failed
+  ignore_errors: true
+
+- name: Import ImageStreams Entando EAP 7.1
+  shell: "oc create -f https://raw.githubusercontent.com/entando/entando-ops/credit-card-dispute/Openshift/image-streams/entando-fsi-ccd-demo.json -n {{ OCP_PROJECT }}"
+
+#- name: Import ImageStreams Entando Appbuilder
+#  shell: "oc create -f https://raw.githubusercontent.com/entando/entando-ops/master/Openshift/image-streams/appbuilder.json -n {{ocp_project}}"
+
+- name: Import PAM template
+  shell: "oc create -f {{pam_template_yml}} -n {{ OCP_PROJECT }}"
+
+- name: Import Entando demo template
+  shell: "oc create -f https://raw.githubusercontent.com/entando/entando-ops/credit-card-dispute/Openshift/templates/entando-demo.yml -n {{ OCP_PROJECT }}"
+
+- name: Create Secrets Business Central
+  shell: oc process -f {{pam_secrets_template_yml}} -p SECRET_NAME=businesscentral-app-secret | oc create -f - -n {{ OCP_PROJECT }}
+
+- name: Create Secrets KIE-server
+  shell: oc process -f {{pam_secrets_template_yml}} -p SECRET_NAME=kieserver-app-secret | oc create -f - -n {{ OCP_PROJECT }}
+
+- name: Create Service Account Business Central
+  shell: oc create serviceaccount businesscentral-service-account -n {{ OCP_PROJECT }}
+
+- name: Create Service Account KIE Server
+  shell: oc create serviceaccount kieserver-service-account -n {{ OCP_PROJECT }}
+
+- name: Link secrets and service account Business Central
+  shell: oc secrets link --for=mount businesscentral-service-account businesscentral-app-secret -n {{ OCP_PROJECT }}
+
+- name: Link secrets and service account KIE-server
+  shell: oc secrets link --for=mount kieserver-service-account kieserver-app-secret -n {{ OCP_PROJECT }}
+
+#- name: Create ConfigMap Business Central
+#  shell: oc create configmap rhpam-bc-setup-config-map --from-file=/tmp/{{guid}}/bc-clone-git-repository.sh,/tmp/{{guid}}/provision-properties-static.sh -n {{ocp_project}}
+
+- name: Create PAM7 Authoring environment 2
+  shell: |
+         oc new-app --template=rhpam75-trial-ephemeral \
+           --name={{pam_app_name}} \
+           -p APPLICATION_NAME={{pam_app_name}} \
+           -p IMAGE_STREAM_NAMESPACE=openshift \
+           -p KIE_ADMIN_USER={{ kie_admin_user }} \
+           -p KIE_SERVER_USER={{ kie_server_user }} \
+           -p KIE_SERVER_CONTROLLER_USER="{{ kie_server_controller_user }}" \
+           -p BUSINESS_CENTRAL_MEMORY_LIMIT="2Gi" \
+           -p KIE_SERVER_MEMORY_LIMIT="2Gi" \
+           -e JAVA_OPTS_APPEND="-Dorg.jbpm.document.storage=/opt/eap/standalone/data/documents"
+#           -p BUSINESS_CENTRAL_HTTPS_SECRET=businesscentral-app-secret \
+#           -p KIE_SERVER_HTTPS_SECRET=kieserver-app-secret \
+#           -p KIE_ADMIN_PWD={{ kie_admin_pwd }} \
+#           -p KIE_SERVER_PWD="{{ kie_server_pwd }}" \
+#           -p KIE_SERVER_CONTROLLER_PWD="{{ kie_server_controller_pwd }}" \
+#           -p BUSINESS_CENTRAL_VOLUME_CAPACITY="1Gi" \
+#           -p DB_VOLUME_CAPACITY="4Gi" \
+
+- name: Configure Liveness probe
+  shell: "oc set probe dc/{{pam_app_name}}-rhpamcentr --liveness --initial-delay-seconds=360 -n {{ OCP_PROJECT }}"
+
+- name: Configure Readiness probe
+  shell: "oc set probe dc/{{pam_app_name}}-rhpamcentr --readiness --initial-delay-seconds=90 -n {{ OCP_PROJECT }}"
+
+- name: Set KIE_ADMIN Password Business Central
+  shell: "oc set env dc/{{pam_app_name}}-rhpamcentr KIE_ADMIN_PWD=redhatpam1! -n {{ OCP_PROJECT }}"
+
+- name: Set KIE_ADMIN Password KIE-Server
+  shell: "oc set env dc/{{pam_app_name}}-kieserver KIE_ADMIN_PWD=redhatpam1! -n {{ OCP_PROJECT }}"
+
+- name: Disable OpenShiftStartupStrategy
+  shell: "oc set env dc/{{pam_app_name}}-rhpamcentr KIE_WORKBENCH_CONTROLLER_OPENSHIFT_ENABLED=false KIE_SERVER_CONTROLLER_PWD=test1234! -n {{ OCP_PROJECT }}"
+
+- name: Configure KIE-Server
+  shell: "oc set env dc/{{pam_app_name}}-kieserver KIE_SERVER_STARTUP_STRATEGY=ControllerBasedStartupStrategy KIE_SERVER_CONTROLLER_USER=controllerUser KIE_SERVER_CONTROLLER_PWD=test1234! KIE_SERVER_CONTROLLER_SERVICE=rhpam7-rhpamcentr KIE_SERVER_CONTROLLER_PROTOCOL=ws KIE_SERVER_ROUTE_NAME=insecure-{{pam_app_name}}-kieserver -n {{ OCP_PROJECT }}"
+
+- name: Running RHPAM DMN PMML build.
+  import_tasks: ./rhpam_openshift_dmn_pmml_workload.yml
+
+# Already wait for deployment here. If we start doing 4 builds and deployments at the same time, and images need to be pulled in, we will timeout.
+# So, we're doing some stuff sequentially (explicitly).
+- include_tasks: ./wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - "{{pam_app_name}}-rhpamcentr"
+      - "{{pam_app_name}}-kieserver"
+
+- name: "Get KIE-Server Route"
+  shell: "oc get route insecure-{{pam_app_name}}-kieserver | awk 'FNR > 1 {print $2}'"
+  register: oc_get_route_output
+
+- name: "Set KIE Server Route fact"
+  set_fact:
+    kie_server_route: "{{ oc_get_route_output.stdout }}"
+
+- name: "Get OCP Domain Suffix"
+  shell: "oc get route insecure-{{pam_app_name}}-kieserver | awk 'FNR > 1 {print $2}'| cut -d\".\" -f2-"
+  register: oc_get_domain_suffix_output
+
+- name: "OCP Domain Suffix fact"
+  set_fact:
+    ocp_domain_suffix: "{{ oc_get_domain_suffix_output.stdout }}"
+
+
+
+
+
+### Entando
+
+- name: "Create Entando Customer Application"
+  shell: |
+         oc new-app --template={{ OCP_PROJECT }}/entando-demo \
+           -p APPLICATION_NAME="entando-fsi-ccd-customer" \
+           -p KIE_SERVER_BASE_URL="http://{{kie_server_route}}" \
+           -p KIE_SERVER_USERNAME={{kie_admin_user}} \
+           -p KIE_SERVER_PASSWORD={{kie_admin_pwd}} \
+           -p IMAGE_STREAM_NAMESPACE={{ OCP_PROJECT }} \
+           -p IMAGE_STREAM="fsi-cc-dispute-customer" \
+           -p ENTANDO_APP_BUILDER_HOSTNAME_HTTP="appbuilder-customer.{{ocp_domain_suffix}}" \
+           -p ENTANDO_RUNTIME_HOSTNAME_HTTP="entando-core.{{ocp_domain_suffix}}" \
+           -p ENTANDO_WEB_CONTEXT="fsi-credit-card-dispute-customer"
+
+- name: "Create Entando Admin Application"
+  shell: |
+         oc new-app --template={{ OCP_PROJECT }}/entando-demo \
+           -p APPLICATION_NAME="entando-fsi-ccd-admin" \
+           -p KIE_SERVER_BASE_URL="http://{{kie_server_route}}" \
+           -p KIE_SERVER_USERNAME={{kie_admin_user}} \
+           -p KIE_SERVER_PASSWORD={{kie_admin_pwd}} \
+           -p IMAGE_STREAM_NAMESPACE="{{ OCP_PROJECT }}" \
+           -p IMAGE_STREAM="fsi-cc-dispute-admin" \
+           -p ENTANDO_APP_BUILDER_HOSTNAME_HTTP="appbuilder-admin.{{ocp_domain_suffix}}" \
+           -p ENTANDO_RUNTIME_HOSTNAME_HTTP="entando-core.{{ocp_domain_suffix}}" \
+           -p ENTANDO_WEB_CONTEXT="fsi-credit-card-dispute-backoffice"
+
+
+### Prometheus
+
+- name: Running Prometheus Workload Tasks
+  import_tasks: ./prometheus_workload.yml
+  become: false
+
+### Grafana
+
+- name: Running Grafana Workload Tasks
+  import_tasks: ./grafana_workload.yml
+  become: false
+
+
+### Data Loaders
+- name: Create DataLoader Build
+  shell: oc new-build fabric8/s2i-java~https://github.com/jbossdemocentral/gdemo-data-loader-quarkus --name=gdemo-data-loader
+
+- name: Deploy DataLoader for DMN
+  shell: oc new-app gdemo-data-loader --allow-missing-imagestream-tags --name gdemo-data-loader-dmn -e KIE_SERVER_REST_ENDPOINT=http://rhpam7-kieserver:8080/services/rest/server  -e DMN_MODEL_NAME=creditDisputeSimpleInput
+
+- name: Set resource limits for DataLoader DMN
+  shell: oc set resources dc/gdemo-data-loader-dmn --limits=cpu=400m,memory=256Mi --requests=cpu=200m,memory=128Mi
+
+- name: Deploy DataLoader for PMML-1
+  shell: oc new-app gdemo-data-loader --allow-missing-imagestream-tags --name gdemo-data-loader-dmn-pmml1 -e KIE_SERVER_REST_ENDPOINT=http://rhpam7-kieserver:8080/services/rest/server  -e DMN_MODEL_NAME=creditDisputeSimpleInputPmml1
+
+- name: Set resource limits for DataLoader DMN PMML1
+  shell: oc set resources dc/gdemo-data-loader-dmn-pmml1 --limits=cpu=400m,memory=256Mi --requests=cpu=200m,memory=128Mi
+
+- name: Deploy DataLoader for PMML2
+  shell: oc new-app gdemo-data-loader --allow-missing-imagestream-tags --name gdemo-data-loader-dmn-pmml2 -e KIE_SERVER_REST_ENDPOINT=http://rhpam7-kieserver:8080/services/rest/server  -e DMN_MODEL_NAME=creditDisputeSimpleInputPmml2
+
+- name: Set resource limits for DataLoader DMN PMML2
+  shell: oc set resources dc/gdemo-data-loader-dmn-pmml2 --limits=cpu=400m,memory=256Mi --requests=cpu=200m,memory=128Mi
+
+- name: Set RepController for DMN DC
+  shell: oc scale --replicas=0 dc/gdemo-data-loader-dmn
+
+- name: Set RepContoller for PMML1 DC
+  shell: oc scale --replicas=0 dc/gdemo-data-loader-dmn-pmml1
+
+- name: Set RepController for PMML2 DC
+  shell: oc scale --replicas=0 dc/gdemo-data-loader-dmn-pmml2
+
+- include_tasks: ./wait_for_build.yml
+  vars:
+    build_to_wait:
+      - gdemo-data-loader
+
+#### Wait for the deployment to complete before slapping on the quota ...
+- include_tasks: ./wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - "entando-fsi-ccd-admin-runtime"
+      - "entando-fsi-ccd-admin-runtime"
+
+- name: Annotate the completed project as requested by user
+  shell: "oc annotate namespace {{ OCP_PROJECT }} openshift.io/requester={{ocp_username}} --overwrite"
+
+- name: Give user access to the completed project
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ OCP_PROJECT }}"
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete
