@@ -106,6 +106,8 @@ if [ -z "${MODULE_TYPE##*m1*}" ] ; then
       -p WEB_CONSOLE_REQUESTED_MEMORY=$REQUESTED_MEMORY \
       -p EXECUTOR_REQUESTED_CPU=$REQUESTED_CPU \
       -p EXECUTOR_REQUESTED_MEMORY=2Gi | oc create -n labs-infra  -f -
+
+  oc scale dc/rhamt-web-console-executor --replicas=$(($USERCOUNT / 2)) -n labs-infra
 fi
 
 # deploy gogs
