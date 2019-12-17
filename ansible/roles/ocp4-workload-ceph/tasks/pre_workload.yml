@@ -42,49 +42,35 @@
     msg: "Less than 3 worker nodes detected. Cannot install Ceph..."
   when: ceph_worker_nodes | length < 3
 
-- name: Provisioning new ebs volumes for worker nodes
-  ec2_vol:
-    aws_access_key: "{{ aws_access_key_id }}"
-    aws_secret_key: "{{ aws_secret_access_key }}"
-    region: "{{ aws_region }}"
-    instance: "{{ item.name }}"
-    volume_type: "gp2"
-    volume_size: "100"
-    delete_on_termination: yes
-    name: "ceph-vol-{{ item.name }}-{{ item.aZone }}"
-    tags:
-      ceph-cluster-id: "{{ ceph_cluster_id }}"
-  loop: "{{ ceph_worker_nodes }}"
-  when: not ceph_workload_destroy | bool
+- block:
+  - name: "Creating temporary directory for VirtualEnv"
+    tempfile:
+      state: directory
+    register: ceph_workload_venv_path
 
-- name: Cleaning up ebs volumes from worker nodes
-  block:
-  - name: Discovering Ceph volumes to delete
-    ec2_vol_facts:
-      aws_access_key: "{{ aws_access_key_id }}"
-      aws_secret_key: "{{ aws_secret_access_key }}"
-      region: "{{ aws_region }}"
-      filters:
-        "tag:ceph-cluster-id": "{{ ceph_cluster_id }}"
-        "tag:Name": "ceph-vol-*"
-    register: ceph_discovered_vols
+  - name: "Creating virtualenv in temporary location"
+    pip:
+      name: "{{ item }}"
+      chdir: "{{ ceph_workload_venv_path.path }}"
+      virtualenv: "{{ ceph_workload_venv_path.path }}"
+    loop:
+    - boto
+    - boto3
+    - ansible
 
-  - name: Detaching Ceph volumes
-    ec2_vol:
-      aws_access_key: "{{ aws_access_key_id }}"
-      aws_secret_key: "{{ aws_secret_access_key }}"
-      region: "{{ aws_region }}"
-      id: "{{ item.id }}"
-      instance: None
-    loop: "{{ ceph_discovered_vols.volumes }}"
+  - name: "Copying AWS helper scripts"
+    synchronize:
+      src: "{{ role_path }}/files/aws_helper.yaml"
+      dest: "{{ ceph_workload_venv_path.path }}/aws_helper.yaml"
 
-  - name: Deleting Ceph volumes
-    ec2_vol:
-      aws_access_key: "{{ aws_access_key_id }}"
-      aws_secret_key: "{{ aws_secret_access_key }}"
-      region: "{{ aws_region }}"
-      id: "{{ item.id }}"
-      state: absent
-    loop: "{{ ceph_discovered_vols.volumes }}"
-  when: ceph_workload_destroy | bool
-  ignore_errors: true
+  - name: "Running AWS helper scripts"
+    shell: |
+      ./bin/ansible-playbook aws_helper.yaml \
+      -e aws_access_key_id={{ aws_access_key_id }} \
+      -e aws_secret_access_key={{ aws_secret_access_key }} \
+      -e aws_region={{ aws_region }} \
+      -e ceph_cluster_id={{ ceph_cluster_id }} \
+      -e ceph_workload_destroy={{ ceph_workload_destroy }} \
+      --extra-vars '{'ceph_worker_nodes':{{ ceph_worker_nodes }} }' \
+    args:
+      chdir: "{{ ceph_workload_venv_path.path }}"
