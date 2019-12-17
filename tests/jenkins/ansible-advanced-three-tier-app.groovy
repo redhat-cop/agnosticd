@@ -136,8 +136,8 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /ssh -i ~/.ssh/your_private_key_name ([^ \n]+)/
-                        ssh_location = m[0]
+                        def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
+                        ssh_location = m[0][1]
                         echo "SSH command: '${ssh_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
