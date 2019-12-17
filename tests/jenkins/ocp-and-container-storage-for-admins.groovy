@@ -78,8 +78,8 @@ pipeline {
                     def cfparams = [
                         'check=t',
                         'check2=t',
-                        'salesforce=test',
-                        'city=rhpds',
+                        'salesforce=gptejen',
+                        'city=jenkins',
                         'notes=devops_automation_jenkins',
                         'expiration=7',
                         'runtime=8',

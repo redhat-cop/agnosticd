@@ -102,8 +102,8 @@ pipeline {
                         'runtime=8',
                         'nodes=2',
                         'users=2',
-                        'city=jenkinsccicd',
-                        'salesforce=test',
+                        'city=jenkins',
+                        'salesforce=gptejen',
                         'notes=devops_automation_jenkins',
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
