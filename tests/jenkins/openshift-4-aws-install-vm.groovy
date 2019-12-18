@@ -2,8 +2,8 @@
 // CloudForms
 def opentlc_creds = 'b93d2da4-c2b7-45b5-bf3b-ee2c08c6368e'
 def opentlc_admin_creds = '73b84287-8feb-478a-b1f2-345fd0a1af47'
-def cf_uri = 'https://rhpds.redhat.com'
-def cf_group = 'rhpds-access-cicd'
+def cf_uri = 'https://labs.opentlc.com'
+def cf_group = 'opentlc-access-cicd'
 // IMAP
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
@@ -19,26 +19,19 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def openshift_location = ''
-def webapp_location = ''
-
+def ssh_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / Integreatly Workshop',
-    'DevOps Team Testing Catalog / TEST - Integreatly Workshop',
-    'DevOps Team Development Catalog / DEV - Integreatly Workshop',
-].join("\n")
-
-def ocprelease_choice = [
-    '3.11.16',
-    '3.10.14',
+    'OPENTLC OpenShift 4 Labs / OpenShift 4 AWS Install VM',
+    'DevOps Deployment Testing / TEST OpenShift 4 AWS Install VM',
+    'DevOps Team Development / DEV OpenShift 4 AWS Install VM',
 ].join("\n")
 
 def region_choice = [
-    'na_openshiftbu',
-    'apac_openshift_bu',
-    'emea_openshiftbu',
+    'na_sandboxes_gpte',
+    'apac_sandboxes_gpte',
+    'emea_sandboxes_gpte',
 ].join("\n")
 
 pipeline {
@@ -60,13 +53,8 @@ pipeline {
             name: 'catalog_item',
         )
         choice(
-            choices: ocprelease_choice,
-            description: 'Catalog item',
-            name: 'ocprelease',
-        )
-        choice(
             choices: region_choice,
-            description: 'Catalog item',
+            description: 'Region',
             name: 'region',
         )
     }
@@ -86,21 +74,7 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
-                    def cfparams = [
-                        'check=t',
-                        'quotacheck=t',
-                        "ocprelease=${ocprelease}",
-                        "region=${region}",
-                        'expiration=7',
-                        'runtime=8',
-                        'users=2',
-                        'city=jenkins',
-                        'salesforce=gptejen',
-                        'notes=devops_automation_jenkins',
-                    ].join(',').trim()
-
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -109,7 +83,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d '${cfparams}' \
+                          -d 'expiration=6,runtime=8,region=${region}'
                         """
                     ).trim()
 
@@ -117,7 +91,8 @@ pipeline {
                 }
             }
         }
-
+        /* Skip this step because sometimes the completed email arrives
+         before the 'has started' email */
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -134,8 +109,8 @@ pipeline {
                     --filter 'has started'"""
             }
         }
-
-        stage('Wait for last email and parse OpenShift and App location') {
+        
+        stage('Wait for last email and parse SSH location') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
@@ -150,22 +125,15 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 100 \
+                          --timeout 20 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (https:\/\/master\.[^ ]+)/
-                        openshift_location = m[0][1]
-                        echo "openshift_location = '${openshift_location}'"
-
-                        m = email =~ /Web App URL: (https:\/\/[^ \n]+)/
-                        webapp_location = m[0][1]
-                        echo "webapp_location = '${openshift_location}'"
-
-                        m = email =~ /Cluster Admin User: ([^ \n]+ \/ [^ \n]+)/
-                        echo "Custer Admin User: ${m[0][1]}"
+                    	def m = email =~ /SSH Access: (.*)/
+						ssh_location = m[0][1]
+						echo "SSH Access: ${ssh_location}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -254,21 +222,6 @@ pipeline {
                 export DEBUG=true
                 ./opentlc/delete_svc_guid.sh '${guid}'
                 """
-            }
-
-            /* Print ansible logs */
-            withCredentials([
-                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
-                sshUserPrivateKey(
-                    credentialsId: ssh_creds,
-                    keyFileVariable: 'ssh_key',
-                    usernameVariable: 'ssh_username')
-            ]) {
-                sh("""
-                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
-                    "bin/logs.sh ${guid}" || true
-                """.trim()
-                )
             }
 
             withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
