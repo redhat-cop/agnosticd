@@ -8,7 +8,7 @@ def cf_group = 'rhpds-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gucore@redhat.com'
+def notification_email = 'gptezabbixalert@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -20,25 +20,26 @@ def ssh_admin_host = 'admin-host-na'
 // state variables
 def guid=''
 def openshift_location = ''
-def webapp_location = ''
 
 
 // Catalog items
 def choices = [
-    'Workshops / Integreatly Workshop',
-    'DevOps Team Testing Catalog / TEST - Integreatly Workshop',
-    'DevOps Team Development Catalog / DEV - Integreatly Workshop',
+    'Workshops / BROKEN! OpenShift Service Mesh in Action',
 ].join("\n")
 
 def ocprelease_choice = [
-    '3.11.16',
-    '3.10.14',
+    '3.11.104',
+    '3.11.59',
+    '3.11.51',
+    '3.11.43',
+    '3.10.34',
+    '3.9.40',
 ].join("\n")
 
 def region_choice = [
-    'na_openshiftbu',
-    'apac_openshift_bu',
-    'emea_openshiftbu',
+    'na_gpte',
+    'apac_gpte',
+    'emea_gpte',
 ].join("\n")
 
 pipeline {
@@ -90,15 +91,16 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'check=t',
-                        'quotacheck=t',
-                        "ocprelease=${ocprelease}",
-                        "region=${region}",
-                        'expiration=7',
+                        'check2=t',
+                        'expiration=2',
                         'runtime=8',
-                        'users=2',
+                        "region=${region}",
                         'city=jenkins',
                         'salesforce=gptejen',
                         'notes=devops_automation_jenkins',
+                        'users=2',
+                        'use_letsencrypt=f',
+                        "ocprelease=${ocprelease}",
                     ].join(',').trim()
 
                     echo "'${catalog}' '${item}'"
@@ -123,7 +125,7 @@ pipeline {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
 
@@ -140,7 +142,7 @@ pipeline {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 script {
@@ -150,7 +152,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 100 \
+                          --timeout 60 \
                           --filter 'has completed'
                         """
                     ).trim()
@@ -160,12 +162,6 @@ pipeline {
                         openshift_location = m[0][1]
                         echo "openshift_location = '${openshift_location}'"
 
-                        m = email =~ /Web App URL: (https:\/\/[^ \n]+)/
-                        webapp_location = m[0][1]
-                        echo "webapp_location = '${openshift_location}'"
-
-                        m = email =~ /Cluster Admin User: ([^ \n]+ \/ [^ \n]+)/
-                        echo "Custer Admin User: ${m[0][1]}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -225,7 +221,7 @@ pipeline {
         }
         stage('Wait for deletion email') {
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {

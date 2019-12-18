@@ -8,7 +8,7 @@ def cf_group = 'rhpds-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gucore@redhat.com'
+def notification_email = 'gptezabbixalert@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -31,8 +31,14 @@ def choices = [
 ].join("\n")
 
 def ocprelease_choice = [
-    '3.11.16',
-    '3.10.14',
+    '3.11.104',
+    '3.11.43',
+].join("\n")
+
+def ig_version_choice = [
+    '1.5.1',
+    '1.5.0',
+    '1.4.1',
 ].join("\n")
 
 def region_choice = [
@@ -65,6 +71,11 @@ pipeline {
             name: 'ocprelease',
         )
         choice(
+            choices: ig_version_choice,
+            description: 'Catalog item',
+            name: 'ig_version',
+        )
+        choice(
             choices: region_choice,
             description: 'Catalog item',
             name: 'region',
@@ -86,18 +97,21 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
+                    def ig_version = params.ig_version.trim()
                     def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
                     def cfparams = [
-                        'check=t',
-                        'quotacheck=t',
-                        "ocprelease=${ocprelease}",
-                        "region=${region}",
-                        'expiration=7',
+                        'expiration=2',
                         'runtime=8',
-                        'users=2',
+                        "region=${region}",
                         'city=jenkins',
                         'salesforce=gptejen',
+                        'users=2',
+                        'check=t',
+                        'check2=t',
+                        'quotacheck=t',
+                        "app_version=${ig_version}",
+                        "ocprelease=${ocprelease}",
                         'notes=devops_automation_jenkins',
                     ].join(',').trim()
 
@@ -123,7 +137,7 @@ pipeline {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
 
@@ -140,7 +154,7 @@ pipeline {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 script {
@@ -150,7 +164,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 100 \
+                          --timeout 120 \
                           --filter 'has completed'
                         """
                     ).trim()
@@ -162,7 +176,7 @@ pipeline {
 
                         m = email =~ /Web App URL: (https:\/\/[^ \n]+)/
                         webapp_location = m[0][1]
-                        echo "webapp_location = '${openshift_location}'"
+                        echo "webapp_location = '${webapp_location}'"
 
                         m = email =~ /Cluster Admin User: ([^ \n]+ \/ [^ \n]+)/
                         echo "Custer Admin User: ${m[0][1]}"
@@ -225,7 +239,7 @@ pipeline {
         }
         stage('Wait for deletion email') {
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {

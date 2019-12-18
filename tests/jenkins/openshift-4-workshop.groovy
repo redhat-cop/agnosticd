@@ -8,7 +8,7 @@ def cf_group = 'rhpds-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gucore@redhat.com'
+def notification_email = 'gptezabbixalert@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -20,25 +20,18 @@ def ssh_admin_host = 'admin-host-na'
 // state variables
 def guid=''
 def openshift_location = ''
-def webapp_location = ''
-
 
 // Catalog items
 def choices = [
-    'Workshops / Integreatly Workshop',
-    'DevOps Team Testing Catalog / TEST - Integreatly Workshop',
-    'DevOps Team Development Catalog / DEV - Integreatly Workshop',
-].join("\n")
-
-def ocprelease_choice = [
-    '3.11.16',
-    '3.10.14',
+    'Workshops / OpenShift 4 Workshop',
+    'DevOps Team Testing Catalog / TEST - OpenShift 4 Workshop RHPDS',
+    'DevOps Team Development Catalog / DEV - OpenShift 4 Workshop',
 ].join("\n")
 
 def region_choice = [
-    'na_openshiftbu',
-    'apac_openshift_bu',
-    'emea_openshiftbu',
+    'na_gpte',
+    'apac_gpte',
+    'emea_gpte',
 ].join("\n")
 
 pipeline {
@@ -58,11 +51,6 @@ pipeline {
             choices: choices,
             description: 'Catalog item',
             name: 'catalog_item',
-        )
-        choice(
-            choices: ocprelease_choice,
-            description: 'Catalog item',
-            name: 'ocprelease',
         )
         choice(
             choices: region_choice,
@@ -86,21 +74,20 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
                     def cfparams = [
                         'check=t',
-                        'quotacheck=t',
-                        "ocprelease=${ocprelease}",
-                        "region=${region}",
+                        'check2=t',
+                        'salesforce=gptejen',
+                        'city=jenkins',
+                        'notes=devops_automation_jenkins',
                         'expiration=7',
                         'runtime=8',
+                        'quotacheck=t',
                         'users=2',
-                        'city=jenkins',
-                        'salesforce=gptejen',
-                        'notes=devops_automation_jenkins',
+                        "region=${region}",
+                        'use_letsencrypt=f',
                     ].join(',').trim()
-
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -117,20 +104,20 @@ pipeline {
                 }
             }
         }
-
+        // Skip this step because sometimes the completed email arrives
+        // before the 'has started' email
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
-
 
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
                     --guid ${guid} \
-                    --timeout 20 \
+                    --timeout 30 \
                     --filter 'has started'"""
             }
         }
@@ -140,7 +127,7 @@ pipeline {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 script {
@@ -150,22 +137,15 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 100 \
+                          --timeout 60 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (https:\/\/master\.[^ ]+)/
+                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
                         openshift_location = m[0][1]
                         echo "openshift_location = '${openshift_location}'"
-
-                        m = email =~ /Web App URL: (https:\/\/[^ \n]+)/
-                        webapp_location = m[0][1]
-                        echo "webapp_location = '${openshift_location}'"
-
-                        m = email =~ /Cluster Admin User: ([^ \n]+ \/ [^ \n]+)/
-                        echo "Custer Admin User: ${m[0][1]}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -225,7 +205,7 @@ pipeline {
         }
         stage('Wait for deletion email') {
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
