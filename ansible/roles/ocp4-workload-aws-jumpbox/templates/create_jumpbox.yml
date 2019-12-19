@@ -1,0 +1,190 @@
+---
+- name: setup jumpbox
+  hosts: localhost
+  connection: local
+
+  tasks:
+  - name: Set Variables
+    set_fact:
+      # Image ID of RHEL 8 Image
+      # eu-central-1
+      aws_image_eu_central_1: ami-0badcc5b522737046
+      # us-east-1
+      aws_image_us_east_1: ami-0c322300a1dd5dc79
+      # us-east-2
+      aws_image_us_east_2: ami-0520e698dd500b1d1
+      # Fall back
+      aws_image: not_set
+
+  - name: Add AWS Hosts to Inventory
+    include_tasks:
+      file: ./aws_inventory.yml
+
+  - name: Setup Jumpbox
+    when: jumpboxes["instances"][0] is not defined
+    block:
+    - name: Put the Cluster Public Key in AWS for jumphost
+      ec2_key:
+        name: "{{ guid }}-cluster-key"
+        key_material: "{{ lookup('file', '/home/ec2-user/.ssh/id_rsa.pub') }}"
+        region: "{{ aws_region }}"
+
+    - name: Create SSH security group
+      ec2_group:
+        name: "jumpbox-{{ cluster_name }}"
+        description: jumpbox security group
+        region: "{{ aws_region }}"
+        vpc_id: "{{ cluster_vpc }}"
+        rules:
+          - proto: tcp
+            ports: 22
+            cidr_ip: 0.0.0.0/0
+      register: sg_jumpbox
+
+    - name: get vpc_subnet_id
+      ec2_vpc_subnet_facts:
+        region: "{{ aws_region }}"
+        filters:
+          vpc-id: "{{ sg_jumpbox.vpc_id }}"
+          cidr-block: "10.0.0.0/20"
+      register: ec2_vpc_subnet_ids
+
+    - name: Set RHEL8 AMI for eu-central-1
+      when: aws_region is match('eu-central-1')
+      set_fact:
+        aws_image: "{{ aws_image_eu_central_1 }}"
+    - name: Set RHEL8 AMI for us-east-1
+      when: aws_region is match('us-east-1')
+      set_fact:
+        aws_image: "{{ aws_image_us_east_1 }}"
+    - name: Set RHEL8 AMI for us-east-2
+      when: aws_region is match('us-east-2')
+      set_fact:
+        aws_image: "{{ aws_image_us_east_2 }}"
+
+    - name: Fail if no image set
+      when: aws_region is match('not_set')
+      fail:
+        msg: "No Image for current region defined"
+    
+    - name: Launch EC2 Jumpbox instance
+      ec2:
+        key_name: "{{ guid }}-cluster-key"
+        vpc_subnet_id: "{{ ec2_vpc_subnet_ids.subnets[0].subnet_id }}"
+        instance_type: t2.micro
+        group_id: "{{ sg_jumpbox.group_id }}"
+        image: "{{ aws_image }}"
+        region: "{{ aws_region }}"
+        assign_public_ip: true
+        instance_tags:
+          type: jumpbox
+          guid: "{{ guid }}"
+          cluster_name: "{{ cluster_name }}"
+        wait: true
+      register: r_jumpbox
+
+    - name: Print Jumpbox information
+      debug:
+        var: r_jumpbox
+
+    - name: Add jumpbox instance public IP to host group
+      add_host:
+        name: "{{ r_jumpbox.instances[0].public_ip }}"
+        groups: jumpbox
+
+    - name: Delete bastion SSH config file
+      file:
+        dest: "/home/ec2-user/.ssh/config"
+        state: absent
+
+    - name: Create empty SSH config
+      file:
+        dest: "/home/ec2-user/.ssh/config"
+        state: touch
+        mode: 0600
+
+    - name: Setup bastion SSH config
+      blockinfile:
+        dest: "/home/ec2-user/.ssh/config"
+        marker: "##### {mark} Adding masters with ProxyJump"
+        content: |
+          Host {{ r_jumpbox.instances[0].public_ip }}
+            User ec2-user
+            StrictHostKeyChecking no
+
+          Host *.internal
+            User core
+            ProxyJump {{ r_jumpbox.instances[0].public_ip }}
+            StrictHostKeyChecking no
+
+          Match User ec2-user
+            IdentityFile /home/ec2-user/.ssh/id_rsa
+            StrictHostKeyChecking no
+
+          Match User core
+            IdentityFile /home/ec2-user/.ssh/id_rsa
+            StrictHostKeyChecking no
+
+          Host *
+            ControlMaster auto
+            ControlPath /tmp/%h-%r
+            ControlPersist 5m
+            StrictHostKeyChecking no
+
+    - name: Wait for SSH to come up
+      delegate_to: "{{ r_jumpbox.instances[0].public_ip }}"
+      wait_for_connection:
+        delay: 10
+        timeout: 180
+
+  - name: Add existing Jumpbox to inventory
+    add_host:
+      name: "{{ jumpboxes.instances[0].public_ip_address }}"
+      groups: jumpbox
+    when: jumpboxes.instances[0] is defined
+
+- name: Prep Jumpbox
+  hosts: jumpbox
+  vars:
+    HOME: "{{ lookup('env', 'HOME') }}"
+    ssh_config: "{{ ansible_env.HOME }}/.ssh/config"
+  tasks:
+  - name: Copy Cluster SSH key to Jumpbox
+    copy:
+      src: /home/ec2-user/.ssh/id_rsa
+      dest: "{{ ansible_env.HOME }}/.ssh/"
+      mode: 0600
+
+  - name: Delete Jumpbox SSH config
+    file:
+      dest: "/home/ec2-user/.ssh/config"
+      state: absent
+
+  - name: Create empty SSH config
+    file:
+      dest: "/home/ec2-user/.ssh/config"
+      state: touch
+      mode: 0600
+
+  - name: Setup SSH config on Jumpbox
+    blockinfile:
+      dest: "/home/ec2-user/.ssh/config"
+      marker: "##### {mark} ADD default key and user"
+      content: |
+        Host *
+          IdentityFile /home/ec2-user/.ssh/id_rsa
+          User core
+          StrictHostKeyChecking no
+          ControlPath /tmp/{{ guid }}-%r-%h-%p
+          ControlPersist 5m
+
+  - name: Show Jumpbox Info
+    debug:
+      #var: groups["jumpbox"].host_name
+      msg:
+       - "SSH to Jumpbox: ssh {{ groups['jumpbox'][0] }}"
+       - "SSH to Master:  ssh {{ groups['control_plane'][0] }}"
+
+
+
+
