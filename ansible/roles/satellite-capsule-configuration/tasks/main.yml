@@ -1,11 +1,26 @@
 ---
-- name: Disable all local repos
-  shell: >-
-    yum-config-manager repo --disable "*"
+- name: Setting up facts for hostname
+  set_fact:
+      publicname: "{{ inventory_hostname | regex_replace('.internal',subdomain_base_suffix) }}"
+  
+- name: Reset internal hostname to public hostname
+  hostname:
+    name: "{{ publicname }}" 
 
-- name: setup satellite name
+- name: Add public hostname name in hosts file
+  lineinfile: 
+    dest: /etc/hosts 
+    state: present 
+    insertafter: EOF 
+    line: "{{ ansible_default_ipv4['address'] }}  {{ publicname }}"
+  tags:
+      - install_satellite
+
+- name: Grab satellite name, consumer-key and consumer-secret
   set_fact:
     satellite_fqdn: "{{ item | regex_replace('.internal',subdomain_base_suffix) }}"
+    consumer_key: "{{ hostvars[item]['capsule_data']['foreman_oauth_key'] }}"
+    consumer_secret: "{{ hostvars[item]['capsule_data']['foreman_oauth_secret'] }}"
   loop: "{{ groups['satellites'] }}"
 
 - name: Download Cert from Satellite
@@ -14,29 +29,29 @@
     dest: /root/katello-ca-consumer-latest.noarch.rpm
     mode: 0664
     validate_certs: no
-  # loop: "{{ groups['satellites'] }}"
-
+  
 - name: Remove rh-amazon-rhui-client package
-  tags: packer
   yum:
     name: rh-amazon-rhui-client
     state: absent
+  tags: packer
+
+- name: Remove existing repo files
+  shell: >-
+    rm -rf /etc/yum.repos.d/*.repo
+
+- name: Disable all local repos
+  shell: >-
+    yum-config-manager repo --disable "*"
+
+- name: Disable all repos
+  shell: >-
+    subscription-manager repos --disable "*"
 
 - name: Install CA certificate
   yum:
     name: /root/katello-ca-consumer-latest.noarch.rpm
     state: present
-
-- name: Install certs
-  # use rpm here to avoid issue when yum is broken (chicken&egg)
-  yum:
-    name:  "/root/katello-ca-consumer-latest.noarch.rpm"
-    state: present
-
-# - name: Delete Cert Package
-#   file:
-#     name: /root/katello-ca-consumer-latest.noarch.rpm
-#     state: absent
 
 - name: Register with activation-key
   redhat_subscription:
@@ -44,10 +59,6 @@
     server_hostname: "{{satellite_fqdn}}"
     activationkey: "{{activation_key_name}}"
     org_id: "{{org_label}}"
-  # loop: "{{ groups['satellites'] }}"
-
-- name: Disable all repos
-  command: subscription-manager repos --disable "*"
 
 - name: Enable repos for RHEL
   rhsm_repository:
@@ -71,8 +82,7 @@
   synchronize:
     src: /root/{{ inventory_hostname }}-certs.tar
     dest: /root
-  delegate_to: "{{item}}"
-  loop: "{{ groups['satellites'] }}"
+  delegate_to: "{{ satellite_fqdn }}"
 
 - name: Configure Satellite Capsule
   command: >-
@@ -82,10 +92,9 @@
       --foreman-proxy-foreman-base-url "https://{{ satellite_fqdn }}"
       --foreman-proxy-trusted-hosts {{ satellite_fqdn }} 
       --foreman-proxy-trusted-hosts {{ inventory_hostname | regex_replace('.internal',subdomain_base_suffix) }}
-      --foreman-proxy-oauth-consumer-key {{ hostvars[item]['capsule_data']['foreman_oauth_key'] }}
-      --foreman-proxy-oauth-consumer-secret {{ hostvars[item]['capsule_data']['foreman_oauth_secret'] }}
+      --foreman-proxy-oauth-consumer-key {{ consumer_key }}
+      --foreman-proxy-oauth-consumer-secret {{ consumer_secret }}
       --foreman-proxy-content-certs-tar /root/{{inventory_hostname}}-certs.tar 
       --puppet-server-foreman-url "https://{{ satellite_fqdn }}"
-  loop: "{{ groups['satellites'] }}"
-
+ 
       
