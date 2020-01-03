@@ -1,0 +1,73 @@
+---
+- environment:
+    OS_AUTH_URL: "{{ osp_auth_url }}"
+    OS_USERNAME: "{{ osp_auth_username }}"
+    OS_PASSWORD: "{{ osp_auth_password }}"
+    OS_PROJECT_NAME: "{{ osp_project_name }}"
+    OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+    OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+  # Delete resources only if the project was created for this environment
+  when: osp_project_create | bool
+  block:
+    - name: Cleanup OpenStack resources
+      environment:
+        OS_PROJECT_ID: "{{ osp_project_info[0].id | default(osp_project_id) }}"
+      block:
+        - name: Do dry-run of compute and storage purge
+          command: |
+            openstack project purge --dry-run --keep-project --project {{ osp_project_name }}
+          register: project_purge_out
+
+        - name: Purge compute and storage
+          command: |
+            openstack project purge --keep-project --project {{ osp_project_name }}
+          when: project_purge_out is succeeded
+
+        - pause:
+            seconds: 30
+
+        - name: Get all remaining volumes in project
+          command: >-
+            openstack volume list --project {{ osp_project_name }} -f json -c ID
+          register: r_volumes
+
+        - set_fact:
+            _all_volumes: >-
+              {{ r_volumes.stdout
+              | from_json
+              | json_query('[*].ID')
+              | list }}
+
+        - debug:
+            var: _all_volumes
+            verbosity: 2
+
+        - when: _all_volumes | length > 0
+          command:
+            openstack volume delete {{ _all_volumes | join(' ') }}
+
+        - name: Get all remaining trunk ports in project
+          command: >-
+            openstack port list
+            --project {{ osp_project_name }}
+            -f json -c trunk_details
+          register: r_ports
+
+        - set_fact:
+            _all_ports: >-
+              {{ r_ports.stdout
+              | from_json
+              | json_query('[?trunk_details != null].trunk_details.trunk_id')
+              | list }}
+
+        - when: _all_ports | length > 0
+          name: Delete any trunk ports in project
+          command: openstack network trunk delete {{ _all_ports | join(' ') }}
+
+        - name: Purge network resources
+          command: |
+            neutron purge --project {{ osp_project_info[0].id }}
+
+        - name: Cleanup the keypairs
+          debug:
+            msg: "Stub task until we figure out how to delete keypairs"
