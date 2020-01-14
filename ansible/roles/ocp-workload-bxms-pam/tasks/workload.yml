@@ -1,29 +1,223 @@
 ---
-- name: define ocp_project
+- name: define ocp_projects
   set_fact:
-    ocp_project: "rhpam-dev-{{ ocp_username }}"
-    
-- name: "Create project for workload {{ocp_project}}"
-  shell: "oc new-project {{ocp_project}}"
+    dev_project: "rhpam-{{ guid }}-dev"
+    tools_project: "rhpam-{{ guid }}-tools"
 
-- name: Prep local filesystem for temp files
-  file:
-    path: "/tmp/{{ ocp_username }}"
-    state: directory
+- name: "Create projects {{dev_project}}"
+  block:
+    - command: "oc new-project {{dev_project}}"
+    - command: "oc new-project {{tools_project}}"
 
+- name: "Label namespaces"
+  block:
+    - command: "oc label namespace {{dev_project}} AAD='{{guid}}'"
+    - command: "oc label namespace {{tools_project}} AAD='{{guid}}'"
 
-# Modify kieserver to include required data products information
-- name: Download products data file
-  get_url:
-    url: '{{products_data}}'
-    dest: /tmp/{{ ocp_username }}/products.txt
+- name: add custom pam image streams
+  block:
+    - command: "oc import-image {{kieserver_image}} -n {{ kieserver_image_namespace }} --confirm"
+    - command: "oc import-image {{businesscentral_image}} -n {{ businesscentral_image_namespace }} --confirm"
 
-- name: Create products configmap
-  shell: oc create configmap products-cm --from-file=/tmp/{{ ocp_username }}/products.txt -n {{ocp_project}}
+# Deploy Nexus
+- name: Check if Nexus was already provisioned
+  command: "oc get service nexus -n {{ tools_project}}"
+  register: nexus_already_installed
+  ignore_errors: true
+  changed_when: false
 
-- name: Modify kieserver to include products in a volume
-  shell: oc set volume dc/rhpam-kieserver -n {{ocp_project}} \
-        --overwrite --add -t configmap -m /data --name=products-volume --configmap-name=products-cm
+- name: Prepare nexus template
+  template:
+    src: "templates/nexus3-persistent-template.yaml"
+    dest: "/tmp/{{guid}}/nexus-template.yaml"
+  changed_when: false
+  when: nexus_already_installed is failed
+
+### We should add a check if a pv is already created (nexus requests a 10Gi pv)
+- name: Instantiate Nexus from template
+  command: >-
+    oc new-app -f /tmp/{{ guid }}/nexus-template.yaml
+    --param=VOLUME_CAPACITY={{ nexus_volume_capacity }}
+    --param=MEMORY_LIMIT={{ nexus_memory_limit }}
+    --param=MEMORY_REQUEST={{ nexus_memory_request }}
+    --param=CPU_LIMIT={{ nexus_cpu_limit }}
+    --param=CPU_REQUEST={{ nexus_cpu_request}}
+    --param=NEXUS_VERSION={{ nexus_version }}
+    -n {{ tools_project }}
+  when: nexus_already_installed is failed
+
+- name: get domain url
+  shell: echo $(oc get route nexus -o jsonpath='{.spec.host}' -n {{ tools_project }} | sed "s/nexus-{{ tools_project }}.//g")
+  register: ocp_domain_host
+
+- name: set ocp_domain fact
+  set_fact:
+    ocp_domain: "{{ ocp_domain_host.stdout }}"
+
+- name: Wait for Nexus to be deployed
+  command: "oc get dc/nexus -o yaml -n {{ tools_project }}"
+  register: result
+  until: '"availableReplicas: 1" in result.stdout'
+  retries: 5
+  delay: 60
+  changed_when: false
+  when:
+    - nexus_already_installed is failed
+
+- name: Wait for Nexus to be running (HTTP test)
+  uri:
+    url: "http://nexus-{{tools_project}}.{{ ocp_domain }}"
+  register: _result
+  until: _result.status == 200
+  retries: 10
+  delay: 60
+  changed_when: false
+  when:
+    - nexus_already_installed is failed
+
+# TODO: Use Groovy scripts to create repositories in Nexus 3
+# https://help.sonatype.com/repomanager3/rest-and-integration-api/script-api
+# https://gist.github.com/nblair/7ff67e67e7ba2114881af7105259e1a3
+
+#- name: configure remote repos
+#  include_tasks: configure_repository.yml
+#  with_items:
+#    - "{{ nexus_remote_proxy_repos }}"
+#  loop_control:
+#    loop_var: proxy_repo
+
+# TODO: Configure hosted repository
+
+# Deploy load tester
+- name: Check if Load Tester was already provisioned
+  command: "oc get service loadtester -n {{ tools_project}}"
+  register: loadtester_already_installed
+  ignore_errors: true
+  changed_when: false
+
+- name: Prepare loadtester template
+  template:
+    src: "templates/loadtester-template.yaml"
+    dest: "/tmp/{{guid}}/loadtester-template.yaml"
+  changed_when: false
+  when: loadtester_already_installed is failed
+
+- name: Instantiate loadtester from template
+  command: >-
+    oc new-app -f /tmp/{{ guid }}/loadtester-template.yaml
+    -n {{ tools_project }}
+  when: loadtester_already_installed is failed
+
+- name: Import PAM Authoring template
+  shell: "oc create -f {{pam_template_yml}} -n {{dev_project}}"
+
+- name: Create Secrets Business Central
+  shell: oc process -f {{pam_secrets_template_yml}} -p SECRET_NAME=businesscentral-app-secret | oc create -f - -n {{dev_project}}
+
+- name: Create Secrets KIE-server
+  shell: oc process -f {{pam_secrets_template_yml}} -p SECRET_NAME=kieserver-app-secret | oc create -f - -n {{dev_project}}
+
+- name: Create Service Account Business Central
+  shell: oc create serviceaccount {{bc_service_account}} -n {{dev_project}}
+
+- name: Create Service Account KIE Server
+  shell: oc create serviceaccount {{ks_service_account}} -n {{dev_project}}
+
+- name: Link secrets and service account Business Central
+  shell: oc secrets link --for=mount {{bc_service_account}} businesscentral-app-secret -n {{dev_project}}
+
+- name: Link secrets and service account KIE-server
+  shell: oc secrets link --for=mount {{ks_service_account}} kieserver-app-secret -n {{dev_project}}
+
+# Deploy Business Central
+- name: Check if Business Central was already provisioned
+  command: "oc get service {{ businesscentral_application_name }} -n {{ dev_project}}"
+  register: bc_already_installed
+  ignore_errors: true
+  changed_when: false
+
+- name: define nexus service vars
+  set_fact:
+    nexus_host: "nexus.{{ tools_project }}.svc"
+    nexus_port: 8081
+    nexus_path: content/groups/public/
+
+- name: Prepare Business Central template
+  template:
+    src: "templates/rhpam-dev-businesscentral.yaml"
+    dest: "/tmp/{{guid}}/rhpam-dev-businesscentral.yaml"
+  changed_when: false
+  when: bc_already_installed is failed
+
+- name: Instantiate Business Central from template
+  command: >-
+    oc new-app -f /tmp/{{ guid }}/rhpam-dev-businesscentral.yaml
+    -n {{ dev_project }}
+  when: bc_already_installed is failed
+
+- name: Wait for Business Central to be deployed
+  command: "oc get dc/{{businesscentral_application_name}} -o yaml -n {{ dev_project }}"
+  register: result
+  until: '"availableReplicas: 1" in result.stdout'
+  retries: 5
+  delay: 60
+  changed_when: false
+  when:
+    - bc_already_installed is failed
+
+- name: Wait for Business Central to be running (HTTP test)
+  uri:
+    url: "https://{{businesscentral_application_name}}-{{dev_project}}.{{ ocp_domain }}"
+  register: _result
+  until: _result.status == 200
+  retries: 10
+  delay: 60
+  changed_when: false
+  when:
+    - bc_already_installed is failed
+
+# Deploy Kie-server
+- name: Check if Kie Server was already provisioned
+  command: "oc get service {{ kieserver_application_name }} -n {{ dev_project}}"
+  register: ks_already_installed
+  ignore_errors: true
+  changed_when: false
+
+- name: Prepare Kie Server template
+  template:
+    src: "templates/rhpam-dev-kieserver.yaml"
+    dest: "/tmp/{{guid}}/rhpam-dev-kieserver.yaml"
+  changed_when: false
+  when: ks_already_installed is failed
+
+- name: Instantiate Kie Server from template
+  command: >-
+    oc new-app -f /tmp/{{ guid }}/rhpam-dev-kieserver.yaml
+    -n {{ dev_project }}
+  when: ks_already_installed is failed
+
+- name: Wait for Kie Server to be deployed
+  command: "oc get dc/{{kieserver_application_name}} -o yaml -n {{ dev_project }}"
+  register: result
+  until: '"availableReplicas: 1" in result.stdout'
+  retries: 5
+  delay: 60
+  changed_when: false
+  when:
+    - ks_already_installed is failed
+
+- name: Wait for Kie Server to be running (HTTP test)
+  uri:
+    url: "https://{{kieserver_application_name}}-{{dev_project}}.{{ ocp_domain }}/docs"
+  register: _result
+  until: _result.status == 200
+  retries: 10
+  delay: 60
+  changed_when: false
+  when:
+    - ks_already_installed is failed
+
+# TODO: Patch kie-server with smtp sidecar
 
 - name: workload Tasks Complete
   debug:
