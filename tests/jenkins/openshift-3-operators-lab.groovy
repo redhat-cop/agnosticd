@@ -162,7 +162,7 @@ pipeline {
                 }
             }
         }
-
+		/* Skipping it as of now
         stage('SSH') {
             steps {
                 withCredentials([
@@ -175,7 +175,7 @@ pipeline {
                     sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
                 }
             }
-        }
+        } */
 
         stage('Confirm before retiring') {
             when {
