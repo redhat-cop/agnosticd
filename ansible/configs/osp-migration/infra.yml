@@ -1,0 +1,192 @@
+---
+- hosts: localhost
+  gather_facts: false
+  vars:
+    api_user: "{{ guid }}"
+  tasks:
+    - set_fact:
+        api_pass: "{{ lookup('password', '/dev/null length=20 chars=ascii_letters') }}"
+
+    - name: Check if project exists
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ osp_auth_username }}"
+        OS_PASSWORD: "{{ osp_auth_password }}"
+        OS_PROJECT_NAME: "admin"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      os_project_info:
+        name: "{{ osp_project_name }}"
+      register: project_exists
+
+    - fail:
+        msg: Project exists, can't continue
+      when: project_exists.openstack_projects
+
+    - name: Create project and assign permission
+      register: stack_admin_output
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ osp_auth_username }}"
+        OS_PASSWORD: "{{ osp_auth_password }}"
+        OS_PROJECT_NAME: "admin"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      os_stack:
+        name: "create-project-{{osp_project_name}}"
+        template: "files/templates/{{ project }}/stack_admin.yaml"
+        parameters:
+          project_name: "{{ osp_project_name }}"
+          project_guid: "{{ guid }}"
+          project_description: "created:{{ ansible_date_time.epoch }}"
+          project_api_user: "{{ guid }}"
+          project_api_pass: "{{ api_pass }}"
+          blueprint: "{{ project }}"
+
+    # when deleting we need to be able to authenticate using that project
+    - name: Grant access to admin account to the new project
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ osp_auth_username }}"
+        OS_PASSWORD: "{{ osp_auth_password }}"
+        OS_PROJECT_NAME: "admin"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      os_user_role:
+        state: present
+        user: "{{ osp_auth_username }}"
+        role: "admin"
+        project: "{{ osp_project_name }}"
+
+    - name: Create objects inside the project
+      register: stack_user_output
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ guid }}"
+        OS_PASSWORD: "{{ api_pass }}"
+        OS_PROJECT_NAME: "{{ osp_project_name }}"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      os_stack:
+        name: "create-objects-{{osp_project_name}}"
+        template: "files/templates/{{ project }}/stack_user.yaml"
+        parameters:
+          project_name: "{{ osp_project_name }}"
+          public_net_id: "{{ external_network }}"
+          api_url: "{{ osp_auth_url }}"
+          api_user: "{{ guid }}"
+          api_pass: "{{ api_pass }}"
+          project_guid: "{{ guid }}"
+
+    - name: Save infra_key content
+      set_fact:
+        infra_private_key_content: "{{ stack_user_output | json_query(query) }}"
+      vars:
+        query: "stack.outputs[?@.output_key=='openstack_project_infra_key'].output_value|[0]"
+
+    - name: Set infra_ssh_key path
+      set_fact:
+        infra_ssh_key: "{{ output_dir}}/{{ guid }}_infra_ssh_key.pem"
+
+    - name: Copy infra_key content to output_dir
+      copy:
+        dest: "{{ infra_ssh_key }}"
+        content: "{{ infra_private_key_content }}"
+        mode: 0600
+
+    - debug:
+        var: stack_user_output
+        verbosity: 2
+
+    - name: Gather instance facts
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ guid }}"
+        OS_PASSWORD: "{{ api_pass }}"
+        OS_PROJECT_NAME: "{{ osp_project_name }}"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      os_server_facts:
+        server: "*"
+        filters:
+          metadata:
+            guid: "{{ guid }}"
+      register: r_osp_facts
+
+    - loop: "{{ r_osp_facts.ansible_facts.openstack_servers }}"
+      loop_control:
+        loop_var: _server
+
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ guid }}"
+        OS_PASSWORD: "{{ api_pass }}"
+        OS_PROJECT_NAME: "{{ osp_project_name }}"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+
+      os_server_metadata:
+        name: "{{ _server.name }}"
+        meta:
+          env_type: "{{ env_type }}"
+
+    - name: debug osp_facts
+      debug:
+        var: r_osp_facts
+
+    - name: Iterate over all instances and create DNS entries
+      loop: "{{ r_osp_facts.ansible_facts.openstack_servers }}"
+      loop_control:
+        loop_var: _instance
+      when: _instance.public_v4 | default('') != ''
+      vars:
+        _infra_osp_dns_default_ttl: 300
+        _dns_state: present
+
+      include_tasks: instance_loop.yml
+
+    # Run common OSP create-inventory but don't use server.name.
+    # Use  server.metadata.hostname  instead
+    - name: Run infra-osp-create-inventory Role
+      include_role:
+        name: infra-osp-create-inventory
+      vars:
+        _name_selector: 'metadata.hostname'
+
+    - name: Run Common SSH Config Generator Role
+      import_role:
+        name: infra-common-ssh-config-generate
+
+# include global vars again, this time for all hosts now that the inventory is built
+- import_playbook: ../../include_vars.yml
+  tags:
+    - create_inventory
+    - must
+
+- name: Step 001.3 Configure Linux Hosts and Wait for Connection
+  hosts:
+    # For now, only bastion is necessary
+    - bastions:!windows:!network
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  tags:
+    - step001
+    - step001.3
+    - wait_ssh
+  tasks:
+    - name: set facts for remote access
+      tags:
+        - create_inventory
+      set_fact:
+        # set python interpreter: Useful when the distrib running ansible has a different path
+        # ex: when running using the alpine image
+        #ansible_python_interpreter: env python
+        ansible_ssh_common_args: >-
+          {{ ansible_ssh_extra_args|d() }}
+          -F {{ output_dir }}/{{ env_type }}_{{ guid }}_ssh_conf
+          -o ControlPath=/tmp/{{ guid }}-%r-%h-%p
+
+    - name: Run infra-osp-wait_for_linux_hosts Role
+      import_role:
+        name: infra-osp-wait_for_linux_hosts
