@@ -1,7 +1,4 @@
 ---
-# Implement your Pre Workload deployment tasks here
-
-
 - wait_for:
     port: 22
     host: "bastion.{{ guid }}.internal"
@@ -9,39 +6,96 @@
   register: status
   ignore_errors: true
 
-- name: copy lab scripts to bastion
-  delegate_to: "{{ bastion_host | d( groups.bastions | first ) }}"
-  become: true
-  copy:
-    src: "{{ role_path }}/files/"
-    dest: "/root/"
+- block:
+  - name: "Ensuring SSH directory"
+    file:
+      path: "/home/{{ student_name }}/.ssh"
+      state: directory
+      owner: "{{ student_name }}"
 
-- name: "Downloading CPMA binary to bastion"
-  delegate_to: "{{ bastion_host | d( groups.bastions | first ) }}"
-  become: true
-  get_url:
-    url: "https://cpma.s3.us-east-2.amazonaws.com/cpma"
-    dest: "/root/cpma"
-    mode: "u+rwx"
+  - name: "Checking if SSH keys exist on bastion"
+    stat: 
+      path: /home/{{ student_name }}/.ssh/openshift_key
+    register: ssh_key
 
-# Leave these as the last tasks in the playbook
+  - name: "Creating SSH keys on bastion"
+    shell: "ssh-keygen -q -t rsa -f /home/{{ student_name }}/.ssh/openshift_key -C '' -N ''"
+    when: not ssh_key.stat.exists|d('false')
 
-# For deployment onto a dedicated cluster (as part of the
-# cluster deployment) set workload_shared_deployment to False
-# This is the default so it does not have to be set explicitely
+  - name: "Fixing permissions of SSH key"
+    file:
+      path: "/home/{{ student_name }}/.ssh/{{ item }}"
+      owner: "{{ student_name }}"
+      mode: "0600"
+    loop:
+      - "openshift_key"
+      - "openshift_key.pub"
+    when: ssh_key.stat.exists|d('false')
+
+  - name: "Finding SSH key"
+    stat: 
+      path: /home/{{ student_name }}/.ssh/openshift_key.pub
+    register: public_key
+
+  - name: "Reading public key"
+    shell: "cat /home/{{ student_name }}/.ssh/openshift_key.pub"
+    register: pub_key_contents
+    when: public_key.stat.exists|d('false')
+  
+  - name: "Downloading lab scripts [1]"
+    tempfile: 
+      state: directory
+    register: scripts_dir
+
+  - name: "Downloading lab scripts [2]"
+    git:
+      repo: "https://github.com/fusor/mig-agnosticd"
+      dest: "{{ scripts_dir.path }}"
+
+  - name: "Downloading lab scripts [3]"
+    copy:
+      src: "{{ scripts_dir.path }}/demos/2019_RHTE/labs/{{ item }}"
+      dest: "/home/{{ student_name }}"
+      remote_src: true
+      owner: "{{ student_name }}"
+      mode: "u+rwx"
+    loop:
+      - 'scripts'
+      - 'files'
+
+  - name: "Downloading CPMA binary to bastion"
+    get_url:
+      url: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      owner: "{{ student_name }}"
+      mode: "u+rwx"
+    loop:
+      - { dest: "/home/{{ student_name }}/cpma", src: "https://cpma.s3.us-east-2.amazonaws.com/cpma" }
+  when: student_name is defined and not status.failed
+  delegate_to: "{{ groups.bastions | first }}"
+  become: yes
+
+- name: "Adding public key to authorized_keys"
+  authorized_key:
+    user: "{{ migration_master_user_name | d('ec2-user') }}"
+    state: present
+    key: "{{ pub_key_contents.stdout }}"
+  when: pub_key_contents.stdout is defined and student_name is defined
+
+- name: "Creating temp directory for operator repo"
+  tempfile: 
+    state: directory
+    suffix: mig-operator
+  register: repodir
+
+- name: "Checking out operator repo"
+  git:
+    repo: "{{ mig_operator_repo }}"
+    dest: "{{ repodir.path }}"
+    version: "{{ mig_operator_repo_branch }}"
+
+# Leave this as the last task in the playbook.
 - name: pre_workload tasks complete
   debug:
     msg: "Pre-Workload tasks completed successfully."
-  when:
-  - not silent|bool
-  - not workload_shared_deployment|d(False)
-
-# For RHPDS deployment (onto a shared cluster) set
-# workload_shared_deployment to True
-# (in the deploy script or AgnosticV configuration)
-- name: pre_workload tasks complete
-  debug:
-    msg: "Pre-Software checks completed successfully"
-  when:
-  - not silent|bool
-  - workload_shared_deployment|d(False)
+  when: not silent|bool
