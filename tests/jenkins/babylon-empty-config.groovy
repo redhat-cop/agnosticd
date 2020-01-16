@@ -8,7 +8,7 @@ def cf_group = 'opentlc-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gptezabbixalert@redhat.com'
+def notification_email = 'gucore@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -24,25 +24,14 @@ def ssh_location = ''
 
 // Catalog items
 def choices = [
-    'OPENTLC OpenShift Labs / OpenShift 3 Operations Lab',
+    'DevOps Team Development / DEV Babylon empty-config',
+    'DevOps Deployement Testing / TEST Babylon empty-config',
+//    'DevOps Deployement Testing / PROD Babylon empty-config',
 ].join("\n")
 
 def region_choice = [
-    'na',
-    'emea',
-    'latam',
-    'apac',
-].join("\n")
-
-def nodes_choice = [
-    '2',
-    '1',
-    '3',    
-    '4',
-    '5',
-    '6',
-    '7',
-    '8',
+    'tests',
+    'tests_prod',
 ].join("\n")
 
 pipeline {
@@ -68,11 +57,6 @@ pipeline {
             description: 'Region',
             name: 'region',
         )
-        choice(
-            choices: nodes_choice,
-            description: 'Number of Nodes',
-            name: 'nodes',
-        )
     }
 
     stages {
@@ -90,8 +74,9 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
+                    def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
-                    def nodes = params.nodes.trim()
+                    def environment = params.environment.trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -100,7 +85,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'expiration=7,runtime=8,region=${region},nodes=${nodes}'
+                          -d 'expiration=7,runtime=8,region=${region}'
                         """
                     ).trim()
 
@@ -108,17 +93,13 @@ pipeline {
                 }
             }
         }
-        
         /* Skip this step because sometimes the completed email arrives
-         before the 'has started' email */
+         before the 'has started' email
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
-                    branch: 'development'
-
 
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
@@ -127,7 +108,7 @@ pipeline {
                     --filter 'has started'"""
             }
         }
-        
+        */
         stage('Wait for last email and parse SSH location') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -143,7 +124,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 100 \
+                          --timeout 40 \
                           --filter 'has completed'
                         """
                     ).trim()
@@ -162,7 +143,7 @@ pipeline {
                 }
             }
         }
-		/* Skipping it as of now
+
         stage('SSH') {
             steps {
                 withCredentials([
@@ -175,7 +156,7 @@ pipeline {
                     sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
                 }
             }
-        } */
+        }
 
         stage('Confirm before retiring') {
             when {
