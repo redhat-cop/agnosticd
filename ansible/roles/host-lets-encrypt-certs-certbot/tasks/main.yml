@@ -4,18 +4,32 @@
   set_fact:
     _certbot_dir: "{{ _certbot_remote_dir }}/certbot"
 
-- name: Verify if AWS Credentials exist on the host
+- name: Check on AWS credentials
   when: _certbot_dns_provider is match('route53')
-  stat:
-    path: "/home/{{ ansible_user }}/.aws/credentials"
-  register: aws_credentials_result
+  block:
+    - name: Verify if AWS Credentials exist on the host
+      stat:
+        path: "/home/{{ ansible_user }}/.aws/credentials"
+      register: aws_credentials_result
+      
+    - name: Fail if AWS Credentials are not on the host
+      fail:
+        msg: AWS Credentials are required when requesting certificates for a wildcard domain
+      when: aws_credentials_result.stat.exists == False
 
-- name: Fail if AWS Credentials are not on the host
-  fail:
-    msg: AWS Credentials are required when requesting certificates for a wildcard domain
-  when:
-  - _certbot_dns_provider is match('route53')
-  - aws_credentials_result.stat.exists == False
+- name: Check on DDNS credentials
+  when: _certbot_dns_provider is match('rfc2136')
+  block:
+    - name: Verify credential are present on host
+      when: _certbot_dns_provider is match('rfc2136') 
+      stat:
+        path: /home/{{ _certbot_user }}/.rfc2136.ini
+      register: ddns_credentials_result
+
+    - name: Fail if DDNS credentials are missing
+      fail:
+        msg: You need a key and secret to update DNS
+      when: ddns_credentials_result.stat.exists == False
 
 - name: Set _certbot_wildcard_certs fact
   set_fact: 
@@ -36,25 +50,28 @@
         state: present
         virtualenv: /opt/virtualenvs/certbot
         name:
-        - certbot
-        - certbot-dns-{{ _certbot_dns_provider }}
+          - certbot
+          - certbot-dns-{{ _certbot_dns_provider }}
+      when: not use_python3 | bool
 
-    # Certbot comes from a pinned EPEL repo
-    # in order for all prerequisites to be
-    # satisfied
-    # - name: Install certbot
-    #   become: True
-    #   yum:
-    #     state: present
-    #     name: certbot
+    - name: Install certbot pip prerequisites in a virtualenv with python3
+      become: True
+      pip:
+        state: present
+        virtualenv_command: /usr/local/bin/virtualenv
+        virtualenv: /opt/virtualenvs/certbot
+        name:
+          - certbot
+          - certbot-dns-{{ _certbot_dns_provider }}
+      when: use_python3 | bool
 
     - name: Copy certbot script
       become: True
       template:
         src: ./templates/run-certbot.j2
         dest: /usr/local/bin/run-certbot
-        owner: root
-        group: root
+        owner: "{{ _certbot_user }}"
+        group: "{{ _certbot_remote_dir_group }}"
         mode: 0755
 
     - name: Check if cached certificate archive exists
@@ -119,7 +136,8 @@
             {{ _certbot_additional_args|d(_certbot_args)|d('') }}
 
       - name: Request API and Wildcard Certificates
-        become: False
+        # become: false
+        become_user: "{{ _certbot_user }} "
         command: /usr/local/bin/run-certbot
         retries: 5
         delay: 30
@@ -154,6 +172,7 @@
       state: directory
       owner: "{{ _certbot_install_dir_owner }}"
       mode: 0775
+
   - name: Install certificates
     copy:
       src: "{{ _certbot_dir }}/config/live/{{ _certbot_domain }}/{{ item }}"
@@ -164,6 +183,10 @@
     - "fullchain.pem"
     - "chain.pem"
     - "privkey.pem"
+
+  - name: Set _certbot_setup_complete to true
+    set_fact:
+      _certbot_setup_complete: true
 
 - name: Install Automatic renewals of Certificates
   when:
