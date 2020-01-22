@@ -25,7 +25,7 @@ def webapp_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / Integreatly Workshop',
+    'Workshops / RHMI (Integreatly) Workshop',
     'DevOps Team Testing Catalog / TEST - Integreatly Workshop',
     'DevOps Team Development Catalog / DEV - Integreatly Workshop',
 ].join("\n")
@@ -36,9 +36,8 @@ def ocprelease_choice = [
 ].join("\n")
 
 def ig_version_choice = [
-    '1.5.1',
-    '1.5.0',
-    '1.4.1',
+    '1.6.0',
+    '1.5.2',
 ].join("\n")
 
 def region_choice = [
@@ -164,7 +163,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 120 \
+                          --timeout 150 \
                           --filter 'has completed'
                         """
                     ).trim()
