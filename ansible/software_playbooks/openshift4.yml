@@ -1,36 +1,153 @@
 # vim: set ft=ansible:
 ---
-- name: Step 004.1 - Local host preparation for OpenShift 4 deployment
-  hosts: localhost
-  connection: local
-  become: False
+
+######################### Prep hosts to run OpenShift Installer
+
+- name: Step 004.1 - Host preparation for OpenShift 4 deployment
+  hosts: bastions
+  become: true
   gather_facts: False
   tags:
     - step004
     - step004.1
   tasks:
-  - name: Dummy Placeholder
-    debug:
-      msg: Step 004.1 Local Host Prep Dummy
+  - name: Run OCP4 Host Provisioner
+    include_role:
+      name: host-ocp4-provisioner
 
 ######################### Run OpenShift Installer
 
-- name: Step 004.2 - Run OpenShift Installer
-  gather_facts: False
-  become: no
-  hosts:
-    - bastions
-  tags:
-    - installing_openshift
-    - step004
-    - step004.2
+- name: Step 002 rootless podman
+  hosts: bastions,utility
+  gather_facts: false
+  become: true
   tasks:
-  - name: Install OCP 4
+  - name: Install slirp4netns
+    package:
+      name: slirp4netns
+
+  - name: update max_user_namespaces in sysctl
+    sysctl:
+      name: user.max_user_namespaces
+      value: "28633"
+      sysctl_file: /etc/sysctl.d/userns.conf
+      reload: yes
+
+- name: Step 003 Set up NFS server on Utility VM
+  hosts: utility
+  gather_facts: false
+  become: true
+  tasks:
+  - name: Configure NFS Server on UtilityVM
+    when: nfs_install_server | d(False)
+    block:
+    - name: Create vols for registry NFS
+      file:
+        path: /srv/nfs/ocp-registry
+        state: directory
+        mode: 777
+      
+    - name: Create user vols for NFS
+      shell: "mkdir -p /srv/nfs/user_vols/vol{1..{{nfs_user_vols}}}"
+
+    - name: Change permissions of the user vols
+      file:
+        path: "/srv/nfs"
+        mode: 0777
+        state: directory
+        recurse: yes
+
+    - name: create exports file
+      file:
+        path: /etc/exports.d/{{ env_type }}-{{ guid }}.exports
+        state: touch
+        mode: 755
+
+    - name: create exports file
+      lineinfile:
+        dest: /etc/exports.d/{{ env_type }}-{{ guid }}.exports
+        line: '/srv/nfs {{ nfs_exports_config }}'
+        state: present
+
+    - name: Enable and start NFS server
+      service:
+        name: nfs-server
+        state: restarted
+        enabled: yes
+
+- name: Step 003.1 Bastion VM NFS config
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+  - name: Configure Bastion VM Files for NFS
+    when: nfs_install_server | d(False)
+    block:
+    - name: Add PV file for OCP registry
+      template:
+        src: "./files/pv-registry.yaml.j2"
+        dest: "/home/{{ ansible_user }}/resources/pv-registry.yaml"
+        owner: "{{ ansible_user }}"
+
+    - name: Add PV files for user vols
+      template:
+        src: "./files/pv-user.yaml.j2"
+        dest: "/home/{{ ansible_user }}/resources/pv-user.yaml"
+        owner: "{{ ansible_user }}"
+
+    - name: Add PVC file for OCP registry
+      copy:
+        src: "./files/pvc-registry.yaml"
+        dest: "/home/{{ ansible_user }}/resources/pvc-registry.yaml"
+        owner: "{{ ansible_user }}"
+
+# - name: Step 004 LE certs
+#   hosts: bastions
+#   gather_facts: false
+#   become: true
+#   vars:
+#     _certbot_dns_provider: "rfc2136"
+#     _certbot_domain: "api.{{ guid }}.{{ osp_cluster_dns_zone }}"
+#     _certbot_wildcard_domain: "*.apps.{{ guid }}.{{ osp_cluster_dns_zone }}"
+#     _certbot_remote_dir: "/home/{{ ansible_user }}"
+#     _certbot_remote_dir_owner: "{{ ansible_user }}"
+#     _certbot_install_dir: "/home/{{ ansible_user }}/certificates"
+#     _certbot_install_dir_owner: "{{ ansible_user }}"
+#     _certbot_production: False
+#     _certbot_user: "{{ ansible_user }}"
+#     _certbot_cache_archive_file: "{{ output_dir|d('/tmp') }}/{{ guid }}-certs.tar.gz"
+#     _certbot_use_cache: False
+#     use_python3: "{{ all_use_python3 | d(True) }}"
+#   tasks:
+#     - name: Copy credentials to host temporarily
+#       template:
+#         src: ./files/rfc2136.ini.j2
+#         dest: /home/{{ _certbot_user }}/.rfc2136.ini
+#         owner: "{{ _certbot_user }}"
+
+#     - import_role:
+#         name: host-lets-encrypt-certs-certbot
+
+#     - name: Remove credentials once LE certs complete
+#       file:
+#         state: absent
+#         path: /home/{{ _certbot_user }}/.rfc2136.ini
+#       when: _certbot_setup_complete
+
+#     - name: Copy the LE root certs into trusted bundle
+#       copy:
+#         dest: /etc/pki/ca-trust/source/anchors/le-chain.pem
+#         src: /home/{{ ansible_user }}/certificates/chain.pem
+#         remote_src: true
+    
+#     - name: Update CA trust
+#       command: update-ca-trust
+
+- name: Step 005 Install OpenShift
+  hosts: bastions
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Call Role to install OpenShift
     include_role:
       name: host-ocp4-installer
-
-  # post_tasks:
-  #   - name: get openshift credentials file
-  #     shell: ansible masters[0] -b -m fetch -a "src=/root/.kube/config dest=/root/.kube/config flat=yes"
-  #     tags:
-  #       - get_openshift_credentials
