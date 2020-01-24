@@ -1,0 +1,172 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Check that ocp4_idm_install is defined
+  when:
+  - ocp4_idm_install is not defined
+  fail:
+    msg: "ocp4_idm_install is not defined"
+
+- name: Setup HTPasswd Authentication
+  when: ocp4_idm_install == "htpasswd"
+  block:
+  - name: Generate htpasswd hash for ocp4_idm_htpasswd_user_password
+    shell: >-
+      htpasswd -nb "userN" "{{ ocp4_idm_htpasswd_user_password }}"|cut -d: -f2
+    register: htpasswd_line
+    when:
+    - ocp4_idm_htpasswd_user_password is defined
+    - ocp4_idm_htpasswd_user_password_hash is not defined
+
+  - name: Set fact ocp4_idm_htpasswd_user_password_hash
+    set_fact:
+      ocp4_idm_htpasswd_user_password_hash: "{{ htpasswd_line.stdout }}"
+    when:
+    - ocp4_idm_htpasswd_user_password is defined
+    - ocp4_idm_htpasswd_user_password_hash is not defined
+    - htpasswd_line is succeeded
+
+  - name: Generate htpasswd hash for ocp4_idm_htpasswd_admin_user
+    shell: >-
+      htpasswd -nb "admin" "{{ ocp4_idm_htpasswd_admin_password }}"|cut -d: -f2
+    register: htpasswd_line
+    when:
+    - ocp4_idm_htpasswd_admin_password is defined
+    - ocp4_idm_htpasswd_admin_password_hash is not defined
+
+  - name: Set fact ocp4_idm_htpasswd_admin_password_hash
+    set_fact:
+      ocp4_idm_htpasswd_admin_password_hash: "{{ htpasswd_line.stdout }}"
+    when:
+    - ocp4_idm_htpasswd_admin_password is defined
+    - ocp4_idm_htpasswd_admin_password_hash is not defined
+    - htpasswd_line is succeeded
+
+  - name: Set fact ocp4_idm_htpasswd_user_count
+    set_fact:
+      ocp4_idm_htpasswd_user_count: 200
+    when:
+    - ocp4_idm_htpasswd_user_count is not defined
+
+  - name: Generate htpasswd file
+    template:
+      src: "./files/htpasswd.j2"
+      dest: "/home/{{ ansible_user }}/users.htpasswd"
+      owner: "{{ ansible_user }}"
+      mode: 0664
+
+  - name: Ensure htpasswd Secret is absent
+    k8s:
+      state: absent
+      api_version: v1
+      kind: Secret
+      name: htpasswd-secret
+      namespace: openshift-config
+
+  - name: Create htpasswd secret from htpasswd file
+    shell: "oc create secret generic htpasswd-secret -n openshift-config --from-file=htpasswd=/home/{{ ansible_user }}/users.htpasswd"
+
+  - name: Update OAuth Configuration
+    k8s:
+      state: present
+      merge_type:
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('file', item ) | from_yaml }}"
+    loop:
+    - ./files/oauth-htpasswd.yaml
+
+  - name: Print User Information
+    debug:
+      msg: "{{ item }}"
+    loop:
+    - "user.info: HTPasswd Authentication is enabled on this cluster."
+    - "user.info: {{ ocp4_idm_htpasswd_user_base }}1 .. {{ ocp4_idm_htpasswd_user_base }}{{ user_count }} are created."
+    - "user.info: User `{{ ocp4_idm_htpasswd_admin_user }}` is a cluster-admin"
+
+- name: Setup OpenTLC LDAP Authentication
+  when: ocp4_idm_install == "ldap"
+  block:
+  - name: Check for LDAP Bind Password
+    fail:
+      msg: LDAP Authentication is configured but LDAP BindPassword (ocp4_idm_ldap_bindPassword) is not defined.
+    when: ocp4_idm_ldap_bindPassword is not defined
+
+  - name: Get IPA CA Cert
+    get_url:
+      url: "{{ ocp4_idm_ldap_ca_url }}"
+      dest: "/home/{{ ansible_user }}/ipa-ca.crt"
+      mode: 0660
+
+  - name: Ensure IPA CA Cert is absent
+    k8s:
+      state: absent
+      api_version: v1
+      kind: ConfigMap
+      name: opentlc-ldap-ca-cert
+      namespace: openshift-config
+
+  - name: Create IPA CA Cert ConfigMap
+    shell: "oc create configmap opentlc-ldap-ca-cert --from-file=ca.crt=/home/{{ ansible_user }}/ipa-ca.crt -n openshift-config"
+
+  - name: Ensure LDAP Bind Password Secret is absent
+    k8s:
+      state: absent
+      api_version: v1
+      kind: Secret
+      name: opentlc-ldap-secret
+      namespace: openshift-config
+
+  - name: Create LDAP Bind Password Secret
+    shell: "oc create secret generic opentlc-ldap-secret --from-literal=bindPassword=\"{{ ocp4_idm_ldap_bindPassword }}\" -n openshift-config"
+
+  - name: Update OAuth Configuration
+    k8s:
+      state: present
+      merge_type:
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - ./templates/oauth-opentlc-ldap.j2
+
+  - name: Print User Information for OpenTLC LDAP
+    debug:
+      msg: "{{ item }}"
+    loop:
+    - "user.info: OpenTLC LDAP Authentication is enabled on this cluster."
+    - "user.info: Use your OpenTLC user and Password to log into this cluster."
+    - "user.info: User `{{ ocp4_idm_admin_user }}` is a cluster-admin"
+
+- name: Set up Cluster Admin User
+  when: ocp4_idm_admin_user is defined
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', './templates/cluster_role_binding.j2') | from_yaml }}"
+
+- name: Remove kubeadmin User
+  when:
+  - ocp4_idm_admin_user is defined
+  - ocp4_idm_install != "none"
+  - ocp4_idm_remove_kubeadmin | bool
+  block:
+  - name: Remove kubeadmin user secret
+    k8s:
+      state: absent
+      api_version: v1
+      kind: Secret
+      namespace: kube-system
+      name: kubeadmin
+  - name: Remove kubeadmin file
+    file:
+      state: absent
+      path: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeadmin-password"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
