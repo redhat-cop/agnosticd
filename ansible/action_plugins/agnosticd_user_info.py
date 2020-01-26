@@ -22,7 +22,7 @@ __metaclass__ = type
 import json
 import os
 
-from ansible.errors import AnsibleUndefinedVariable
+from ansible.errors import AnsibleError, AnsibleUndefinedVariable
 from ansible.module_utils.six import string_types
 from ansible.module_utils._text import to_text
 from ansible.plugins.action import ActionBase
@@ -31,6 +31,7 @@ class ActionModule(ActionBase):
     '''Print statements during execution and save user info to file'''
 
     TRANSFERS_FILES = False
+    _VALID_ARGS = frozenset(('msg',))
 
     def run(self, tmp=None, task_vars=None):
         self._supports_check_mode = True
@@ -45,7 +46,11 @@ class ActionModule(ActionBase):
         result['_ansible_verbose_always'] = True
 
         try:
-            output_dir = task_vars.get('output_dir', task_vars.get('playbook_dir', '.'))
+            output_dir = task_vars.get('output_dir',
+                task_vars['hostvars'].get('localhost',{}).get('output_dir',
+                    task_vars.get('playbook_dir', '.')
+                )
+            )
             fh = open(os.path.join(output_dir, 'user-info.yaml'), 'a')
             fh.write('- ' + json.dumps(result['msg']) + "\n")
             fh.close()
