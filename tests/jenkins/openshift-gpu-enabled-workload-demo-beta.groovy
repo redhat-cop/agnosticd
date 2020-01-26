@@ -137,7 +137,7 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
+                        def m = email =~ /The OpenShift console for your environment is available at <a href="(https:\/\/master\.[^"]+)/
                         openshift_location = m[0][1]
                         echo "openshift_location = '${openshift_location}'"
                     } catch(Exception ex) {
