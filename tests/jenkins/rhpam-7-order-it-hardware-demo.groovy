@@ -32,6 +32,17 @@ def region_choice = [
     'global_gpte',
 ].join("\n")
 
+def nodes_choice = [
+    '3',
+    '1',
+    '2',    
+    '4',
+    '5',
+    '6',
+    '7',
+    '8',
+].join("\n")
+
 pipeline {
     agent any
 
@@ -55,6 +66,11 @@ pipeline {
             description: 'Catalog item',
             name: 'region',
         )
+        choice(
+            choices: nodes_choice,
+            description: 'Number of Nodes',
+            name: 'nodes',
+        )
     }
 
     stages {
@@ -73,6 +89,7 @@ pipeline {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
+                    def nodes = params.nodes.trim()
                     def cfparams = [
                         'check=t',
                         'expiration=14',
