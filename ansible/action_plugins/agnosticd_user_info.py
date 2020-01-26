@@ -52,7 +52,7 @@ class ActionModule(ActionBase):
                 )
             )
             fh = open(os.path.join(output_dir, 'user-info.yaml'), 'a')
-            fh.write('- ' + json.dumps(result['msg']) + "\n")
+            fh.write('- ' + json.dumps(self._task.args['msg']) + "\n")
             fh.close()
             result['failed'] = False
         except Exception as e:
