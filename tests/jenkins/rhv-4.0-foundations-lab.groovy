@@ -24,7 +24,7 @@ def ssh_location = ''
 
 // Catalog items
 def choices = [
-    'OPENTLC Datacenter Infrastructure Labs / RHV 4.0 Foundations Lab',		
+    'OPENTLC Datacenter Infrastructure Labs / RHV 4.0 Foundations Lab	',		
 ].join("\n")
 
 def region_choice = [
@@ -123,7 +123,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 100 \
+                          --timeout 150 \
                           --filter 'has completed'
                         """
                     ).trim()
