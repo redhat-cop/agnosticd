@@ -96,8 +96,6 @@ pipeline {
             }
         }
 
-		//skipping this as sometimes first mail does not receive
-		/*
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -113,7 +111,7 @@ pipeline {
                     --timeout 20 \
                     --filter 'has started'"""
             }
-        }*/
+        }
 
         stage('Wait for last email and parse OpenShift and App location') {
             environment {
@@ -130,7 +128,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 40 \
+                          --timeout 100 \
                           --filter 'has completed'
                         """
                     ).trim()
