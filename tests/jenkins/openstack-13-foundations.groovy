@@ -96,7 +96,9 @@ pipeline {
                 }
             }
         }
-
+		// Skip this step because sometimes the completed email arrives
+        // before the 'has started' email
+        /*
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -113,6 +115,7 @@ pipeline {
                     --filter 'has started'"""
             }
         }
+        */
 
         stage('Wait for last email and parse OpenShift and App location') {
             environment {
