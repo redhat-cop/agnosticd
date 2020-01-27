@@ -151,7 +151,7 @@ pipeline {
                     ).trim()
 
                     try {
-                    	def m = email =~ /Connect to the shared cluster by pointing your web browser to <a href="(https:\/\/master\.[^"]+)/
+                    	def m = email =~ /Connect to the shared cluster by pointing your web browser to <a href="(.*)"
                         openshift_location = m[0]
                         echo "openshift_location = ${openshift_location}"
                     } catch(Exception ex) {
