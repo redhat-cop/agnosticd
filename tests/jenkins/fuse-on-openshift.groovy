@@ -25,6 +25,8 @@ def openshift_location = ''
 // Catalog items
 def choices = [
     'OPENTLC Middleware Solutions Labs / Fuse on OpenShift',
+    'Middleware Preprod / Fuse on OpenShift - Preprod',
+    'Shared Cluster Development / DEV Fuse on OpenShift',
 ].join("\n")
 
 def region_choice = [
