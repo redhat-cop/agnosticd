@@ -132,9 +132,11 @@ pipeline {
             }
         }
         
-        stage ("Wait to complete deployment") {
-			echo 'Wait for 20 minutes for deployment to complete'
-			sleep 1200 // seconds
+        stage ('Wait to complete deployment') {
+        	steps {
+				echo "Wait for 20 minutes for deployment to complete"
+				sleep 1200 // seconds
+			}
 		}
 
         stage('Confirm before retiring') {
