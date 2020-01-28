@@ -106,7 +106,7 @@ pipeline {
                           --server '${imap_server}' \
                           --guid ${guid} \
                           --timeout 20 \
-                          --filter 'RHEL 7 Implementation Lab is building'
+                          --filter 'is building'
                         """
                     ).trim()
 
