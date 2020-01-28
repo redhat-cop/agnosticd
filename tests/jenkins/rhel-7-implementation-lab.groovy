@@ -90,24 +90,6 @@ pipeline {
         }
         
         // This kind of CI send only one mail
-        stage('Wait for first email') {
-            environment {
-                credentials=credentials("${imap_creds}")
-            }
-            steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
-                    branch: 'development'
-
-
-                sh """./tests/jenkins/downstream/poll_email.py \
-                    --server '${imap_server}' \
-                    --guid ${guid} \
-                    --timeout 20 \
-                    --filter 'is building'"""
-            }
-        }
-        
-        /*
         stage('Wait for email and parse detail') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -121,10 +103,8 @@ pipeline {
                         returnStdout: true,
                         script: """
                           ./tests/jenkins/downstream/poll_email.py \
-                          --server '${imap_server}' \
-                          --guid ${guid} \
-                          --timeout 150 \
-                          --filter 'is building'
+                          --timeout 20 \
+                          --filter 'RHEL 7 Implementation Lab is building'
                         """
                     ).trim()
 
@@ -141,7 +121,7 @@ pipeline {
 
                 }
             }
-        }*/
+        }
 
         stage('Confirm before retiring') {
             when {
