@@ -103,6 +103,8 @@ pipeline {
                         returnStdout: true,
                         script: """
                           ./tests/jenkins/downstream/poll_email.py \
+                          --server '${imap_server}' \
+                          --guid ' ' \
                           --timeout 20 \
                           --filter 'RHEL 7 Implementation Lab is building'
                         """
