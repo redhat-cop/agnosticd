@@ -19,7 +19,7 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ssh_location = ''
+def external_host = ''
 
 
 // Catalog items
@@ -89,25 +89,7 @@ pipeline {
             }
         }
         
-        /* Skip this step because sometimes the completed email arrives
-         before the 'has started' email */
-        stage('Wait for first email') {
-            environment {
-                credentials=credentials("${imap_creds}")
-            }
-            steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
-                    branch: 'development'
-
-
-                sh """./tests/jenkins/downstream/poll_email.py \
-                    --server '${imap_server}' \
-                    --guid ${guid} \
-                    --timeout 20 \
-                    --filter 'has started'"""
-            }
-        }
-        
+        // This kind of CI send only one mail
         stage('Wait for last email and parse SSH location') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -129,9 +111,9 @@ pipeline {
                     ).trim()
 
                     try {
-                    	def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
-                    	ssh_location = m[0][1]
-                    	echo "ssh_location = '${ssh_location}'"
+                    	def m = email =~ /<a href="(http:\/\/.*.opentlc.com")/
+                    	external_host = m[0]
+                    	echo "external_host = '${external_host}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -142,20 +124,6 @@ pipeline {
                 }
             }
         }
-		/* Skipping it as of now
-        stage('SSH') {
-            steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: ssh_creds,
-                        keyFileVariable: 'ssh_key',
-                        usernameVariable: 'ssh_username')
-                ]) {
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
-                }
-            }
-        } */
 
         stage('Confirm before retiring') {
             when {
