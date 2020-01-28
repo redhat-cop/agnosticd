@@ -98,12 +98,12 @@ pipeline {
         }
 
         // This kind of CI send only one mail
-        stage('Wait for email and parse detail') {
+        stage('Wait and parse email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
                 script {
@@ -113,13 +113,13 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 20 \
-                          --filter 'is building.'
+                          --timeout 30 \
+                          --filter 'is building'
                         """
                     ).trim()
 
                     try {
-                        def m = email =~ /<a href="(http:\/\/.*.opentlc.com")/
+                    	def m = email =~ /External Hostname<\/TH><TD>(.*)/
                     	external_host = m[0]
                     	echo "external_host = '${external_host}'"
                     } catch(Exception ex) {
@@ -134,8 +134,8 @@ pipeline {
         
         stage ('Wait to complete deployment') {
         	steps {
-				echo "Wait for 20 minutes for deployment to complete"
-				sleep 1200 // seconds
+				echo "Wait for 35 minutes for deployment to complete"
+				sleep 2100 // seconds
 			}
 		}
 
