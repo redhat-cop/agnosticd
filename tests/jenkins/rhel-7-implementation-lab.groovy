@@ -111,7 +111,7 @@ pipeline {
                     ).trim()
 
                     try {
-                    	def m = email =~ /External Hostname<\/TH><TD>(.*)/
+                    	def m = email =~ /External Hostname<\/TH><TD>(.*	)/
                     	external_host = m[0]
                     	echo "external_host = '${external_host}'"
                     } catch(Exception ex) {
@@ -124,6 +124,13 @@ pipeline {
                 }
             }
         }
+        
+        stage ('Wait to complete deployment') {
+        	steps {
+				echo "Wait for 40 minutes for deployment to complete"
+				sleep 2400 // seconds
+			}
+		}
 
         stage('Confirm before retiring') {
             when {
