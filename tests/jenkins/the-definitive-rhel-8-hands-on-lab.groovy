@@ -19,7 +19,7 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def openshift_location = ''
+def external_host = ''
 
 // Catalog items
 def choices = [
@@ -115,30 +115,14 @@ pipeline {
                 }
             }
         }
-        // Skip this step because sometimes the completed email arrives
-        // before the 'has started' email
-        stage('Wait for first email') {
+
+        // This kind of CI send only one mail
+        stage('Wait and parse email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
-                    branch: 'development'
-
-                sh """./tests/jenkins/downstream/poll_email.py \
-                    --server '${imap_server}' \
-                    --guid ${guid} \
-                    --timeout 30 \
-                    --filter 'has started'"""
-            }
-        }
-
-        stage('Wait for last email and parse OpenShift and App location') {
-            environment {
-                credentials=credentials("${imap_creds}")
-            }
-            steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
                 script {
@@ -148,15 +132,15 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
-                          --filter 'has completed'
+                          --timeout 30 \
+                          --filter 'is building'
                         """
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
-                        openshift_location = m[0][1]
-                        echo "openshift_location = '${openshift_location}'"
+                    	def m = email =~ /External Hostname<\/TH><TD>(.*)/
+                    	external_host = m[0]
+                    	echo "external_host = '${external_host}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -166,6 +150,13 @@ pipeline {
                 }
             }
         }
+        
+        stage ('Wait to complete deployment') {
+        	steps {
+				echo "Wait for 35 minutes for deployment to complete"
+				sleep 2100 // seconds
+			}
+		}
 
         stage('Confirm before retiring') {
             when {

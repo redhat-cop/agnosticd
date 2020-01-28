@@ -90,7 +90,7 @@ pipeline {
         }
         
         // This kind of CI send only one mail
-        stage('Wait for last email and parse SSH location') {
+        stage('Wait and parse email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
@@ -105,13 +105,13 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
-                          --filter 'has completed'
+                          --timeout 30 \
+                          --filter 'is building'
                         """
                     ).trim()
 
                     try {
-                    	def m = email =~ /<a href="(http:\/\/.*.opentlc.com")/
+                    	def m = email =~ /External Hostname<\/TH><TD>(.*)/
                     	external_host = m[0]
                     	echo "external_host = '${external_host}'"
                     } catch(Exception ex) {
@@ -120,10 +120,16 @@ pipeline {
                         echo ex.toString()
                         throw ex
                     }
-
                 }
             }
         }
+        
+        stage ('Wait to complete deployment') {
+        	steps {
+				echo "Wait for 35 minutes for deployment to complete"
+				sleep 2100 // seconds
+			}
+		}
 
         stage('Confirm before retiring') {
             when {
