@@ -8,7 +8,7 @@ def cf_group = 'opentlc-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'djana@redhat.com'
+def notification_email = 'gptezabbixalert@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -90,7 +90,7 @@ pipeline {
         }
         
         // This kind of CI send only one mail
-        stage('Wait for email and parse detail') {
+        stage('Wait and parse email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
@@ -105,7 +105,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 20 \
+                          --timeout 30 \
                           --filter 'is building'
                         """
                     ).trim()
@@ -120,15 +120,14 @@ pipeline {
                         echo ex.toString()
                         throw ex
                     }
-
                 }
             }
         }
         
         stage ('Wait to complete deployment') {
         	steps {
-				echo "Wait for 40 minutes for deployment to complete"
-				sleep 2400 // seconds
+				echo "Wait for 35 minutes for deployment to complete"
+				sleep 2100 // seconds
 			}
 		}
 
