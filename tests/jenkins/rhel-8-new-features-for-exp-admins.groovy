@@ -112,7 +112,7 @@ pipeline {
 
                     try {
                     	echo email
-                    	def m = email =~ /External Hostname<\/TH><TD>((.|\n)*^com )/m
+                    	def m = email =~ /External Hostname<\/TH><TD>((.|\n)*^com )/
                     	external_host = m[0]
                     	echo "external_host = '${external_host}'"
                     } catch(Exception ex) {
