@@ -8,7 +8,7 @@ def cf_group = 'opentlc-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'djana@redhat.com'
+def notification_email = 'gptezabbixalert@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -118,7 +118,6 @@ pipeline {
                     ).trim()
 
                     try {
-                    	echo email
                     	def m = email =~ /External Hostname<\/TH><TD>(.*)/
                     	def mm = email =~ /(.*)<\/TD><\/TR><TR><TH>Internal IP Address/
                     	external_host = m[0][1].replaceAll("=","") + mm[0][1].replaceAll(" ","")

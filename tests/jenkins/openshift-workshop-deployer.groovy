@@ -8,7 +8,7 @@ def cf_group = 'opentlc-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'djana@redhat.com'
+def notification_email = 'gptezabbixalert@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -19,7 +19,7 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def external_host = ''
+def ssh_location = ''
 
 
 // Catalog items
@@ -142,13 +142,29 @@ pipeline {
             }
         }
         
-        // This kind of CI send only one mail
-        stage('Wait to receive and parse email') {
+        stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                    branch: 'development'
+
+
+                sh """./tests/jenkins/downstream/poll_email.py \
+                    --server '${imap_server}' \
+                    --guid ${guid} \
+                    --timeout 20 \
+                    --filter 'has started'"""
+            }
+        }	
+
+        stage('Wait for last email and parse') {
+            environment {
+                credentials=credentials("${imap_creds}")
+            }
+            steps {
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 script {
@@ -158,17 +174,15 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 30 \
-                          --filter 'is building'
+                          --timeout 150 \
+                          --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                    	echo email
-                    	def m = email =~ /External Hostname<\/TH><TD>(.*)/
-                    	def mm = email =~ /(.*)<\/TD><\/TR><TR><TH>Internal IP Address/
-                    	external_host = m[0][1].replaceAll("=","") + mm[0][1].replaceAll(" ]","")
-                    	echo "External-Host='${external_host}'"
+                        def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
+                        ssh_location = m[0][1]
+                        echo "SSH command: '${ssh_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -178,13 +192,6 @@ pipeline {
                 }
             }
         }
-        
-        stage ('Wait to complete provision') {
-        	steps {
-				echo "Wait for 30 minutes for deployment to complete"
-				sleep 1800 // seconds
-			}
-		}
 
         stage('Confirm before retiring') {
             when {
