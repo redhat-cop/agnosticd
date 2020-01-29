@@ -127,7 +127,7 @@ pipeline {
         stage ('Wait to complete deployment') {
         	steps {
 				echo "Wait for 35 minutes for deployment to complete"
-				sleep 2100 // seconds
+				sleep 100 // seconds
 			}
 		}
 
