@@ -90,7 +90,7 @@ pipeline {
         }
         
         // This kind of CI send only one mail
-        stage('Wait and parse email') {
+        stage('Wait to receive and parse email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
@@ -112,8 +112,9 @@ pipeline {
 
                     try {
                     	def m = email =~ /External Hostname<\/TH><TD>(.*)/
-                    	external_host = m[0]
-                    	echo "external_host = '${external_host}'"
+                    	def mm = email =~ /(.*)<\/TD><\/TR><TR><TH>Internal IP Address/
+                    	external_host = m[0][1].replaceAll("=","") + mm[0][1].replaceAll(" ]","")
+                    	echo "External-Host='${external_host}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -124,10 +125,10 @@ pipeline {
             }
         }
         
-        stage ('Wait to complete deployment') {
+        stage ('Wait to complete provision') {
         	steps {
-				echo "Wait for 35 minutes for deployment to complete"
-				sleep 2100 // seconds
+				echo "Wait for 30 minutes for deployment to complete"
+				sleep 1800 // seconds
 			}
 		}
 
