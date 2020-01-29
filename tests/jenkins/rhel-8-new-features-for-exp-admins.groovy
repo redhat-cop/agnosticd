@@ -112,7 +112,8 @@ pipeline {
 
                     try {
                     	def m = email =~ /External Hostname<\/TH><TD>(.*)/
-                    	external_host = m[0][1]
+                    	def mm = email =~ /(.*)<\/TD><\/TR><TR><TH>Internal IP Address/
+                    	external_host = m[0][1].replaceAll("=","") + mm[0]
                     	echo "external_host = '${external_host}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
