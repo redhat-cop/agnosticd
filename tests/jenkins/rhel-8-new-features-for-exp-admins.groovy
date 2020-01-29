@@ -111,6 +111,7 @@ pipeline {
                     ).trim()
 
                     try {
+                    	echo email
                     	def m = email =~ /External Hostname<\/TH><TD>(.*)/
                     	external_host = m[0]
                     	echo "external_host = '${external_host}'"
