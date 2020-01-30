@@ -233,7 +233,39 @@ if [ -z "${MODULE_TYPE##*m4*}" ] ; then
   oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-serving-subscription.yaml
 
   echo -e "Installing Knative Eventing..."
-  oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-eventing-subscription.yaml
+  # oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-eventing-subscription.yaml
+cat <<EOF | oc apply -n openshift-marketplace -f -
+apiVersion: operators.coreos.com/v1
+kind: CatalogSourceConfig
+metadata:
+  finalizers:
+  - finalizer.catalogsourceconfigs.operators.coreos.com
+  name: installed-community-openshift-operators
+  namespace: openshift-marketplace
+spec:
+  targetNamespace: openshift-operators
+  packages: knative-eventing-operator
+  csDisplayName: Community Operators
+  csPublisher: Community
+EOF
+
+cat <<EOF | oc apply -n openshift-operators -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: knative-eventing-operator
+  namespace: openshift-operators
+  labels:
+    csc-owner-name: installed-community-openshift-operators
+    csc-owner-namespace: openshift-marketplace
+spec:
+  channel: alpha
+  installPlanApproval: Manual
+  name: knative-eventing-operator
+  source: installed-community-openshift-operators
+  sourceNamespace: openshift-operators
+  startingCSV: knative-eventing-operator.v0.10.0
+EOF
 
 echo -e "Creating Role, Group, and assign Users"
 for i in $(eval echo "{0..$USERCOUNT}") ; do
