@@ -1,0 +1,143 @@
+---
+- name: Create operator
+  k8s:
+    state: present
+    namespace: "{{ _namespace }}"
+    definition: "{{ lookup('file', role_path ~ '/files/codeready-workspaces/operator.yml' ) | from_yaml }}"
+
+- name: Wait until csv/{{ _crw_csv_version }} is Succeeded
+  command: >
+    oc get csv/{{ _crw_csv_version }} -o jsonpath='{.status.phase}' -n "{{ _namespace }}"
+  register: crwcsv
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: crwcsv.stdout == "Succeeded"
+
+- name: Check if Che cluster already exists (note; error can be ignored)
+  command: >
+    oc get CheCluster/codeready-workspaces -o jsonpath='{.metadata.name}' -n "{{ _namespace }}"
+  register: che_cluster
+  ignore_errors: true
+
+- name: Create Che Cluster
+  k8s:
+    state: present
+    namespace: "{{ _namespace }}"
+    definition: "{{ lookup('template', role_path ~ '/files/codeready-workspaces/cluster.yml' ) | from_yaml }}"
+  when: che_cluster.stdout != "codeready-workspaces"
+
+- name: Wait until Che Cluster is Running
+  command: >
+    oc get CheCluster/codeready-workspaces -o jsonpath='{.status.cheClusterRunning}' -n "{{ _namespace }}"
+  register: checluster
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: checluster.stdout == "Available"
+
+- name: Get codeready route host
+  command: >
+    oc get route/codeready -o jsonpath='{.spec.host}' -n "{{ _namespace }}"
+  register: che_route
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: che_route.stdout != ""
+
+- name: Get keycloak route host
+  command: >
+    oc get route/keycloak -o jsonpath='{.spec.host}' -n "{{ _namespace }}"
+  register: keycloak_route
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: keycloak_route.stdout != ""
+
+- name: Wait for Che route to respond with 200
+  uri:
+    url: "http://{{ che_route.stdout }}"
+    method: GET
+    validate_certs: false
+    follow_redirects: yes
+  register: cheresult
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: cheresult.status == 200
+
+- name: Wait for Keycloak route to respond with 200
+  uri:
+    url: "http://{{ keycloak_route.stdout }}"
+    method: GET
+    validate_certs: false
+    follow_redirects: yes
+  register: keycloakresult
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: keycloakresult.status == 200
+
+- name: Get Keycloak username
+  command: >
+    oc get deployment/keycloak -o=jsonpath={'.spec.template.spec.containers[0].env[?(@.name=="SSO_ADMIN_USERNAME")].value'} -n "{{ _namespace }}"
+  register: sso_admin_username
+
+- name: Get Keycloak password
+  command: >
+    oc get deployment/keycloak -o=jsonpath={'.spec.template.spec.containers[0].env[?(@.name=="SSO_ADMIN_PASSWORD")].value'} -n "{{ _namespace }}"
+  register: sso_admin_password
+
+- name: Get Keycloak admin token
+  uri:
+    url: "http://{{ keycloak_route.stdout }}/auth/realms/master/protocol/openid-connect/token"
+    method: POST
+    body:
+      username: "{{ sso_admin_username.stdout }}"
+      password: "{{ sso_admin_password.stdout }}"
+      grant_type: "password"
+      client_id: "admin-cli"
+    body_format: form-urlencoded
+    status_code: 200,201,204
+  register: sso_admin_token
+
+- name: Add user to Che
+  uri:
+    url: "http://{{ keycloak_route.stdout }}/auth/admin/realms/codeready/users"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ sso_admin_token.json.access_token }}"
+    body:
+      username: "{{ _account_name }}"
+      enabled: true
+      emailVerified: true
+      firstName: "{{ _account_name }}"
+      lastName: Developer
+      email: "{{ _account_name }}@workshop.com"
+      credentials:
+        - type: password
+          value: "{{ _account_password }}"
+          temporary: false
+    body_format: json
+    status_code: 201,409
+
+- name: Get Che user token
+  uri:
+    url: "http://{{ keycloak_route.stdout }}/auth/realms/codeready/protocol/openid-connect/token"
+    method: POST
+    body:
+      username: "{{ _account_name }}"
+      password: "{{ _account_password }}"
+      grant_type: "password"
+      client_id: "admin-cli"
+    body_format: form-urlencoded
+    status_code: 200
+  register: user_token
+
+- name: Create Che workspace
+  uri:
+    url: "http://{{ che_route.stdout }}/api/workspace/devfile?namespace={{ _account_name }}&attribute=stackName:Red+Hat+Fuse&start-after-create=true"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ user_token.json.access_token }}"
+    body: "{{ lookup('template', role_path ~ '/templates/codeready-workspaces/workspace.j2') }}"
+    body_format: json
+    status_code: 201,409
+
+- name: todo
+  debug:
+    msg: "TODO: Deploy quarkus workspace and other plugins needed by pam/dm"

@@ -1,0 +1,245 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  annotations:
+    openshift.io/node-selector: ""
+  labels:
+    control-plane: controller-manager
+    controller-tools.k8s.io: "1.0"
+  name: {{ mig_migration_namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: RoleBinding
+metadata:
+  annotations:
+    openshift.io/description: Allows deploymentconfigs in this namespace to rollout
+      pods in this namespace.  It is auto-managed by a controller; remove subjects
+      to disable.
+  name: system:deployers
+  namespace: {{ mig_migration_namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:deployer
+subjects:
+- kind: ServiceAccount
+  name: deployer
+  namespace: {{ mig_migration_namespace }}
+userNames:
+- system:serviceaccount:openshift-migration:deployer
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: RoleBinding
+metadata:
+  annotations:
+    openshift.io/description: Allows builds in this namespace to push images to this
+      namespace.  It is auto-managed by a controller; remove subjects to disable.
+  name: system:image-builders
+  namespace: {{ mig_migration_namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:image-builder
+subjects:
+- kind: ServiceAccount
+  name: builder
+  namespace: {{ mig_migration_namespace }}
+userNames:
+- system:serviceaccount:openshift-migration:builder
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+groupNames:
+- system:serviceaccounts:openshift-migration
+kind: RoleBinding
+metadata:
+  annotations:
+    openshift.io/description: Allows all pods in this namespace to pull images from
+      this namespace.  It is auto-managed by a controller; remove subjects to disable.
+  creationTimestamp: null
+  name: system:image-pullers
+  namespace: {{ mig_migration_namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:image-puller
+subjects:
+- kind: Group
+  name: system:serviceaccounts:openshift-migration
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: migration-operator
+  namespace: {{ mig_migration_namespace }}
+---
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: migrationcontrollers.migration.openshift.io
+spec:
+  group: migration.openshift.io
+  names:
+    kind: MigrationController
+    listKind: MigrationControllerList
+    plural: migrationcontrollers
+    singular: migrationcontroller
+  scope: Namespaced
+  subresources:
+    status: {}
+  version: v1alpha1
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: Role
+metadata:
+  creationTimestamp: null
+  name: migration-operator
+  namespace: {{ mig_migration_namespace }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - services
+  - endpoints
+  - persistentvolumeclaims
+  - events
+  - configmaps
+  - secrets
+  verbs:
+  - '*'
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - daemonsets
+  - replicasets
+  - statefulsets
+  verbs:
+  - '*'
+- apiGroups:
+  - monitoring.coreos.com
+  resources:
+  - servicemonitors
+  verbs:
+  - get
+  - create
+- apiGroups:
+  - apps
+  resourceNames:
+  - mig-operator
+  resources:
+  - deployments/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - migration.openshift.io
+  resources:
+  - '*'
+  verbs:
+  - '*'
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: migration-operator
+  namespace: {{ mig_migration_namespace }}
+subjects:
+- kind: ServiceAccount
+  name: migration-operator
+roleRef:
+  kind: Role
+  name: migration-operator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: migration-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: migration-operator
+    namespace: {{ mig_migration_namespace }}
+namespace: {{ mig_migration_namespace }}
+---
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: migration-operator
+  namespace: {{ mig_migration_namespace }}
+  labels:
+    app: migration-operator
+spec:
+  selector:
+    matchLabels:
+      app: migration-operator
+  template:
+    metadata:
+      labels:
+        app: migration-operator
+    spec:
+      serviceAccountName: migration-operator
+      containers:
+      - name: ansible
+        command:
+        - /usr/local/bin/ao-logs
+        - /tmp/ansible-operator/runner
+        - stdout
+        image: registry.redhat.io/rhcam-1-0/openshift-migration-rhel7-operator:v1.0
+        imagePullPolicy: Always
+        volumeMounts:
+        - mountPath: /tmp/ansible-operator/runner
+          name: runner
+          readOnly: true
+      - name: operator
+        image: registry.redhat.io/rhcam-1-0/openshift-migration-rhel7-operator:v1.0
+        imagePullPolicy: Always
+        volumeMounts:
+        - mountPath: /tmp/ansible-operator/runner
+          name: runner
+        env:
+        - name: OPERATOR_NAME
+          value: migration-operator
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: WATCH_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: REGISTRY
+          value: registry.redhat.io
+        - name: PROJECT
+          value: rhcam-1-0
+        - name: MIG_CONTROLLER_REPO
+          value: openshift-migration-controller-rhel8@sha256
+        - name: MIG_CONTROLLER_TAG
+          value: f5cdf3c0d3da45243b3e98441f0486b29aa8683b09dd936dfb32fda3ff10c2c1
+        - name: MIG_UI_REPO
+          value: openshift-migration-ui-rhel8@sha256
+        - name: MIG_UI_TAG
+          value: a196fa9d9af4262641a740823a8b3343c59a352fb3a48a409538554bd1fa88a9
+        - name: VELERO_REPO
+          value: openshift-migration-velero-rhel8@sha256
+        - name: VELERO_TAG
+          value: d4423442db8618e4c96faadd96b053572ecf278f07461c8f8709af8094e8a5da
+        - name: VELERO_PLUGIN_REPO
+          value: openshift-migration-plugin-rhel8@sha256
+        - name: VELERO_PLUGIN_TAG
+          value: ffdea2b8e467ab7a8e1b9f718e7e3700abbfa3cb9539a09b4dc7a5cb6ea9e0bb
+        - name: VELERO_RESTIC_RESTORE_HELPER_REPO
+          value: openshift-migration-velero-restic-restore-helper-rhel8@sha256
+        - name: VELERO_RESTIC_RESTORE_HELPER_TAG
+          value: 0ec6d5e6f3446490d7cb54a2443c2869936fc7650e19740e4b10aed71ff4f863
+      volumes:
+        - name: runner
+          emptyDir: {}
