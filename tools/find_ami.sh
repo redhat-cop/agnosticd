@@ -2,11 +2,14 @@
 
 # Generate yaml containing image information for each region
 
+profile=gpte
+
 search_images() {
     owner=$1
     pattern=$2
     ispublic=$3
     aws ec2 describe-images \
+        --profile $profile \
         --owners ${owner} \
         --filters "Name=name,Values=${pattern}" "Name=is-public,Values=${ispublic}" \
         --query "reverse(sort_by(Images, &CreationDate))[0].{name: Name, id: ImageId}" \
@@ -15,14 +18,20 @@ search_images() {
 }
 
 #for region in us-east-1
-for region in $(aws ec2 describe-regions --query "Regions[].RegionName" --output text --region us-east-1)
+for region in $(aws ec2 --profile $profile describe-regions --query "Regions[].RegionName" --output text --region us-east-1)
 do
     echo "${region}:"
+    echo -n "  RHEL81GOLD: "
+    search_images 309956199498 'RHEL-8.1*Access*' false
+
     echo -n "  RHEL75GOLD: "
     search_images 309956199498 'RHEL-7.5*Access*' false
 
     echo -n "  RHEL74GOLD: "
     search_images 309956199498 'RHEL-7.4*Access*' false
+
+    echo -n "  RHEL81: "
+    search_images 309956199498 'RHEL-8.1*' true
 
     echo -n "  RHEL75: "
     search_images 309956199498 'RHEL-7.5*' true
