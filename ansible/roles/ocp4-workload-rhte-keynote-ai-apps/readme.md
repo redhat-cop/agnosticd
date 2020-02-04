@@ -5,7 +5,7 @@
 - **Important:** you'll want to give this some time before the keynote, because of steps you'll need to do later to show data drift.
 - From a checkout of this repository, `cd ansible`
 - Log in to your RHPDS bastion host and add an `authorized_keys` file, like this:
-  - `mkdir .ssh`
+  - `mkdir -p .ssh`
   - `chmod 700 .ssh`
   - `curl https://github.com/${YOUR_GITHUB_HANDLE}.keys >> .ssh/authorized_keys`
 - `export RHPDS_GUID=...`, where "..." is your GUID
