@@ -1,4 +1,4 @@
-cat <<EOF | oc apply -n elastic -f -
+cat <<EOF | oc apply -f -
 apiVersion: kibana.k8s.elastic.co/v1
 kind: Kibana
 metadata:

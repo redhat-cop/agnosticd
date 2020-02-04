@@ -1,4 +1,4 @@
-cat <<EOF | oc apply -n elastic -f -
+cat <<EOF | oc apply  -f -
 # This sample sets up an Elasticsearch cluster with an OpenShift route
 apiVersion: elasticsearch.k8s.elastic.co/v1
 kind: Elasticsearch
