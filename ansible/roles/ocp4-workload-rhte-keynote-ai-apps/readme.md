@@ -7,7 +7,7 @@
 - Log in to your RHPDS bastion host and add an `authorized_keys` file, like this:
   - `mkdir .ssh`
   - `chmod 700 .ssh`
-  - `curl https://github.com/${YOUR_GITHUB_HANDLE}.keys > .ssh/authorized_keys`
+  - `curl https://github.com/${YOUR_GITHUB_HANDLE}.keys >> .ssh/authorized_keys`
 - `export RHPDS_GUID=...`, where "..." is your GUID
 - `export RHPDS_USER=...`, where "..." is your RHPDS username
 - Install the infrastructure role:
