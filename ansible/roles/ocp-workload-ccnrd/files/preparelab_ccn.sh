@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Prereqs: a running ocp 4 cluster, logged in as kubeadmin
+# Prereqs: a running ocp 3 cluster, logged in as kubeadmin
 #
 MYDIR="$( cd "$(dirname "$0")" ; pwd -P )"
 function usage() {
@@ -20,6 +20,8 @@ MODULE_TYPE=m1
 REQUESTED_CPU=2
 REQUESTED_MEMORY=4Gi
 GOGS_PWD=r3dh4t1!
+GITHUB_USER=RedHat-Middleware-Workshops
+GITHUB_BRANCH=master
 
 POSITIONAL=()
 while [[ $# -gt 0 ]]
@@ -34,6 +36,16 @@ case $key in
     ;;
     -m|--module-type)
     MODULE_TYPE="$2"
+    shift # past argument
+    shift # past value
+    ;;
+    -p|--password)
+    GOGS_PWD="$2"
+    shift # past argument
+    shift # past value
+    ;;
+    -b|--branch)
+    GITHUB_BRANCH="$2"
     shift # past argument
     shift # past value
     ;;
@@ -453,8 +465,8 @@ for MODULE in $(echo $MODULE_TYPE | sed "s/,/ /g") ; do
       -e KEYCLOAK_URL=http://keycloak-labs-infra.$HOSTNAME_SUFFIX \
       -e GIT_URL=http://gogs-labs-infra.$HOSTNAME_SUFFIX \
       -e ROUTE_SUBDOMAIN=$HOSTNAME_SUFFIX \
-      -e CONTENT_URL_PREFIX="https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2$MODULE-guides/master" \
-      -e WORKSHOPS_URLS="https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2$MODULE-guides/master/_cloud-native-workshop-module$MODULE_NO.yml" \
+      -e CONTENT_URL_PREFIX="https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2$MODULE-guides/$GITHUB_BRANCH" \
+      -e WORKSHOPS_URLS="https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2$MODULE-guides/$GITHUB_BRANCH/_cloud-native-workshop-module$MODULE_NO.yml" \
       -e CHE_USER_NAME=userXX \
       -e CHE_USER_PASSWORD=${GOGS_PWD} \
       -e OPENSHIFT_USER_NAME=userXX \
@@ -561,9 +573,9 @@ fi
 
 oc delete project $TMP_PROJ
 
-# Install Che
+# Install che
 echo -e "Installing CodeReady Workspace...\n"
-crwctl server:start --platform=openshift --installer=operator --domain=$HOSTNAME_SUFFIX --chenamespace=labs-infra
+crwctl --deploy --project=labs-infra
 
 # Wait for che to be up
 echo "Waiting for Che to come up..."
@@ -620,7 +632,7 @@ SSO_CHE_TOKEN=$(curl -s -d "username=admin&password=admin&grant_type=password&cl
   -X POST http://keycloak-labs-infra.$HOSTNAME_SUFFIX/auth/realms/codeready/protocol/openid-connect/token | \
   jq  -r '.access_token')
 
-wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/stack-ccn.json
+wget https://raw.githubusercontent.com/ecwpz91/cloud-native-workshop-v2-infra/ocp-3.11/files/stack-ccn.json
 STACK_RESULT=$(curl -X POST --header 'Content-Type: application/json' --header 'Accept: application/json' \
     --header "Authorization: Bearer ${SSO_CHE_TOKEN}" -d @stack-ccn.json \
     "http://codeready-labs-infra.$HOSTNAME_SUFFIX/api/stack")
