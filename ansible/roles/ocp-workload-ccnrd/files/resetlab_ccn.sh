@@ -6,11 +6,39 @@ MYDIR="$( cd "$(dirname "$0")" ; pwd -P )"
 function usage() {
     echo "usage: $(basename $0)"
 }
+# Defaults
+USERCOUNT=100
+
+POSITIONAL=()
+while [[ $# -gt 0 ]]
+do
+key="$1"
+
+case $key in
+    -c|--count)
+    USERCOUNT="$2"
+    shift # past argument
+    shift # past value
+    ;;
+    *)    # unknown option
+    echo "Unknown option: $key"
+    usage
+    exit 1
+    ;;
+esac
+done
 
 if [ ! "$(oc get clusterrolebindings)" ] ; then
   echo "not cluster-admin"
   exit 1
 fi
+
+# Remove view role of default namespace to all userXX
+for i in $(eval echo "{0..$USERCOUNT}") ; do
+  oc adm policy remove-role-from-user view user$i -n default
+  echo -n .
+  sleep 2
+done
 
 oc delete project labs-infra
 oc delete template coolstore-monolith-binary-build coolstore-monolith-pipeline-build ccn-sso72 -n openshift
@@ -28,9 +56,3 @@ done
 
 # delete json files
 rm -rf *.json
-
-# scale back down
-for i in $(oc get machinesets -n openshift-machine-api -o name | grep worker| cut -d'/' -f 2) ; do
-  echo "Scaling $i to 1 replica"
-  oc patch -n openshift-machine-api machineset/$i -p '{"spec":{"replicas": 1}}' --type=merge
-done
