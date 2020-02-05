@@ -46,9 +46,11 @@ class ActionModule(ActionBase):
         result['_ansible_verbose_always'] = True
 
         try:
-            output_dir = task_vars.get('output_dir',
-                task_vars['hostvars'].get('localhost',{}).get('output_dir',
-                    task_vars.get('playbook_dir', '.')
+            output_dir = self._templar.template(
+                task_vars.get('output_dir',
+                    task_vars['hostvars'].get('localhost',{}).get('output_dir',
+                        task_vars.get('playbook_dir', '.')
+                    )
                 )
             )
             fh = open(os.path.join(output_dir, 'user-info.yaml'), 'a')
