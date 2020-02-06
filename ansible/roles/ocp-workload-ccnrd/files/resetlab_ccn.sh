@@ -7,7 +7,7 @@ function usage() {
     echo "usage: $(basename $0)"
 }
 # Defaults
-USERCOUNT=100
+USERCOUNT=3
 
 POSITIONAL=()
 while [[ $# -gt 0 ]]
