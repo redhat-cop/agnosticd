@@ -20,8 +20,8 @@ MODULE_TYPE=m1
 REQUESTED_CPU=2
 REQUESTED_MEMORY=4Gi
 GOGS_PWD=openshift
-GITHUB_USER=RedHat-Middleware-Workshops
-GITHUB_BRANCH=master
+GITHUB_USER=ecwpz91
+GITHUB_BRANCH=ocp-3.11
 
 POSITIONAL=()
 while [[ $# -gt 0 ]]
