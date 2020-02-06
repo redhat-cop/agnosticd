@@ -15,11 +15,11 @@ new_fileName=$file_name.$current_time
 exec > $new_fileName
 
 # Defaults
-USERCOUNT=100
+USERCOUNT=3
 MODULE_TYPE=m1
 REQUESTED_CPU=2
 REQUESTED_MEMORY=4Gi
-GOGS_PWD=r3dh4t1!
+GOGS_PWD=openshift
 GITHUB_USER=RedHat-Middleware-Workshops
 GITHUB_BRANCH=master
 
@@ -669,7 +669,7 @@ for i in $(eval echo "{0..$USERCOUNT}") ; do
         -X POST http://keycloak-labs-infra.${HOSTNAME_SUFFIX}/auth/realms/codeready/protocol/openid-connect/token | jq  -r '.access_token')
 
     TMPWORK=$(mktemp)
-    wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.2/files/workspace.json
+    wget https://raw.githubusercontent.com/ecwpz91/cloud-native-workshop-v2-infra/ocp-3.11/files/workspace.json
     sed 's/WORKSPACENAME/WORKSPACE'${i}'/g' workspace.json > $TMPWORK
     rm -rf workspace.json
 
