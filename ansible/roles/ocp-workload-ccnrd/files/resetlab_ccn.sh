@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Prereqs: a running ocp 4 cluster, logged in as kubeadmin
+# Prereqs: a running ocp 3 cluster, logged in as kubeadmin
 #
 MYDIR="$( cd "$(dirname "$0")" ; pwd -P )"
 function usage() {
