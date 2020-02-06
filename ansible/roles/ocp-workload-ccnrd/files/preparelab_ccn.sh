@@ -476,16 +476,15 @@ for MODULE in $(echo $MODULE_TYPE | sed "s/,/ /g") ; do
   oc -n labs-infra expose svc/guides-$MODULE
 done
 
-# update Jenkins templates and create Jenkins project
+# deploy jenkins
 if [ -z "${MODULE_TYPE##*m2*}" ] ; then
-  oc replace -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/jenkins-ephemeral.yml -n openshift
   oc get project jenkins
   RESULT=$?
   if [ $RESULT -eq 0 ]; then
     echo -e "jenkins project already exists..."
   elif [ -z "${MODULE_TYPE##*m2*}" ] ; then
     echo -e "Creating Jenkins project..."
-    oc new-project jenkins --display-name='Jenkins' --description='Jenkins CI Engine'
+    oc new-project jenkins --description='Jenkins CI Engine'
     oc new-app --template=jenkins-ephemeral -l app=jenkins -p JENKINS_SERVICE_NAME=jenkins -p DISABLE_ADMINISTRATIVE_MONITORS=true
     oc set resources dc/jenkins --limits=cpu=1,memory=2Gi --requests=cpu=1,memory=512Mi
   fi
