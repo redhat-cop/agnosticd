@@ -55,6 +55,11 @@ if [ -z "${MODULE_TYPE##*m2*}" ] ; then
  oc delete project jenkins
 fi
 
+if [ -z "${MODULE_TYPE##*m3*}" ] ; then
+ oc delete project istio-system
+ oc delete project istio-operator
+fi
+
 # delete user projects
 for proj in $(oc get projects -o name | grep 'user*' | cut -d/ -f2) ; do
  oc delete project $proj
