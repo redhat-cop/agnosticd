@@ -238,11 +238,25 @@ done
 
 # Install Custom Resource Definitions, Knative Serving, Knative Eventing
 if [ -z "${MODULE_TYPE##*m4*}" ] ; then
- echo -e "Installing Knative Subscriptions..."
- oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/catalog-sources.yaml"
+ oc get project openshift-marketplace
+ RESULT=$?
+ if [ $RESULT -eq 0 ]; then
+  echo -e "openshift-marketplace already exists..."
+ elif [ -z "${MODULE_TYPE##*m3*}" ] || [ -z "${MODULE_TYPE##*m4*}" ] ; then
+  echo -e "Installing Knative Subscriptions..."
+  oc new-project openshift-marketplace
+  oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/catalog-sources.yaml" -n openshift-marketplace
+ fi
 
- echo -e "Installing Knative Serving..."
- oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/knative-serving-subscription.yaml"
+ oc get project openshift-operators
+ RESULT=$?
+ if [ $RESULT -eq 0 ]; then
+  echo -e "openshift-operators already exists..."
+ elif [ -z "${MODULE_TYPE##*m3*}" ] || [ -z "${MODULE_TYPE##*m4*}" ] ; then
+  echo -e "Installing Knative Serving..."
+  oc new-project openshift-marketplace
+  oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/knative-serving-subscription.yaml" -n openshift-operators
+ fi
 
  echo -e "Installing Knative Eventing..."
  # oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/knative-eventing-subscription.yaml"
@@ -252,7 +266,7 @@ kind: CatalogSourceConfig
 metadata:
   finalizers:
   - finalizer.catalogsourceconfigs.operators.coreos.com
-  name: installed-community-openshift-operators
+  name: rhd-workshop-packages
   namespace: openshift-marketplace
 spec:
   targetNamespace: openshift-operators
@@ -268,16 +282,31 @@ metadata:
   name: knative-eventing-operator
   namespace: openshift-operators
   labels:
-    csc-owner-name: installed-community-openshift-operators
+    csc-owner-name: rhd-workshop-packages
     csc-owner-namespace: openshift-marketplace
 spec:
   channel: alpha
   installPlanApproval: Manual
   name: knative-eventing-operator
-  source: installed-community-openshift-operators
+  source: rhd-workshop-packages
   sourceNamespace: openshift-operators
   startingCSV: knative-eventing-operator.v0.10.0
 EOF
+
+ # Waiting for getting knative-eventing-operator subscription
+ echo "Waiting for getting knative-eventing-operator subscription"
+ while [ true ] ; do
+  if [ "$(oc -n openshift-operators get subscription knative-eventing-operator -o=jsonpath='{.status.installPlanRef.name}')" ] ; then
+   break
+  fi
+  echo -n .
+  sleep 10
+ done
+
+ export InstallPlanName=$(oc -n openshift-operators get subscription knative-eventing-operator -o=jsonpath='{.status.installPlanRef.name}')
+ echo -e "InstallPlanName: $InstallPlanName"
+
+ oc -n  openshift-operators patch installplan $InstallPlanName --type=json -p='[{ "op": "replace", "path": "/spec/approved", "value": true }]'
 
  echo -e "Creating Role, Group, and assign Users"
  for i in $(eval echo "{0..$USERCOUNT}") ; do
@@ -317,6 +346,9 @@ EOF
  done
 
  # Install AMQ Streams operator for all namespaces
+ oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.2/files/clusterserviceversion-amqstreams.v1.3.0.yaml
+ oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.2/files/subscription-amq-streams.yaml
+
  cat <<EOF | oc apply -n openshift-marketplace -f -
 apiVersion: operators.coreos.com/v1
 kind: CatalogSourceConfig
@@ -430,7 +462,7 @@ metadata:
   name: knative-eventing-kafka
   namespace: knative-eventing
 spec:
-  bootstrapServers: 'my-cluster-kafka-bootstrap:9092'
+  bootstrapServers: 'my-cluster-kafka-bootstrap.knative-eventing:9092'
   setAsDefaultChannelProvisioner: false
 EOF
 
@@ -445,7 +477,8 @@ EOF
   oc create serviceaccount pipeline
   oc adm policy add-scc-to-user privileged -z pipeline
   oc adm policy add-role-to-user edit -z pipeline
-  oc delete limitranges user$i-cloudnative-pipeline-core-resource-limits
+  oc delete limitranges user$i-cloudnativeapps-core-resource-limits -n user$i-cloudnativeapps
+  oc delete limitranges user$i-cloudnative-pipeline-core-resource-limits -n user$i-cloudnative-pipeline
   oc adm policy add-role-to-user admin user$i -n user$i-cloudnative-pipeline
  done
 
