@@ -107,13 +107,13 @@ echo -e "HOSTNAME_SUFFIX: $HOSTNAME_SUFFIX \n"
 oc project labs-infra
 
 # create templates for labs
-oc create -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/template-binary.json -n openshift
-oc create -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/template-prod.json -n openshift
-oc create -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/ccn-sso72-template.json -n openshift
+oc create -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/template-binary.json" -n openshift
+oc create -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/template-prod.json" -n openshift
+oc create -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/ccn-sso72-template.json" -n openshift
 
 # deploy rhamt
 if [ -z "${MODULE_TYPE##*m1*}" ] ; then
- oc process -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/web-template-empty-dir-executor.json \
+ oc process -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/web-template-empty-dir-executor.json" \
   -p WEB_CONSOLE_REQUESTED_CPU=$REQUESTED_CPU \
   -p WEB_CONSOLE_REQUESTED_MEMORY=$REQUESTED_MEMORY \
   -p EXECUTOR_REQUESTED_CPU=$REQUESTED_CPU \
@@ -123,7 +123,7 @@ if [ -z "${MODULE_TYPE##*m1*}" ] ; then
 fi
 
 # deploy gogs
-oc -n labs-infra new-app -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/gogs-template.yaml \
+oc new-app -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/gogs-template.yaml" -n labs-infra \
  -p HOSTNAME=gogs-labs-infra.$HOSTNAME_SUFFIX \
  -p GOGS_VERSION=0.11.34 \
  -p SKIP_TLS_VERIFY=true \
@@ -168,7 +168,7 @@ done
 echo -e "Creating $USERCOUNT users' private repo...."
 for MODULE in $(echo $MODULE_TYPE | sed "s/,/ /g") ; do
  MODULE_NO=$(echo $MODULE | cut -c 2)
- CLONE_ADDR=https://github.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2m$MODULE_NO-labs.git
+ CLONE_ADDR="https://github.com/$GITHUB_USER/cloud-native-workshop-v2m$MODULE_NO-labs.git"
  REPO_NAME=cloud-native-workshop-v2m$MODULE_NO-labs
  for i in $(eval echo "{0..$USERCOUNT}") ; do
   USER_ID=$(($i + 2))
@@ -192,7 +192,7 @@ if [ $RESULT -eq 0 ]; then
 elif [ -z "${MODULE_TYPE##*m3*}" ] || [ -z "${MODULE_TYPE##*m4*}" ] ; then
  echo -e "Installing istio-operator..."
  oc new-project istio-operator
- oc apply -n istio-operator -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/servicemesh-operator.yaml
+ oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/servicemesh-operator.yaml" -n istio-operator
 fi
 
 oc get project istio-system
@@ -202,7 +202,7 @@ if [ $RESULT -eq 0 ]; then
 elif [ -z "${MODULE_TYPE##*m3*}" ] || [ -z "${MODULE_TYPE##*m4*}" ] ; then
  echo -e "Deploying the Istio Control Plane with Single-Tenant..."
  oc new-project istio-system
- oc create -n istio-system -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/servicemeshcontrolplane.yaml
+ oc create -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/servicemeshcontrolplane.yaml -n istio-system
  # bash <(curl -L https://git.io/getLatestKialiOperator) --operator-image-version v1.0.0 --operator-watch-namespace '**' --accessible-namespaces '**' --operator-install-kiali false
  # oc apply -n istio-system -f https://raw.githubusercontent.com/kiali/kiali/v1.0.0/operator/deploy/kiali/kiali_cr.yaml
 fi
@@ -239,13 +239,13 @@ done
 # Install Custom Resource Definitions, Knative Serving, Knative Eventing
 if [ -z "${MODULE_TYPE##*m4*}" ] ; then
  echo -e "Installing Knative Subscriptions..."
- oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/catalog-sources.yaml
+ oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/catalog-sources.yaml"
 
  echo -e "Installing Knative Serving..."
- oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-serving-subscription.yaml
+ oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/knative-serving-subscription.yaml"
 
  echo -e "Installing Knative Eventing..."
- # oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/knative-eventing-subscription.yaml
+ # oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/knative-eventing-subscription.yaml"
  cat <<EOF | oc apply -n openshift-marketplace -f -
 apiVersion: operators.coreos.com/v1
 kind: CatalogSourceConfig
@@ -608,7 +608,7 @@ SSO_TOKEN=$(curl -s -d "username=${KEYCLOAK_USER}&password=${KEYCLOAK_PASSWORD}&
 echo -e "SSO_TOKEN: $SSO_TOKEN"
 
 # Import realm
-wget https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.1/files/ccnrd-realm.json
+wget "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/ccnrd-realm.json"
 curl -v -H "Authorization: Bearer ${SSO_TOKEN}" -H "Content-Type:application/json" -d @ccnrd-realm.json \
  -X POST "http://keycloak-labs-infra.$HOSTNAME_SUFFIX/auth/admin/realms"
 rm -rf ccnrd-realm.json
@@ -646,7 +646,7 @@ curl -X POST --header 'Content-Type: application/json' --header 'Accept: applica
  "http://codeready-labs-infra.$HOSTNAME_SUFFIX/api/permissions"
 
 # import stack image
-oc create -n openshift -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.2/files/stack.imagestream.yaml
+oc create -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/stack.imagestream.yaml" -n openshift
 sleep 5
 oc import-image --all quarkus-stack -n openshift
 
