@@ -41,9 +41,9 @@ def ig_version_choice = [
 ].join("\n")
 
 def region_choice = [
-    'na_openshiftbu',
-    'apac_openshift_bu',
-    'emea_openshiftbu',
+    'gpte_apac',
+    'gpte_emea',
+    'gpte_na',
 ].join("\n")
 
 pipeline {
