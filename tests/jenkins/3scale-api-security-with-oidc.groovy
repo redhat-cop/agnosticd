@@ -21,27 +21,24 @@ def ssh_admin_host = 'admin-host-na'
 def guid=''
 def openshift_location = ''
 
-
 // Catalog items
 def choices = [
-    'Workshops / OpenShift Workshop',
-    'DevOps Team Testing Catalog / TEST - OCP Workshop RHPDS',
-    'DevOps Team Development Catalog / DEV - OPENSHIFT WORKSHOP RHPDS',
-].join("\n")
-
-def ocprelease_choice = [
-    '3.11.104',
-    '3.11.59',
-    '3.11.51',
-    '3.11.43',
-    '3.10.34',
-    '3.9.40',
+    'Multi-product Demos / 3Scale API Security with OIDC',
 ].join("\n")
 
 def region_choice = [
-    'na_gpte',
-    'apac_gpte',
-    'emea_gpte',
+    'global_gpte',
+].join("\n")
+
+def nodes_choice = [
+    '3',
+    '1',
+    '2',    
+    '4',
+    '5',
+    '6',
+    '7',
+    '8',
 ].join("\n")
 
 pipeline {
@@ -63,14 +60,14 @@ pipeline {
             name: 'catalog_item',
         )
         choice(
-            choices: ocprelease_choice,
-            description: 'Catalog item',
-            name: 'ocprelease',
-        )
-        choice(
             choices: region_choice,
             description: 'Catalog item',
             name: 'region',
+        )
+        choice(
+            choices: nodes_choice,
+            description: 'Number of Nodes',
+            name: 'nodes',
         )
     }
 
@@ -89,22 +86,16 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
+                    def nodes = params.nodes.trim()
                     def cfparams = [
                         'check=t',
-                        'check2=t',
-                        'expiration=2',
+                        'expiration=14',
                         'runtime=8',
+                        'quotacheck=t',
                         "region=${region}",
-                        'city=jenkins',
-                        'salesforce=gptejen',
-                        'notes=devops_automation_jenkins',
-                        'users=2',
-                        'use_letsencrypt=f',
-                        "ocprelease=${ocprelease}",
+                        "nodes=${nodes}",
                     ].join(',').trim()
-
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -121,7 +112,8 @@ pipeline {
                 }
             }
         }
-
+        // Skip this step because sometimes the completed email arrives
+        // before the 'has started' email
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -130,11 +122,10 @@ pipeline {
                 git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
-
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
                     --guid ${guid} \
-                    --timeout 20 \
+                    --timeout 30 \
                     --filter 'has started'"""
             }
         }
@@ -160,10 +151,9 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (https:\/\/master\.[^ ]+)/
+                    	def m = email =~ /Connect to the shared cluster by pointing your web browser to <a href="(https:\/\/master\.[^"]+)/
                         openshift_location = m[0][1]
                         echo "openshift_location = '${openshift_location}'"
-
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
