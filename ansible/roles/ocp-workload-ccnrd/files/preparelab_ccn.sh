@@ -242,19 +242,20 @@ if [ -z "${MODULE_TYPE##*m4*}" ] ; then
  RESULT=$?
  if [ $RESULT -eq 0 ]; then
   echo -e "openshift-marketplace already exists..."
- elif [ -z "${MODULE_TYPE##*m3*}" ] || [ -z "${MODULE_TYPE##*m4*}" ] ; then
+ else
   echo -e "Installing Knative Subscriptions..."
-  oc new-project openshift-marketplace
+  oc adm new-project openshift-marketplace
   oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/catalog-sources.yaml" -n openshift-marketplace
  fi
+
 
  oc get project openshift-operators
  RESULT=$?
  if [ $RESULT -eq 0 ]; then
   echo -e "openshift-operators already exists..."
- elif [ -z "${MODULE_TYPE##*m3*}" ] || [ -z "${MODULE_TYPE##*m4*}" ] ; then
+ else
   echo -e "Installing Knative Serving..."
-  oc new-project openshift-marketplace
+  oc adm new-project openshift-operators
   oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/knative-serving-subscription.yaml" -n openshift-operators
  fi
 
