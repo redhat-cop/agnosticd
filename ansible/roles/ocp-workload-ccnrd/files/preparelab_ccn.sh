@@ -204,7 +204,7 @@ elif [ -z "${MODULE_TYPE##*m3*}" ] || [ -z "${MODULE_TYPE##*m4*}" ] ; then
  oc new-project istio-system
  oc create -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/servicemeshcontrolplane.yaml" -n istio-system
  # bash <(curl -L https://git.io/getLatestKialiOperator) --operator-image-version v1.0.0 --operator-watch-namespace '**' --accessible-namespaces '**' --operator-install-kiali false
- # oc apply -n istio-system -f https://raw.githubusercontent.com/kiali/kiali/v1.0.0/operator/deploy/kiali/kiali_cr.yaml
+ # oc apply -f https://raw.githubusercontent.com/kiali/kiali/v1.0.0/operator/deploy/kiali/kiali_cr.yaml -n istio-system
 fi
 
 # Create coolstore & bookinfo projects for each user
