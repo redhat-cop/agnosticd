@@ -346,8 +346,8 @@ EOF
  done
 
  # Install AMQ Streams operator for all namespaces
- oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.2/files/clusterserviceversion-amqstreams.v1.3.0.yaml
- oc apply -f https://raw.githubusercontent.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-infra/ocp-4.2/files/subscription-amq-streams.yaml
+ oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/clusterserviceversion-amqstreams.v1.3.0.yaml"
+ oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/subscription-amq-streams.yaml"
 
  cat <<EOF | oc apply -n openshift-marketplace -f -
 apiVersion: operators.coreos.com/v1
