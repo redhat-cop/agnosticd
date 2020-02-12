@@ -294,19 +294,19 @@ spec:
 EOF
 
  # Waiting for getting knative-eventing-operator subscription
- echo "Waiting for getting knative-eventing-operator subscription"
- while [ true ] ; do
-  if [ "$(oc -n openshift-operators get subscription knative-eventing-operator -o=jsonpath='{.status.installPlanRef.name}')" ] ; then
-   break
-  fi
-  echo -n .
-  sleep 10
- done
-
- export InstallPlanName=$(oc -n openshift-operators get subscription knative-eventing-operator -o=jsonpath='{.status.installPlanRef.name}')
- echo -e "InstallPlanName: $InstallPlanName"
-
- oc -n  openshift-operators patch installplan $InstallPlanName --type=json -p='[{ "op": "replace", "path": "/spec/approved", "value": true }]'
+ # echo "Waiting for getting knative-eventing-operator subscription"
+ # while [ true ] ; do
+ #  if [ "$(oc -n openshift-operators get subscription knative-eventing-operator -o=jsonpath='{.status.installPlanRef.name}')" ] ; then
+ #   break
+ #  fi
+ #  echo -n .
+ #  sleep 10
+ # done
+ #
+ # export InstallPlanName=$(oc -n openshift-operators get subscription knative-eventing-operator -o=jsonpath='{.status.installPlanRef.name}')
+ # echo -e "InstallPlanName: $InstallPlanName"
+ #
+ # oc -n  openshift-operators patch installplan $InstallPlanName --type=json -p='[{ "op": "replace", "path": "/spec/approved", "value": true }]'
 
  echo -e "Creating Role, Group, and assign Users"
  for i in $(eval echo "{0..$USERCOUNT}") ; do
@@ -415,14 +415,14 @@ spec:
 EOF
 
  # Waiting for Kafka CRD
- echo "Waiting for Kafka CRD"
- while [ true ] ; do
-  if [ "$(oc explain kafka -n knative-eventing)" ] ; then
-   break
-  fi
-  echo -n .
-  sleep 10
- done
+ # echo "Waiting for Kafka CRD"
+ # while [ true ] ; do
+ #  if [ "$(oc explain kafka -n knative-eventing)" ] ; then
+ #   break
+ #  fi
+ #  echo -n .
+ #  sleep 10
+ # done
 
  # Install Kafka cluster in Knative-eventing
  cat <<EOF | oc create -f -
