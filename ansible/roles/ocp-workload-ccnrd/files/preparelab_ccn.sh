@@ -248,7 +248,6 @@ if [ -z "${MODULE_TYPE##*m4*}" ] ; then
   oc apply -f "https://raw.githubusercontent.com/$GITHUB_USER/cloud-native-workshop-v2-infra/$GITHUB_BRANCH/files/catalog-sources.yaml" -n openshift-marketplace
  fi
 
-
  oc get project openshift-operators
  RESULT=$?
  if [ $RESULT -eq 0 ]; then
