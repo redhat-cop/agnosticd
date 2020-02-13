@@ -1,0 +1,325 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Mappings:
+  RegionMapping: {{ aws_ami_region_mapping | to_json }}
+
+Resources:
+   Vpc:
+    Type: "AWS::EC2::VPC"
+    Properties:
+     CidrBlock: "{{vpcid_cidr_block}}"
+     EnableDnsSupport: true
+     EnableDnsHostnames: true
+     Tags:
+      - Key: Name
+        Value: "{{vpcid_name_tag}}"
+      - Key: Hostlication
+        Value:
+          Ref: "AWS::StackId"
+
+   VpcInternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+     Tags:
+      - Key: Name
+        Value: "{{vpcid_name_tag}}"
+
+   VpcGA:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+     InternetGatewayId:
+      Ref: VpcInternetGateway
+     VpcId:
+      Ref: Vpc
+
+   VpcRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+     VpcId:
+      Ref: Vpc
+     Tags:
+      - Key: Name
+        Value: "{{vpcid_name_tag}}"
+
+   VPCRouteInternetGateway:
+    DependsOn: VpcGA
+    Type: "AWS::EC2::Route"
+    Properties:
+     GatewayId:
+      Ref: VpcInternetGateway
+     DestinationCidrBlock: "0.0.0.0/0"
+     RouteTableId:
+      Ref: VpcRouteTable
+
+   PublicSubnet:
+    Type: "AWS::EC2::Subnet"
+    DependsOn:
+      - Vpc
+    Properties:
+{% if aws_availability_zone is defined %}
+      AvailabilityZone: "{{ aws_availability_zone }}"
+{% endif %}
+      CidrBlock: "{{ aws_public_subnet_cidr }}"
+      Tags:
+        - Key: Name
+          Value: "{{vpcid_name_tag}}-public"
+        - Key: Hostlication
+          Value:
+            Ref: "AWS::StackId"
+      MapPublicIpOnLaunch: false
+      VpcId:
+        Ref: Vpc
+
+   PublicSubnetRTA:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+     RouteTableId:
+      Ref: VpcRouteTable
+     SubnetId:
+      Ref: PublicSubnet
+
+   PrivateRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+     VpcId:
+      Ref: Vpc
+     Tags:
+      - Key: Name
+        Value: "{{vpcid_name_tag}}-private"
+
+   PrivateRouteNatGateway:
+    DependsOn:
+     - NatGateway
+    Type: "AWS::EC2::Route"
+    Properties:
+     NatGatewayId:
+      Ref: NatGateway
+     DestinationCidrBlock: "0.0.0.0/0"
+     RouteTableId:
+      Ref: PrivateRouteTable
+
+   PrivateSubnet:
+    Type: "AWS::EC2::Subnet"
+    DependsOn:
+     - Vpc
+    Properties:
+{% if aws_availability_zone is defined %}
+     AvailabilityZone: "{{ aws_availability_zone }}"
+{% endif %}
+     CidrBlock: "{{ aws_private_subnet_cidr }}"
+     Tags:
+      - Key: Name
+        Value: "{{ vpcid_name_tag }}-private"
+      - Key: Hostlication
+        Value:
+         Ref: "AWS::StackId"
+     MapPublicIpOnLaunch: false
+     VpcId:
+      Ref: Vpc
+
+   PrivateSubnetRTA:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+     RouteTableId:
+      Ref: PrivateRouteTable
+     SubnetId:
+      Ref: PrivateSubnet
+
+   NatGatewayEIP:
+    Type: "AWS::EC2::EIP"
+    DependsOn:
+     - VpcGA
+    Properties:
+     Domain: vpc
+
+   NatGateway:
+    Type: "AWS::EC2::NatGateway"
+    DependsOn:
+     - NatGatewayEIP
+     - PublicSubnet
+    Properties:
+     AllocationId:
+      Fn::GetAtt:
+       - NatGatewayEIP
+       - AllocationId
+     SubnetId:
+      Ref: PublicSubnet
+     Tags:
+      - Key: Name
+        Value: "{{vpcid_name_tag}}"
+
+
+{% for security_group in security_groups %}
+   {{security_group['name']}}:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Host
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value: "{{course_name}}-{{guid}}-{{security_group['name']}}"
+{% endfor %}
+
+{% for security_group in security_groups %}
+{% for rule in security_group['rules'] %}
+   {{security_group['name']}}{{rule['name']}}:
+    Type: "AWS::EC2::SecurityGroup{{rule['rule_type']}}"
+    Properties:
+     GroupId:
+       Fn::GetAtt:
+         - "{{security_group['name']}}"
+         - GroupId
+     IpProtocol: {{rule['protocol']}}
+     FromPort: {{rule['from_port']}}
+     ToPort: {{rule['to_port']}}
+{% if rule['cidr'] is defined %}
+     CidrIp: "{{rule['cidr']}}"
+{% endif  %}
+{% if rule['group'] is defined %}
+     SourceSecurityGroupId:
+       Fn::GetAtt:
+        - "{{rule['group']}}"
+        - GroupId
+{% endif  %}
+{% endfor %}
+{% endfor %}
+
+   zoneinternalidns:
+    Type: "AWS::Route53::HostedZone"
+    Properties:
+     Name: "{{ zone_internal_dns }}"
+     VPCs:
+      - VPCId:
+          Ref: Vpc
+        VPCRegion:
+          Ref: "AWS::Region"
+     HostedZoneConfig:
+      Comment: "Created By ansible agnostic deployer"
+
+
+{% for instance in instances %}
+{% for c in range(1,(instance['count'] |int)+1) %}
+{% set instancecount = loop %}
+#this is host {{instance['name']}}{{loop.index}}
+
+   {{instance['name']}}{{loop.index}}:
+    Type: "AWS::EC2::Instance"
+    DependsOn:
+     - PrivateRouteNatGateway
+    Properties:
+     ImageId:
+      "Fn::FindInMap":
+       - RegionMapping
+       - Ref: "AWS::Region"
+       - {{ instance['image_id'] | default(aws_default_image) }}
+
+     InstanceType: "{{instance['flavor'][cloud_provider]}}"
+     KeyName: "{{instance['key_name'] | default(key_name)}}"
+{% if instance['UserData'] is defined %}
+     {{instance['UserData']}}
+{% endif %}
+     SecurityGroupIds:
+        - "Fn::GetAtt":
+          - {{instance['security_group']}}
+          - GroupId
+     SubnetId:
+{% if instance['public_dns'] %}
+      Ref: PublicSubnet
+{% else %}
+      Ref: PrivateSubnet
+{% endif %}
+     Tags:
+{% if instance['unique'] | default(false) %}
+      - Key: Name
+        Value: {{course_name}}-{{guid}}-{{instance['name']}}
+      - Key: internaldns
+        Value: {{instance['name']}}.{{chomped_zone_internal_dns}}
+{% else %}
+      - Key: Name
+        Value: {{course_name}}-{{guid}}-{{instance['name']}}{{instancecount.index}}
+      - Key: internaldns
+        Value: {{instance['name']}}{{loop.index}}.{{chomped_zone_internal_dns}}
+{% endif %}
+      - Key: "owner"
+        Value: "{{ email | default('unknownuser') }}"
+      - Key: "Project"
+        Value: "{{project_tag}}"
+      - Key: "{{project_tag}}"
+        Value: "{{ instance['name'] }}"
+{% if instance['unique'] | default(false) %}
+      - Key: "instance_name"
+        Value: "{{ instance['name'] }}"
+{% else %}
+      - Key: "instance_name"
+        Value: "{{ instance['name'] }}{{instancecount.index}}"
+{% endif %}
+      - Key: "env_type"
+        Value: "{{ env_type }}"
+      - Key: "guid"
+        Value: "{{ guid }}"
+{% for tag in instance['tags'] %}
+      - Key: {{tag['key']}}
+        Value: {{tag['value']}}
+{% endfor %}
+     BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: 30
+{% for vol in instance.volumes|default([]) if vol.enable|d(true) %}
+        - DeviceName: "{{ vol.name | default(vol.device_name) }}"
+          Ebs:
+{% if cloud_provider in vol and 'type' in vol.ec2 %}
+            VolumeType: "{{ vol[cloud_provider].type }}"
+{% else %}
+            VolumeType: "{{ aws_default_volume_type }}"
+{% endif %}
+            VolumeSize: "{{ vol.size }}"
+            DeleteOnTermination: true
+{% endfor %}
+   {{instance['name']}}{{loop.index}}InternalDNS:
+    Type: "AWS::Route53::RecordSetGroup"
+    Properties:
+     HostedZoneId:
+      Ref: zoneinternalidns
+     RecordSets:
+{% if instance['unique'] | default(false) %}
+      - Name: "{{instance['name']}}.{{zone_internal_dns}}"
+{% else %}
+      - Name: "{{instance['name']}}{{loop.index}}.{{zone_internal_dns}}"
+{% endif %}
+        Type: A
+        TTL: 10
+        ResourceRecords:
+          - "Fn::GetAtt":
+            - {{instance['name']}}{{loop.index}}
+            - PrivateIp
+{% if instance['public_dns'] %}
+   {{instance['name']}}{{loop.index}}EIP:
+     Type: "AWS::EC2::EIP"
+     DependsOn:
+      - VpcGA
+     Properties:
+      InstanceId:
+       Ref: {{instance['name']}}{{loop.index}}
+   {{instance['name']}}{{loop.index}}PublicDNS:
+     Type: "AWS::Route53::RecordSetGroup"
+     DependsOn:
+        - {{instance['name']}}{{loop.index}}EIP
+     Properties:
+      HostedZoneId: {{HostedZoneId}}
+      RecordSets:
+{% if instance['unique'] | default(false) %}
+         - Name: "{{instance['name']}}.{{subdomain_base}}."
+{% else %}
+         - Name: "{{instance['name']}}{{loop.index}}.{{subdomain_base}}."
+{% endif %}
+           Type: A
+           TTL: 10
+           ResourceRecords:
+           - "Fn::GetAtt":
+             - {{instance['name']}}{{loop.index}}
+             - PublicIp
+{% endif %}
+
+{% endfor %}
+{% endfor %}

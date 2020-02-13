@@ -1,0 +1,239 @@
+---
+- name: Remove repo directory
+  file:
+    path: /tmp/do417
+    state: absent
+
+- name: Get ssh key for Github
+  copy:
+    src: "{{ github_ssh_key }}"
+    dest: /tmp/github_ssh_key
+    mode: 0400
+    owner: "{{ ansible_user }}"
+
+- name: Get lab source code
+  git:
+    clone: yes
+    force: yes
+    dest: "/tmp/do417"
+    repo: "git@github.com:RedHatTraining/do417.git"
+    key_file: /tmp/github_ssh_key
+    accept_hostkey: true
+
+- name: Remove ssh key for Github
+  file:
+    path: /tmp/github_ssh_key
+    state: absent
+
+- name: Remove .git directory
+  file:
+    path: /tmp/do417/.git
+    state: absent
+
+- name: Determining material directories
+  command: find /tmp/do417/classroom/infrastructure/playbooks/files/src -maxdepth 1 -mindepth 1 -type d -printf '%f\n'
+  register: repos_name
+
+- name: Wait for Tower to be reachable
+  wait_for:
+    port: 443
+    delay: 5
+
+- name: Retrieve default organization ID
+  uri:
+    url:  "https://localhost/api/v2/organizations/?name=Default"
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+  register: organization_id
+
+- name: Retrieve default inventory ID
+  uri:
+    url: "https://localhost/api/v2/inventories/?name=Default+inventory"
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+  register: inventory_id
+
+- name: Create GitLab credentials
+  uri:
+    url:  "https://localhost/api/v2/credentials/"
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: "{{ lookup('template','gitlab-creds.json.j2') }}"
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 400
+  register: response
+  changed_when: response.status == 201
+
+- name: Retrieve credentials ID
+  uri:
+    url:  "https://localhost/api/v2/credentials/?name=GitLab"
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+  register: gitlab_credentials_id
+
+- name: Create DevOps credentials
+  uri:
+    url:  "https://localhost/api/v2/credentials/"
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: "{{ lookup('template','devops-creds.json.j2') }}"
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 400
+  register: response
+  changed_when: response.status == 201
+
+- name: Retrieve credentials ID
+  uri:
+    url:  "https://localhost/api/v2/credentials/?name=DevOps"
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+  register: devops_credentials_id
+
+- name: Create Tower credentials
+  uri:
+    url:  "https://localhost/api/v2/credentials/"
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: "{{ lookup('template','tower-creds.json.j2') }}"
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 400
+  register: response
+  changed_when: response.status == 201
+
+- name: Create Git projects
+  uri:
+    url:  "https://localhost/api/v2/projects/"
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body:
+      name: "{{ item }} repository"
+      description: "{{ item }} project"
+      local_path: ""
+      scm_type: "git"
+      scm_url: "https://gitlab.{{ dns_domain_name }}/student/{{ item }}.git"
+      scm_branch: "master"
+      scm_clean: false
+      scm_delete_on_update: false
+      credential: "{{ gitlab_credentials_id.json.results[0].id }}"
+      timeout: 0
+      organization: "{{ organization_id.json.results[0].id }}"
+      scm_update_on_launch: true
+      scm_update_cache_timeout: 0
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 400
+  register: response
+  changed_when: response.status == 201
+  with_items: "{{ repos_name.stdout_lines }}"
+
+- name: Retrieve projects ID
+  uri:
+    url:  "https://localhost/api/v2/projects/?name={{ item }}+repository"
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+  with_items: "{{ repos_name.stdout_lines }}"
+  register: projects_id
+
+- name: Create job templates
+  uri:
+    url:  "https://localhost/api/v2/job_templates/"
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body:
+      name: "Run {{ item.json.results[0].description }}"
+      description: Use this job template to run your playbooks
+      job_type: run
+      inventory: "{{ inventory_id.json.results[0].id }}"
+      project:  "{{ item.json.results[0].id }}"
+      playbook: dummy.yml
+      forks: 0
+      verbosity: 0
+      force_handlers: false
+      timeout: 0
+      use_fact_cache: false
+      ask_diff_mode_on_launch: false
+      ask_variables_on_launch: false
+      ask_limit_on_launch: false
+      ask_tags_on_launch: false
+      ask_skip_tags_on_launch: false
+      ask_job_type_on_launch: false
+      ask_verbosity_on_launch: false
+      ask_inventory_on_launch: false
+      ask_credential_on_launch: false
+      survey_enabled: true
+      become_enabled: false
+      diff_mode: false
+      allow_simultaneous: false
+      custom_virtualenv:
+      job_slice_count: 1
+      credential: "{{ devops_credentials_id.json.results[0].id }}"
+      vault_credential:
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 400
+  register: response
+  changed_when: response.status == 201
+  with_items: "{{ projects_id.results }}"
