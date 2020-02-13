@@ -1,0 +1,464 @@
+---
+- name: Check if we need to do installer things
+  uri:
+    url: https://localhost/api/v1/ping/
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    validate_certs: False
+  register: checkout
+  ignore_errors: True
+
+- name: Set condtional if the above didn't error
+  set_fact:
+    towerchk: "{{ checkout.json.version }}"
+  when: checkout.json is defined
+
+- name: Download tower installer
+  get_url:
+    url: https://releases.ansible.com/ansible-tower/setup/ansible-tower-setup-{{ towerversion }}.tar.gz
+    dest: /tmp/ansible-tower-setup-{{ towerversion }}.tar.gz
+    mode: 0640
+  when: towerchk not in towerversion
+
+- name: Extract installer
+  unarchive:
+    src: /tmp/ansible-tower-setup-{{ towerversion }}.tar.gz
+    dest: /tmp/
+    remote_src: True
+  when: towerchk not in towerversion
+
+- name: Template inventory file
+  template:
+    src: inventory
+    dest: /tmp/ansible-tower-setup-{{ towerversion }}/inventory
+  when: towerchk != towerversion
+
+- name: Create the environment file (fixes the incorrect repository lookup)
+  copy:
+   dest: /tmp/ansible-tower-setup-{{ towerversion }}/install_vars.yml
+   content: |
+     redhat_aws_rhui_repos:
+       - rhel-server-rhui-rhscl-7-rpms
+       - rhel-7-server-rhui-extras-rpms
+
+- name: Run the tower installer
+  shell: ./setup.sh -e "@install_vars.yml"
+  args:
+    chdir: /tmp/ansible-tower-setup-{{ towerversion }}
+  when: towerchk not in towerversion
+
+- name: Wait for tower to be up
+  uri:
+    url: https://localhost/api/v1/ping/
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    validate_certs: False
+    force_basic_auth: yes
+  register: check2
+  until: check2.json is defined and check2.json.version in towerversion
+  retries: 10
+  delay: 30
+  when: towerchk not in towerversion
+
+- name: Post license key
+  uri:
+    url: https://localhost/api/v1/config/
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: "{{ tower_license }}"
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+  ignore_errors: True
+
+- name: Add LDAP Config
+  uri:
+    url: https://localhost/api/v2/settings/ldap/
+    method: PATCH
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: "{{ lookup('template','ldap_conf.json.j2') }}"
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+
+- set_fact:
+    userid: "{{ inventory_hostname | regex_replace('[^0-9]', '') }}"
+
+- name: Delete demo inventory
+  uri:
+    url:  https://localhost/api/v2/inventories/1/
+    method: DELETE
+    user: admin
+    password: "{{ tower_admin_password }}"
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 202
+      - 204
+      - 400
+      - 404
+  register: response
+  changed_when: response.status == 204
+
+- name: Delete demo project
+  uri:
+    url:  https://localhost/api/v2/projects/4/
+    method: DELETE
+    user: admin
+    password: "{{ tower_admin_password }}"
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 202
+      - 204
+      - 400
+      - 404
+  register: response
+  changed_when: response.status == 204
+
+- name: Delete demo template
+  uri:
+    url:  https://localhost/api/v2/job_templates/5/
+    method: DELETE
+    user: admin
+    password: "{{ tower_admin_password }}"
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 202
+      - 204
+      - 400
+      - 404
+  register: response
+  changed_when: response.status == 204
+
+- name: Delete demo credential
+  uri:
+    url:  https://localhost/api/v2/credentials/1/
+    method: DELETE
+    user: admin
+    password: "{{ tower_admin_password }}"
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 202
+      - 204
+      - 400
+      - 404
+  register: response
+  changed_when: response.status == 204
+
+- name: Create default inventory
+  uri:
+    url:  https://localhost/api/v2/inventories/
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: "{{ lookup('file','default_inventory.json') }}"
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 400
+  register: response
+  changed_when: response.status == 201
+
+- name: Retrieve default inventory ID
+  uri:
+    url:  "https://localhost/api/v2/inventories/?name=Default+inventory"
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+  register: default_inventory_id
+
+- name: Create group in default inventory
+  uri:
+    url:  "https://localhost/api/v2/groups/"
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body:
+      name: "Windows"
+      description: ""
+      inventory: "{{ default_inventory_id.json.results[0].id }}"
+      variables: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 400
+  register: response
+  changed_when: response.status == 201
+
+- name: Retrieve default group ID
+  uri:
+    url:  "https://localhost/api/v2/groups/?name=Windows"
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+  register: group_id
+
+- name: Create host in default group
+  uri:
+    url:  https://localhost/api/v2/hosts/
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: "{{ lookup('template','win1_host.json.j2') }}"
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 400
+  register: response
+  changed_when: response.status == 201
+
+- name: Retrieve host ID
+  uri:
+    url:  "https://localhost/api/v2/hosts/?name=win1.{{ dns_domain_name }}"
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+  register: host_id
+
+- name: Associate host to group
+  uri:
+    url:  "https://localhost/api/v2/groups/{{ group_id.json.results[0].id }}/hosts/"
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body:
+      '{ "id": {{ host_id.json.results[0].id | int }} }'
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 204
+      - 400
+  register: response
+  changed_when: response.status == 204
+
+- name: Create classroom inventory
+  uri:
+    url:  https://localhost/api/v2/inventories/
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: "{{ lookup('file','classroom_inventory.json') }}"
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 400
+  register: response
+  changed_when: response.status == 201
+
+- name: Retrieve classroom inventory ID
+  uri:
+    url:  "https://localhost/api/v2/inventories/?name=Classroom+inventory"
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+  register: classroom_inventory_id
+
+- name: Create group in classroom inventory
+  uri:
+    url:  "https://localhost/api/v2/groups/"
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body:
+      name: "Tower"
+      description: ""
+      inventory: "{{ classroom_inventory_id.json.results[0].id }}"
+      variables: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 400
+  register: response
+  changed_when: response.status == 201
+
+- name: Retrieve classroom group ID
+  uri:
+    url:  "https://localhost/api/v2/groups/?name=Tower"
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+  register: group_id
+
+- name: Create host in tower group
+  uri:
+    url:  https://localhost/api/v2/hosts/
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: "{{ lookup('template','tower_host.json.j2') }}"
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 201
+      - 400
+  register: response
+  changed_when: response.status == 201
+
+- name: Retrieve tower host ID
+  uri:
+    url:  "https://localhost/api/v2/hosts/?name=tower"
+    method: GET
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: ""
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+  register: host_id
+
+- name: Associate host to group
+  uri:
+    url:  "https://localhost/api/v2/groups/{{ group_id.json.results[0].id }}/hosts/"
+    method: POST
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body:
+      '{ "id": {{ host_id.json.results[0].id | int }} }'
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 204
+      - 400
+  register: response
+  changed_when: response.status == 204
+
+- name: Add win_shell/win_feature/win_reboot to allowed adhoc modules
+  uri:
+    url:  https://localhost/api/v2/settings/all/
+    method: PATCH
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: "{{ lookup('template','tower_config_adhoc.json.j2') }}"
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 204
+      - 400
+  register: response
+  changed_when: response.status == 200
+
+- name: Set Base URL of Tower to resolve issues with websocket
+  uri:
+    url:  https://localhost/api/v2/settings/system/
+    method: PATCH
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: '{ "TOWER_URL_BASE": "https://tower.{{ dns_domain_name }}" }'
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 204
+      - 400
+  register: response
+  changed_when: response.status == 200
+
+- name: Change timeout default value
+  uri:
+    url:  "https://localhost/api/v2/settings/authentication/"
+    method: PATCH
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: '{ "SESSION_COOKIE_AGE": 14400 }'
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 204
+      - 400
+  register: response
+  changed_when: response.status == 200
+
+- name: Change Tower settings for Git and Galaxy SSL validation
+  uri:
+    url:  "https://localhost/api/v2/settings/jobs/"
+    method: PATCH
+    user: admin
+    password: "{{ tower_admin_password }}"
+    body: '{"AWX_TASK_ENV": {"GALAXY_IGNORE_CERTS": "TRUE","GIT_SSL_NO_VERIFY": "TRUE"}}'
+    body_format: json
+    validate_certs: False
+    force_basic_auth: yes
+    status_code:
+      - 200
+      - 204
+      - 400
+  register: response
+  changed_when: response.status == 200
+
+  # RM: Manual restart since we need the next playbook to
+  # to be able to clone the repos
+- name: restart tower
+  command: ansible-tower-service restart
