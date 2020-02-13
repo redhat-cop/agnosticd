@@ -8,7 +8,7 @@ def cf_group = 'rhpds-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gptezabbixalert@redhat.com'
+def notification_email = 'djana@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -32,7 +32,6 @@ def choices = [
 
 def ocprelease_choice = [
     '3.11.104',
-    '3.11.43',
 ].join("\n")
 
 def app_version_choice = [
