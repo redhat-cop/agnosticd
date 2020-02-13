@@ -35,15 +35,15 @@ def ocprelease_choice = [
     '3.11.43',
 ].join("\n")
 
-def ig_version_choice = [
+def app_version_choice = [
     '1.6.0',
     '1.5.2',
 ].join("\n")
 
 def region_choice = [
-    'gpte_apac',
-    'gpte_emea',
     'gpte_na',
+    'gpte_emea',
+    'gpte_apac',
 ].join("\n")
 
 pipeline {
@@ -70,9 +70,9 @@ pipeline {
             name: 'ocprelease',
         )
         choice(
-            choices: ig_version_choice,
+            choices: app_version_choice,
             description: 'Catalog item',
-            name: 'ig_version',
+            name: 'app_version',
         )
         choice(
             choices: region_choice,
@@ -96,20 +96,20 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def ig_version = params.ig_version.trim()
+                    def app_version = params.app_version.trim()
                     def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
                     def cfparams = [
-                        'expiration=2',
-                        'runtime=8',
+                        'expiration=3',
+                        'runtime=36',
                         "region=${region}",
                         'city=jenkins',
                         'salesforce=gptejen',
-                        'users=2',
+                        'users=1',
                         'check=t',
                         'check2=t',
                         'quotacheck=t',
-                        "app_version=${ig_version}",
+                        "app_version=${app_version}",
                         "ocprelease=${ocprelease}",
                         'notes=devops_automation_jenkins',
                     ].join(',').trim()
