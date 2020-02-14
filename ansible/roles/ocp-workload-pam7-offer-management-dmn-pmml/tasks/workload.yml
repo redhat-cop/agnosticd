@@ -9,7 +9,7 @@
 
     # Templates come from here: https://raw.githubusercontent.com/jorgemoralespou/ose-sample-apps-layouts
 
-- name: "Elastic templates"
+- name: "Elastic CRDs"
   shell: "oc apply -f https://download.elastic.co/downloads/eck/1.0.0/all-in-one.yaml"
 - name: "Project for elastic"
   shell: oc new-project {{ ELASTIC_PROJ }}
@@ -32,6 +32,13 @@
   shell: oc get is/rhpam-businesscentral-rhel8 -n openshift
   register: rhpam_is_exists_result
   ignore_errors: true
+
+- name: Wait for RHPAM ImageStream tags to be available
+  shell: "oc get is -n openshift | grep -i rhpam | grep -i {{pam_imagestreams_tag}}"
+  register: result
+  until: result.stdout != ""
+  retries: 5
+  delay: 10
 
 - name: Import the RHPAM ImageStreams into the cluster.
   shell: "oc create -f {{pam_imagestreams_yml}} -n openshift"
@@ -111,8 +118,6 @@
     ocp_domain_suffix: "{{ oc_get_domain_suffix_output.stdout }}"
 
 
-- name: Give user access to the completed project
-  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ OCP_PROJECT }}"
 
 - name: "Create Nexus template"
   shell: "oc create -f https://raw.githubusercontent.com/OpenShiftDemos/nexus/master/nexus3-template.yaml -n {{ OCP_PROJECT }}"
@@ -196,26 +201,66 @@
           -e RATE=1 \
           --name=emitter -n {{OCP_PROJECT}}
 
+
 - name: "Create Event Analysis application"
   shell: "oc new-app java:8~https://github.com/snandakumar87/offer-analysis.git --name=offer-analysis --build-env=\"NEXUSREPO=http://nexus.{{OCP_PROJECT}}.svc.cluster.local:8081\" -n {{OCP_PROJECT}}"
 
 
 - name: "elastic password"
   shell: "echo $(oc -n {{ELASTIC_PROJ}} get secret elasticsearch-sample-es-elastic-user -o=jsonpath='{.data.elastic}' | base64 --decode)"
-  register: foo
+  register: elasticpwd
 
 - name: "elastic route"
   shell: "echo $(oc get routes -n {{ELASTIC_PROJ}} elasticsearch-sample -o jsonpath='{.spec.host}')"
   register: routeelastic
 
-- debug: msg="the echo was {{ foo.stdout }}"
+- debug: msg="the echo was {{ elasticpwd.stdout }}"
 
 - debug: msg="the echo was {{ routeelastic.stdout }}"
 
 
 - name: "put index"
-  shell: "curl -X PUT -u 'elastic:{{foo.stdout}}' -k https://{{routeelastic.stdout}}/off"
+  shell: "curl -X PUT -u 'elastic:{{elasticpwd.stdout}}' -k https://{{routeelastic.stdout}}/off"
 
 
 - name: "push to elastic"
-  shell: "oc new-app java:8~https://github.com/snandakumar87/offer-elastic-service.git --name=offer-elastic-service --build-env=\"PASSWORD={{foo.stdout}}\" --build-env=\"ROUTEADDR={{routeelastic.stdout}}\" -n {{OCP_PROJECT}}"
+  shell: "oc new-app java:8~https://github.com/snandakumar87/offer-elastic-service.git --name=offer-elastic-service --build-env=\"PASSWORD={{elasticpwd.stdout}}\" --build-env=\"ROUTEADDR={{routeelastic.stdout}}\" -n {{OCP_PROJECT}}"
+
+- name: "Quarkus+Kafka Streams+Angular UI for producer"
+  shell: "oc new-app quay.io/quarkus/ubi-quarkus-native-s2i:19.2.1~https://github.com/snandakumar87/quarkus-kafka-streams.git"
+
+- name: "cancel build so that we can increase memory limits"
+  shell: "oc cancel-build bc/quarkus-kafka-streams"
+
+- name: "Patch"
+  shell: "oc patch bc/quarkus-kafka-streams -p '{\"spec\":{\"resources\":{\"limits\":{\"cpu\":\"2\", \"memory\":\"6Gi\"}}}}'"
+
+- name: "Restart build"
+  shell: "oc start-build bc/quarkus-kafka-streams"
+
+- name: "expose route"
+  shell: "oc expose svc/quarkus-kafka-streams"
+
+- name: "Quarkus+Kafka Streams+Angular UI for consumer"
+  shell: "oc new-app quay.io/quarkus/ubi-quarkus-native-s2i:19.2.1~https://github.com/snandakumar87/quarkus-kafka-consumer.git"
+
+- name: "cancel build so that we can increase memory limits"
+  shell: "oc cancel-build bc/quarkus-kafka-consumer"
+
+- name: "Patch"
+  shell: "oc patch bc/quarkus-kafka-consumer -p '{\"spec\":{\"resources\":{\"limits\":{\"cpu\":\"2\", \"memory\":\"6Gi\"}}}}'"
+
+- name: "Restart build"
+  shell: "oc start-build bc/quarkus-kafka-consumer"
+
+- name: "expose route"
+  shell: "oc expose svc/quarkus-kafka-consumer"
+
+- include_tasks: ./wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - "quarkus-kafka-consumer"
+      - "quarkus-kafka-consumer"
+
+- name: Give user access to the completed project
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ OCP_PROJECT }}"
