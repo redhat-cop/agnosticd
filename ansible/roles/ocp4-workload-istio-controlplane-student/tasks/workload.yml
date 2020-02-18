@@ -2,41 +2,56 @@
 ---
 # Implement your Workload deployment tasks here
 
-# Target: OCP4.1, Tech Preview 12
-# Source install instruction from https://maistra.io/docs/getting_started/install/
-
 #############################################################
 ###############Deploying the ServiceMeshControlplane CR######
 #############################################################
-# from https://maistra.io/docs/getting_started/install/
-- name: facts for servicemeshcontrolplane
+- name: set relevant facts for re-use
   set_fact:
-    smcp_project_name: "smcp-{{ ocp_username }}"
-- name: create project to contain servicemeshcontrolplane
+    smcp_project_name: "-smcp"
+    sm_tutorial_project_name: "-tutorial"
+
+- name: create user control plane projects
   k8s:
     state: present
-    kind: Namespace
-    name: "{{ smcp_project_name }}"
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: "user{{ item }}{{ smcp_project_name }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: create user tutorial projects
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: "user{{ item }}{{ sm_tutorial_project_name }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: need to make the user an admin of the control plane project
+  shell: "oc adm policy add-role-to-user admin user{{ item }} -n user{{ item }}{{ smcp_project_name }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: need to make the user an admin of the tutorial project
+  shell: "oc adm policy add-role-to-user admin user{{ item }} -n user{{ item }}{{ sm_tutorial_project_name }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
 
 - name: istio servicemeshcontrolplane cr
   k8s:
-    namespace: "{{ smcp_project_name }}"
     state: present
     definition:
       apiVersion: maistra.io/v1
       kind: ServiceMeshControlPlane
       metadata:
         name: basic-install
+        namespace: "user{{ item }}{{ smcp_project_name }}"
       spec:
-        threeScale:
-          enabled: false
         istio:
-          istio_cni:
-            enabled: true
           global:
             disablePolicyChecks: false
-            multitenant: true
-            proxy: # constrain resources for use in smaller environments
+            proxy:
               resources:
                 requests:
                   cpu: 100m
@@ -46,10 +61,9 @@
                   memory: 128Mi
           gateways:
             istio-egressgateway:
-              autoscaleEnabled: false # disable autoscaling for use in smaller environments
+              autoscaleEnabled: false
             istio-ingressgateway:
-              autoscaleEnabled: false # disable autoscaling for use in smaller environments
-              ior_enabled: false
+              autoscaleEnabled: false
           mixer:
             policy:
               autoscaleEnabled: false
@@ -58,40 +72,65 @@
               resources:
                 requests:
                   cpu: 100m
-                  memory: 1G
+                  memory: 512m
                 limits:
                   cpu: 500m
                   memory: 4G
           pilot:
             autoscaleEnabled: false
-            traceSampling: 100.0
+            traceSampling: 100
           kiali:
-            dashboard:
-              user: admin
-              passphrase: admin
+            enabled: true
+          grafana:
+            enabled: true
           tracing:
             enabled: true
+            jaeger:
+              template: all-in-one
   register: result
   retries: 20
   until: not ('Failed' or 'failed' or 'Internal Server Error') in result
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
 
-- name: wait up to 8 minutes for the elasticsearch statefulset to exist
-  shell: "oc get statefulset elasticsearch -n {{ smcp_project_name }}"
-  register: elasticsearch_set_status
-  until: elasticsearch_set_status.rc == 0
-  retries: 8
-  delay: 60
+- name: wait for CR to indicate everything is running
+  k8s_facts:
+    api_version: maistra.io/v1
+    kind: ServiceMeshControlPlane
+    name: basic-install
+    namespace: "user{{ item }}{{ smcp_project_name }}"
+  register: crd_status_out
+  until:
+    - crd_status_out.resources[0].status.lastAppliedConfiguration | length > 0
+  retries: 10
+  delay: 600
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
 
 - name: wait for kiali route to exist
   k8s_facts:
     api_version: route.openshift.io/v1
     kind: Route
     name: kiali
-    namespace: "{{ smcp_project_name }}"
+    namespace: "user{{ item }}{{ smcp_project_name }}"
   register: result
   failed_when: result.resources | length == 0
   retries: 120
   until: result.resources | length > 0
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: create the service mesh member roll to point to the tutorial project
+  k8s:
+    state: present
+    definition:
+      apiVersion: maistra.io/v1
+      kind: ServiceMeshMemberRoll
+      metadata:
+        name: default
+        namespace: "user{{ item }}{{ smcp_project_name }}"
+      spec:
+        members:
+        # a list of projects joined into the service mesh
+        - "user{{item}}{{ sm_tutorial_project_name }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete

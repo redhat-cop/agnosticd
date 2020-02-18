@@ -1,0 +1,274 @@
+---
+- name: Step 00xxxxx post software
+  hosts: bastions
+  become: no
+  gather_facts: False
+  environment:
+    KUBECONFIG: /home/{{ remote_user }}/{{ cluster_name }}/auth/kubeconfig
+  tasks:
+  - debug:
+      msg: "Post-Software Steps starting"
+
+- name: Step 003.1 Switch Registry to use NFS storage and create NFS PVs
+  hosts: bastions
+  gather_facts: false
+  become: true
+  environment:
+    KUBECONFIG: /home/{{ remote_user }}/{{ cluster_name }}/auth/kubeconfig
+  tasks:
+  - name: Set Ansible Python interpreter to k8s virtualenv
+    set_fact:
+      ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+  - name: Configure Bastion VM Files for NFS
+    when: nfs_install_server | d(False) | bool
+    block:
+    - name: Create OCP Registry PV
+      k8s:
+        state: present
+        merge_type:
+        - strategic-merge
+        - merge
+        definition: "{{ lookup('template', './files/pv-registry.j2' ) | from_yaml }}"
+
+    - name: Create PVC for OCP registry
+      k8s:
+        state: present
+        merge_type:
+        - strategic-merge
+        - merge
+        definition: "{{ lookup('file', './files/pvc-registry.yaml' ) | from_yaml }}"
+
+    - name: Update OCP registry to use NFS storage instead of SWIFT
+      shell: "oc patch configs.imageregistry.operator.openshift.io cluster --type=json --patch '[{\"op\": \"replace\", \"path\": \"/spec/storage\", \"value\": {\"pvc\": {\"claim\": \"image-registry-storage\"}}}]'"
+
+    - name: Create PVs for user vols
+      k8s:
+        state: present
+        merge_type:
+        - strategic-merge
+        - merge
+        definition: "{{ lookup('template', './files/pv-user.j2' ) | from_yaml }}"
+      loop: "{{ range(1, nfs_user_vols_count)|list }}"
+      loop_control:
+        loop_var: index
+
+- name: Step 003.2 PostSoftware flight-check
+  hosts: bastions
+  run_once: yes
+  gather_facts: false
+  become: false
+  tags:
+  - post_flight_check
+  tasks:
+  - when:
+    - install_ocp4 | d(False) | bool
+    - run_smoke_tests | d(False) | bool
+    environment:
+      KUBECONFIG: "{{ cluster_name }}/auth/kubeconfig"
+    ignore_errors: yes
+    block:
+    - name: Get API for command line
+      command: oc whoami --show-server
+      register: showserver
+
+    - name: Ensure web console is known
+      when: webconsole is not defined
+      block:
+      - name: Get console route
+        command: oc get route -n openshift-console console -o json
+        register: routeconsole
+        retries: 10
+        delay: 30
+        until: routeconsole is succeeded
+        ignore_errors: yes
+
+      - name: Set webconsole address
+        set_fact:
+          webconsole: "http://{{ routeconsole.stdout | from_json | json_query('spec.host') }}"
+        when: routeconsole is succeeded
+
+    - name: Check DNS webconsole
+      command: nslookup "{{ webconsole | urlsplit('hostname') }}"
+      register: checkdnswebconsole
+      changed_when: false
+      retries: 15
+      until: checkdnswebconsole is succeeded
+      delay: 30
+
+    - name: Check DNS API
+      command: nslookup "{{ showserver.stdout | trim | urlsplit('hostname') }}"
+      register: checkdnsapi
+      changed_when: false
+
+    - name: Webconsole
+      uri:
+        url: "{{ webconsole }}"
+        validate_certs: no
+      register: testwebconsole
+      retries: 5
+      until: testwebconsole is succeeded
+      delay: 60
+
+    - name: Cluster-info
+      command: oc cluster-info
+      register: clusterinfor
+      changed_when: false
+
+    - name: Create project
+      command: oc new-project postflightcheck
+      register: newproject
+
+    - name: New-app
+      command: oc new-app cakephp-mysql-persistent -n postflightcheck
+      register: newapp
+
+    - name: Wait for mysql
+      command: timeout 300 oc rollout status dc/mysql -w -n postflightcheck
+      register: mysqlw
+      changed_when: false
+
+    - name: Wait for php
+      command: timeout 300 oc rollout status dc/cakephp-mysql-persistent -w -n postflightcheck
+      register: phpw
+      changed_when: false
+      retries: 2
+      delay: 60
+      until: phpw is succeeded
+
+    - name: Get route
+      command: >-
+        oc get route
+        -l template=cakephp-mysql-persistent
+        --no-headers
+        -o json
+        -n postflightcheck
+      register: getroute
+      changed_when: false
+      retries: 10
+      delay: 5
+      until: getroute is succeeded
+
+    - name: Test that route is reachable
+      uri:
+        url: "http://{{ getroute.stdout|from_json|json_query('items[0].spec.host') }}"
+      register: testroute
+      retries: 15
+      delay: 5
+      until: testroute is succeeded
+
+    - name: Delete project
+      command: oc delete project postflightcheck
+
+    - name: Switch back to default project
+      command: oc project default
+
+    - debug:
+        msg: "{{ item }}"
+      loop:
+      - "user.info: "
+      - "user.info: Post Flight Check"
+      - "user.info: DNS Web Console ............... {{ 'OK' if checkdnswebconsole.rc == 0 else 'FAIL' }}"
+      - "user.info: DNS API ....................... {{ 'OK' if checkdnsapi.rc == 0 else 'FAIL' }}"
+      - "user.info: Web console ................... {{ 'OK' if testwebconsole is succeeded else 'FAIL' }}"
+      - "user.info: API ........................... {{ 'OK' if clusterinfor.rc == 0 else 'FAIL' }}"
+      - "user.info: Create Project with PV ........ {{ 'OK' if newproject.rc == 0 else 'FAIL' }}"
+      - "user.info: App deployed .................. {{ 'OK' if phpw.rc == 0 and mysqlw.rc == 0 else 'FAIL' }}"
+      - "user.info: Route ......................... {{ 'OK' if testroute is succeeded else 'FAIL' }}"
+
+    - name: Fail smoke tests
+      when:
+      - run_smoke_tests | d(False) | bool
+      - >-
+        checkdnswebconsole.rc != 0
+        or checkdnsapi.rc != 0
+        or testwebconsole is failed
+        or clusterinfor.rc != 0
+        or newproject.rc != 0
+        or phpw.rc != 0
+        or mysqlw.rc != 0
+        or testroute is failed
+      fail:
+        msg: "FAIL Smoke tests"
+      ignore_errors: no
+
+# Deploy Workloads
+- name: Step 003.3 Deploy Default, Infra and Student Workloads
+  import_playbook: workloads.yml
+
+# Workarounds to enable cluster shutdown before 24h are over
+- name: Step 003.4 Enable Cluster Shutdown and Resume
+  hosts: bastions
+  run_once: yes
+  gather_facts: false
+  become: false
+  tags:
+  - enable_shutdown
+  environment:
+    KUBECONFIG: /home/{{ remote_user }}/{{ cluster_name }}/auth/kubeconfig
+  tasks:
+  - when:
+    - install_ocp4 | d(False) | bool
+    block:
+    - name: Set Ansible Python interpreter to k8s virtualenv
+      set_fact:
+        ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+    - name: Create Daemon Set to renew Bootstrap Credentials
+      k8s:
+        state: present
+        merge_type:
+        - strategic-merge
+        - merge
+        definition: "{{ lookup('file', './files/kubelet-bootstrap-cred-manager-ds.yaml' ) | from_yaml }}"
+    - name: Delete initial Bootstrap Secrets to force regeneration
+      k8s:
+        state: absent
+        api_version: v1
+        kind: Secret
+        name: "{{ item }}"
+        namespace: openshift-kube-controller-manager-operator
+      loop:
+      - "csr-signer-signer"
+      - "csr-signer"
+    # The next tasks are to fix the bug fixed in https://github.com/openshift/cluster-kube-controller-manager-operator/pull/305
+    # Also the operator dealing with prometheus adapters doesn't watch the certificates.
+    # Need to force it to reconcile
+
+    # Next bit doesn't seem to work on OCP 4.3. Disable for now and investigate...
+    # - name: Wait 15 seconds before next command
+    #   pause:
+    #     seconds: 15
+    # - name: Get Config Map Definition
+    #   shell: oc get configmap extension-apiserver-authentication -n kube-system -o yaml >/tmp/extension-apiserver-authentication.yaml
+    # - name: Add an empty line to config map file
+    #   lineinfile:
+    #     path: /tmp/extension-apiserver-authentication.yaml
+    #     firstmatch: true
+    #     insertafter: '-----END CERTIFICATE-----'
+    #     line: ''
+    # - name: Update Config Map with new file
+    #   k8s:
+    #     state: present
+    #     src: /tmp/extension-apiserver-authentication.yaml
+
+- name: Step 003.5 Print Student Info
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+  - name: print out user.info
+    debug:
+      msg: "{{ item }}"
+    loop:
+    - "user.info: You can access your bastion via SSH:"
+    - "user.info: ssh {{ student_name }}@bastion.{{ guid }}.{{ osp_cluster_dns_zone }}"
+    - "user.info: "
+    - "user.info: Make sure you use the username '{{ student_name }}' and the password '{{ hostvars['bastion']['student_password'] }}' when prompted."
+
+- name: Step 003.6 Tell CloudForms we are done
+  hosts: localhost
+  run_once: yes
+  gather_facts: false
+  become: false
+  tasks:
+  - debug:
+      msg: "Post-Software checks completed successfully"
