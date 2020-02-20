@@ -1,0 +1,165 @@
+---
+# deploy codeready operator
+- name: Create operator subscription for CodeReady
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/codeready_operatorgroup.yaml
+  - ./files/codeready_subscription.yaml
+
+# wait for CRD to be a thing
+- name: Wait for CodeReady CRD to be ready
+  k8s_facts:
+    api_version: apiextensions.k8s.io/v1beta1
+    kind: CustomResourceDefinition
+    name: checlusters.org.eclipse.che
+  register: r_codeready_crd
+  retries: 200
+  delay: 10
+  ignore_errors: yes
+  until: r_codeready_crd.resources | list | length == 1
+
+# deploy codeready CR
+- name: Create CR for CodeReady
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/codeready_cr.yaml
+
+# wait for che to be up
+- name: wait for CRW to be running
+  uri:
+    url: http://codeready-labs-infra.{{ route_subdomain }}/dashboard/
+  register: result
+  until: result.status == 200
+  retries: "120"
+  delay: "15"
+
+- name: Get codeready keycloak deployment
+  k8s_facts:
+    kind: Deployment
+    namespace: labs-infra
+    name: keycloak
+  register: r_keycloak_deployment
+
+- name: show cr
+  debug:
+    msg: "existing keycloak deployment: {{ r_keycloak_deployment }}"
+
+- name: set codeready username fact
+  set_fact:
+    codeready_sso_admin_username: "{{ r_keycloak_deployment.resources[0].spec.template.spec.containers[0].env | selectattr('name','equalto','SSO_ADMIN_USERNAME') |map (attribute='value') | list | first }}"
+
+- name: set codeready password fact
+  set_fact:
+    codeready_sso_admin_password: "{{ r_keycloak_deployment.resources[0].spec.template.spec.containers[0].env | selectattr('name','equalto','SSO_ADMIN_PASSWORD') |map (attribute='value') | list | first }}"
+
+- name: show codeready keycloak admin username
+  debug:
+    msg: "codeready keycloak admin username: {{ codeready_sso_admin_username }}"
+
+- name: show codeready keycloak admin password
+  debug:
+    msg: "codeready keycloak admin password: {{ codeready_sso_admin_password }}"
+
+- name: enable script upload
+  command: oc set env -n labs-infra deployment/keycloak JAVA_OPTS_APPEND="-Dkeycloak.profile.feature.scripts=enabled -Dkeycloak.profile.feature.upload_scripts=enabled"
+
+- name: wait for keycloak to return
+  command: oc rollout -n labs-infra status --timeout=1m -w deployment/keycloak
+  register: cmd_res
+  retries: 120
+  delay: 10
+  until: cmd_res.rc == 0
+
+- name: copy realm to local
+  copy:
+    src: ./files/ccnrd_keycloak_realm.json
+    dest: /tmp/realm.json
+
+- name: get keycloak pod
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: labs-infra
+    label_selectors:
+      - app = codeready
+      - component = keycloak
+  register: r_keycloak_pod
+  retries: 120
+  delay: 10
+  until: r_keycloak_pod.resources | list | length == 1
+
+- name: add new realm with kcadm
+  shell: >
+    oc cp /tmp/realm.json {{ r_keycloak_pod.resources[0].metadata.name }}:/tmp -n labs-infra &&
+    oc exec -n labs-infra deployment/keycloak -c keycloak -- bash -c
+    "/opt/eap/bin/kcadm.sh config credentials --server http://keycloak:8080/auth --realm master --user {{ codeready_sso_admin_username }} --password {{ codeready_sso_admin_password }} &&
+    /opt/eap/bin/kcadm.sh create realms -f /tmp/realm.json &&
+    rm -f /tmp/realm.json"
+  register: cmd_res
+  retries: 120
+  delay: 10
+  until: cmd_res.rc == 0
+
+- name: create codeready users
+  include_tasks: add_che_user.yaml
+  vars:
+    user: "{{ item }}"
+  with_list: "{{ users }}"
+
+- name: Get Codeready admin token
+  uri:
+    url: http://keycloak-labs-infra.{{ route_subdomain }}/auth/realms/codeready/protocol/openid-connect/token
+    method: POST
+    body:
+      username: admin
+      password: admin
+      grant_type: "password"
+      client_id: "admin-cli"
+    body_format: form-urlencoded
+    status_code: 200,201,204
+  register: che_admin_token
+
+- name: Import stack imagestream
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/stack_imagestream.yaml
+
+- name: wait for stack to be a thing
+  k8s_facts:
+    kind: ImageStream
+    name: quarkus-stack
+    namespace: openshift
+  register: r_stack_is
+  retries: 200
+  delay: 10
+  ignore_errors: yes
+  until: r_stack_is.resources | list | length == 1
+
+- name: import stack image
+  shell: |
+    oc import-image --all quarkus-stack -n openshift
+
+- name: wait a minute and let the image download and be registered so workspaces start up
+  pause:
+      minutes: 1
+
+- name: Pre-create and warm user workspaces
+  include_tasks: create_che_workspace.yaml
+  vars:
+    user: "{{ item }}"
+  with_list: "{{ users }}"
