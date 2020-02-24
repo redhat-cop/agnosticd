@@ -1,0 +1,74 @@
+---
+# deploy rhamt
+- name: Deploy RHAMT
+  shell: >
+    oc process -f -
+    -p WEB_CONSOLE_REQUESTED_CPU=2
+    -p WEB_CONSOLE_REQUESTED_MEMORY=3Gi
+    -p EXECUTOR_REQUESTED_CPU=1
+    -p EXECUTOR_REQUESTED_MEMORY=3Gi
+    | oc create -n labs-infra  -f -
+  args:
+    stdin: "{{ lookup('file', './files/rhamt-template.yaml') }}"
+
+- name: TODO - scale RHAMT executor to quarter the number of users
+  shell: |
+         oc scale dc/rhamt-web-console-executor --replicas={{ ((num_users|int) / 3) | int }} -n labs-infra
+
+- name: remove liveness and readiness for RHAMT web console
+  shell: |
+         oc set probe dc/rhamt-web-console  -n labs-infra --remove --readiness --liveness
+
+# wait for RHAMT to be running
+- name: wait for RHAMT to be running
+  uri:
+    url: http://rhamt-web-console-labs-infra.{{ route_subdomain }}/rhamt-web/
+  register: result
+  until: result.status == 200
+  retries: "120"
+  delay: "15"
+
+# Get admin token for rhamt's sso
+- name: Get SSO admin token
+  uri:
+    url: https://secure-rhamt-web-console-labs-infra.{{ route_subdomain }}/auth/realms/master/protocol/openid-connect/token
+    method: POST
+    validate_certs: no
+    body:
+      username: "admin"
+      password: "password"
+      grant_type: "password"
+      client_id: "admin-cli"
+    body_format: form-urlencoded
+    status_code: 200,201,204
+  register: sso_admin_token
+  until: sso_admin_token is succeeded
+  retries: "120"
+  delay: "15"
+
+# Update master realm with RH-SSO theme
+- name: Update master realm with RH-SSO theme
+  uri:
+    url: https://secure-rhamt-web-console-labs-infra.{{ route_subdomain }}/auth/admin/realms/master/
+    method: PUT
+    validate_certs: no
+    headers:
+      Content-Type: application/json
+      Accept: application/json
+      Authorization: "Bearer {{ sso_admin_token.json.access_token }}"
+    body:
+      displayName: "rh-sso"
+      displayNameHtml: "<strong>Red Hat</strong> Single Sign On"
+      loginTheme: "rh-sso"
+      adminTheme: "rh-sso"
+      accountTheme: "rh-sso"
+      emailTheme: "rh-sso"
+      accessTokenLifespan: "6000"
+    body_format: json
+    status_code: 204
+
+- name: Pre-create RHSSO users
+  include_tasks: add_rhamt_user.yaml
+  vars:
+    user: "{{ item }}"
+  with_list: "{{ users }}"
