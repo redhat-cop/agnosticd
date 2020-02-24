@@ -1,0 +1,343 @@
+:scrollbar:
+:data-uri:
+:toc2:
+:linkattrs:
+
+= API Lifecycle - A CI/CD Walkthrough for OpenBanking APIs
+
+:numbered:
+
+== Overview
+
+This workload provisions all the required resources for running the API Lifecycle lab On OpenShift 4. The following are provisioned:
+
+. 3scale Operator
+. 3scale Multitenant API Manager 2.7 (using RWO System Storage)
+. 3scale Tenants (*openbanking-dev* and *openbanking-prod*)
+. 3scale Gateway Projects with APIcast gateways v2.7 (openbanking-dev-gw and openbanking-prod-gw)
+. camelK operator
+. Tekton Operator
+. Namespaces for API Implementation:
+.. *openbanking-api-dev*
+.. *openbanking-api-test*
+.. *openbanking-api-prod*
+. Namespace for CICD:
+.. *openbanking-cicd*
+
+=== Prerequisites and assumptions
+
+An OCP 4 cluster is provisioned and this role is run using a cluster admin.
+
+
+. The version of 3scale provisioned in this lab (v2.7) is known to run on OpenShift Container Platform v4.*.
++
+This version of OpenShift should already be pre-installed before executing this ansible role.
+
+. Using a version of oc utility that corresponds to your target OCP cluster, ensure oc utility is already authenticated as the cluster-admin.
+
+. This ansible role requires installation of the lxml python module on target host executing this ansible. ie:
++
+-----
+# dnf install python3-lxml
+-----
+
+. It is highly recommended that you SSH into the bastion node of your OCP cluster. The following tasks are best executed on the bastion node.
++
+-----
+# ssh -i ~/.ssh/your_private_key_name <OPENTLC_ID>@bastion.<GUID>.openshift.opentlc.com
+-----
+
+. Ensure that you are explicitly logged onto the master API of the OCP cluster, from your bastion node.
++
+-----
+# oc login master.<GUID>.openshift.opentlc.com
+-----
+
+==== Resource requirements
+
+This ansible role allows for provisioning of 3scale of different sizes based on the value of the following ansible variable: _is_shared_cluster_
+
+. Resource utilization: _is_shared_cluster = true_
+.. The cluster quota for both CPU and RAM is set fairly high by default:
+... CPU limit:  30 cores
+... RAM limit:  30 Gi
+.. The cpu and RAM limits defined in the 3scale API Manager template are also set fairly high.
+.. These default settings are set intentionally high to allow for high throughput
+
+. Resource utilization: _is_shared_cluster = false_
++
+This is the default.
+The resources needed to provision 3scale drops down to about 12 Gi RAM and 6 CPU
+
+
+==== SMTP Providers
+You'll want to have registered with an smtp provider to enable the 3scale API Manager with the ability to send emails.
+
+In 3scale, smtp settings are configured globally and is leveraged by all API _tenants_.
+When provisioning 3scale, you can specify the following ansible variables:
+
+* smtp_host
+* smtp_userid
+* smtp_passwd
+* smtp_authentication
+
+
+A few SMTP providers with _Free Plans_ that this ansible role has been tested with are listed below:
+
+. *SocketLabs:* Currently offering a free plan that allows for link:https://www.socketlabs.com/signup/[2000 emails per month]
+. *SendGrid:* Currently offering a free plan that allows for link:https://sendgrid.com/pricing/[100 emails per day]
+
+You can choose to provision your 3scale API Manager such that it is not configured to send emails.
+To do so, ensure that the value of _smtp_userid_ = "changeme"
+
+=== Project Layout
+
+. Notice the directory layout and files included in this project:
++
+-----
+$ tree
+
+├── defaults
+│   └── main.yml
+├── meta
+│   └── main.yml
+├── README.adoc
+├── tasks
+│   ├── main.yml
+│   ├── pre_workload.yml
+│   ├── remove_workload.yml
+│   ├── tenant_loop.yml
+│   ├── tenant_mgmt.yml
+│   ├── wait_for_deploy.yml
+│   └── workload.yml
+└── templates
+    └── limitrange.yaml
+-----
+
+. Highlights of the most important files are as follows:
+
+.. *defaults/main.yml* : ansible variables and their defaults
+.. *tasks/pre_workload.ymml* : ansible tasks used to set clusterquota
+.. *tasks/workload.yml* : ansible tasks executed when provisioning 3scale API Manager
+.. *tasks/tenant_mgmt.yml* : ansible tasks executed when provisioning tenants
+
+
+== 3scale Deployment
+
+=== Environment Variables
+
+-----
+# Update the following:
+$ echo "export OCP_AMP_ADMIN_ID=api0" >> ~/.bashrc  # OCP user that owns OCP namespace where mult-tenant 3scale resides
+                                                    # A cluster quota is assigned to this user
+                                                    # NOTE: this OCP user doesn't necessarily need to exist
+
+
+$ echo "export API_MANAGER_NS=3scale-mt-\$OCP_AMP_ADMIN_ID" >> ~/.bashrc      # OCP namespace where 3scale API Manager resides
+
+# Execute the following:
+$ source ~/.bashrc
+
+
+# SMTP Configurations to enable API Manager to send emails
+$ smtp_host=smtp.socketlabs.com
+$ smtp_port=587
+$ smtp_authentication=login
+$ smtp_userid=<change me>
+$ smtp_passwd=<change me>
+$ smtp_domain=redhat.com
+$ adminEmailUser=<change me>            #   ie:  jdoe
+$ adminEmailDomain=<change me>          #   ie:  redhat.com
+
+RESUME_CONTROL_PLANE_GWS=false          #   3scale API Manager includes a staging and production gateway by default
+                                        #   These two GWs typically are not used for applying API policies to requests  because the "data plane" (aka: gateways) tends to be deployed in a different environment
+                                        #   However, the staging gateway is needed by system-provider web application for API Gateway policies details.
+                                        #   Subsquently, the default value is:  true
+
+
+
+SUBDOMAIN_BASE=<change me>              #   OCP wildcard DNS after "apps";  ie; 2345.openshift.opentlc.com
+                                        #   examples:
+                                        #       oc cluster up vm:   SUBDOMAIN_BASE=clientvm.`oc whoami --show-server | cut -d'.' -f 2,3,4,5 | cut -d':' -f 1`
+                                        #       ravello vm      :   SUBDOMAIN_BASE=`oc whoami --show-server | cut -d'-' -f 2 | cut -d':' -f 1`
+                                        #       ocp workshop    :   SUBDOMAIN_BASE=`oc whoami --show-server | cut -d'.' -f 2,3,4,5 | cut -d':' -f 1`
+
+use_rwo_for_cms=false                   #   3scale control plane consists of a Content Management System (CMS) that typically is scaled out for improved performance in a production environment
+                                        #   This CMS subsequently requires a ReadWriteMany access mode for its corresponding "system-storage" PVC
+                                        #   In a deployment of 3scale control plane to OCP 4.* where AWS EBS is used for storage, a ReadWriteMany access mode is not available
+                                        #     Reference:   https://docs.openshift.com/container-platform/4.2/storage/understanding-persistent-storage.html#pv-access-modes_understanding-persistent-storage
+                                        #   In that scenario, set this environment variable to: true
+                                        #   Doing so hacks the 3scale control plane template to specify ReadWriteOnce (and not ReadWriteMany)
+                                        #   If you set this to true, then do not attempt to create more than one replica of the system-app pod 
+
+$ rht_service_token_user=<change me>    #   RHT Registry Service Account name as per:   https://access.redhat.com/terms-based-registry
+$ rht_service_token_password=<changeme> #   RHT Registry Service Account passwd as per: https://access.redhat.com/terms-based-registry/
+
+
+-----
+
+=== Provision 3scale API manager
+
+The OCP namespace for 3scale multi-tenant app will be owned by the following user: {{OCP_AMP_ADMIN_ID}}.
+
+{{OCP_AMP_ADMIN_ID}} will be assigned a clusterquota so as to manage limits and requests assigned to 3scale
+
+. Execute:
++
+-----
+
+# API manager provision
+$ ansible-playbook -i localhost, -c local /tmp/3scale_multitenant.yml \
+                    -e"ACTION=apimanager" \
+                    -e"subdomain_base=$SUBDOMAIN_BASE" \
+                    -e"OCP_AMP_ADMIN_ID=$OCP_AMP_ADMIN_ID" \
+                    -e"API_MANAGER_NS=$API_MANAGER_NS" \
+                    -e"smtp_port=$smtp_port" \
+                    -e"smtp_authentication=$smtp_authentication" \
+                    -e"smtp_host=$smtp_host" \
+                    -e"smtp_userid=$smtp_userid" \
+                    -e"smtp_passwd=$smtp_passwd" \
+                    -e"smtp_passwd=$smtp_domain" \
+                    -e"is_shared_cluster=true" \
+                    -e"rht_service_token_user=$rht_service_token_user" \
+                    -e"rht_service_token_password=$rht_service_token_password" \
+                    -e"use_rwo_for_cms=$use_rwo_for_cms"
+-----
+
+. After about 5 minutes, provisioning of the  API Manager should complete.
+
+
+
+=== Tenant management
+
+==== Sequence of generic tenants
+
+. This ansible can optionally create multiple tenants in the previously provisioned 3scale API Manager.  If so then ensure the following when invoking this ansible:
+
+.. specify ACTION = "tenant_mgmt"
+.. specify "start_tenant" and "end_tenant" variables
+.. set value of CREATE_GWS_WITH_EACH_TENANT (true / false) to automate provisioning of a staging and production GW for each tenant
+
+
+-----
+START_TENANT=1
+END_TENANT=1
+CREATE_GWS_WITH_EACH_TENANT=true           #   if true, then an OCP project with API gateways will be created for each corresponding tenant in the same OCP cluster where API Manager resides
+
+ocp_user_name_base=ocp                     #   base name of OCP users that will have access to their corresponding API Mgmt related projects.
+                                           #   ie; if OCP user names are:  user01, user02, user03 ....... ,  then the value of this variable should be:  "user"
+                                           #   default value = "ocp"
+
+tenant_admin_user_name_base=api            #   base name of API users that will be admins of their API tenants (and admins of thier own API gateways)
+                                           #   ie; if desired API user names are:  api01, api02, api03 ....... ,  then the value of this variable should be:  "api"
+                                           #   default value = "api"
+
+use_padded_tenant_numbers=true             #   if creating sequential generic tenants, specify whether the tenant names should include a padded numer or not
+                                           #   ie;  ocp01, ocp02 ... ocp10    or ocp1, ocp2 ... ocp10
+                                           #   default value is true
+                                           #   default value corresponds to the defualt use of padded numbers in: https://github.com/gpe-mw-ansible-org/rh-sso-multi-realm
+
+
+$ ansible-playbook -i localhost, -c local /tmp/3scale_multitenant.yml \
+                    -e"ACTION=tenant_mgmt" \
+                    -e"subdomain_base=$SUBDOMAIN_BASE" \
+                    -e"API_MANAGER_NS=$API_MANAGER_NS" \
+                    -e"start_tenant=$START_TENANT" \
+                    -e"end_tenant=$END_TENANT" \
+                    -e"adminEmailUser=$adminEmailUser" \
+                    -e"adminEmailDomain=$adminEmailDomain" \
+                    -e"create_gws_with_each_tenant=$CREATE_GWS_WITH_EACH_TENANT" \
+                    -e"ocp_user_name_base=$ocp_user_name_base" \
+                    -e"tenant_admin_user_name_base=$tenant_admin_user_name_base" \
+                    -e"use_padded_tenant_numbers=$use_padded_tenant_numbers" \
+                    -e"rht_service_token_user=$rht_service_token_user" \
+                    -e"rht_service_token_password=$rht_service_token_password"
+-----
+
+. After the tenant provisioning completes, you will see messages similar to the following at the end of the ansible standard out:
++
+-----
+ok: [localhost] => {
+    "msg": [
+        "tenant_output_dir:  /home/jbride/provisioning_output/3295.openshift.opentlc.com/tenants_3scale-mt-api0",
+        "tenant_provisioning_log_file = /home/jbride/provisioning_output/3295.openshift.opentlc.com/tenants_3scale-mt-api0/tenant_provisioning.log",
+        "tenant_provisioning_results_file = /home/jbride/provisioning_output/3295.openshift.opentlc.com/tenants_3scale-mt-api0/tenant_info_file_1_2.txt",
+        "start and end tenants = 1  2",
+        "create API Gateways for each tenant = true"
+    ]
+}
+-----
++
+Feel free to review the files mentioned in those output messages.
+
+. The _tenant_provisioning_results_file_ is particularly important to share details about API tenants with students.
++
+This is a tab delimited file that can be imported into Google Spreadsheets and made accessible to students.
+
+==== Named tenants
+
+Alternative to the ability to create a sequence of generica tenants, a _named_ tenant can be created on an individual basis.
+
+
+-----
+orgName=openbanking-prod
+
+ocpAdminId=ocp01                           #   name of OCP user that will have access to their corresponding API Mgmt related projects.
+
+tenantAdminId=api01                        #   name of API user that will be the admin of their API tenants (and admins of thier own API gateways)
+
+CREATE_GWS_WITH_EACH_TENANT=true           #   if true, then an OCP project with API gateways will be created for each corresponding tenant in the same OCP cluster where API Manager resides
+
+gw_project_name=$orgName-gw
+
+
+$ ansible-playbook -i localhost, -c local /tmp/3scale_multitenant.yml \
+                    -e"ACTION=tenant_mgmt" \
+                    -e"subdomain_base=$SUBDOMAIN_BASE" \
+                    -e"API_MANAGER_NS=$API_MANAGER_NS" \
+                    -e"adminEmailUser=$adminEmailUser" \
+                    -e"adminEmailDomain=$adminEmailDomain" \
+                    -e"create_gws_with_each_tenant=$CREATE_GWS_WITH_EACH_TENANT" \
+                    -e"orgName=$orgName" \
+                    -e"ocpAdminId=$ocpAdminId" \
+                    -e"tenantAdminId=$tenantAdminId" \
+                    -e"gw_project_name=$gw_project_name"
+-----
+
+
+==== Tenant User credentials
+
+Each tenant is provisioned with a user that has admin privleges to that tenant.
+
+The useId and password are generated using the following ansible variables found in defaults/main.yml:
+
+. *Tenant admin userId:*  {{ tenant_admin_user_name_base }}  (ie:  api01, api02, api03 ...., api10 )
+. *Tenant admin password:* {{ tenantAdminPasswd }}
+
+=== Delete 3scale API manager
+
+-----
+REMOVE_TENANTS_ONLY=true
+$ ansible-playbook -i localhost, -c local /tmp/3scale_multitenant.yml \
+                    -e"ACTION=remove" \
+                    -e"OCP_AMP_ADMIN_ID=$OCP_AMP_ADMIN_ID" \
+                    -e"API_MANAGER_NS=$API_MANAGER_NS" \
+                    -e"subdomain_base=$SUBDOMAIN_BASE" \
+                    -e"REMOVE_TENANTS_ONLY=$REMOVE_TENANTS_ONLY"
+-----
+
+== Stale _WILDCARD_DOMAIN_ State in API Manager
+There may be scenarios where the DNS of your originally provisioned API Manager changes.
+Specifically, the value of the _WILDCARD_DOMAIN_ parameter utilized in the original provisioning of your API Manager is no longer valid.
+
+An example of a scenario where this might occur is in Ravello where the original provisioning of the 3scale API Manager would be captured as a Ravello _Blueprint_.
+At runtime, a Ravello _application_ is instantiated from this Ravello _blueprint_ and the actual runtime DNS of the Ravello _application_ is applied.
+This DNS applied to the runtime _application_ will be different than the DNS originally utilized when creating the _blueprint_.
+
+To correct issues pertaining to this stale state, the following needs to occur :
+
+. Update all routes in the namespace of your API Manager
+. Update the stale URLs found in the _system.accounts_ table in the system-mysql database of the API Manager.
+. Change the value of the _THREESCALE_SUPERDOMAIN_ variable in the configmap:  system-environment:
+
+Examples of how to change the above are found link:https://gist.github.com/jbride/be32113707418cb43d73c9ef28a09b9d[here]
