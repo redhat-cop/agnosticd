@@ -1,0 +1,383 @@
+---
+# tasks file for ipaclient
+
+- name: Install - Ensure that IPA client packages are installed
+  package:
+    name: "{{ ipaclient_packages }}"
+    state: present
+  when: ipaclient_install_packages | bool
+
+#- name: Install - Include Python2/3 import test
+#  import_tasks: "{{ role_path }}/tasks/python_2_3_test.yml"
+
+- name: Install - Set ipaclient_servers
+  set_fact:
+    ipaclient_servers: "{{ groups['ipaservers'] | list }}"
+  when: groups.ipaservers is defined and ipaclient_servers is not defined
+
+- name: Install - Set ipaclient_servers from cluster inventory
+  set_fact:
+    ipaclient_servers: "{{ groups['ipaserver'] | list }}"
+  when: ipaclient_no_dns_lookup | bool and groups.ipaserver is defined and
+        ipaclient_servers is not defined
+
+- name: Install - Check that either principal or keytab is set
+  fail: msg="ipaadmin_principal and ipaadmin_keytab cannot be used together"
+  when: ipaadmin_keytab is defined and ipaadmin_principal is defined
+
+- name: Install - Set default principal if no keytab is given
+  set_fact:
+    ipaadmin_principal: admin
+  when: ipaadmin_principal is undefined and ipaclient_keytab is undefined
+
+- name: Install - IPA client test
+  ipaclient_test:
+    ### basic ###
+    domain: "{{ ipaserver_domain | default(ipaclient_domain) | default(omit) }}"
+    servers: "{{ ipaclient_servers | default(omit) }}"
+    realm: "{{ ipaserver_realm | default(ipaclient_realm) | default(omit) }}"
+    hostname: "{{ ipaclient_hostname | default(ansible_fqdn) }}"
+    ntp_servers: "{{ ipaclient_ntp_servers | default(omit) }}"
+    ntp_pool: "{{ ipaclient_ntp_pool | default(omit) }}"
+    no_ntp: "{{ ipaclient_no_ntp }}"
+    force_ntpd: "{{ ipaclient_force_ntpd }}"
+    nisdomain: "{{ ipaclient_nisdomain | default(omit) }}"
+    no_nisdomain: "{{ ipaclient_no_nisdomain }}"
+    kinit_attempts: "{{ ipaclient_kinit_attempts }}"
+    ca_cert_files: "{{ ipaclient_ca_cert_file | default(omit) }}"
+    configure_firefox: "{{ ipaclient_configure_firefox }}"
+    firefox_dir: "{{ ipaclient_firefox_dir | default(omit) }}"
+    ip_addresses: "{{ ipaclient_ip_addresses | default(omit) }}"
+    all_ip_addresses: "{{ ipaclient_all_ip_addresses }}"
+    on_master: "{{ ipaclient_on_master }}"
+    ### sssd ###
+    enable_dns_updates: "{{ ipassd_enable_dns_updates
+                            | default(ipasssd_enable_dns_updates) }}"
+  register: result_ipaclient_test
+
+- block:
+  - name: Install - Cleanup leftover ccache
+    file:
+      path: "/etc/ipa/.dns_ccache"
+      state: absent
+
+  - name: Install - Configure NTP
+    ipaclient_setup_ntp:
+      ### basic ###
+      ntp_servers: "{{ result_ipaclient_test.ntp_servers | default(omit) }}"
+      ntp_pool: "{{ result_ipaclient_test.ntp_pool | default(omit) }}"
+      no_ntp: "{{ ipaclient_no_ntp }}"
+      # force_ntpd: "{{ ipaclient_force_ntpd }}"
+      on_master: "{{ ipaclient_on_master }}"
+      ### additional ###
+      servers: "{{ result_ipaclient_test.servers }}"
+      domain: "{{ result_ipaclient_test.domain }}"
+
+  - name: Install - Make sure One-Time Password is enabled if it's already defined
+    set_fact:
+      ipaclient_use_otp: "yes"
+    when: ipaclient_otp is defined
+
+  - name: Install - Disable One-Time Password for on_master
+    set_fact:
+      ipaclient_use_otp: "no"
+    when: ipaclient_use_otp | bool and ipaclient_on_master | bool
+
+  - name: Install - Test if IPA client has working krb5.keytab
+    ipaclient_test_keytab:
+      servers: "{{ result_ipaclient_test.servers }}"
+      domain: "{{ result_ipaclient_test.domain }}"
+      realm: "{{ result_ipaclient_test.realm }}"
+      hostname: "{{ result_ipaclient_test.hostname }}"
+      kdc: "{{ result_ipaclient_test.kdc }}"
+      kinit_attempts: "{{ ipaclient_kinit_attempts | default(omit) }}"
+    register: result_ipaclient_test_keytab
+
+  - name: Install - Disable One-Time Password for client with working
+          krb5.keytab
+    set_fact:
+      ipaclient_use_otp: "no"
+    when: ipaclient_use_otp | bool and
+          result_ipaclient_test_keytab.krb5_keytab_ok and
+          not ipaclient_force_join | bool
+
+  # The following block is executed when using OTP to enroll IPA client and
+  # the OTP isn't predefined, ie when ipaclient_use_otp is set and ipaclient_otp
+  # is not set.
+  # It connects to ipaserver and add the host with --random option in order
+  # to create a OneTime Password
+  # If a keytab is specified in the hostent, then the hostent will be disabled
+  # if ipaclient_use_otp is set.
+  - block:
+    - name: Install - Keytab or password is required for getting otp
+      fail: msg="Keytab or password is required for getting otp"
+      when: ipaadmin_keytab is undefined and ipaadmin_password is undefined
+
+    #- name: Install - Include Python2/3 import test
+    #  import_tasks: "{{ role_path }}/tasks/python_2_3_test.yml"
+    #  delegate_to: "{{ result_ipaclient_test.servers[0] }}"
+
+    - name: Install - Get One-Time Password for client enrollment
+      no_log: yes
+      ipaclient_get_otp:
+        state: present
+        principal: "{{ ipaadmin_principal | default(omit) }}"
+        password: "{{ ipaadmin_password | default(omit) }}"
+        keytab: "{{ ipaadmin_keytab | default(omit) }}"
+        fqdn: "{{ result_ipaclient_test.hostname }}"
+        lifetime: "{{ ipaclient_lifetime | default(omit) }}"
+        random: True
+      register: result_ipaclient_get_otp
+      # If the host is already enrolled, this command will exit on error
+      # The error can be ignored
+      failed_when: result_ipaclient_get_otp is failed and
+                   "Password cannot be set on enrolled host" not
+                       in result_ipaclient_get_otp.msg
+      delegate_to: "{{ result_ipaclient_test.servers[0] }}"
+      delegate_facts: yes
+      ignore_errors: yes
+
+    - name: Install - Report error for OTP generation
+      debug:
+        msg: "{{ result_ipaclient_get_otp.msg }}"
+      when: result_ipaclient_get_otp is failed
+      failed_when: yes
+
+    - name: Install - Store the previously obtained OTP
+      no_log: yes
+      set_fact:
+        ipaadmin_orig_password: "{{ ipaadmin_password | default(omit) }}"
+        ipaadmin_password: "{{ result_ipaclient_get_otp.host.randompassword
+                               if result_ipaclient_get_otp.host is defined }}"
+
+    when: ipaclient_use_otp | bool and ipaclient_otp is not defined
+
+  - name: Store predefined OTP in admin_password
+    no_log: yes
+    set_fact:
+      ipaadmin_orig_password: "{{ ipaadmin_password | default(omit) }}"
+      ipaadmin_password: "{{ ipaclient_otp }}"
+    when: ipaclient_otp is defined
+
+  - block:
+    # This block is executed only when
+    # not (not ipaclient_on_master | bool and
+    #      not result_ipaclient_join.changed and
+    #      not ipaclient_allow_repair | bool and
+    #      (result_ipaclient_test_keytab.krb5_keytab_ok or
+    #       (result_ipaclient_join.already_joined is defined and
+    #        result_ipaclient_join.already_joined)))
+
+    - name: Install - Check if principal and keytab are set
+      fail: msg="Principal and keytab cannot be used together"
+      when: ipaadmin_principal is defined and ipaclient_keytab is defined
+
+    - name: Install - Check if one of password or keytabs are set
+      fail: msg="At least one of password or keytabs must be specified"
+      when: not result_ipaclient_test_keytab.krb5_keytab_ok
+            and ipaadmin_password is undefined
+            and ipaadmin_keytab is undefined
+            and ipaclient_keytab is undefined
+    when: not ipaclient_on_master | bool
+
+  - name: Install - Purge {{ result_ipaclient_test.realm }} from host keytab
+    command: >
+      /usr/sbin/ipa-rmkeytab
+      -k /etc/krb5.keytab
+      -r "{{ result_ipaclient_test.realm }}"
+    register: result_ipa_rmkeytab
+    # Do not fail on error codes 3 and 5:
+    #   3 - Unable to open keytab
+    #   5 - Principal name or realm not found in keytab
+    failed_when: result_ipa_rmkeytab.rc != 0 and
+                 result_ipa_rmkeytab.rc != 3 and result_ipa_rmkeytab.rc != 5
+    when: ipaclient_use_otp | bool or ipaclient_force_join | bool
+
+  - name: Install - Backup and set hostname
+    ipaclient_set_hostname:
+      hostname: "{{ result_ipaclient_test.hostname }}"
+    when: not ipaclient_on_master | bool
+
+  - name: Install - Join IPA
+    ipaclient_join:
+      servers: "{{ result_ipaclient_test.servers }}"
+      domain: "{{ result_ipaclient_test.domain }}"
+      realm: "{{ result_ipaclient_test.realm }}"
+      kdc: "{{ result_ipaclient_test.kdc }}"
+      basedn: "{{ result_ipaclient_test.basedn }}"
+      hostname: "{{ result_ipaclient_test.hostname }}"
+      force_join: "{{ ipaclient_force_join | default(omit) }}"
+      principal: "{{ ipaadmin_principal if not ipaclient_use_otp | bool and
+                     ipaclient_keytab is not defined else omit }}"
+      password: "{{ ipaadmin_password | default(omit) }}"
+      keytab: "{{ ipaclient_keytab | default(omit) }}"
+      admin_keytab: "{{ ipaadmin_keytab if ipaadmin_keytab is defined and not ipaclient_use_otp | bool else omit }}"
+      # ca_cert_file: "{{ ipaclient_ca_cert_file | default(omit) }}"
+      kinit_attempts: "{{ ipaclient_kinit_attempts | default(omit) }}"
+    register: result_ipaclient_join
+    when: not ipaclient_on_master | bool and
+          (not result_ipaclient_test_keytab.krb5_keytab_ok or
+              ipaclient_force_join)
+
+  - block:
+    - fail:
+        msg: >
+          The krb5 configuration is not correct, please enable allow_repair
+          to fix this.
+      when: not result_ipaclient_test_keytab.krb5_conf_ok
+    - fail:
+        msg: "The IPA test failed, please enable allow_repair to fix this."
+      when: not result_ipaclient_test_keytab.ping_test_ok
+    - fail:
+        msg: >
+          The ca.crt file is missing, please enable allow_repair to fix this.
+      when: not result_ipaclient_test_keytab.ca_crt_exists
+    when: not ipaclient_on_master | bool and
+          not result_ipaclient_join.changed and
+          not ipaclient_allow_repair | bool and
+          (result_ipaclient_test_keytab.krb5_keytab_ok or
+              (result_ipaclient_join.already_joined is defined and
+                  result_ipaclient_join.already_joined))
+
+  - block:
+    - name: Install - Configure IPA default.conf
+      ipaclient_ipa_conf:
+        servers: "{{ result_ipaclient_test.servers }}"
+        domain: "{{ result_ipaclient_test.domain }}"
+        realm: "{{ result_ipaclient_test.realm }}"
+        hostname: "{{ result_ipaclient_test.hostname }}"
+        basedn: "{{ result_ipaclient_test.basedn }}"
+      when: not ipaclient_on_master | bool
+
+    - name: Install - Configure SSSD
+      ipaclient_setup_sssd:
+        servers: "{{ result_ipaclient_test.servers }}"
+        domain: "{{ result_ipaclient_test.domain }}"
+        realm: "{{ result_ipaclient_test.realm }}"
+        hostname: "{{ result_ipaclient_test.hostname }}"
+        on_master: "{{ ipaclient_on_master }}"
+        no_ssh: "{{ ipaclient_no_ssh }}"
+        no_sshd: "{{ ipaclient_no_sshd }}"
+        no_sudo: "{{ ipaclient_no_sudo }}"
+        all_ip_addresses: "{{ ipaclient_all_ip_addresses }}"
+        fixed_primary: "{{ ipassd_fixed_primary
+                           | default(ipasssd_fixed_primary) }}"
+        permit: "{{ ipassd_permit | default(ipasssd_permit) }}"
+        enable_dns_updates: "{{ ipassd_enable_dns_updates
+                                | default(ipasssd_enable_dns_updates) }}"
+        preserve_sssd: "{{ ipassd_preserve_sssd
+                           | default(ipasssd_preserve_sssd) }}"
+        no_krb5_offline_passwords:
+          "{{ ipassd_no_krb5_offline_passwords
+              | default(ipasssd_no_krb5_offline_passwords) }}"
+
+    - name: Install - Configure krb5 for IPA realm
+      ipaclient_setup_krb5:
+        realm: "{{ result_ipaclient_test.realm }}"
+        domain: "{{ result_ipaclient_test.domain }}"
+        servers: "{{ result_ipaclient_test.servers }}"
+        kdc: "{{ result_ipaclient_test.kdc }}"
+        dnsok: "{{ result_ipaclient_test.dnsok }}"
+        client_domain: "{{ result_ipaclient_test.client_domain }}"
+        hostname: "{{ result_ipaclient_test.hostname }}"
+        sssd: "{{ result_ipaclient_test.sssd }}"
+        force: "{{ ipaclient_force }}"
+        # on_master: "{{ ipaclient_on_master }}"
+      when: not ipaclient_on_master | bool
+
+    - name: Install - IPA API calls for remaining enrollment parts
+      ipaclient_api:
+        servers: "{{ result_ipaclient_test.servers }}"
+        realm: "{{ result_ipaclient_test.realm }}"
+        hostname: "{{ result_ipaclient_test.hostname }}"
+        # debug: yes
+      register: result_ipaclient_api
+
+    - name: Install - Fix IPA ca
+      ipaclient_fix_ca:
+        servers: "{{ result_ipaclient_test.servers }}"
+        realm: "{{ result_ipaclient_test.realm }}"
+        basedn: "{{ result_ipaclient_test.basedn }}"
+        allow_repair: "{{ ipaclient_allow_repair }}"
+      when: not ipaclient_on_master | bool and
+            result_ipaclient_test_keytab.krb5_keytab_ok and
+            not result_ipaclient_test_keytab.ca_crt_exists
+
+    - name: Install - Create IPA NSS database
+      ipaclient_setup_nss:
+        servers: "{{ result_ipaclient_test.servers }}"
+        domain: "{{ result_ipaclient_test.domain }}"
+        realm: "{{ result_ipaclient_test.realm }}"
+        basedn: "{{ result_ipaclient_test.basedn }}"
+        hostname: "{{ result_ipaclient_test.hostname }}"
+        subject_base: "{{ result_ipaclient_api.subject_base }}"
+        principal: "{{ ipaadmin_principal | default(omit) }}"
+        mkhomedir: "{{ ipaclient_mkhomedir }}"
+        ca_enabled: "{{ result_ipaclient_api.ca_enabled }}"
+        on_master: "{{ ipaclient_on_master }}"
+        dnsok: "{{ result_ipaclient_test.dnsok }}"
+        enable_dns_updates: "{{ ipassd_enable_dns_updates
+                                | default(ipasssd_enable_dns_updates) }}"
+        all_ip_addresses: "{{ ipaclient_all_ip_addresses }}"
+        ip_addresses: "{{ ipaclient_ip_addresses | default(omit) }}"
+        request_cert: "{{ ipaclient_request_cert }}"
+        preserve_sssd: "{{ ipassd_preserve_sssd
+                           | default(ipasssd_preserve_sssd) }}"
+        no_ssh: "{{ ipaclient_no_ssh }}"
+        no_sshd: "{{ ipaclient_no_sshd }}"
+        no_sudo: "{{ ipaclient_no_sudo }}"
+        fixed_primary: "{{ ipassd_fixed_primary
+                           | default(ipasssd_fixed_primary) }}"
+        permit: "{{ ipassd_permit | default(ipasssd_permit) }}"
+        no_krb5_offline_passwords:
+          "{{ ipassd_no_krb5_offline_passwords
+              | default(ipasssd_no_krb5_offline_passwords) }}"
+        no_dns_sshfp: "{{ ipaclient_no_dns_sshfp }}"
+
+    - name: Install - Configure SSH and SSHD
+      ipaclient_setup_ssh:
+        servers: "{{ result_ipaclient_test.servers }}"
+        sssd: "{{ result_ipaclient_test.sssd }}"
+        no_ssh: "{{ ipaclient_no_ssh }}"
+        ssh_trust_dns: "{{ ipaclient_ssh_trust_dns }}"
+        no_sshd: "{{ ipaclient_no_sshd }}"
+
+    - name: Install - Configure automount
+      ipaclient_setup_automount:
+        servers: "{{ result_ipaclient_test.servers }}"
+        sssd: "{{ result_ipaclient_test.sssd }}"
+        automount_location: "{{ ipaautomount_location | default(omit) }}"
+
+    - name: Install - Configure firefox
+      ipaclient_setup_firefox:
+        firefox_dir: "{{ ipaclient_firefox_dir | default(omit) }}"
+      when: ipaclient_configure_firefox | bool
+
+    - name: Install - Configure NIS
+      ipaclient_setup_nis:
+        domain: "{{ result_ipaclient_test.domain }}"
+        nisdomain: "{{ ipaclient_nisdomain | default(omit) }}"
+      when: not ipaclient_no_nisdomain | bool
+
+    when: not (not ipaclient_on_master | bool and
+          not result_ipaclient_join.changed and
+          not ipaclient_allow_repair | bool
+              and (result_ipaclient_test_keytab.krb5_keytab_ok
+              or (result_ipaclient_join.already_joined is defined
+              and result_ipaclient_join.already_joined)))
+
+  when: not ansible_check_mode and
+        not (result_ipaclient_test.client_already_configured and
+            not ipaclient_allow_repair | bool and not ipaclient_force_join | bool)
+
+  always:
+  - name: Install - Restore original admin password if overwritten by OTP
+    no_log: yes
+    set_fact:
+        ipaadmin_password: "{{ ipaadmin_orig_password }}"
+    when: ipaclient_use_otp | bool and ipaadmin_orig_password is defined
+
+  - name: Cleanup leftover ccache
+    file:
+      path: "/etc/ipa/.dns_ccache"
+      state: absent
