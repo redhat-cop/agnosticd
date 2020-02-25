@@ -136,9 +136,9 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /Login is ssh (.*)/
-                        ssh_location = m[0]
-                        echo "User instructed: '${ssh_location}'"
+                        def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
+                        ssh_location = m[0][1]
+                        echo "SSH command: '${ssh_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
