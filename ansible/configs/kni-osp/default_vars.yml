@@ -1,0 +1,565 @@
+################################################################################
+################################################################################
+### Environment Structure
+################################################################################
+################################################################################
+## Environment Sizing
+
+bmc_instance_type:
+  osp: "m1.small"
+
+bastion_instance_type:
+  ec2: "t2.medium"
+  azure: Standard_A2_V2
+  osp: 2c2g30d
+
+bastion_instance_image: RHEL75
+worker_instance_image: RHEL75
+master_instance_image: RHEL75
+bmc_instance_image: RHEL75
+
+node_instance_type:
+  ec2: "t2.medium"
+  azure: Standard_A2_V2
+  osp: 2c2g30d
+
+worker_instance_type:
+  ec2: "t2.medium"
+  azure: Standard_A2_V2
+  osp: 2c2g30d
+
+master_instance_type:
+  ec2: "t2.medium"
+  azure: Standard_A2_V2
+  osp: 2c2g30d
+
+# How many do you want for each instance type
+worker_instance_count: 1
+master_instance_count: 1
+
+networks:
+- name: pxe
+  shared: "false"
+  subnet_cidr: 192.0.2.0/24
+  gateway_ip: 192.0.2.1
+  allocation_start: 192.0.2.10
+  allocation_end: 192.0.2.200
+  dns_nameservers: []
+  create_router: false
+
+- name: appnet
+  shared: false
+  subnet_cidr: 10.20.0.0/24
+  gateway_ip: 10.20.0.1
+  allocation_start: 10.20.0.10
+  allocation_end: 10.20.0.200
+  dns_nameservers: []
+  create_router: true
+
+ocp_network_subnet_cidr: 10.20.0.0/24
+
+
+# Environment Instances
+instances:
+
+  - name: "bastion"
+    count: 1
+    unique: true
+    public_dns: true
+    dns_loadbalancer: false
+    image_id: "{{ bastion_image_file }}"
+    flavor: "{{ bastion_instance_type }}"
+    metadata:
+      - key: "AnsibleGroup"
+        value: "bastions"
+      - key: "ostype"
+        value: "linux"
+      - key: "instance_filter"
+        value: "{{ env_type }}-{{ email }}"
+    volumes:
+      - name: '/dev/sda1'
+        size: 20
+    network: appnet
+    floating_ip: yes
+    security_groups:
+      - bastion_sg
+
+  - name: "bmc"
+    count: 1
+    public_dns: false
+    dns_loadbalancer: false
+    image_id: "{{ bmc_image_file }}"
+    flavor: "{{ bmc_instance_type }}"
+    metadata:
+      - key: "AnsibleGroup"
+        value: "bmcs"
+      - key: "ostype"
+        value: "linux"
+      - key: "instance_filter"
+        value: "{{ env_type }}-{{ email }}"
+      - key: "api_user"
+        value: "{{ osp_auth_username }}"
+      - key: "api_pass"
+        value: "{{ osp_auth_password }}"
+      - key: "api_url"
+        value: "{{ osp_auth_url }}"
+      - key: "project_name"
+        value: "{{ osp_project_name }}"
+    network: pxe
+    network: appnet
+    floating_ip: yes
+    security_groups:
+      - utility_sg
+
+  - name: "master"
+    count: "{{master_instance_count}}"
+    public_dns: false
+    dns_loadbalancer: false
+    image_id: "{{ master_image_file }}"
+    flavor: "{{ master_instance_type }}"
+    metadata:
+      - key: "AnsibleGroup"
+        value: "nodes"
+      - key: "ostype"
+        value: "linux"
+      - key: "instance_filter"
+        value: "{{ env_type }}-{{ email }}"
+      - key: "powerdown"
+        value: "true"
+      - key: "ipmiaddr"
+        value: "192.0.2.210"
+      - key: "ipmmipw"
+        value: "redhat"
+      - key: "ipminetwork"
+        value: "pxe"
+      - key: "cdrom"
+        value: "pxeboot"
+    network: pxe
+    network: appnet
+    floating_ip: yes
+    security_groups:
+      - master_sg
+
+  - name: "worker"
+    count: "{{worker_instance_count}}"
+    public_dns: false
+    dns_loadbalancer: false
+    image_id: "{{ worker_instance_image }}"
+    flavor: "{{ worker_instance_type }}"
+    metadata:
+      - key: "AnsibleGroup"
+        value: "nodes"
+      - key: "ostype"
+        value: "linux"
+      - key: "instance_filter"
+        value: "{{ env_type }}-{{ email }}"
+      - key: "powerdown"
+        value: "true"
+      - key: "ipmiaddr"
+        value: "192.168.2.211"
+      - key: "ipmmipw"
+        value: "redhat"
+      - key: "ipminetwork"
+        value: "pxe"
+      - key: "cdrom"
+        value: "pxeboot"
+    network: pxe
+    network: appnet
+    floating_ip: no
+    security_groups:
+      - worker_sg
+
+# Stuff that only GPTE cares about:
+install_ipa_client: false
+
+# Security groups and associated rules. This will be provided
+#when the Heat template is generated separate groups and rules
+security_groups:
+  - name: bastion_sg
+    description: Bastion security group allows basic icmp and SSH ingress and egress to *
+    rules:
+    - protocol: icmp
+      direction: ingress
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 22
+      port_range_max: 22
+      remote_ip_prefix: 0.0.0.0/0
+  - name: utility_sg
+    description: Utility security group allows SSH from bastion and egress to *
+    rules:
+    - protocol: icmp
+      direction: ingress
+      remote_group: "bastion_sg"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 22
+      port_range_max: 22
+      remote_group: "bastion_sg"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 5000
+      port_range_max: 5000
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "local container registry"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 80
+      port_range_max: 80
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "http traffic for ignition files"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 2049
+      port_range_max: 2049
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "NFS traffic"
+  - name: isolated_sg
+    description: All instances in the disconnected network
+    rules:
+    - protocol: icmp
+      direction: ingress
+      remote_group: "bastion_sg"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 22
+      port_range_max: 22
+      remote_group: "bastion_sg"
+  - name: master_sg
+    description: Security group for OpenShift master and bootstrap
+    rules:
+    - protocol: icmp
+      direction: ingress
+      description: "icmp"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 22623
+      port_range_max: 22623
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "machine config server"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 22
+      port_range_max: 22
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "SSH"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 53
+      port_range_max: 53
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "DNS (tcp)"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 53
+      port_range_max: 53
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "DNS (udp)"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 5353
+      port_range_max: 5353
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "mDNS"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 6443
+      port_range_max: 6443
+      remote_ip_prefix: 0.0.0.0/0
+      description: "OpenShift API"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 4789
+      port_range_max: 4789
+      remote_group: "master_sg"
+      description: "VXLAN"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 4789
+      port_range_max: 4789
+      remote_group: "worker_sg"
+      description: "VXLAN (worker)"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 6081
+      port_range_max: 6081
+      remote_group: "master_sg"
+      description: "Geneve"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 6081
+      port_range_max: 6081
+      remote_group: "worker_sg"
+      description: "Geneve (worker)"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 6641
+      port_range_max: 6642
+      remote_group: "master_sg"
+      description: "OVNDB"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 6641
+      port_range_max: 6642
+      remote_group: "worker_sg"
+      description: "OVNDB (worker)"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 9000
+      port_range_max: 9999
+      remote_group: "master_sg"
+      description: "Master ingress internal (tcp)"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 9000
+      port_range_max: 9999
+      remote_group: "worker_sg"
+      description: "Master ingress from worker (tcp)"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 9000
+      port_range_max: 9999
+      remote_group: "master_sg"
+      description: "Master ingress internal (udp)"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 9000
+      port_range_max: 9999
+      remote_group: "worker_sg"
+      description: "Master ingress from worker (udp)"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 10259
+      port_range_max: 10259
+      remote_group: "master_sg"
+      description: "Kube Scheduler"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 10259
+      port_range_max: 10259
+      remote_group: "worker_sg"
+      description: "Kube Scheduler (worker)"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 10257
+      port_range_max: 10257
+      remote_group: "master_sg"
+      description: "Kube controller manager"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 10257
+      port_range_max: 10257
+      remote_group: "worker_sg"
+      description: "Kube controller manager (worker)"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 10250
+      port_range_max: 10250
+      remote_group: "master_sg"
+      description: "master ingress kubelet secure"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 10250
+      port_range_max: 10250
+      remote_group: "worker_sg"
+      description: "master ingress kubelet secure from worker"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 2379
+      port_range_max: 2380
+      remote_group: "master_sg"
+      description: "etcd"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 30000
+      port_range_max: 32767
+      remote_group: "master_sg"
+      description: "master ingress services (tcp)"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 30000
+      port_range_max: 32767
+      remote_group: "master_sg"
+      description: "master ingress services (udp)"
+    - protocol: vrrp
+      direction: ingress
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "VRRP"
+  - name: worker_sg
+    description: Security group for OpenShift workers
+    rules:
+    - protocol: icmp
+      direction: ingress
+      description: icmp
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 22
+      port_range_max: 22
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "SSH"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 5353
+      port_range_max: 5353
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "mDNS"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 80
+      port_range_max: 80
+      description: "Ingress HTTP"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 443
+      port_range_max: 443
+      description: "Ingress HTTPS"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 1936
+      port_range_max: 1936
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "router stats"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 4789
+      port_range_max: 4789
+      remote_group: "master_sg"
+      description: "VXLAN from master"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 4789
+      port_range_max: 4789
+      remote_group: "worker_sg"
+      description: "VXLAN"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 6081
+      port_range_max: 6081
+      remote_group: "master_sg"
+      description: "Geneve from master"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 6081
+      port_range_max: 6081
+      remote_group: "worker_sg"
+      description: "Geneve"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 9000
+      port_range_max: 9999
+      remote_group: "worker_sg"
+      description: "Worker ingress internal (tcp)"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 9000
+      port_range_max: 9999
+      remote_group: "master_sg"
+      description: "Worker ingress from master (tcp)"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 9000
+      port_range_max: 9999
+      remote_group: "master_sg"
+      description: "Worker ingress from master (udp)"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 9000
+      port_range_max: 9999
+      remote_group: "worker_sg"
+      description: "Worker ingress internal (udp)"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 10250
+      port_range_max: 10250
+      remote_group: "master_sg"
+      description: "master ingress kubelet secure from master"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 10250
+      port_range_max: 10250
+      remote_group: "worker_sg"
+      description: "master ingress kubelet secure"
+    - protocol: tcp
+      direction: ingress
+      port_range_min: 30000
+      port_range_max: 32767
+      remote_group: "worker_sg"
+      description: "worker ingress services (tcp)"
+    - protocol: udp
+      direction: ingress
+      port_range_min: 30000
+      port_range_max: 32767
+      remote_group: "worker_sg"
+      description: "worker ingress services (udp)"
+    - protocol: vrrp
+      direction: ingress
+      remote_ip_prefix: "{{ ocp_network_subnet_cidr }}"
+      description: "VRRP"
+################################################################################
+################################################################################
+### Common Host settings
+################################################################################
+################################################################################
+# Other Options are: file, satellite and rhn
+#If using repo_method: satellite, you must set these values as well.
+# satellite_url: satellite.example.com
+# satellite_org: Sat_org_name
+# satellite_activationkey: "rhel7basic"
+
+repo_method: file
+repo_version: "3.10"
+# Do you want to run a full yum update
+update_packages: false
+common_packages:
+  - python
+  - unzip
+  - bash-completion
+  - tmux
+  - wget
+  - git
+  - vim-enhanced
+  - at
+
+rhel_repos:
+  - rhel-7-server-rpms
+  - rhel-7-server-extras-rpms
+  - epel-release-latest-7
+
+###V2WORK, these should just be set as default listed in the documentation
+install_bastion: true
+install_bmc: true
+install_common: true
+## SB Don't set software_to_deploy from here, always use extra vars (-e) or "none" will be used
+#software_to_deploy: none
+
+
+## guid is the deployment unique identifier, it will be appended to all tags,
+## files and anything that identifies this environment from another.
+# Using GUID is required, if it is not passed in the command line or uncommented
+# here the deployment will fail
+#guid: defaultguid
+
+
+
+###V2WORK, these should just be set as default listed in the documentation
+# This is where the ssh_config file will be created, this file is used to
+# define the communication method to all the hosts in the deployment
+deploy_local_ssh_config_location: "{{output_dir}}/"
+
+
+### If you want a Key Pair name created and injected into the hosts,
+# set `set_env_authorized_key` to true and set the keyname in `env_authorized_key`
+# you can use the key used to create the environment or use your own self generated key
+# if you set "use_own_key" to false your PRIVATE key will be copied to the bastion. (This is {{key_name}})
+
+###V2WORK, these should just be set as default listed in the documentation
+use_own_key: true
+env_authorized_key: "{{guid}}key"
+set_env_authorized_key: true
+
+###V2WORK THIS SHOULD MOVE INTO THE ROLE
+# This var is used to identify stack (cloudformation, azure resourcegroup, ...)
+project_tag: "{{ env_type }}-{{ guid }}"
+
+network_kni: pxe
+network_private: appnet
