@@ -1,6 +1,17 @@
 ---
 
-
+- name: Install camel-K & Tekton Pipelines operator from OLM to openshift-operators namespace
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/operators-project.j2
+  - ./templates/global-operators.j2
+  - ./templates/camel-k-subscription.j2
+  - ./templates/tekton-subscription.j2
 
 - name: Create OpenShift Objects for 3scale multitenant
   k8s:
@@ -21,7 +32,7 @@
         --docker-username='{{ rht_service_token_user }}' \
         --docker-password={{ rht_service_token_password }} \
         -n  {{ API_MANAGER_NS }}
-
+  ignore_errors: True
 
 - name: Deploy 3scale API Manager for OpenBanking
   k8s:
@@ -48,6 +59,145 @@
 # Routes are created after some delay. Wait here for routes to  be ready.
 - pause:
     minutes: 1
+
+# Create dev tenant objects
+- name: Create OpenShift Objects for Dev Tenant
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/dev-tenant-secret.j2
+  - ./templates/dev-admin-secret.j2
+  - ./templates/dev-tenant.j2
+  
+# Create prod tenant objects
+- name: Create OpenShift Objects for Prod Tenant
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/prod-tenant-secret.j2
+  - ./templates/prod-admin-secret.j2
+  - ./templates/prod-tenant.j2
+
+# create the DEV tenant Gateway
+- block:
+    - name: "**********  DEV TENANT API GW  Provisioning **********"
+      command: "oc adm new-project {{ DEV_GW_PROJECT }} --admin={{ ocp_user }}  --description='{{ DEV_GW_PROJECT_DISPLAY }}'"
+      register: create_proj
+      failed_when: create_proj.stderr != ""  and 'already exists' not in create_proj.stderr
+
+    - set_fact:
+        THREESCALE_PORTAL_ENDPOINT: "https://{{dev_tenant_token}}@{{dev_tenant}}-admin.{{ocp_apps_domain}}"
+
+    - name: "Create threescale-registry-auth image pull secret in {{ DEV_GW_PROJECT }}"
+      shell: |
+        oc create secret docker-registry threescale-registry-auth \
+            --docker-server=registry.redhat.io \
+            --docker-username='{{ rht_service_token_user }}' \
+            --docker-password={{ rht_service_token_password }} \
+            -n  {{ DEV_GW_PROJECT }}
+
+    - name: "Create threescale-portal-endpoint secret in {{ DEV_GW_PROJECT }}"
+      shell: |
+        oc secret new-basicauth apicast-configuration-url-secret \
+            --password={{ THREESCALE_PORTAL_ENDPOINT }} \
+            -n  {{ DEV_GW_PROJECT }}
+
+    - name: "Create Staging Gateway; {{ THREESCALE_PORTAL_ENDPOINT }}"
+      shell: |
+        oc new-app \
+               -f {{tenant_api_gw_template_url}} \
+               --param APICAST_NAME=stage-apicast \
+               --param DEPLOYMENT_ENVIRONMENT=sandbox \
+               --param CONFIGURATION_LOADER=lazy \
+               --param CONFIGURATION_CACHE=0 \
+               --param MANAGEMENT_API=debug \
+               -n {{ DEV_GW_PROJECT }}
+      register: create_stage_gw
+      failed_when: create_stage_gw.stderr != ""  and 'already exists' not in create_stage_gw.stderr
+
+    - name: "Create Production Gateway; {{ THREESCALE_PORTAL_ENDPOINT }}"
+      shell: |
+        oc new-app \
+               -f {{tenant_api_gw_template_url}} \
+               --param APICAST_NAME=prod-apicast \
+               --param DEPLOYMENT_ENVIRONMENT=production \
+               --param CONFIGURATION_LOADER=boot \
+               -n {{ DEV_GW_PROJECT }}
+      register: create_prod_gw
+      failed_when: create_prod_gw.stderr != ""  and 'already exists' not in create_prod_gw.stderr
+
+# create the PROD tenant Gateway
+- block:
+    - name: "**********   PROD TENANT API GW  Provisioning **********"
+      command: "oc adm new-project {{ PROD_GW_PROJECT }} --admin={{ ocp_user }}  --description='{{ PROD_GW_PROJECT_DISPLAY }}'"
+      register: create_proj
+      failed_when: create_proj.stderr != ""  and 'already exists' not in create_proj.stderr
+
+    - set_fact:
+        THREESCALE_PORTAL_ENDPOINT: "https://{{prod_tenant_token}}@{{prod_tenant}}-admin.{{ocp_apps_domain}}"
+
+    - name: "Create threescale-registry-auth image pull secret in {{ PROD_GW_PROJECT }}"
+      shell: |
+        oc create secret docker-registry threescale-registry-auth \
+            --docker-server=registry.redhat.io \
+            --docker-username='{{ rht_service_token_user }}' \
+            --docker-password={{ rht_service_token_password }} \
+            -n  {{ PROD_GW_PROJECT }}
+
+    - name: "Create threescale-portal-endpoint secret in {{ PROD_GW_PROJECT }}"
+      shell: |
+        oc secret new-basicauth apicast-configuration-url-secret \
+            --password={{ THREESCALE_PORTAL_ENDPOINT }} \
+            -n  {{ PROD_GW_PROJECT }}
+
+    - name: "Create Staging Gateway; {{ THREESCALE_PORTAL_ENDPOINT }}"
+      shell: |
+        oc new-app \
+               -f {{tenant_api_gw_template_url}} \
+               --param APICAST_NAME=stage-apicast \
+               --param DEPLOYMENT_ENVIRONMENT=sandbox \
+               --param CONFIGURATION_LOADER=lazy \
+               --param CONFIGURATION_CACHE=0 \
+               --param MANAGEMENT_API=debug \
+               -n {{ PROD_GW_PROJECT }}
+      register: create_stage_gw
+      failed_when: create_stage_gw.stderr != ""  and 'already exists' not in create_stage_gw.stderr
+
+    - name: "Create Production Gateway; {{ THREESCALE_PORTAL_ENDPOINT }}"
+      shell: |
+        oc new-app \
+               -f {{tenant_api_gw_template_url}} \
+               --param APICAST_NAME=prod-apicast \
+               --param DEPLOYMENT_ENVIRONMENT=production \
+               --param CONFIGURATION_LOADER=boot \
+               -n {{ PROD_GW_PROJECT }}
+      register: create_prod_gw
+      failed_when: create_prod_gw.stderr != ""  and 'already exists' not in create_prod_gw.stderr
+
+# Create OpenBanking API Implementation Projects:
+- block:
+    - name: "**********  DEV API PROJECT  **********"
+      command: "oc adm new-project {{ DEV_API_PROJECT }} --admin={{ ocp_user }}  --description='{{ DEV_API_PROJECT_DISPLAY }}'"
+      register: create_proj
+      failed_when: create_proj.stderr != ""  and 'already exists' not in create_proj.stderr
+
+    - name: "**********  TEST API PROJECT  **********"
+      command: "oc adm new-project {{ TEST_API_PROJECT }} --admin={{ ocp_user }}  --description='{{ TEST_API_PROJECT_DISPLAY }}'"
+      register: create_proj
+      failed_when: create_proj.stderr != ""  and 'already exists' not in create_proj.stderr
+
+    - name: "**********  PROD API PROJECT  **********"
+      command: "oc adm new-project {{ PROD_API_PROJECT }} --admin={{ ocp_user }}  --description='{{ PROD_API_PROJECT_DISPLAY }}'"
+      register: create_proj
+      failed_when: create_proj.stderr != ""  and 'already exists' not in create_proj.stderr
 
 
 - name: workload Tasks Complete
