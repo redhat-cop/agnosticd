@@ -93,7 +93,7 @@ pipeline {
                     guid = sh(
                         returnStdout: true,
                         script: """
-                          ./opentlc/order_svc_guid.sh \
+						  ./opentlc/order_svc_guid.sh \
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
