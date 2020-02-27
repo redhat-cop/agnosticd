@@ -68,7 +68,7 @@ pipeline {
         choice(
             choices: environment_choice,
             description: 'Environment',
-            name: 'env',
+            name: 'environment',
         )
     }
 
