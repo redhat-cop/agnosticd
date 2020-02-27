@@ -36,7 +36,7 @@ def region_choice = [
     'emea_sandboxes_gpte',
 ].join("\n")
 
-def env_choice = [
+def environment_choice = [
     'PROD',
     'TEST',
     'DEV',
@@ -66,7 +66,7 @@ pipeline {
             name: 'region',
         )
         choice(
-            choices: env_choice,
+            choices: environment_choice,
             description: 'Environment',
             name: 'env',
         )
@@ -88,7 +88,7 @@ pipeline {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
-                    def env = params.env.trim()
+                    def environment = params.environment.trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -97,7 +97,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,expiration=7,runtime=10,region=${region},env=${env}'
+                          -d 'check=t,expiration=7,runtime=10,region=${region},environment=${environment}'
                         """
                     ).trim()
 
