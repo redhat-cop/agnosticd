@@ -24,19 +24,18 @@ def ssh_location = ''
 
 // Catalog items
 def choices = [
-    'OPENTLC OpenShift Labs / OpenShift Client VM',
-    'OPENTLC OpenShift Labs / OpenShift 3.9 - Client VM',
-    'DevOps Deployment Testing / OpenShift Client VM - Testing',
-    'DevOps Team Development / DEV OpenShift Client VM',
+    'OPENTLC OpenShift Labs / OpenShift Workshop Deployer',
 ].join("\n")
 
 def ocprelease_choice = [
     '3.11.43',
+    '3.11.129',
+    '3.11.59',
     '3.11.16',
     '3.10.34',
     '3.10.14',
-    '3.9.41',
-    '3.9.31',
+    '3.9.40',
+    '3.7.23',
 ].join("\n")
 
 def region_choice = [
@@ -44,6 +43,26 @@ def region_choice = [
     'emea',
     'latam',
     'apac',
+].join("\n")
+
+def nodes_choice = [
+    '3',
+    '1',
+    '2',    
+    '4',
+    '5',
+    '6',
+    '7',
+    '8',
+    '9',
+    '10',
+    '15',
+].join("\n")
+
+def environment_choice = [
+    'PROD',
+    'TEST',
+    'DEV',
 ].join("\n")
 
 pipeline {
@@ -75,6 +94,16 @@ pipeline {
             description: 'Region',
             name: 'region',
         )
+        choice(
+            choices: nodes_choice,
+            description: 'Number of Nodes',
+            name: 'nodes',
+        )
+        choice(
+            choices: environment_choice,
+            description: 'Environment',
+            name: 'environment',
+        )
     }
 
     stages {
@@ -94,6 +123,8 @@ pipeline {
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
+                    def nodes = params.nodes.trim()
+                    def environment = params.environment.trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -102,7 +133,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,quotacheck=t,ocprelease=${ocprelease},runtime=8,expiration=7,region=${region}'
+                          -d 'expiration=7,runtime=8,ocprelease=${ocprelease},region=${region},nodes=${nodes},environment=${environment}'
                         """
                     ).trim()
 
@@ -110,13 +141,15 @@ pipeline {
                 }
             }
         }
-        /* Skip this step because sometimes the completed email arrives
-         before the 'has started' email
+        
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                    branch: 'development'
+
 
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
@@ -124,14 +157,14 @@ pipeline {
                     --timeout 20 \
                     --filter 'has started'"""
             }
-        }
-        */
-        stage('Wait for last email and parse SSH location') {
+        }	
+
+        stage('Wait for last email and parse') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 script {
@@ -141,29 +174,21 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 40 \
+                          --timeout 150 \
                           --filter 'has completed'
                         """
                     ).trim()
 
-
-                    def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
-                    ssh_location = m[0][1]
-                    echo "ssh_location = '${ssh_location}'"
-                }
-            }
-        }
-
-        stage('SSH') {
-            steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: ssh_creds,
-                        keyFileVariable: 'ssh_key',
-                        usernameVariable: 'ssh_username')
-                ]) {
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
+                    try {
+                        def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
+                        ssh_location = m[0][1]
+                        echo "SSH command: '${ssh_location}'"
+                    } catch(Exception ex) {
+                        echo "Could not parse email:"
+                        echo email
+                        echo ex.toString()
+                        throw ex
+                    }
                 }
             }
         }

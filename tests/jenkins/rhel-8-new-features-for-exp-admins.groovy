@@ -19,31 +19,16 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ssh_location = ''
+def external_host = ''
 
 
 // Catalog items
 def choices = [
-    'OPENTLC OpenShift Labs / OpenShift Client VM',
-    'OPENTLC OpenShift Labs / OpenShift 3.9 - Client VM',
-    'DevOps Deployment Testing / OpenShift Client VM - Testing',
-    'DevOps Team Development / DEV OpenShift Client VM',
-].join("\n")
-
-def ocprelease_choice = [
-    '3.11.43',
-    '3.11.16',
-    '3.10.34',
-    '3.10.14',
-    '3.9.41',
-    '3.9.31',
+    'OPENTLC Datacenter Infrastructure Labs / RHEL 8 New Features For Exp. Admins',		
 ].join("\n")
 
 def region_choice = [
-    'na',
-    'emea',
-    'latam',
-    'apac',
+    'global_gpte',
 ].join("\n")
 
 pipeline {
@@ -64,12 +49,6 @@ pipeline {
             description: 'Catalog item',
             name: 'catalog_item',
         )
-        choice(
-            choices: ocprelease_choice,
-            description: 'Catalog item',
-            name: 'ocprelease',
-        )
-
         choice(
             choices: region_choice,
             description: 'Region',
@@ -92,7 +71,6 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
@@ -102,7 +80,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,quotacheck=t,ocprelease=${ocprelease},runtime=8,expiration=7,region=${region}'
+                          -d 'check=t,expiration=7,runtime=4,region=${region},quotacheck=t'
                         """
                     ).trim()
 
@@ -110,23 +88,9 @@ pipeline {
                 }
             }
         }
-        /* Skip this step because sometimes the completed email arrives
-         before the 'has started' email
-        stage('Wait for first email') {
-            environment {
-                credentials=credentials("${imap_creds}")
-            }
-            steps {
-
-                sh """./tests/jenkins/downstream/poll_email.py \
-                    --server '${imap_server}' \
-                    --guid ${guid} \
-                    --timeout 20 \
-                    --filter 'has started'"""
-            }
-        }
-        */
-        stage('Wait for last email and parse SSH location') {
+        
+        // This kind of CI send only one mail
+        stage('Wait to receive and parse email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
@@ -141,32 +105,32 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 40 \
-                          --filter 'has completed'
+                          --timeout 30 \
+                          --filter 'is building'
                         """
                     ).trim()
 
-
-                    def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
-                    ssh_location = m[0][1]
-                    echo "ssh_location = '${ssh_location}'"
+                    try {
+                    	def m = email =~ /External Hostname<\/TH><TD>(.*)/
+                    	def mm = email =~ /(.*)<\/TD><\/TR><TR><TH>Internal IP Address/
+                    	external_host = m[0][1].replaceAll("=","") + mm[0][1].replaceAll(" ","")
+                    	echo "External-Host='${external_host}'"
+                    } catch(Exception ex) {
+                        echo "Could not parse email:"
+                        echo email
+                        echo ex.toString()
+                        throw ex
+                    }
                 }
             }
         }
-
-        stage('SSH') {
-            steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: ssh_creds,
-                        keyFileVariable: 'ssh_key',
-                        usernameVariable: 'ssh_username')
-                ]) {
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
-                }
-            }
-        }
+        
+        stage ('Wait to complete provision') {
+        	steps {
+				echo "Wait for 30 minutes for deployment to complete"
+				sleep 1800 // seconds
+			}
+		}
 
         stage('Confirm before retiring') {
             when {

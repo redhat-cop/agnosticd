@@ -8,7 +8,7 @@ def cf_group = 'opentlc-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gpteinfrasev3@redhat.com'
+def notification_email = 'djana@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -19,24 +19,14 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ssh_location = ''
+def openshift_location = ''
 
 
 // Catalog items
 def choices = [
-    'OPENTLC OpenShift Labs / OpenShift Client VM',
-    'OPENTLC OpenShift Labs / OpenShift 3.9 - Client VM',
-    'DevOps Deployment Testing / OpenShift Client VM - Testing',
-    'DevOps Team Development / DEV OpenShift Client VM',
-].join("\n")
-
-def ocprelease_choice = [
-    '3.11.43',
-    '3.11.16',
-    '3.10.34',
-    '3.10.14',
-    '3.9.41',
-    '3.9.31',
+    'OPENTLC Middleware Solutions Labs / Fuse on OpenShift',
+    'Middleware Preprod / Fuse on OpenShift - Preprod',
+    'Shared Cluster Development / DEV Fuse on OpenShift',
 ].join("\n")
 
 def region_choice = [
@@ -44,6 +34,17 @@ def region_choice = [
     'emea',
     'latam',
     'apac',
+].join("\n")
+
+def nodes_choice = [
+    '3',
+    '1',
+    '2',    
+    '4',
+    '5',
+    '6',
+    '7',
+    '8',
 ].join("\n")
 
 pipeline {
@@ -65,15 +66,14 @@ pipeline {
             name: 'catalog_item',
         )
         choice(
-            choices: ocprelease_choice,
-            description: 'Catalog item',
-            name: 'ocprelease',
-        )
-
-        choice(
             choices: region_choice,
             description: 'Region',
             name: 'region',
+        )
+        choice(
+            choices: nodes_choice,
+            description: 'Number of Nodes',
+            name: 'nodes',
         )
     }
 
@@ -92,8 +92,8 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
+                    def nodes = params.nodes.trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -102,7 +102,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,quotacheck=t,ocprelease=${ocprelease},runtime=8,expiration=7,region=${region}'
+                          -d 'check=t,expiration=7,runtime=8,quotacheck=t,region=${region},nodes=${nodes}'
                         """
                     ).trim()
 
@@ -110,13 +110,17 @@ pipeline {
                 }
             }
         }
+        
         /* Skip this step because sometimes the completed email arrives
-         before the 'has started' email
+         before the 'has started' email */
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
+                git url: 'https://github.com/redhat-cop/agnosticd',
+                    branch: 'development'
+
 
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
@@ -125,7 +129,7 @@ pipeline {
                     --filter 'has started'"""
             }
         }
-        */
+        
         stage('Wait for last email and parse SSH location') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -141,29 +145,22 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 40 \
+                          --timeout 150 \
                           --filter 'has completed'
                         """
                     ).trim()
 
+                    try {
+                    	def m = email =~ /Connect to the shared cluster by pointing your web browser to <a href="(.*)"/
+                        openshift_location = m[0]
+                        echo "openshift_location = ${openshift_location}"
+                    } catch(Exception ex) {
+                        echo "Could not parse email:"
+                        echo email
+                        echo ex.toString()
+                        throw ex
+                    }
 
-                    def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
-                    ssh_location = m[0][1]
-                    echo "ssh_location = '${ssh_location}'"
-                }
-            }
-        }
-
-        stage('SSH') {
-            steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: ssh_creds,
-                        keyFileVariable: 'ssh_key',
-                        usernameVariable: 'ssh_username')
-                ]) {
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
                 }
             }
         }

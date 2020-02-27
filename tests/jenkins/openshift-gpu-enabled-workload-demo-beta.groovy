@@ -2,8 +2,8 @@
 // CloudForms
 def opentlc_creds = 'b93d2da4-c2b7-45b5-bf3b-ee2c08c6368e'
 def opentlc_admin_creds = '73b84287-8feb-478a-b1f2-345fd0a1af47'
-def cf_uri = 'https://labs.opentlc.com'
-def cf_group = 'opentlc-access-cicd'
+def cf_uri = 'https://rhpds.redhat.com'
+def cf_group = 'rhpds-access-cicd'
 // IMAP
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
@@ -19,31 +19,16 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ssh_location = ''
-
+def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'OPENTLC OpenShift Labs / OpenShift Client VM',
-    'OPENTLC OpenShift Labs / OpenShift 3.9 - Client VM',
-    'DevOps Deployment Testing / OpenShift Client VM - Testing',
-    'DevOps Team Development / DEV OpenShift Client VM',
-].join("\n")
-
-def ocprelease_choice = [
-    '3.11.43',
-    '3.11.16',
-    '3.10.34',
-    '3.10.14',
-    '3.9.41',
-    '3.9.31',
+    'OpenShift Demos / OpenShift GPU-enabled Workload Demo Beta',
+    'DevOps Team Development Catalog / DEV-OpenShift GPU-enabled Workload Demo',
 ].join("\n")
 
 def region_choice = [
-    'na',
-    'emea',
-    'latam',
-    'apac',
+    'na_gpte',
 ].join("\n")
 
 pipeline {
@@ -65,14 +50,8 @@ pipeline {
             name: 'catalog_item',
         )
         choice(
-            choices: ocprelease_choice,
-            description: 'Catalog item',
-            name: 'ocprelease',
-        )
-
-        choice(
             choices: region_choice,
-            description: 'Region',
+            description: 'Catalog item',
             name: 'region',
         )
     }
@@ -92,8 +71,17 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
+                    def cfparams = [
+                        'expiration=2',
+                        'runtime=8',
+                        "region=${region}",
+                        'city=jenkins',
+                        'salesforce=gptejen',
+                        'check=t',
+                        'check2=t',
+                        'notes=devops_automation_jenkins',
+                    ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -102,7 +90,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,quotacheck=t,ocprelease=${ocprelease},runtime=8,expiration=7,region=${region}'
+                          -d '${cfparams}' \
                         """
                     ).trim()
 
@@ -110,28 +98,30 @@ pipeline {
                 }
             }
         }
-        /* Skip this step because sometimes the completed email arrives
-         before the 'has started' email
+        // Skip this step because sometimes the completed email arrives
+        // before the 'has started' email
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                    branch: 'development'
 
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
                     --guid ${guid} \
-                    --timeout 20 \
+                    --timeout 30 \
                     --filter 'has started'"""
             }
         }
-        */
-        stage('Wait for last email and parse SSH location') {
+
+        stage('Wait for last email and parse OpenShift and App location') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 script {
@@ -141,29 +131,21 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 40 \
+                          --timeout 150 \
                           --filter 'has completed'
                         """
                     ).trim()
 
-
-                    def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
-                    ssh_location = m[0][1]
-                    echo "ssh_location = '${ssh_location}'"
-                }
-            }
-        }
-
-        stage('SSH') {
-            steps {
-                withCredentials([
-                    sshUserPrivateKey(
-                        credentialsId: ssh_creds,
-                        keyFileVariable: 'ssh_key',
-                        usernameVariable: 'ssh_username')
-                ]) {
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
+                    try {
+                        def m = email =~ /The OpenShift console for your environment is available at <a href="(https:\/\/master\.[^"]+)/
+                        openshift_location = m[0][1]
+                        echo "openshift_location = '${openshift_location}'"
+                    } catch(Exception ex) {
+                        echo "Could not parse email:"
+                        echo email
+                        echo ex.toString()
+                        throw ex
+                    }
                 }
             }
         }
@@ -217,7 +199,7 @@ pipeline {
         }
         stage('Wait for deletion email') {
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
@@ -258,7 +240,7 @@ pipeline {
             ]) {
                 sh("""
                     ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
-                    "find deployer_logs -name '*${guid}*log' | xargs cat"
+                    "bin/logs.sh ${guid}" || true
                 """.trim()
                 )
             }
