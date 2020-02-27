@@ -20,8 +20,8 @@ def ssh_admin_host = 'admin-host-na'
 // state variables
 def guid=''
 def openshift_location = ''
-//def ssh_location = ''
-//def ssh_p = ''
+def ssh_location = ''
+def ssh_p = ''
 
 
 // Catalog items
@@ -36,7 +36,7 @@ def region_choice = [
     'emea_sandboxes_gpte',
 ].join("\n")
 
-def environment_choice = [
+def env_choice = [
     'PROD',
     'TEST',
     'DEV',
