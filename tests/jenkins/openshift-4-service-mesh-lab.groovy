@@ -21,7 +21,7 @@ def ssh_admin_host = 'admin-host-na'
 def guid=''
 def openshift_location = ''
 def ssh_location = ''
-def ssh_p = ''
+// def ssh_p = ''
 
 
 // Catalog items
@@ -82,7 +82,7 @@ pipeline {
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
             steps {
-                git url: 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
+                git url: 'https://github.com/redhat-cop/agnosticd'
 
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
@@ -152,10 +152,7 @@ pipeline {
                     	m = email =~ /SSH Access: (.*)/
 						ssh_location = m[0][1]
 						echo "SSH Access: ${ssh_location}"
-						
-						m = email =~ /SSH password: (.*)/
-						ssh_p =​ m[0][1]
-						echo "SSH password: ${ssh_p}"
+
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -258,6 +255,21 @@ pipeline {
                 export DEBUG=true
                 ./opentlc/delete_svc_guid.sh '${guid}'
                 """
+            }
+
+            /* Print ansible logs */
+            withCredentials([
+                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
+                sshUserPrivateKey(
+                    credentialsId: ssh_creds,
+                    keyFileVariable: 'ssh_key',
+                    usernameVariable: 'ssh_username')
+            ]) {
+                sh("""
+                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
+                    "bin/logs.sh ${guid}" || true
+                """.trim()
+                )
             }
 
             withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
