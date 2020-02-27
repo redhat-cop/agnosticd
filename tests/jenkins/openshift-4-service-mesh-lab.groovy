@@ -8,7 +8,7 @@ def cf_group = 'opentlc-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gptezabbixalert@redhat.com'
+def notification_email = 'gpteinfrasev2@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -26,14 +26,20 @@ def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'OPENTLC OpenShift Labs / OpenShift Service Mesh Lab',
-    'DevOps Team Development / DEV - OpenShift Service Mesh Lab',
+    'OPENTLC OpenShift 4 Labs / OpenShift 4 Service Mesh Lab',
+    'DevOps Team Development / PREPROD - OpenShift Service Mesh Lab',
 ].join("\n")
 
 def region_choice = [
     'na_sandboxes_gpte',
     'apac_sandboxes_gpte',
     'emea_sandboxes_gpte',
+].join("\n")
+
+def environment_choice = [
+    'PROD',
+    'TEST',
+    'DEV',
 ].join("\n")
 
 pipeline {
@@ -59,6 +65,11 @@ pipeline {
             description: 'Region',
             name: 'region',
         )
+        choice(
+            choices: env_choice,
+            description: 'Environment',
+            name: 'env',
+        )
     }
 
     stages {
@@ -77,6 +88,7 @@ pipeline {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
+                    def env = params.env.trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -85,7 +97,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'expiration=6,runtime=8,region=${region}'
+                          -d 'check=t,expiration=7,runtime=10,region=${region},env=${env}'
                         """
                     ).trim()
 
@@ -136,17 +148,14 @@ pipeline {
                     	def m = email =~ /Openshift Master Console: (.*)/
                     	openshift_location = m[0][1]
                     	echo "Openshift Master Console: ${openshift_location}"
-                    
-//						m = email =~ /This cluster has authentication enabled. (.*)/
-//						echo "Cluster authentication:  ${m[0][1]}"
                       
-//                    	m = email =~ /SSH Access: (.*)/
-//						ssh_location = m[0][1]
-//						echo "SSH Access: ${ssh_location}"
+                    	m = email =~ /SSH Access: (.*)/
+						ssh_location = m[0][1]
+						echo "SSH Access: ${ssh_location}"
 						
-//						m = email =~ /SSH password: (.*)/
-//						ssh_p =​ m[0][1]
-//						echo "SSH password: ${ssh_p}"
+						m = email =~ /SSH password: (.*)/
+						ssh_p =​ m[0][1]
+						echo "SSH password: ${ssh_p}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
