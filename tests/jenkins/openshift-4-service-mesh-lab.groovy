@@ -82,7 +82,7 @@ pipeline {
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd'
+                git url: 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
