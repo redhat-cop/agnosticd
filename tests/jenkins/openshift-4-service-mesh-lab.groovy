@@ -165,20 +165,20 @@ pipeline {
                 }
             }
         }
-
-//        stage('SSH') {
-//            steps {
-//                withCredentials([
-//                    sshUserPrivateKey(
-//                        credentialsId: ssh_creds,
-//                        keyFileVariable: 'ssh_key',
-//                        usernameVariable: 'ssh_username')
-//                ]) {
-//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
-//                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
-//                }
-//            }
-//        }
+		/*
+        stage('SSH') {
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: ssh_creds,
+                        keyFileVariable: 'ssh_key',
+                        usernameVariable: 'ssh_username')
+                ]) {
+                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} w"
+                    sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
+                }
+            }
+        }*/
 
         stage('Confirm before retiring') {
             when {
