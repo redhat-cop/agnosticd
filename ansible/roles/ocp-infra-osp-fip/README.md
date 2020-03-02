@@ -1,10 +1,7 @@
-AWS-Broker
+OCP-Infra-OSP-FIP
 =========
 
-This role installs the AWS Broker on a 3.7 or higher OCP Cluster.
-
-Refer to the Readme on how to create proper AWS Credentials to be passed to the services:
-https://github.com/awslabs/aws-servicebroker-documentation/blob/master/getting-started.md
+This role configured an OCP cluster running on OpenStack to use a Floating IP.
 
 Requirements
 ------------
@@ -28,8 +25,9 @@ Example Playbook
   gather_facts: False
   become: yes
   run_once: true
+  when: cloud_provider == "osp"
   roles:
-    - { role: "aws-broker" }
+    - { role: "ocp-infra-osp-fip" }
 
 License
 -------
