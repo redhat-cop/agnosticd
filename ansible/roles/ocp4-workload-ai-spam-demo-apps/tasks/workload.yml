@@ -34,9 +34,18 @@
     - "{{ lookup('template', 'pipeline-deploymentconfig.yaml.j2') }}"
     - "{{ lookup('template', 'pipeline-service.yaml.j2') }}"
 
-- name: build the pipeline
+- name: check for pipeline builds
+  k8s_facts:
+    api_version: build.openshift.io/v1
+    kind: Build
+    name: pipeline
+    namespace: ai-spam-detection
+  register: pipeline_build_out
+
+- name: build the pipeline if not built
   shell: |
       oc start-build pipeline -n {{ project_name }}
+  when: pipeline_build_out.resources | length | int == 0
 
 #- name: Kick Jupyterhub
 #  shell: |
@@ -46,46 +55,91 @@
 #  shell: |
 #      oc scale dc/jupyterhub --replicas=1 -n {{ project_name }}
 
-- name: build the spam emitter
+- name: check for spam emitter buildconfig
+  k8s_facts:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: spam-emitter
+    namespace: ai-spam-detection
+  register: spam_emitter_buildconfig
+
+- name: build the spam emitter if not built
   shell: |
       oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-stream-generator -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092  -e KAFKA_TOPIC=social-firehose -e RATE=300 -e SPAM_PROPORTION=.95 --name=spam-emitter
+  when: spam_emitter_buildconfig.resources | length | int == 0
 
-- name: build the legitimate emitter
+- name: check for legitimate emitter buildconfig
+  k8s_facts:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: legitimate-emitter
+    namespace: ai-spam-detection
+  register: legitimate_emitter_buildconfig
+
+- name: build the legitimate emitter if not built
   shell: |
       oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-stream-generator -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092  -e KAFKA_TOPIC=social-firehose -e RATE=300 -e SPAM_PROPORTION=.3 --name=legitimate-emitter
+  when: legitimate_emitter_buildconfig.resources | length | int == 0
+
+- name: check for legitimate flood buildconfig
+  k8s_facts:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: legitimate-flood
+    namespace: ai-spam-detection
+  register: legitimate_flood_emitter_buildconfig
 
 - name: build the emitter for too many legitimate messages
   shell: |
       oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-stream-generator -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092  -e KAFKA_TOPIC=legitimate-firehose -e RATE=1000 -e SPAM_PROPORTION=.01 --name=legitimate-flood
+  when: legitimate_flood_emitter_buildconfig.resources | length | int == 0
+
+- name: check for flood filter buildconfig
+  k8s_facts:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: flood-filter
+    namespace: ai-spam-detection
+  register: flood_filter_buildconfig
 
 - name: build the filter for legitimate messages
   shell: |
       oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-processor -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092 -e KAFKA_TOPIC=legitimate-firehose  --name=flood-filter
+  when: flood_filter_buildconfig.resources | length | int == 0
+
+- name: check for spam filter buildconfig
+  k8s_facts:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: spam-filter
+    namespace: ai-spam-detection
+  register: spam_filter_buildconfig
 
 - name: build the filter for spam messages
   shell: |
       oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-processor -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092 -e KAFKA_TOPIC=social-firehose  --name=spam-filter
+  when: spam_filter_buildconfig.resources | length | int == 0
 
-- name: get the spam-emitter build
+- name: get the spam-emitter build details to extract the version
   k8s_facts:
     api_version: build.openshift.io/v1
     kind: BuildConfig
     name: "spam-emitter"
     namespace: "ai-spam-detection"
-  register: spam-emitter
+  register: spam_emitter
 
 - name: Wait for the spam-emitter build to complete
   k8s_facts:
     api_version: build.openshift.io/v1
     kind: Build
-    name: "spam-emitter-{{ spam-emitter.resources[0].status.lastVersion }}"
+    name: "spam-emitter-{{ spam_emitter.resources[0].status.lastVersion }}"
     namespace: "ai-spam-detection"
-  register: spam-emitter-build
+  register: spam_emitter_build
   until:
-    - spam-emitter-build.resources is defined
-    - spam-emitter-build.resources[0].status is defined
-    - spam-emitter-build.resources[0].status.phase is defined
-    - spam-emitter-build.resources[0].status.phase == "Complete"
+    - spam_emitter_build.resources is defined
+    - spam_emitter_build.resources[0].status is defined
+    - spam_emitter_build.resources[0].status.phase is defined
+    - spam_emitter_build.resources[0].status.phase == "Complete"
 
 # wait for builds
 
@@ -96,7 +150,6 @@
 #- name: scale up the pipeline
 #  shell: |
 #      oc scale dc/pipeline --replicas=4 -n {{ project_name }}
-
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
