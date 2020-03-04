@@ -2,9 +2,9 @@
 
 Checks if required packages are installed, if proper directories exist and if required podman image was built.
 
-## How to run
+## Variables
 
 ```
-ansible-playbook -i <TARGET_HOST>, main.yml -u ec2-user
+remote_user: ec2-user (default)
 ```
 
