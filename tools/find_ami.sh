@@ -24,6 +24,9 @@ do
     echo -n "  RHEL81GOLD: "
     search_images 309956199498 'RHEL-8.1*Access*' false
 
+    echo -n "  RHEL77GOLD: "
+    search_images 309956199498 'RHEL-7.7*Access*' false
+
     echo -n "  RHEL75GOLD: "
     search_images 309956199498 'RHEL-7.5*Access*' false
 
@@ -41,6 +44,9 @@ do
 
     echo -n "  WIN2012R2: "
     search_images 801119661308 'Windows_Server-2012-R2_RTM-English-64Bit-Base*' true
+
+    echo -n "  WIN2019: "
+    search_images 801119661308 'Windows_Server-2019-English-Full-Base-2020.02.12' true
 done
 
 # For azure
