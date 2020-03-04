@@ -76,12 +76,12 @@ def catalog_item_choices = [
 ].join("\n")
 
 def region_choice = [
-    'NA',
-    'EMEA',
-    'APAC',
     'NA - DEV',
     'EMEA - DEV',
     'APAC - DEV',
+    'NA',
+    'EMEA',
+    'APAC',
 ].join("\n")
 
 def environment_choice = [
