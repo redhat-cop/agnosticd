@@ -82,9 +82,9 @@ def region_choice = [
 ].join("\n")
 
 def environment_choice = [
-    'PROD',
-    'TEST',
     'DEV',
+    'TEST',
+    'PROD',
 ].join("\n")
 
 pipeline {
