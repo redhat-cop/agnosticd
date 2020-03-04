@@ -79,6 +79,9 @@ def region_choice = [
     'NA',
     'EMEA',
     'APAC',
+    'NA - DEV',
+    'EMEA - DEV',
+    'APAC - DEV',
 ].join("\n")
 
 def environment_choice = [
