@@ -27,12 +27,6 @@
       when: az_result is failed
 
     - set_fact:
-        stack_tag: "{{env_type | replace('-', '_')}}_{{guid}}"
-      tags:
-        - create_inventory
-        - must
-
-    - set_fact:
         t_dest: "{{output_dir}}/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
         params_dest: "{{output_dir}}/{{project_tag}}-cloud_template_parameters.json"
       tags:
@@ -79,6 +73,11 @@
         - must
         - create_inventory
 
+    - name: Setting windows_password variable
+      set_fact:
+        windows_password: "{{hostvars['localhost'].generated_windows_password}}"
+      when: windows_password is not defined
+
     - name: Build parameter file
       copy:
         content: |
@@ -122,26 +121,6 @@
       until: az_deploy is succeeded
       retries: 0
 
-    # I tried to use the 'azure_rm_deployment' ansible module instead of the azure-cli,
-    # but this does not work for large templates.
-    # Also, module is marked as 'preview' so let's use the cli for now.
-    # Commented for later use:
-    #
-    #   azure_rm_deployment:
-    #     deployment_name: "{{env_type}}.{{guid}}"
-    #     resource_group_name: "{{az_resource_group}}"
-    #     location: "{{ azure_region }}"
-    #     template: "{{ lookup('file', t_dest) }}"
-    #     parameters:
-    #       adminUsername:
-    #         value: "{{remote_user}}"
-    #       sshKeyData:
-    #         value: "{{ssh_key_data}}"
-    #       DNSZone:
-    #         value: "{{HostedZoneId}}"
-    #       guid:
-    #         value: "{{guid}}"
-
     - debug:
         var: az_deploy
         verbosity: 2
@@ -179,85 +158,9 @@
       when:
         - HostedZoneId != "none"
 
-    # use '--show-details' feature from the cli, it groups instances and their public IPs.
-    # It saves us API calls.
-    - name: Get list of VMs
-      command: az vm list --resource-group "{{az_resource_group}}" --show-details
-      # specify path to use azure-cli from system and not from python virtualenv
-      environment:
-        PATH: /usr/bin
-      changed_when: false
-      register: result_list
-      tags:
-        - create_inventory
-        - must
-
-    - name: Translate JSON output from 'az vm list' to ansible variable
-      set_fact:
-        vm_list: "{{ result_list.stdout | from_json }}"
-      tags:
-        - create_inventory
-        - must
-
-    - debug:
-        var: vm_list
-        verbosity: 2
-      tags:
-        - create_inventory
-        - must
-
-    - name: Build inventory
-      add_host:
-        name: "{{item.osProfile.computerName|default(item.name)}}"
-        shortname: "{{item.tags.Name|default(item.name)}}"
-        groups:
-          - "tag_Project_{{stack_tag}}"
-          - "tag_{{stack_tag}}_{{item.tags.AnsibleGroup | default('unknowns')}}"
-          - "tag_{{stack_tag}}_ostype_{{item.tags.ostype | default('unknown')}}"
-          - "{{item.tags.ostype | default('unknowns')}}"
-          - "{{ 'newnodes' if (item.tags.newnode|d()|bool) else 'all'}}"
-        ansible_user: "{{ remote_user }}"
-        remote_user: "{{ remote_user | d('azure') }}"
-        ansible_ssh_private_key_file: "{{ssh_key}}"
-        key_name: "{{key_name}}"
-        state: "{{item.powerState|d('unknown')}}"
-        internaldns: "{{item.tags.internaldns | d(item.osProfile.computerName) |d(item.name)}}"
-        instance_id: "{{ item.vmId | d('unknown')}}"
-        region: "{{azure_region}}"
-        public_dns_name: "{{item.fqdns|d(item.publicIps)|d('')}}"
-        private_dns_name: "{{item.tags.internaldns|d(item.name)}}"
-        private_ip_address: "{{item.privateIps}}"
-        public_ip_address: "{{item.publicIps}}"
-        placement: "{{item.zones}}"
-        image_id: "{{item.storageProfile.osDisk.image|d('unknown')}}"
-        ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
-        instance_canonical_name: "{{ item.tags.canonical_name }}"
-      with_items: "{{vm_list}}"
-      when:
-        - item.tags is defined
-        - item.tags.Project is defined
-        - item.tags.Project == project_tag
-      loop_control:
-        label: "{{ item.name }}"
-      tags:
-        - create_inventory
-        - must
-
-    # AnsibleGroup tag can have several comma-separated values. Ex: activedirectories,windows
-    - add_host:
-        name: "{{item.osProfile.computerName|default(item.name)}}"
-        groups: "{{item.tags.AnsibleGroup}}"
-      with_items: "{{vm_list}}"
-      loop_control:
-        label: "{{ item.name }}"
-      tags:
-        - create_inventory
-        - must
-
-    - name: debug hostvars
-      debug:
-        var: hostvars
-        verbosity: 2
+    - name: Run infra-azure-create-inventory Role
+      import_role:
+        name: infra-azure-create-inventory
 
 # Copy env_vars variables from the config to all hosts
 - import_playbook: ../include_vars.yml
@@ -269,7 +172,7 @@
   tags:
     - must
     - create_inventory
-
+ 
 - name: wait_for_connection for all non-windows machines and set hostname
   hosts:
     - all:!windows:!network
@@ -308,7 +211,6 @@
       retries: 3
       delay: 10
       until: rping is succeeded
-
 
     # < get internal domain name for later use
     - name: Get internal fqdn
@@ -359,7 +261,7 @@
         ansible_host: "{{ public_dns_name }}"
         ansible_password: "{{ windows_password | default(hostvars['localhost'].generated_windows_password) }}"
         ansible_port: 5986
-        ansible_user: Administrator
+        ansible_user: "{{ remote_user | default('Administrator') }}"
         ansible_winrm_server_cert_validation: ignore
 
     - name: wait for windows host to be available
