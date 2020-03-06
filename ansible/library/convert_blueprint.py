@@ -64,6 +64,7 @@ import ibm_boto3
 import os
 from ibm_botocore.client import Config, ClientError
 import uuid
+import shutil
 
 try:
     import botocore
@@ -262,8 +263,11 @@ def convert_to_raw(module):
             create_glance_image(module, image_name, img_id)
 
         convert_to_ceph(module, dest_disk, img_id)
+        module.log("Remove disk %s from disk" % dest_disk )
         os.remove(dest_disk)
         update_glance_location(module, img_id)
+
+    shutil.rmtree(output_dir)
     module.exit_json(changed=True)
 
 
