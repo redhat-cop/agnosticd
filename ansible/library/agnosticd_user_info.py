@@ -37,9 +37,16 @@ description:
 options:
   msg:
     description:
-    - This is the message or data to display.
-    - It may be of any datatype.
-  required: true
+      - This is the message or data to display.
+      - It should be a string.
+  data:
+    description:
+      - Dictionary of data to store.
+      - Values may be of any type, deep data structures are discouraged.
+      - Subsequent calls to agnosticd_user_info will add new keys and update existing keys.
+  user:
+    description:
+      - User name if data should be set for a particular user.
 
 author:
 - Johnathan Kupferer
