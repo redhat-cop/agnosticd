@@ -6,14 +6,14 @@
 # RH_PASSWORD=your-password
 #
 # then:
-# DOCKER_BUILDKIT=1 docker build --progress=plain --secret id=rhsm,src=rhsm.secret.yaml -t quay.io/username/cloudnative-workspaces-kamel:VVV -f stack.Dockerfile .
-# docker push quay.io/username/quay.io/username/cloudnative-workspaces-kamel:VVVV
+# DOCKER_BUILDKIT=1 docker build --progress=plain --secret id=rhsm,src=rhsm.secret.yaml -t quay.io/mcochran/cloudnative-workspaces-kamel:VVV -f stack.Dockerfile .
+# docker push quay.io/mcochran/quay.io/mcochran/cloudnative-workspaces-kamel:VVVV
 
 FROM registry.redhat.io/codeready-workspaces/stacks-java-rhel8:2.0
 
 ENV GRAALVM_VERSION=19.3.1
 ENV QUARKUS_VERSION=1.2.0.Final
-ENV CAMELK_VERSION=1.0.0-RC1
+ENV CAMELK_VERSION=1.0.0-RC2
 ENV MVN_VERSION=3.6.3
 ENV GRAALVM_HOME="/usr/local/graalvm-ce-java8-${GRAALVM_VERSION}"
 ENV MAVEN_OPTS="-Xmx4G -Xss128M -XX:MetaspaceSize=1G -XX:MaxMetaspaceSize=2G -XX:+CMSClassUnloadingEnabled"
@@ -30,7 +30,7 @@ RUN wget -O /tmp/tkn.tar.gz https://github.com/tektoncd/cli/releases/download/v0
 
 RUN wget -O /tmp/graalvm.tar.gz https://github.com/graalvm/graalvm-ce-builds/releases/download/vm-${GRAALVM_VERSION}/graalvm-ce-java8-linux-amd64-${GRAALVM_VERSION}.tar.gz && cd /usr/local && tar -xvzf /tmp/graalvm.tar.gz && rm -rf /tmp/graalvm.tar.gz && ${GRAALVM_HOME}/bin/gu install native-image
 
-RUN wget -O /tmp/kamel.tar.gz https://github.com/apache/camel-k/releases/download/1.0.0-RC1/camel-k-client-1.0.0-RC1-linux-64bit.tar.gz && cd /usr/bin && tar -xvzf /tmp/kamel.tar.gz && chmod a+x /usr/bin/kamel && rm -f /tmp/kamel.tar.gz
+RUN wget -O /tmp/kamel.tar.gz https://github.com/apache/camel-k/releases/download/1.0.0-RC2/camel-k-client-1.0.0-RC2-linux-64bit.tar.gz && cd /usr/bin && tar -xvzf /tmp/kamel.tar.gz && chmod a+x /usr/bin/kamel && rm -f /tmp/kamel.tar.gz
 
 RUN wget -O /tmp/mvn.tar.gz https://www-us.apache.org/dist/maven/maven-3/${MVN_VERSION}/binaries/apache-maven-${MVN_VERSION}-bin.tar.gz && tar xzf /tmp/mvn.tar.gz && rm -rf /tmp/mvn.tar.gz && mkdir /usr/local/maven && mv apache-maven-${MVN_VERSION}/ /usr/local/maven/ && alternatives --install /usr/bin/mvn mvn /usr/local/maven/apache-maven-${MVN_VERSION}/bin/mvn 1
 
