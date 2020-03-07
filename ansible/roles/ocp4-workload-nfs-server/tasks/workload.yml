@@ -1,0 +1,200 @@
+---
+- name: Create or update storage class
+  k8s:
+    state: present
+    definition:
+      apiVersion: "storage.k8s.io/v1"
+      kind: "StorageClass"
+      metadata:
+        name: manual
+      provisioner: kubernetes.io/no-provisioner
+      reclaimPolicy: Retain
+      volumeBindingMode: WaitForFirstConsumer
+
+- name: Create project for NFS server
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ _nfs_project }}"
+
+- name: Create new build config for NFS server container image
+  k8s:
+    state: present
+    definition:
+      apiVersion: build.openshift.io/v1
+      kind: BuildConfig
+      metadata:
+        labels:
+          app: nfs-server
+        name: nfs-server
+        namespace: "{{ _nfs_project }}"
+      spec:
+        failedBuildsHistoryLimit: 5
+        output:
+          to:
+            kind: ImageStreamTag
+            name: nfs-server:latest
+        runPolicy: Serial
+        source:
+          binary: {}
+          type: Binary
+        strategy:
+          dockerStrategy: {}
+          type: Docker
+        successfulBuildsHistoryLimit: 5
+
+- name: Start build for NFS server container image and push to imagestream
+  shell: oc start build nfs-server --from-dir
+
+- name: Create service account
+  shell: oc create sa nfs-server
+
+- name: Add anyuid SCC to SA
+  shell: oc adm policy add-scc-to-user anyuid -z nfs-server
+
+- name: Add privileged SCC to SA
+  shell: oc adm policy add-scc-to-user privileged -z nfs-server
+
+- name: Create PVC for NFS server underlying storage
+  k8s:
+    state: present
+    definition:
+      kind: PersistentVolumeClaim
+      apiVersion: v1
+      metadata:
+        labels:
+          app: nfs-server
+        name: nfs-server
+        namespace: "{{ _nfs_project }}"
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: "{{ _nfs_pvc_type }}"
+        resources:
+          requests:
+            storage: 6Gi
+
+- name: Create NFS server StatefulSet
+  k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        labels:
+          app: nfs-server
+        name: nfs-server
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: nfs-server
+            statefulset: nfs-server
+        template:
+          metadata:
+            labels:
+              app: nfs-server
+              statefulset: nfs-server
+          spec:
+            serviceAccountName: nfs-server
+            containers:
+            - name: nfs-server
+              command:
+              - /usr/local/bin/run_nfs.sh
+              - -G
+              - "0"
+              - "0"
+              - "1"
+              - "2"
+              - "3"
+              - "4"
+              - "5"
+              - "6"
+              - "7"
+              image: ""
+              ports:
+                - name: nfs
+                  containerPort: 2049
+                - name: mountd
+                  containerPort: 20048
+                - name: rpcbind
+                  containerPort: 111
+              securityContext:
+                privileged: true
+              volumeMounts:
+                - mountPath: /exports
+                  name: pvc-nfs-server
+            volumes:
+              - name: pvc-nfs-server
+                persistentVolumeClaim:
+                  claimName: nfs-server
+
+- name: Create NFS server service
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        labels:
+          app: nfs-server
+        name: nfs-server
+      spec:
+        ports:
+          - name: nfs
+            port: 2049
+          - name: mountd
+            port: 20048
+          - name: rpcbind
+            port: 111
+        selector:
+          app: nfs-server
+  register: r_nfs_service
+
+- name: Dump r_nfs_service
+    var: r_nfs_service
+
+- name: Set trigger to point SS to imagestream
+# TODO: can't we just set this in the SS?
+
+- name: Get NFS server service clusterIP
+  set_fact:
+    nfs_ip: r_nfs_service.
+
+- name: Create PVs pointing to NFS
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolume
+      metadata:
+        labels:
+          app: nfs-server
+        name: "{{ item }}"
+      spec:
+        storageClassName: manual
+        capacity:
+          storage: 1Gi
+        accessModes:
+          - ReadWriteOnce
+          - ReadOnlyMany
+          - ReadWriteMany
+        persistentVolumeReclaimPolicy: Recycle
+        nfs:
+          server: "{{ r_nfs_server_ip.something }}"
+          path: TBD
+        mountOptions:
+          - vers=4
+  loop:
+    something
+
+
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
