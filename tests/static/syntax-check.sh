@@ -38,6 +38,11 @@ for i in \
         )
     fi
 
+    if [ "${env_type}" = satellite-vm ] || [ "${env_type}" = satellite-multi-region ]; then
+        pip install apypie
+        ansible-galaxy collection install theforeman.foreman
+    fi
+
 
     if [ -e "${ansible_path}/configs/${env_type}/hosts" ]; then
         inventory=(-i "${ansible_path}/configs/${env_type}/hosts")
