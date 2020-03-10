@@ -38,17 +38,18 @@ for i in \
         )
     fi
 
-    if [ "${env_type}" = satellite-vm ] || [ "${env_type}" = satellite-multi-region ]; then
-        pip install apypie
-        ansible-galaxy collection install theforeman.foreman
-    fi
-
-
     if [ -e "${ansible_path}/configs/${env_type}/hosts" ]; then
         inventory=(-i "${ansible_path}/configs/${env_type}/hosts")
     else
         inventory=(-i "${static}/tox-inventory.txt")
     fi
+
+    # Setup galaxy roles and collections, make sure it works
+    ansible-playbook --tags galaxy_roles \
+                     "${inventory[@]}" \
+                     ${ansible_path}/main.yml \
+                     ${extra_args[@]} \
+                     -e @${i}
 
     for playbook in \
         ${ansible_path}/main.yml \
