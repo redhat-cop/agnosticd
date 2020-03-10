@@ -26,11 +26,11 @@ for i in \
     fi
     env_type=$(egrep ^env_type: ${i}|cut -d' ' -f 2)
 
-    # Linklight needs to be downloaded
-    if [ "${env_type}" = linklight ]; then
-        if [ ! -d ${ansible_path}/workdir/linklight ]; then
-            echo "Download linklight"
-            git clone https://github.com/ansible/workshops.git ${ansible_path}/workdir/linklight
+    # Ansible Workshops AKA as Linklight needs to be downloaded
+    if [ "${env_type}" = linklight ] || [ "${env_type}" = ansible-workshops ]; then
+        if [ ! -d ${ansible_path}/workdir/${env_type} ]; then
+            echo "Download ${env_type}"
+            git clone https://github.com/ansible/workshops.git ${ansible_path}/workdir/${env_type}
         fi
         touch $(dirname "${i}")/env_secret_vars.yml
         extra_args=(
