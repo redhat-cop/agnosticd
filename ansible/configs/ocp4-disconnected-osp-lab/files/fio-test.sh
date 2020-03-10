@@ -10,4 +10,4 @@ echo "running tests"
 for i in {1..50};do echo "running test $i";fio --rw=write --ioengine=sync --fdatasync=1 --directory=/var/lib/etcd/fio --size=22m --bs=2300 --name=mytest --output-format=json+ | jq '.jobs[].sync.lat_ns.percentile."99.000000"' >> $(cat /etc/hostname)-fio.out;done
 
 echo "uploading to s3"
-/host/root/upload.sh '' '' nstephan-test ./ $(cat /etc/hostname)-fio.out
+/host/home/core/upload-to-s3.sh '' '' nstephan-test ./ $(cat /etc/hostname)-fio.out
