@@ -24,7 +24,7 @@ def rhdemo_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / Ansible Linux Automation',
+    'Workshops / Ansible Linux Automation Workshop',
     'DevOps Team Testing Catalog / TEST - Ansible Linux Automation Workshop',
     'DevOps Team Development Catalog / DEV Ansible Linux Automation Workshop',
 ].join("\n")
