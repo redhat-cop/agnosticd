@@ -36,6 +36,12 @@ do
     echo -n "  RHEL81: "
     search_images 309956199498 'RHEL-8.1*x86_64*' true
 
+    echo -n "  RHEL78: "
+    search_images 309956199498 'RHEL-7.8*x86_64*' true
+
+    echo -n "  RHEL77: "
+    search_images 309956199498 'RHEL-7.7*x86_64*' true
+
     echo -n "  RHEL75: "
     search_images 309956199498 'RHEL-7.5*x86_64*' true
 
