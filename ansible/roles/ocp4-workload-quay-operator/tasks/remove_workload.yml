@@ -1,15 +1,44 @@
 ---
-# Implement your Workload removal tasks here
+- name: Set up combined ocp4_workload_quay_operator dictionary
+  set_fact:
+    ocp4_workload_quay_operator: >-
+      {{ ocp4_workload_quay_operator_defaults
+       | combine(ocp4_workload_quay_operator_vars    | default( {} ),
+                 ocp4_workload_quay_operator_secrets | default( {} ), recursive=true)
+      }}
 
-- name: Remove Quay Resources
+- name: Get ClusterVersion
+  k8s_facts:
+    api_version: config.openshift.io/v1
+    kind: ClusterVersion
+    name: version
+  register: r_cluster_version
+- name: Set ocp4_workload_quay_operator_cluster_version fact
+  set_fact:
+    ocp4_workload_quay_operator_cluster_version: "{{ r_cluster_version.resources[0].status.history[0].version }}"
+- name: Print OpenShift version
+  debug:
+    msg: "Removing Quay Operator for OpenShift Version: {{ ocp4_workload_quay_operator_cluster_version }}"
+
+- name: Remove Quay
   k8s:
     state: absent
     definition: "{{ lookup('template', item ) | from_yaml }}"
   loop:
   - ./templates/quay.j2
 
-- name: Remove Red Hat Quay Operator (OLM install)
-  when: _quay_operator_hub | bool
+- name: Wait for all Quay Pods to be terminated
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ ocp4_workload_quay_operator.project }}"
+  register: r_running_pods
+  until: r_running_pods.resources | list | length <= 1
+  ignore_errors: true
+  retries: 20
+  delay: 10
+
+- name: Remove Red Hat Quay Operator
   k8s:
     state: absent
     definition: "{{ lookup('template', item ) | from_yaml }}"
@@ -17,34 +46,18 @@
   - ./templates/subscription.j2
   - ./templates/operatorgroup.j2
   - ./templates/catalogsourceconfig.j2
-
-- name: Remove Red Hat Quay Operator (Manual install)
-  when: not _quay_operator_hub | bool
-  k8s:
-    state: absent
-    definition: "{{ lookup('template', item ) | from_yaml }}"
-  loop:
-  - ./templates/operator.j2
-  - ./templates/service_account.j2
-  - ./templates/role.j2
-  - ./templates/role_binding.j2
-  - ./templates/cluster_role_binding.j2
-  # NOT removing Cluster Resources because there may be
-  # other projects with Quay Operators in them.
-  # Removing Cluster Resources would screw those up.
-  #- ./templates/cluster_role.j2
-  #- ./templates/crd.j2
-
-- name: Remove Red Hat Quay Operator (Shared resources)
-  k8s:
-    state: absent
-    definition: "{{ lookup('template', item ) | from_yaml }}"
-  loop:
   - ./templates/pull_secret.j2
   - ./templates/quay_superuser_secret.j2
   - ./templates/quay_config_secret.j2
   - ./templates/quay_ssl_certificate_secret.j2
   - ./templates/project.j2
+
+- name: Remove serviceaccounts from anyuid scc (if they are still there)
+  shell: "oc adm policy remove-scc-from-user anyuid system:serviceaccount:{{ ocp4_workload_quay_operator.project }}:{{ item }}"
+  loop:
+  - quay
+  - clair
+  ignore_errors: true
 
 # Leave this as the last task in the playbook.
 - name: remove_workload tasks complete

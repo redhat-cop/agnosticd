@@ -9,8 +9,7 @@ static=${ORIG}/tests/static
 cd ${ORIG}
 
 for i in \
-    $(find ${ORIG}/ansible/configs -name 'sample_vars*.y*ml' | sort) \
-    ${static}/scenarii/*.{yaml,yml}; do
+    $(find ${ORIG}/ansible/configs -name 'sample_vars*.y*ml' | sort); do
     echo
     echo '##################################################'
     echo "$(basename $(dirname ${i}))/$(basename ${i})"
