@@ -1,0 +1,97 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Set up ocp4_workload_pipelines combined dictionary
+  set_fact:
+    ocp4_workload_pipelines: >-
+      {{ ocp4_workload_pipelines_defaults
+       | combine(ocp4_workload_pipelines_vars    | default( {} ),
+                 ocp4_workload_pipelines_secrets | default( {}), recursive=true )
+      }}
+- name: Print combined role variables
+  debug:
+    var: ocp4_workload_pipelines
+    verbosity: 2
+
+- name: Install tkn CLI
+  become: yes
+  unarchive:
+    src: "https://github.com/tektoncd/cli/releases/download/v{{ ocp4_workload_pipelines.tkn_version }}/tkn_{{ ocp4_workload_pipelines.tkn_version }}_Linux_x86_64.tar.gz"
+    remote_src: yes
+    dest: /usr/bin
+    mode: 0775
+    owner: root
+    group: root
+
+- name: Create tkn bash completion file
+  become: true
+  shell: /usr/bin/tkn completion bash >/etc/bash_completion.d/tkn
+
+- name: Create OpenShift Objects for OpenShift Pipelines
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/subscription.j2
+
+- name: Approve InstallPlan
+  when: ocp4_workload_pipelines.install_plan_approval == "Manual"
+  block:
+  - name: Wait until InstallPlan is Created
+    shell: oc get installplan -o name -n openshift-operators | awk -F "/" '{print $2}'
+    register: r_install_plan
+    retries: 30
+    delay: 10
+    until: r_install_plan.stdout != ""
+
+  - name: Ensure InstallPlan is Approved
+    command: oc patch installplan "{{ r_install_plan.stdout }}" --type merge -p '{"spec":{"approved":true}}' -n openshift-operators
+
+- name: Get Installed CSV
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: openshift-pipelines-operator
+    namespace: openshift-operators
+  register: r_subscription
+  retries: 30
+  delay: 5
+  until:
+  - r_subscription.resources[0].status.currentCSV is defined
+  - r_subscription.resources[0].status.currentCSV | length > 0
+
+- name: Wait until CSV is Installed
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: openshift-operators
+  register: r_csv
+  until:
+  - r_csv.resources[0].status.phase is defined
+  - r_csv.resources[0].status.phase | length > 0
+  - r_csv.resources[0].status.phase == "Succeeded"
+
+- name: Wait until Pipelines Pods are ready
+  k8s_facts:
+    api_version: v1
+    kind: Deployment
+    namespace: "openshift-pipelines"
+    name: "tekton-pipelines-controller"
+  register: r_pipeline_controller_deployment
+  retries: 30
+  delay: 10
+  until:
+  - r_pipeline_controller_deployment.resources | length | int > 0
+  - r_pipeline_controller_deployment.resources[0].status.availableReplicas is defined
+  - r_pipeline_controller_deployment.resources[0].status.availableReplicas | int == r_pipeline_controller_deployment.resources[0].spec.replicas | int
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
