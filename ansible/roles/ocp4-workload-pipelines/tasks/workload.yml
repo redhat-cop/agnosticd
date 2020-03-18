@@ -18,7 +18,7 @@
     verbosity: 2
 
 - name: Install tkn CLI
-  become: yes
+  become: true
   unarchive:
     src: "https://github.com/tektoncd/cli/releases/download/v{{ ocp4_workload_pipelines.tkn_version }}/tkn_{{ ocp4_workload_pipelines.tkn_version }}_Linux_x86_64.tar.gz"
     remote_src: yes
@@ -26,10 +26,14 @@
     mode: 0775
     owner: root
     group: root
+  args:
+    creates: /usr/bin/tkn
 
 - name: Create tkn bash completion file
   become: true
-  shell: /usr/bin/tkn completion bash >/etc/bash_completion.d/tkn
+  command: /usr/bin/tkn completion bash >/etc/bash_completion.d/tkn
+  args:
+    creates: /etc/bash_completion.d/tkn
 
 - name: Create OpenShift Objects for OpenShift Pipelines
   k8s:
@@ -38,18 +42,31 @@
   loop:
   - ./templates/subscription.j2
 
-- name: Approve InstallPlan
-  when: ocp4_workload_pipelines.install_plan_approval == "Manual"
+- name: Manually approve InstallPlan
+  when: not ocp4_workload_pipelines.automatic_install_plan_approval
   block:
-  - name: Wait until InstallPlan is Created
-    shell: oc get installplan -o name -n openshift-operators | awk -F "/" '{print $2}'
+  - name: Wait until InstallPlan is created
+    k8s_facts:
+      api_version: operators.coreos.com/v1alpha1
+      kind: InstallPlan
+      namespace: openshift-operators
     register: r_install_plan
     retries: 30
-    delay: 10
-    until: r_install_plan.stdout != ""
+    delay: 5
+    until:
+    - r_install_plan|selectattr('clusterServiceVersionNames', 'contains', 'openshift-pipelines-operator')
 
-  - name: Ensure InstallPlan is Approved
-    command: oc patch installplan "{{ r_install_plan.stdout }}" --type merge -p '{"spec":{"approved":true}}' -n openshift-operators
+  - name: Set InstallPlan Name
+    set_fact:
+      ocp4_workload_pipelines_install_plan_name: "{{ r_install_plan.resources | to_json | from_json | json_query(query) }}"
+    vars:
+      query: >-
+        [?starts_with(spec.clusterServiceVersionNames[0], 'openshift-pipelines-operator')].metadata.name|[0]
+
+  - name: Approve InstallPlan
+    k8s:
+      state: present
+      definition: "{{ lookup( 'template', './templates/installplan.j2' ) }}"
 
 - name: Get Installed CSV
   k8s_facts:
@@ -71,6 +88,8 @@
     name: "{{ r_subscription.resources[0].status.currentCSV }}"
     namespace: openshift-operators
   register: r_csv
+  retries: 15
+  delay: 5
   until:
   - r_csv.resources[0].status.phase is defined
   - r_csv.resources[0].status.phase | length > 0
