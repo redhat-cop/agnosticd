@@ -1,11 +1,4 @@
 ---
-# vim: set ft=ansible:
-# To use this method you need to set these variables (perhaps in env_secret_vars.yml)
-#
-# satellite_url: 'your.satellite.host.without.http.or.https.prefix'
-# satellite_org: 'your_Org_name'
-# satellite_activationkey: "activation_key_id_name"
-
 - name: Remove rh-amazon-rhui-client package
   tags: packer
   package:
@@ -27,7 +20,6 @@
     validate_certs: no
 
 - name: Install Cert
-  # use rpm here to avoid issue when yum is broken (chicken&egg)
   command: "rpm -Uvh /root/katello-ca-consumer-latest.noarch.rpm"
   args:
     warn: no
@@ -37,26 +29,49 @@
     name: /root/katello-ca-consumer-latest.noarch.rpm
     state: absent
 
+- name: list current repository files
+  command: "ls -1 /etc/yum.repos.d/"
+  register: repodircontents
+  changed_when: false
+  tags:
+    - configure_repos
+    - remove_existing_repos
+
+- name: remove current repository files
+  file:
+    path: /etc/yum.repos.d/{{ item }}
+    state: absent
+  with_items: "{{ repodircontents.stdout_lines }}"
+  ignore_errors: true
+  tags:
+    - configure_repos
+    - remove_existing_repos
+
+- name: Run setup if gather_facts hasn't been run
+  setup:
+    gather_subset: min
+  when: ansible_date_time is not defined
+
+- name: Randomize hostname for Satellite
+  copy:
+    dest: /etc/rhsm/facts/katello.facts
+    content: {"network.fqdn": "{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic | lower }}"}
+
 - name: Register with activation-key
+  when: satellite_activationkey is defined
   redhat_subscription:
     state: present
-    server_hostname: "{{satellite_url}}"
-    activationkey: "{{satellite_activationkey}}"
-    org_id: "{{satellite_org}}"
+    server_hostname: "{{ satellite_url }}"
+    activationkey: "{{ satellite_activationkey }}"
+    org_id: "{{ satellite_org }}"
 
-# - name: Enable Repositories
-#   command: subscription-manager repos --enable=rhel-7-server-satellite-tools-6.3-rpms
-
-# - name: Install Katello Agent
-#   yum:
-#     name: katello-agent
-#     state: latest
-
-# - name: Start Katello Agent
-#   service:
-#     name: goferd
-#     state: started
-#     enabled: yes
+- name: Enable repos
+  rhsm_repository:
+    name: "*"
+    state: enabled
+  when:
+  - use_content_view
+  - satellite_activationkey is defined
 
 - name: Enable repos for RHEL
   rhsm_repository:
@@ -64,10 +79,46 @@
     state: enabled
   with_items:
     - '{{ rhel_repos }}'
-  when: not use_content_view
+  when:
+  - not use_content_view
+  - rhel_repos is defined
 
-- name: Enable repos
-  rhsm_repository:
-    name: "*"
-    state: enabled
-  when: use_content_view
+# This would be used to skip registering with Satellite,
+# but still be able to access the repos via certificate auth.
+# This will only run if you have satellite_key and satellite_cert defined,
+# but not satellite_activationkey
+- name: Set up repos to access Satellite using cert
+  when:
+  - satellite_key is defined
+  - satellite_cert is defined
+  block:
+  - name: Create the certificate and key files
+    file:
+      state: touch
+      path: "{{ item }}"
+    loop:
+      - "/etc/pki/tls/Red_GPTE.key"
+      - "/etc/pki/tls/Red_GPTE.pem"
+
+  - name: Add certificate and key content
+    copy:
+      dest: "{{ item.file }}"
+      content: "{{ item.contents }}"
+    loop:
+      - {file: "/etc/pki/tls/Red_GPTE.key", contents: "{{ satellite_key }}"}
+      - {file: "/etc/pki/tls/Red_GPTE.pem", contents: "{{ satellite_cert }}"}
+
+  - name: create open.repo template on host
+    template:
+      src: "./files/repos_template.j2"
+      dest: /etc/yum.repos.d/open_{{ env_type }}.repo
+    tags:
+    - create_open_repo_template
+
+- name: clean repositories
+  command: "yum clean all"
+  args:
+    warn: false
+  tags:
+    - configure_repos
+    - run_yum_repolist

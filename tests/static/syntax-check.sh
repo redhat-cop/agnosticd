@@ -9,8 +9,7 @@ static=${ORIG}/tests/static
 cd ${ORIG}
 
 for i in \
-    $(find ${ORIG}/ansible/configs -name 'sample_vars*.y*ml' | sort) \
-    ${static}/scenarii/*.{yaml,yml}; do
+    $(find ${ORIG}/ansible/configs -name 'sample_vars*.y*ml' | sort); do
     echo
     echo '##################################################'
     echo "$(basename $(dirname ${i}))/$(basename ${i})"
@@ -26,11 +25,11 @@ for i in \
     fi
     env_type=$(egrep ^env_type: ${i}|cut -d' ' -f 2)
 
-    # Linklight needs to be downloaded
-    if [ "${env_type}" = linklight ]; then
-        if [ ! -d ${ansible_path}/workdir/linklight ]; then
-            echo "Download linklight"
-            git clone https://github.com/ansible/workshops.git ${ansible_path}/workdir/linklight
+    # Ansible Workshops AKA as Linklight needs to be downloaded
+    if [ "${env_type}" = linklight ] || [ "${env_type}" = ansible-workshops ]; then
+        if [ ! -d ${ansible_path}/workdir/${env_type} ]; then
+            echo "Download ${env_type}"
+            git clone https://github.com/ansible/workshops.git ${ansible_path}/workdir/${env_type}
         fi
         touch $(dirname "${i}")/env_secret_vars.yml
         extra_args=(
@@ -38,12 +37,18 @@ for i in \
         )
     fi
 
-
     if [ -e "${ansible_path}/configs/${env_type}/hosts" ]; then
         inventory=(-i "${ansible_path}/configs/${env_type}/hosts")
     else
         inventory=(-i "${static}/tox-inventory.txt")
     fi
+
+    # Setup galaxy roles and collections, make sure it works
+    ansible-playbook --tags galaxy_roles \
+                     "${inventory[@]}" \
+                     ${ansible_path}/main.yml \
+                     ${extra_args[@]} \
+                     -e @${i}
 
     for playbook in \
         ${ansible_path}/main.yml \
