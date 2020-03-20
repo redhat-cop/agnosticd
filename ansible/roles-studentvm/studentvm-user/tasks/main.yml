@@ -1,0 +1,115 @@
+---
+- name: Set up studentvm_user combined dictionary
+  set_fact:
+    studentvm_user: >-
+      {{ studentvm_user_defaults
+       | combine(studentvm_user_vars    | default( {} ),
+                 studentvm_user_secrets | default( {}), recursive=true )
+      }}
+- name: Print combined role variables
+  debug:
+    var: studentvm_user
+    verbosity: 2
+
+- name: Generate user password if not defined
+  when:
+  - student_user.use_password | bool
+  - student_user.password | d("") | length == 0
+  set_fact:
+    student_user_student_password: "{{ lookup('password', '/dev/null length=12 chars=ascii_letters,digits') }}"
+
+- name: Use provided password
+  when:
+  - student_user.use_password | bool
+  - student_user.password | d("") | length > 0
+  set_fact:
+    student_user_student_password: "{{ student_user.password }}"
+
+- name: User with Password
+  when: student_user.use_password | bool
+  block:
+  - name: Create user with password
+    user:
+      state: present
+      name: "{{ studentvm_user.user_name }}"
+      password: "{{ student_user_student_password | password_hash( 'sha512' ) }}"
+      password_lock: yes
+      comment: GTPE Student
+      group: users
+      groups: "{{ 'wheel' if studentvm_user.enable_sudo | bool else '' }}"
+      shell: /bin/bash
+
+  - name: Enable password authentication
+    lineinfile:
+      line: PasswordAuthentication yes
+      regexp: '^ *PasswordAuthentication'
+      path: /etc/ssh/sshd_config
+
+- name: Create user without password
+  when: not student_user.use_password
+  user:
+    state: present
+    name: "{{ studentvm_user.user_name }}"
+    comment: GTPE Student
+    group: users
+    groups: "{{ 'wheel' if studentvm_user.enable_sudo | bool else '' }}"
+    shell: /bin/bash
+
+- name: Disable root password authentication
+  lineinfile:
+    line: PermitRootLogin without-password
+    regexp: '^ *PermitRootLogin'
+    path: /etc/ssh/sshd_config
+
+- name: Allow passwordless sudo
+  when: studentvm_user.enable_sudo | bool
+  lineinfile:
+    path: '/etc/sudoers'
+    state: present
+    line: "{{ studentvm_user.user_name }}         ALL=(ALL)       NOPASSWD: ALL"
+    insertafter: "'^{{ remote_user }}"
+
+- name: Generate student SSH Key if no public key specified
+  when: studentvm_user.public_key | d("") | length == 0
+  block:
+  - name: Generate student SSH Key
+    openssh_keypair:
+      state: present
+      comment: GPTE Student User
+      path: "/home/{{ remote_user }}/.ssh/student"
+      owner: "{{ remote_user }}"
+      mode: 0600
+    register: r_student_key
+  - name: Set Public and Private Key
+    set_fact:
+      studentvm_user_public_key: "{{ r_student_key.public_key }}"
+      studentvm_user_private_key: "{{ r_student_key.private_key }}"
+
+- name: Set student key
+  when: studentvm_user.public_key | d("") | length > 0
+  set_fact:
+    studentvm_user_public_key: "{{ studentvm_user.public_key }}"
+
+- name: Add student public key to student vm
+  authorized_key:
+    user: "{{ studentvm_user.user_name }}"
+    key: "{{ studentvm_user_public_key }}"
+
+- name: Restart sshd
+  service:
+    name: sshd
+    state: restarted
+
+- name: Print User Info for Password authentication
+  when: studentvm_user.use_password | bool
+  agnosticd_user_info:
+    username: "{{ studentvm_user.user_name }}"
+    password: "{{ student_user_student_password }}"
+
+- name: Print User Info for Public Key authentication
+  when:
+  - not studentvm_user.use_password | bool
+  - studentvm_user_private_key | d("") | > 0
+  agnosticd_user_info:
+    username: "{{ studentvm_user.user_name }}"
+    private_key: "{{ studentvm_user_private_key }}"
