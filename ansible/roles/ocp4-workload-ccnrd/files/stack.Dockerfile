@@ -12,9 +12,9 @@
 FROM registry.redhat.io/codeready-workspaces/stacks-java-rhel8:2.0
 
 ENV GRAALVM_VERSION=19.3.1
-ENV QUARKUS_VERSION=1.2.1.Final
+ENV QUARKUS_VERSION=1.3.0.Final
 ENV TKN_VERSION=0.8.0
-ENV KN_VERSION=0.11.0
+ENV KN_VERSION=0.12.0
 ENV OC_VERSION=4.3
 ENV MVN_VERSION=3.6.3
 ENV GRAALVM_HOME="/usr/local/graalvm-ce-java8-${GRAALVM_VERSION}"
@@ -41,7 +41,7 @@ RUN cd /tmp && mkdir project && cd project && mvn io.quarkus:quarkus-maven-plugi
 
 RUN cd /tmp && mkdir project && cd project && mvn io.quarkus:quarkus-maven-plugin:${QUARKUS_VERSION}:create -DprojectGroupId=org.acme -DprojectArtifactId=footest -Dextensions="quarkus-smallrye-reactive-streams-operators,quarkus-smallrye-reactive-messaging,quarkus-smallrye-reactive-messaging-kafka,quarkus-swagger-ui,quarkus-vertx,quarkus-kafka-client, quarkus-smallrye-metrics,quarkus-smallrye-openapi" && mvn -f footest clean compile package -Pnative && cd / && rm -rf /tmp/project
 
-RUN cd /tmp && git clone https://github.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2m4-labs && cd cloud-native-workshop-v2m4-labs && for proj in *-service ; do mvn -fn -f ./$proj dependency:resolve-plugins dependency:resolve dependency:go-offline clean compile -DskipTests ; done && cd /tmp && rm -rf /tmp/cloud-native-workshop-v2m4-labs
+RUN cd /tmp && git clone https://github.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2m4-labs && cd cloud-native-workshop-v2m4-labs && git checkout ocp-4.3 && for proj in *-service ; do mvn -fn -f ./$proj dependency:resolve-plugins dependency:resolve dependency:go-offline clean compile -DskipTests ; done && cd /tmp && rm -rf /tmp/cloud-native-workshop-v2m4-labs
 
 RUN siege && sed -i 's/^connection = close/connection = keep-alive/' $HOME/.siege/siege.conf && sed -i 's/^benchmark = false/benchmark = true/' $HOME/.siege/siege.conf
 
