@@ -1,0 +1,128 @@
+---
+
+- name: "create operatorgroup in {{ ocp_project_gitea }}"
+  k8s:
+    state: present
+    namespace: "{{ ocp_project_gitea }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/operatorgroup.j2' ) | from_yaml }}"
+  vars:
+    operator_group_name: "{{ gitea_operator_group_name }}"
+
+- name: create gitea operator
+  k8s:
+    state: present
+    namespace: "{{ ocp_project_gitea }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/gitea-operator.j2' ) | from_yaml }}"
+  vars:
+    _namespace: "{{ ocp_project_gitea }}"
+
+- name: create gitea deployment
+  k8s:
+    state: present
+    namespace: "{{ ocp_project_gitea }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/gitea-server.j2' ) | from_yaml }}"
+
+- name: wait until gitea-server has running condition
+  command: >
+    oc get Gitea/gitea-server -o jsonpath='{.status.conditions[?(@.type=="Running")].status}' -n "{{ ocp_project_gitea }}"
+  register: r_gitea
+  retries: 180
+  delay: 10
+  until: r_gitea.stdout == "True"
+
+- name: check gitea deployment is running
+  k8s_facts:
+    api_version: apps/v1
+    kind: Deployment
+    name: "{{ gitea_service_name }}"
+    namespace: "{{ ocp_project_gitea }}"
+  register: r_gitea_deployment
+  retries: 180
+  delay: 10
+  until:
+    - r_gitea_deployment.resources[0].status.readyReplicas is defined
+    - r_gitea_deployment.resources[0].status.replicas is defined
+    - r_gitea_deployment.resources[0].status.readyReplicas == r_gitea_deployment.resources[0].status.replicas
+
+- name: search for gitea pod
+  k8s_facts:
+    kind: Pod
+    namespace: "{{ ocp_project_gitea }}"
+    label_selectors:
+      - app = gitea
+  register: gitea_pod
+
+- name: search for gitea route
+  k8s_facts:
+    kind: Route
+    namespace: "{{ ocp_project_gitea }}"
+    label_selectors:
+      - app = gitea
+  register: gitea_route
+
+- name: wait for gitea route to respond with 200
+  uri:
+    url: "https://{{ gitea_route.resources[0].spec.host }}"
+    method: GET
+    validate_certs: false
+  register: gitea_route_status
+  retries: 180
+  delay: 10
+  until: gitea_route_status.status == 200
+
+- name: check if gitea admin user already exists
+  uri:
+    url: "https://{{ gitea_route.resources[0].spec.host }}/api/v1/users/{{ gitea_admin_name }}"
+    method: GET
+    validate_certs: false
+    status_code: 200, 404
+  register: giteaadmin_user
+  ignore_errors: true
+
+- name: create admin user in gitea
+  command: >
+    oc exec {{ gitea_pod.resources[0].metadata.name }} -n "{{ ocp_project_gitea }}" -- /home/gitea/gitea admin create-user --username {{ gitea_admin_name }} --password {{ gitea_admin_password }} --email {{ gitea_admin_name }}@workshop.com --must-change-password=false --admin -c /home/gitea/conf/app.ini
+  when: giteaadmin_user.status == 404
+
+- name: check if gitea amq_streams_development_experienced_labs project already exists
+  uri:
+    url: "https://{{ gitea_route.resources[0].spec.host }}/api/v1/repos/{{ gitea_admin_name }}/amq_streams_development_experienced_labs"
+    method: GET
+    validate_certs: false
+    user: "{{ gitea_admin_name }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    status_code: 200, 404
+  register: gitea_project
+  ignore_errors: true
+
+- name: get gitea user info
+  uri:
+    url: "https://{{ gitea_route.resources[0].spec.host }}/api/v1/users/{{ gitea_admin_name }}"
+    method: GET
+    validate_certs: false
+    user: "{{ gitea_admin_name }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+  register: gitea_insystem_user
+  when: gitea_project.status == 404
+
+- name: deploy amq_streams_development_experienced_labs into gitea
+  uri:
+    url: "https://{{ gitea_route.resources[0].spec.host }}/api/v1/repos/migrate"
+    method: POST
+    body: "{{ body }}"
+    status_code: 201
+    body_format: json
+    validate_certs: false
+    user: "{{ gitea_admin_name }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+  when: gitea_project.status == 404
+  vars:
+    body: '{
+      "clone_addr": "{{ github_repository }}",
+      "description": "",
+      "repo_name": "{{ gitea_repository_name }}",
+      "uid": {{ gitea_insystem_user.json.id | int }}
+    }'
