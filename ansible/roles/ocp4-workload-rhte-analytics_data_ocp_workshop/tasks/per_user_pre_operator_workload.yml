@@ -1,0 +1,145 @@
+# vim: set ft=ansible
+---
+# Implement your Workload deployment tasks here
+- set_fact:
+    user_name: "user{{ user_num }}"
+
+- set_fact:
+    project_name: "opendatahub-{{ user_name }}"
+
+- name: "Create ODH project for {{ user_name }}"
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: "{{ project_name }}"
+
+- name: "Get any LimitRanges in {{ project_name }}"
+  k8s_facts:
+    kind: LimitRange
+    namespace: "{{ project_name }}"
+  register: limit_ranges
+
+- name: "DEBUG: Available LimitRanges in {{ project_name }}"
+  debug:
+    msg: "{{ item }}"
+  loop: "{{ limit_ranges.resources | list }}"
+  when: not silent|bool
+
+- name: "Delete any limitranges in {{ project_name }}"
+  k8s:
+    state: absent
+    kind: LimitRange
+    api_version: v1
+    definition: "{{ item }}"
+  loop: "{{ limit_ranges.resources | list }}"
+  when: limit_ranges.resources
+
+- name: "Create CephObjectStoreUser for {{ user_name }}"
+  k8s:
+    state: present
+    definition:
+      apiVersion: ceph.rook.io/v1
+      kind: CephObjectStoreUser
+      metadata:
+        name: "{{ user_name }}"
+        namespace: "{{ ocs_namespace }}"
+      spec:
+        store: ocs-storagecluster-cephobjectstore
+        displayName: "{{ user_name }}"
+
+- name: "Make {{ user_name }} an admin of {{ project_name }}"
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: "admin-{{ user_name }}"
+        namespace: "{{ project_name }}"
+      subjects:
+        - kind: User
+          name: "{{ user_name }}"
+      roleRef:
+        kind: ClusterRole
+        name: admin
+        apiGroup: rbac.authorization.k8s.io
+
+- name: "Make {{ user_name }} ODH admin"
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: "opendatahub-admin-{{ user_name }}"
+        namespace: "{{ project_name }}"
+      subjects:
+        - kind: User
+          name: "{{ user_name }}"
+      roleRef:
+        kind: ClusterRole
+        name: opendatahub-admin
+        apiGroup: rbac.authorization.k8s.io
+
+- name: "Make {{ user_name }} Seldon user"
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: "seldon-user-{{ user_name }}"
+        namespace: "{{ project_name }}"
+      subjects:
+        - kind: User
+          name: "{{ user_name }}"
+      roleRef:
+        kind: ClusterRole
+        name: seldon-user
+        apiGroup: rbac.authorization.k8s.io
+
+- name: "Create Open Data Hub operator RBAC in {{ project_name }}"
+  k8s:
+    state: present
+    definition: "{{ item }}"
+    namespace: "{{ project_name }}"
+  loop:
+    - "{{ lookup('file', 'deploy_service_account.yaml') }}"
+    - "{{ lookup('file', 'deploy_role.yaml') }}"
+    - "{{ lookup('file', 'deploy_role_binding.yaml') }}"
+
+####################################################################################################
+# STRIMZI SETUP
+####################################################################################################
+- name: Create the Strimzi ServiceAccount, RoleBinding and ClusterRoleBinding
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  with_items:
+    - "{{ lookup('template', 'kafka/strimzi.serviceaccount.yaml.j2') }}"
+    - "{{ lookup('template', 'kafka/strimzi.rolebinding.yaml.j2') }}"
+    - "{{ lookup('template', 'kafka/strimzi.clusterrolebinding.yaml.j2') }}"
+####################################################################################################
+# END STRIMZI
+####################################################################################################
+
+- name: 'Add Open Data Hub to the project "Installed Operators" in {{ project_name }}'
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  loop:
+    - "{{ lookup('template', 'opendatahub-operator.operatorgroup.yaml.j2') }}"
+    - "{{ lookup('template', 'opendatahub-operator.v0.5.1.clusterserviceversion.yaml.j2') }}"
+
+- name: 'Create the OBC for {{ user_name }}'
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  loop:
+    - "{{ lookup('template', 'user-obc.yaml.j2') }}"

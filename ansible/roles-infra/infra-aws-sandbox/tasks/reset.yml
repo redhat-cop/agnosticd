@@ -1,0 +1,95 @@
+---
+- name: Download aws-nuke
+  become: yes
+  get_url:
+    url: "{{ aws_nuke_binary_url }}"
+    dest: /usr/bin/aws-nuke
+    mode: 755
+    owner: root
+    group: root
+  failed_when: false
+
+- name: Grab or create the public zone
+  environment:
+    AWS_PROFILE: "{{ account_profile }}"
+  route53_zone:
+    zone: "{{ account_name }}{{subdomain_base}}."
+  register: _route53zone
+  retries: 5
+  delay: "{{ 60|random(start=3, step=1) }}"
+  until: _route53zone is succeeded
+
+- name: Cleanup DNS Zone
+  include_tasks: clean_zone.yml
+  vars:
+    _hostedzoneid: "{{ _route53zone.zone_id }}"
+    aws_public_zone: "{{ account_name }}{{subdomain_base}}."
+
+- tags: nuke
+  when: nuke_sandbox | bool
+  block:
+    - name: Set fact for filtered resources
+      set_fact:
+        aws_nuke_filters:
+          Route53HostedZone:
+            - "{{ account_name }}{{ subdomain_base }}."
+            - /hostedzone/{{ _route53zone.zone_id }} ({{ account_name }}{{ subdomain_base }}.)
+
+    - name: Generate config file for aws-nuke
+      template:
+        src: "{{ role_path }}/templates/nuke-config.yml.j2"
+        dest: "{{ output_dir }}/{{ account_name }}_nuke-config.yml"
+
+    - name: Run aws-nuke on sandbox account
+      command: >-
+        aws-nuke --profile {{ account_name }}
+        -c "{{ output_dir }}/{{ account_name }}_nuke-config.yml"
+        --no-dry-run
+        --force
+      args:
+        stdin: "{{ account_name }}{{ alias_suffix }}"
+      register: _awsnuke
+      async: 1800
+      poll: 30
+      ignore_errors: true
+      retries: "{{ aws_nuke_retries }}"
+      delay: 30
+      until: _awsnuke is succeeded
+
+    - debug:
+        var: _awsnuke
+
+    - when: _awsnuke is failed
+      block:
+        - include_tasks: manual_cleanup.yml
+          loop: "{{ all_regions }}"
+          loop_control:
+            loop_var: _region
+
+        - name: Run aws-nuke again
+          when: run_aws_nuke_again | default(false)
+          command: >-
+            aws-nuke --profile {{ account_name }}
+            -c "{{ output_dir }}/{{ account_name }}_nuke-config.yml"
+            --no-dry-run
+            --force
+          args:
+            stdin: "{{ account_name }}{{ alias_suffix }}"
+          register: _awsnuke2
+          async: 1800
+          poll: 30
+          ignore_errors: true
+          retries: "{{ aws_nuke_retries }}"
+          delay: 30
+          until: _awsnuke2 is succeeded
+
+        - debug:
+            var: _awsnuke2
+
+
+    - name: Report aws-nuke error
+      fail:
+        msg: aws-nuke failed
+      when:
+        - _awsnuke is failed
+        - _awsnuke2 is failed or _awsnuke2 is skipped

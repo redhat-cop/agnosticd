@@ -1,0 +1,110 @@
+---
+- name: Set mig_state to absent if destroying workload
+  set_fact: 
+    mig_state: "absent"
+  when: migration_workload_destroy|bool
+
+- name: "Set {{ mig_migration_namespace }} namespace state to {{ mig_state }}"
+  k8s:
+    name: "{{ mig_migration_namespace }}"
+    kind: Namespace
+    state: "{{ mig_state }}"
+
+- name: "Set CAM OperatorGroup state to {{ mig_state }}"
+  k8s:
+    state: "{{ mig_state }}"
+    definition: "{{ lookup('template', 'mig-operator-operatorgroup.yml.j2' ) }}"
+
+- name: "Set CAM Operator Subscription state to {{ mig_state }}"
+  k8s:
+    state: "{{ mig_state }}"
+    definition: "{{ lookup('template', 'mig-operator-subscription-downstream.yml.j2' ) }}"
+
+- name: "Wait for Migration CRDs to exist"
+  k8s_info:
+    api_version: "apiextensions.k8s.io/v1beta1"
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop: "{{ mig_expected_crds }}"
+  register: crds
+  until: crds.resources|length > 0
+  retries: 30
+  delay: 10
+  when: not migration_workload_destroy|bool
+
+- name: "Set MigrationController state to {{ mig_state }}"
+  k8s:
+    state: "{{ mig_state }}"
+    definition: "{{ lookup('template', 'controller-4.yml.j2' ) }}"
+
+- name: copy lab scripts to bastion
+  become: true
+  copy:
+    src: "{{ role_path }}/files/"
+    dest: "/home/{{ student_name }}/"
+  when: student_name is defined
+
+- when: ocs_migstorage
+  block:
+  - name: Discovering NooBaa S3 endpoint
+    k8s_info:
+      api_version: v1
+      kind: Service
+      name: s3
+      namespace: "{{ ocs_migstorage_namespace }}"
+    register: noobaa_s3_endpoint
+    retries: 10
+    delay: 3
+    until: noobaa_s3_endpoint.resources is defined and
+           noobaa_s3_endpoint.resources[0] is defined and
+           noobaa_s3_endpoint.resources[0].status.loadBalancer is defined and
+           noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress is defined
+
+  - set_fact:
+      noobaa_endpoint: "{{ noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress[0].ip }}"
+    when: noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress[0].ip is defined
+
+  - set_fact:
+      noobaa_endpoint: "{{ noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress[0].hostname }}"
+    when: noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress[0].hostname is defined
+
+  - name: Get MCG PV Pool secret
+    k8s_info:
+      api_version: v1
+      kind: Secret
+      name: "{{ ocs_migstorage_bucketname }}"
+      namespace: "{{ ocs_migstorage_namespace }}"
+    register: ocs_migstorage_secret
+    retries: 20
+    delay: 3
+    until: ocs_migstorage_secret.resources|length > 0
+
+  - set_fact:
+      noobaa_s3_access_key_id: "{{ ocs_migstorage_secret.resources[0].data.AWS_ACCESS_KEY_ID | b64decode }}"
+      noobaa_s3_secret_access_key: "{{ ocs_migstorage_secret.resources[0].data.AWS_SECRET_ACCESS_KEY | b64decode }}"
+
+  - name: Discovering NooBaa CA Bundle
+    shell: "{{ item }}"
+    loop:
+    - openssl s_client -showcerts -verify 5 -connect {{ noobaa_endpoint }}:443 < /dev/null | awk '/BEGIN/,/END/{ if(/BEGIN/){a++}; out="cert"a".crt"; print >out}' && for cert in *.crt; do newname=$(openssl x509 -noout -subject -in $cert | sed -n 's/^.*CN=\(.*\)$/\1/; s/[ ,.*]/_/g; s/__/_/g; s/^_//g;p').pem; mv $cert $newname; done;
+    - cat *.pem
+    - rm *.pem
+    register: noobaa_ca_bundle_raw
+    when: noobaa_s3_endpoint_proto == 'https'
+
+  - set_fact:
+      noobaa_ca_bundle: "{{ noobaa_ca_bundle_raw.results[1].stdout }}"
+    when: noobaa_s3_endpoint_proto == 'https'
+
+  - name: Creating OCS backed migstorage
+    k8s:
+      state: present
+      definition: "{{ lookup('template', 'mig_storage.yml.j2') }}"
+    vars:
+      noobaa_s3_url: "{{ noobaa_s3_endpoint_proto }}://{{ noobaa_endpoint }}/"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

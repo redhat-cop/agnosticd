@@ -1,0 +1,270 @@
+---
+- name: Step 00xxxxx software
+  hosts: bastions
+  gather_facts: false
+  become: false
+  tasks:
+    - when: install_ocp4 | bool
+      tags:
+      - install_openshift
+      block:
+        - name: Create deployinprogress file
+          file:
+            path: /tmp/deployinprogress
+            state: touch
+
+        - name: Get awscli bundle
+          get_url:
+            url: https://s3.amazonaws.com/aws-cli/awscli-bundle.zip
+            dest: /tmp/awscli-bundle.zip
+
+        - name: Unzip awscli-bundle.zip
+          unarchive:
+            src: /tmp/awscli-bundle.zip
+            dest: /tmp/
+            remote_src: yes
+
+        - name: Install awscli
+          command: /tmp/awscli-bundle/install -i /usr/local/aws -b /bin/aws
+          args:
+            creates: /usr/local/aws
+          become: yes
+
+        - name: cleanup archive and tmp files
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/awscli-bundle
+            - /tmp/awscli-bundle.zip
+
+        - name: Create .aws directory
+          file:
+            path: ~/.aws
+            state: directory
+
+        - name: Add aws credentials
+          blockinfile:
+            path: ~/.aws/credentials
+            block: |-
+              [default]
+              aws_access_key_id = {{ hostvars.localhost.student_access_key_id }}
+              aws_secret_access_key = {{ hostvars.localhost.student_secret_access_key }}
+
+        - name: Install Packages
+          become: yes
+          package:
+            name:
+              - golang
+              # - python2-boto3
+              - unzip
+
+        - name: Get the OpenShift Installer
+          become: yes
+          unarchive:
+            src: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp4_installer_version }}/openshift-install-linux-{{ ocp4_installer_version }}.tar.gz"
+            remote_src: yes
+            dest: /usr/bin
+            mode: 0755
+            owner: root
+            group: root
+
+        - name: Get the OpenShift CLI
+          become: yes
+          unarchive:
+            src: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp4_installer_version }}/openshift-client-linux-{{ ocp4_installer_version }}.tar.gz"
+            remote_src: yes
+            dest: /usr/bin
+            mode: 0775
+            owner: root
+            group: root
+
+        - name: Generate SSH keys
+          shell: ssh-keygen -b 2048 -t rsa -f ~/.ssh/id_rsa -q -N ""
+          args:
+            creates: ~/.ssh/id_rsa
+
+        - name: Generate SSH pub key
+          shell: ssh-keygen -y -f ~/.ssh/id_rsa > ~/.ssh/id_rsa.pub
+          args:
+            creates: ~/.ssh/id_rsa.pub
+
+        - name: Slurp public key
+          slurp:
+            path: /home/{{ ansible_user }}/.ssh/id_rsa.pub
+          register: idrsapub
+
+        - name: Create cluster directory
+          file:
+            path: /home/{{ ansible_user }}/{{ cluster_name }}
+            state: directory
+
+        - name: Check if version specific install-config.j2 exists
+          stat:
+            path: files/install-config.yaml.{{ ocp4_installer_version }}.j2
+          register: rconfig
+          delegate_to: localhost
+
+        - name: Use version-specific template for install-config-yaml
+          set_fact:
+            install_config_template_path: files/install-config.yaml.{{ ocp4_installer_version }}.j2
+          when: rconfig.stat.exists
+
+        - name: Use default template for install-config-yaml
+          set_fact:
+            install_config_template_path: files/install-config.yaml.j2
+          when: not rconfig.stat.exists
+
+        - name: Generate config install-config.yaml
+          template:
+            src: "{{ install_config_template_path }}"
+            dest: /home/{{ ansible_user }}/{{ cluster_name }}/install-config.yaml
+
+        - name: Run the installer
+          tags:
+          - run_installer
+          command: openshift-install create cluster --dir=/home/{{ ansible_user }}/{{ cluster_name }}
+          async: "{{ 2 * 60 * 60 }}"
+
+        - name: Fetch kube config
+          fetch:
+            flat: yes
+            src: /home/{{ ansible_user }}/{{ cluster_name }}/auth/{{ item }}
+            dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_{{ item }}"
+          loop:
+            - kubeconfig
+            - kubeadmin-password
+
+        - name: Make sure .kube directory exists in home directory
+          file:
+            state: directory
+            path: "/home/{{ ansible_user }}/.kube"
+            owner: "{{ ansible_user }}"
+            mode: 0775
+
+        - name: Set up .kube/config
+          copy:
+            remote_src: yes
+            src: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+            dest: "/home/{{ ansible_user }}/.kube/config"
+
+        - name: Make sure .kube directory exists in /root
+          file:
+            state: directory
+            path: /root/.kube
+            owner: root
+            mode: 0700
+          become: yes
+
+        - name: Set up .kube/config for root
+          copy:
+            remote_src: yes
+            src: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+            dest: /root/.kube/config
+          become: yes
+
+        - name: Get kubeadmin password
+          slurp:
+            path: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeadmin-password
+          register: kubeadminr
+
+        - name: Get console route
+          environment:
+            KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+          command: oc get route -n openshift-console console -o json
+          register: routeconsole
+          retries: 10
+          delay: 30
+          until: routeconsole is succeeded
+          ignore_errors: yes
+
+        - name: Set webconsole address
+          set_fact:
+            webconsole: "http://{{ routeconsole.stdout | from_json | json_query('spec.host') }}"
+          when: routeconsole is succeeded
+
+        # sometimes the route is not ready, guess it
+        - name: Guess webconsole address
+          set_fact:
+            webconsole: "http://console-openshift-console.apps.{{ cluster_name }}.{{ guid }}.{{ subdomain_base }}"
+          when: routeconsole is failed
+
+        - name: Get API for command line
+          environment:
+            KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+          command: oc whoami --show-server
+          register: showserver
+
+        - name: Print Overview
+          debug:
+            msg: "{{ item }}"
+          with_items:
+            - "user.info: Openshift Master Console: {{ webconsole }}"
+            - "user.info: Openshift API for command line 'oc' client: {{ showserver.stdout | trim }}"
+            - "user.info: Download oc client from https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp4_installer_version }}/openshift-client-linux-{{ ocp4_installer_version }}.tar.gz"
+
+        - name: Output htpasswd
+          debug:
+            msg: "user.info: This cluster has authentication enabled. You can use '{{ admin_user }}' with password '{{ admin_password }}' to access your cluster"
+          when:
+            - admin_password is defined
+            - install_idm == "htpasswd"
+
+        - name: Output kubeadmin
+          debug:
+            msg: "user.info: Kubeadmin user / password: kubeadmin / {{ kubeadminr.content | b64decode }}"
+          when: >-
+            install_idm is not defined
+            or install_idm != "htpasswd"
+
+        - name: Print SSH warning
+          debug:
+            msg: "{{ item }}"
+          with_items:
+            - "user.info: "
+            - "user.info: You *CANNOT* SSH into this environment"
+          when: not install_student_user | bool
+
+      always:
+        - name: Delete deployinprogress lock file
+          file:
+            path: /tmp/deployinprogress
+            state: absent
+
+- name: Step 00xxxxx software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    # NOT Pre-installed 
+    - name: Print Student aws access as user.info
+      debug:
+        msg: "{{ item }}"
+      with_items:
+        - "user.info: Top level domain: {{ subdomain_base_suffix }}"
+        - "user.info: "
+        - "user.info: WARNING: with great power comes great responsibility. We monitor usage."
+        - "user.info: Your AWS programmatic access:"
+        - "user.info: aws_access_key_id = {{ student_access_key_id }}"
+        - "user.info: aws_secret_access_key = {{ student_secret_access_key }}"
+      when:
+        - not install_ocp4 | bool
+        - student_access_key_id is defined
+        - student_secret_access_key is defined
+
+    - when:
+        - install_student_user | bool
+        - student_name is defined
+        - student_password is defined or hostvars[groups.bastions.0].student_password is defined
+      block:
+        - name: Print Student SSH access as user.info
+          debug:
+            msg: "{{ item }}"
+          with_items:
+            - "user.info: "
+            - "user.info: SSH Access: ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix }}"
+
+        - name: Print Student SSH password as user.info
+          debug:
+            msg: "user.info: SSH password: {{ student_password | d(hostvars[groups.bastions.0].student_password) }}"
+          when: print_student_password | default(true) | bool
