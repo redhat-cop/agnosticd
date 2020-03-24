@@ -1,0 +1,99 @@
+---
+- name: set namespace
+  set_fact:
+    _namespace: "codeready-workspaces"
+
+- name: Create namespace for {{ _namespace }}
+  k8s:
+    state: present
+    definition: "{{ lookup('template', role_path ~ '/templates/namespace-without-requester.j2' ) | from_yaml }}"
+  vars:
+    _description: "Codeready Workspaces"
+
+- name: Create OperatorGroup for the operators
+  k8s:
+    state: present
+    definition: "{{ lookup('template', role_path ~ '/templates/olm-operatorgroup/single-namespace.j2' ) | from_yaml }}"
+
+- name: Create operator
+  k8s:
+    state: present
+    namespace: "{{ _namespace }}"
+    definition: "{{ lookup('file', role_path ~ '/files/codeready-workspaces/operator.yml' ) | from_yaml }}"
+
+- name: Wait until csv/{{ _crw_csv_version }} is Succeeded
+  command: >
+    oc get csv/{{ _crw_csv_version }} -o jsonpath='{.status.phase}' -n "{{ _namespace }}"
+  register: crwcsv
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: crwcsv.stdout == "Succeeded"
+
+- name: Check if Che cluster already exists (note; error can be ignored)
+  command: >
+    oc get CheCluster/codeready-workspaces -o jsonpath='{.metadata.name}' -n "{{ _namespace }}"
+  register: che_cluster
+  ignore_errors: true
+
+- name: Create Che Cluster
+  k8s:
+    state: present
+    namespace: "{{ _namespace }}"
+    definition: "{{ lookup('template', role_path ~ '/files/codeready-workspaces/cluster.yml' ) | from_yaml }}"
+  when: che_cluster.stdout != "codeready-workspaces"
+
+- name: Wait until Che Cluster is Running
+  command: >
+    oc get CheCluster/codeready-workspaces -o jsonpath='{.status.cheClusterRunning}' -n "{{ _namespace }}"
+  register: checluster
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: checluster.stdout == "Available"
+
+- name: Get codeready route host
+  command: >
+    oc get route/codeready -o jsonpath='{.spec.host}' -n "{{ _namespace }}"
+  register: che_route
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: che_route.stdout != ""
+
+- name: Get keycloak route host
+  command: >
+    oc get route/keycloak -o jsonpath='{.spec.host}' -n "{{ _namespace }}"
+  register: keycloak_route
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: keycloak_route.stdout != ""
+
+- name: Wait for Che route to respond with 200
+  uri:
+    url: "http://{{ che_route.stdout }}"
+    method: GET
+    validate_certs: false
+    follow_redirects: yes
+  register: cheresult
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: cheresult.status == 200
+
+- name: Wait for Keycloak route to respond with 200
+  uri:
+    url: "http://{{ keycloak_route.stdout }}"
+    method: GET
+    validate_certs: false
+    follow_redirects: yes
+  register: keycloakresult
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: keycloakresult.status == 200
+
+- name: Get Keycloak username
+  command: >
+    oc get deployment/keycloak -o=jsonpath={'.spec.template.spec.containers[0].env[?(@.name=="SSO_ADMIN_USERNAME")].value'} -n "{{ _namespace }}"
+  register: sso_admin_username
+
+- name: Get Keycloak password
+  command: >
+    oc get deployment/keycloak -o=jsonpath={'.spec.template.spec.containers[0].env[?(@.name=="SSO_ADMIN_PASSWORD")].value'} -n "{{ _namespace }}"
+  register: sso_admin_password

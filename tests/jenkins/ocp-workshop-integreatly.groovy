@@ -8,7 +8,7 @@ def cf_group = 'rhpds-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gucore@redhat.com'
+def notification_email = 'gpteinfrasev3@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -81,7 +81,7 @@ pipeline {
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
             steps {
-                git url: 'https://github.com/fridim/cloudforms-oob'
+                git url: 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
@@ -96,8 +96,8 @@ pipeline {
                         'expiration=7',
                         'runtime=8',
                         'users=2',
-                        'city=jenkinsccicd',
-                        'salesforce=test',
+                        'city=jenkins',
+                        'salesforce=gptejen',
                         'notes=devops_automation_jenkins',
                     ].join(',').trim()
 
@@ -196,7 +196,7 @@ pipeline {
             /* This step uses the delete_svc_guid.sh script to retire
              the service from CloudForms */
             steps {
-                git 'https://github.com/fridim/cloudforms-oob'
+                git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 sh "./opentlc/delete_svc_guid.sh '${guid}'"
             }
@@ -241,7 +241,7 @@ pipeline {
 
     post {
         failure {
-            git 'https://github.com/fridim/cloudforms-oob'
+            git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
             /* retire in case of failure */
             withCredentials(
                 [
