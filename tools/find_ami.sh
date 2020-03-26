@@ -22,25 +22,31 @@ for region in $(aws ec2 --profile $profile describe-regions --query "Regions[].R
 do
     echo "${region}:"
     echo -n "  RHEL81GOLD: "
-    search_images 309956199498 'RHEL-8.1*Access*' false
+    search_images 309956199498 'RHEL-8.1*x86_64*Access*' false
 
     echo -n "  RHEL77GOLD: "
-    search_images 309956199498 'RHEL-7.7*Access*' false
+    search_images 309956199498 'RHEL-7.7*x86_64*Access*' false
 
     echo -n "  RHEL75GOLD: "
-    search_images 309956199498 'RHEL-7.5*Access*' false
+    search_images 309956199498 'RHEL-7.5*x86_64*Access*' false
 
     echo -n "  RHEL74GOLD: "
-    search_images 309956199498 'RHEL-7.4*Access*' false
+    search_images 309956199498 'RHEL-7.4*x86_64*Access*' false
 
     echo -n "  RHEL81: "
-    search_images 309956199498 'RHEL-8.1*' true
+    search_images 309956199498 'RHEL-8.1*x86_64*' true
+
+    echo -n "  RHEL78: "
+    search_images 309956199498 'RHEL-7.8*x86_64*' true
+
+    echo -n "  RHEL77: "
+    search_images 309956199498 'RHEL-7.7*x86_64*' true
 
     echo -n "  RHEL75: "
-    search_images 309956199498 'RHEL-7.5*' true
+    search_images 309956199498 'RHEL-7.5*x86_64*' true
 
     echo -n "  RHEL74: "
-    search_images 309956199498 'RHEL-7.4*' true
+    search_images 309956199498 'RHEL-7.4*x86_64*' true
 
     echo -n "  WIN2012R2: "
     search_images 801119661308 'Windows_Server-2012-R2_RTM-English-64Bit-Base*' true
