@@ -1,0 +1,282 @@
+# Cloudformation template or equivalent should tag all hosts with Project:{{ env_type }}-{{ guid }}
+
+#### Temporary workaround while Sat get required subs
+- name: Add missing rhsm CA to RHVH Hosts
+  hosts: rhvhs
+  become: true
+  gather_facts: False
+  tasks:
+
+    - copy:
+        src: "./files/redhat-uep.pem"
+        dest: "/etc/rhsm/ca/redhat-uep.pem"
+        owner: root
+        group: root
+        mode: 0644
+#### Temporary workaround while Sat get required subs
+
+- name: Set environment key and register to Satellite
+  hosts:
+    - all
+  become: true
+  gather_facts: False
+  roles:
+    - { role: "set_env_authorized_key", when: 'set_env_authorized_key' }
+    - { role: "set-repositories", when: 'repo_method is defined' }
+  tags:
+    - step004
+    - common_tasks
+
+- name: Enable repos on Bastion Hosts
+  hosts: bastions
+  become: true
+  gather_facts: False
+  tasks:
+    - name: Enable base and Ansible repositories
+      rhsm_repository:
+        name: "{{ item }}"
+        state: enabled
+      with_items:
+        - 'rhel-8-for-x86_64-baseos-rpms'
+        - 'rhel-8-for-x86_64-appstream-rpms'
+        - 'ansible-2-for-rhel-8-x86_64-rpms'
+
+- name: Enable repos on RHVM Hosts
+  hosts: rhvms
+  become: true
+  gather_facts: False
+  tasks:
+
+    - name: Ensure all the repositories are disabled
+      rhsm_repository:
+        name: "*"
+        state: disabled
+
+    - name: Ensure RHVH repository is enabled 
+      rhsm_repository:
+        name: "{{ item }}"
+        state: enabled
+      with_items:
+        - 'rhel-7-server-rpms'
+        - 'rhel-7-server-supplementary-rpms'
+        - 'rhel-7-server-rhv-4.3-manager-rpms'
+        - 'rhel-7-server-rhv-4-manager-tools-rpms'
+        - 'rhel-7-server-ansible-2-rpms'
+        - 'jb-eap-7.2-for-rhel-7-server-rpms'
+
+- name: Enable repos on RHVH Hosts
+  hosts: rhvhs
+  become: true
+  gather_facts: False
+  tasks:
+
+    - name: Ensure all the repositories are disabled
+      rhsm_repository:
+        name: "*"
+        state: disabled
+
+    - name: Ensure RHVH repository is enabled 
+      rhsm_repository:
+        name: "{{ item }}"
+        state: enabled
+      with_items:
+        - 'rhel-7-server-rhvh-4-rpms'
+
+- name: Configure Bastion Common Files
+  hosts:
+    - bastions
+  become: true
+  gather_facts: False
+  roles:
+    - { role: "common", when: 'install_common' }
+  tags:
+    - step004
+    - common_tasks
+
+- name: Configuring Bastion Hosts
+  hosts: bastions
+  become: true
+  roles:
+    -  { role: "bastion", when: 'install_bastion' }
+    - role: bastion-student-user
+      when: install_student_user | bool
+  tags:
+    - step004
+    - bastion_tasks
+
+- name: Copy keys to RHVH and RHVM Hosts
+  hosts: rhv*
+  become: true
+  gather_facts: False
+  tasks:
+
+    - name: copy the environment .pem key
+      become: true
+      copy:
+        src: "{{output_dir}}/{{ env_authorized_key }}"
+        dest: "/root/.ssh/id_rsa"
+        owner: root
+        group: root
+        mode: 0400
+
+    - name: add public key to root's authorized keys
+      become: true
+      lineinfile:
+        path: /root/.ssh/authorized_keys
+        line: "{{lookup('file', '{{output_dir}}/{{ env_authorized_key }}.pub')}}"
+
+- name: Copy SSH RSA to cloud-user
+  hosts: bastions
+  become: true
+  tasks:
+    - copy:
+        src: /root/.ssh/{{env_authorized_key}}.pem
+        dest: /home/cloud-user/.ssh/id_rsa
+        owner: cloud-user
+        group: cloud-user
+        mode: 0400
+        remote_src: yes
+  tags:
+    - step004
+    - bastion_tasks
+
+- name: Prepare devices for Gluster
+  hosts: rhvhs
+  become: true
+  gather_facts: False
+  tasks:
+
+    - name: Create first partition
+      parted:
+        device: /dev/vdb
+        number: 1
+        flags: [ lvm ]
+        state: present
+        part_end: 120GiB
+    
+    - name: Create second partition
+      parted:
+        device: /dev/vdb
+        number: 2
+        flags: [ lvm ]
+        state: present
+        part_start: 120GiB
+        part_end: 640GiB
+
+    - name: Create third partition
+      parted:
+        device: /dev/vdb
+        number: 3
+        flags: [ lvm ]
+        state: present
+        part_start: 640GiB
+        part_end: 770GiB
+
+# - name: dump all
+#   hosts: all
+ 
+#   tasks:
+#     - name: Print some debug information 
+#       vars: 
+#         msg: |
+#           Module Variables ("vars"):
+#           --------------------------------
+#           {{ vars | to_nice_json }} 
+          
+#           Environment Variables ("environment"):
+#           --------------------------------
+#           {{ environment | to_nice_json }} 
+          
+#           GROUP NAMES Variables ("group_names"):
+#           --------------------------------
+#           {{ group_names | to_nice_json }}
+          
+#           GROUPS Variables ("groups"):
+#           --------------------------------
+#           {{ groups | to_nice_json }}
+          
+#           HOST Variables ("hostvars"):
+#           --------------------------------
+#           {{ hostvars | to_nice_json }} 
+    
+#       debug: 
+#         msg: "{{ msg.split('\n') }}"       
+#       tags: debug_info
+
+- name: Add short and fqdn resolution for every host
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+
+    - name: Add all hosts info to /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        state: present
+        line: "{{ hostvars[item].ansible_default_ipv4.address }}    {{ hostvars[item].ansible_hostname }}    {{ hostvars[item].ansible_hostname }}.saplab.local"
+      when: item not in ['localhost', '127.0.0.1']
+      with_items: "{{ groups['all'] }}"
+
+    # - name: Add custom Hosted Engine info to /etc/hosts
+    #   lineinfile:
+    #     path: /etc/hosts
+    #     state: present
+    #     line: "192.168.47.100    rhvm-{{ guid }}    rhvm-{{ guid }}.saplab.local"
+
+- name: Prepare Ansible inventories for RHHI and ssh_config 
+  hosts: rhvhs
+  become: True
+  gather_facts: True
+  tasks:
+
+    - name: Add Gluster Inventory
+      template:
+        src: "./files/rhhi-playbooks/gluster_inventory.j2"
+        dest: "/etc/ansible/roles/gluster.ansible/playbooks/hc-ansible-deployment/gluster_inventory.yml"
+        force: yes
+
+    - name: Add Extra Variables for Hosted Engine
+      template:
+        src: "./files/rhhi-playbooks/he_gluster_vars.j2"
+        dest: "/etc/ansible/roles/gluster.ansible/playbooks/hc-ansible-deployment/he_gluster_vars.json"
+        force: yes
+
+    - name: Enable only Gluster playbook
+      template:
+        src: "./files/rhhi-playbooks/hc_deployment.j2"
+        dest: "/etc/ansible/roles/gluster.ansible/playbooks/hc-ansible-deployment/hc_deployment.yml"
+        force: yes
+
+    - name: Ignore HostKeyChecking
+      blockinfile:
+        path: /etc/ssh/ssh_config
+        block: |
+          # Ignore localhost
+          Host localhost
+              StrictHostKeyChecking no
+          # Ignore RHVH servers
+          Host rhvh*
+              StrictHostKeyChecking no
+
+- name: Prepare responses for RHV Engine
+  hosts: rhvms
+  become: True
+  gather_facts: True
+  tasks:
+
+    - name: Add engine-setup responses file
+      template:
+        src: "./files/rhhi-playbooks/rhvm_answers.j2"
+        dest: "/usr/local/src/rhvm_answers.ini"
+        force: yes
+
+- name: PreSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - flight_check
+  tasks:
+    - debug:
+        msg: "Pre-Software checks completed successfully"
