@@ -1,5 +1,5 @@
 ---
-- name: Step 00xxxxx post software
+- name: Step 005 - Post software
   hosts: bastions
   become: no
   gather_facts: False
@@ -9,50 +9,7 @@
   - debug:
       msg: "Post-Software Steps starting"
 
-- name: Step 003.1 Switch Registry to use NFS storage and create NFS PVs
-  hosts: bastions
-  gather_facts: false
-  become: true
-  environment:
-    KUBECONFIG: /home/{{ remote_user }}/{{ cluster_name }}/auth/kubeconfig
-  tasks:
-  - name: Set Ansible Python interpreter to k8s virtualenv
-    set_fact:
-      ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
-  - name: Configure Bastion VM Files for NFS
-    when: nfs_install_server | d(False) | bool
-    block:
-    - name: Create OCP Registry PV
-      k8s:
-        state: present
-        merge_type:
-        - strategic-merge
-        - merge
-        definition: "{{ lookup('template', './files/pv-registry.j2' ) | from_yaml }}"
-
-    - name: Create PVC for OCP registry
-      k8s:
-        state: present
-        merge_type:
-        - strategic-merge
-        - merge
-        definition: "{{ lookup('file', './files/pvc-registry.yaml' ) | from_yaml }}"
-
-    - name: Update OCP registry to use NFS storage instead of SWIFT
-      shell: "oc patch configs.imageregistry.operator.openshift.io cluster --type=json --patch '[{\"op\": \"replace\", \"path\": \"/spec/storage\", \"value\": {\"pvc\": {\"claim\": \"image-registry-storage\"}}}]'"
-
-    - name: Create PVs for user vols
-      k8s:
-        state: present
-        merge_type:
-        - strategic-merge
-        - merge
-        definition: "{{ lookup('template', './files/pv-user.j2' ) | from_yaml }}"
-      loop: "{{ range(1, nfs_user_vols_count)|list }}"
-      loop_control:
-        loop_var: index
-
-- name: Step 003.2 PostSoftware flight-check
+- name: Step 005.1 - Post Software flight-check
   hosts: bastions
   run_once: yes
   gather_facts: false
@@ -192,11 +149,11 @@
       ignore_errors: no
 
 # Deploy Workloads
-- name: Step 003.3 Deploy Default, Infra and Student Workloads
+- name: Step 005.2 - Deploy Default, Infra and Student Workloads
   import_playbook: workloads.yml
 
 # Workarounds to enable cluster shutdown before 24h are over
-- name: Step 003.4 Enable Cluster Shutdown and Resume
+- name: Step 005.3 - Enable Cluster Shutdown and Resume
   hosts: bastions
   run_once: yes
   gather_facts: false
@@ -228,28 +185,90 @@
       loop:
       - "csr-signer-signer"
       - "csr-signer"
-    # The next tasks are to fix the bug fixed in https://github.com/openshift/cluster-kube-controller-manager-operator/pull/305
-    # Also the operator dealing with prometheus adapters doesn't watch the certificates.
-    # Need to force it to reconcile
 
-    # Next bit doesn't seem to work on OCP 4.3. Disable for now and investigate...
-    # - name: Wait 15 seconds before next command
-    #   pause:
-    #     seconds: 15
-    # - name: Get Config Map Definition
-    #   shell: oc get configmap extension-apiserver-authentication -n kube-system -o yaml >/tmp/extension-apiserver-authentication.yaml
-    # - name: Add an empty line to config map file
-    #   lineinfile:
-    #     path: /tmp/extension-apiserver-authentication.yaml
-    #     firstmatch: true
-    #     insertafter: '-----END CERTIFICATE-----'
-    #     line: ''
-    # - name: Update Config Map with new file
-    #   k8s:
-    #     state: present
-    #     src: /tmp/extension-apiserver-authentication.yaml
+- name: Step 005.4 Run performance test (optional)
+  hosts: bastions
+  gather_facts: false
+  become: false
+  environment:
+    KUBECONFIG: /home/{{ remote_user }}/{{ cluster_name }}/auth/kubeconfig
+  tasks:
+  - name: Run fio tests for etcd performance
+    when: fio_test_enable
+    block:
+    - name: Set Ansible Python interpreter to k8s virtualenv
+      set_fact:
+        ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
 
-- name: Step 003.5 Print Student Info
+    - name: Get metadata.json
+      stat:
+        path: /home/{{ ansible_user }}/{{ cluster_name }}/metadata.json
+      register: r_metadata
+
+    - name: Get the infra ID
+      shell: jq -r .infraID /home/{{ ansible_user }}/{{ cluster_name }}/metadata.json
+      register: r_infra_id
+      when: r_metadata.stat.exists
+
+    - name: create fio testing project
+      k8s:
+        name: fio-test
+        api_version: v1
+        kind: Namespace
+        state: present
+
+    - name: give default sa privileged scc
+      shell: oc adm policy add-scc-to-user privileged system:serviceaccount:fio-test:default
+
+    - name: run job pod with fio-etcd-osp container
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './files/fio-test-job.yaml.j2') }}"
+      vars:
+        INFRA_ID: "{{ r_infra_id.stdout }}"
+
+    - name: Wait for job to finish (1h max)
+      k8s_facts:
+        api_version: batch/v1
+        kind: Job
+        name: fio-test
+        namespace: fio-test
+      register: r_fio_test_job
+      retries: 60
+      delay: 60
+      until: r_fio_test_job.resources[0].status.conditions | json_query(fio_query) | bool
+      vars:
+        fio_query: >-
+          [?type=='Complete'].status[] | [0]
+        INFRA_ID: "{{ r_infra_id.stdout }}"
+
+    - name: Remove job
+      k8s:
+        name: fio-test
+        kind: Job
+        api_version: batch/v1
+        namespace: fio-test
+        state: absent
+
+    - name: Remove fio testing project
+      k8s:
+        name: fio-test
+        kind: Namespace
+        api_version: v1
+        state: absent
+
+- name: Step 005.5 Remove AWS Credentials from Bastion
+  hosts: bastions
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Remove AWS Credentials directory from bastion
+    when: cloud_provider == 'ec2'
+    file:
+      path: "/home/{{ ansible_user }}/.aws"
+      state: absent
+
+- name: Step 005.6 Print Student Info
   hosts: localhost
   gather_facts: false
   become: false
@@ -262,11 +281,11 @@
       msg: "{{ item }}"
     loop:
     - "user.info: You can access your bastion via SSH:"
-    - "user.info: ssh {{ student_name }}@bastion.{{ guid }}.{{ ocp4_base_domain }}"
+    - "user.info: ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix if cloud_provider == 'ec2' else '.'+ocp4_base_domain }}"
     - "user.info: "
     - "user.info: Make sure you use the username '{{ student_name }}' and the password '{{ hostvars[bastion_hostname]['student_password'] }}' when prompted."
 
-- name: Step 003.6 Tell CloudForms we are done
+- name: Step 005.7 Tell CloudForms we are done
   hosts: localhost
   run_once: yes
   gather_facts: false
