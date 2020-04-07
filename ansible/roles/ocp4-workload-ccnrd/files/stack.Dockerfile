@@ -12,7 +12,7 @@
 FROM registry.redhat.io/codeready-workspaces/stacks-java-rhel8:2.0
 
 ENV GRAALVM_VERSION=19.3.1
-ENV QUARKUS_VERSION=1.3.0.Final
+ENV QUARKUS_VERSION=1.3.1.Final
 ENV TKN_VERSION=0.8.0
 ENV KN_VERSION=0.12.0
 ENV OC_VERSION=4.3
