@@ -18,7 +18,7 @@
 
 - import_playbook: ../../setup_runtime.yml
 
-- name: Start clientVM and cluster instances if they are stopped
+- name: Start instances if they are stopped
   hosts: localhost
   connection: local
   gather_facts: False
@@ -32,67 +32,41 @@
         - stack_status is defined
         - stack_status == 'CREATE_COMPLETE'
       block:
-        - set_fact:
-            clientvm_id: "{{ hostvars[groups.bastions[0]].instance_id }}"
-          when:
-            - "'bastions' in groups"
-            - groups.bastions | length > 0
+        - name: Get instance Ids
+          command: >-
+            aws ec2 describe-instances
+            --filters
+            "Name=tag:Project,Values={{ project_tag }}"
+            "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped"
+            --query 'Reservations[*].Instances[*].InstanceId'
+            --output text
+          changed_when: false
+          register: instanceids
+          until: instanceids is succeeded
+          retries: 10
+          delay: "{{ 60|random(start=3, step=1) }}"
 
-        - fail:
-            msg: "No clientVM present"
-          when: >-
-            'bastions' not in groups or groups.bastions | length == 0
+        - name: Start instances
+          when: instanceids.stdout | trim | length > 0
+          command: >-
+            aws ec2 start-instances --instance-ids {{ instanceids.stdout | trim }}
+          register: _startinstances
+          until: _startinstances is succeeded
+          retries: 10
+          delay: "{{ 60|random(start=3, step=1) }}"
+          ignore_errors: true
 
-        - when:
-            - stack_status is defined
-            - stack_status == 'CREATE_COMPLETE'
-          block:
-            - name: Start clientVM instance
-              command: "aws ec2 start-instances --instance-ids '{{clientvm_id}}'"
-              register: _startclientvm
-              until: _startclientvm is succeeded
-              retries: 10
-              delay: "{{ 60|random(start=3, step=1) }}"
+        - name: Wait for cluster instances
+          when: instanceids.stdout | trim | length > 0
+          command: >-
+            aws ec2 wait instance-running
+            --filters "Name=tag:Project,Values={{ project_tag }}"
+          ignore_errors: true
 
-            - name: Get cluster instance Ids
-              command: >-
-                aws ec2 describe-instances
-                --filters
-                "Name=tag:clusterid,Values={{ cluster_name }}"
-                "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped"
-                --query 'Reservations[*].Instances[*].InstanceId'
-                --output text
-              changed_when: false
-              # Sometimes deployment fails before any OCP instances is created, so comment this line:
-              # failed_when: instanceids.stdout | trim | length == 0
-              register: instanceids
-              until: instanceids is succeeded
-              retries: 10
-              delay: "{{ 60|random(start=3, step=1) }}"
-
-            - name: Start cluster instances
-              when: instanceids.stdout | trim | length > 0
-              command: >-
-                    aws ec2 start-instances --instance-ids {{ instanceids.stdout | trim }}
-              register: _startinstances
-              until: _startinstances is succeeded
-              retries: 10
-              delay: "{{ 60|random(start=3, step=1) }}"
-
-            - name: Wait for clientVM instance
-              command: "aws ec2 wait instance-running --instance-ids '{{clientvm_id}}'"
-
-            - name: Wait for cluster instances
-              when: instanceids.stdout | trim | length > 0
-              ignore_errors: true
-              command: >-
-                    aws ec2 wait instance-running
-                    --filters "Name=tag:clusterid,Values={{ cluster_name }}"
-
-- name: Set ssh config for unsubscribe.
+- name: Unsubscribe systems from Satellite
   hosts: all
+  become: true
   gather_facts: false
-  become: no
   tasks:
     - name: Set facts for ssh proxy
       set_fact:
@@ -100,13 +74,9 @@
           {{ ansible_ssh_extra_args|d() }}
           -F {{hostvars.localhost.output_dir}}/{{ env_type }}_{{ guid }}_ssh_conf
 
-- name: Unsubscribe systems from Satellite
-  hosts: all
-  become: true
-  gather_facts: false
-  ignore_errors: true
-  tasks:
-    - shell: "subscription-manager unsubscribe --all"
+    - name: Attempt to unsubscribe systems
+      shell: "subscription-manager unsubscribe --all"
+      ignore_errors: true
 
 - name: Import default destroy playbook
   import_playbook: ../../cloud_providers/{{cloud_provider}}_destroy_env.yml
