@@ -55,10 +55,8 @@ class ActionModule(ActionBase):
         user = self._task.args.get('user')
 
         if not user and msg != None:
-            if msg == '':
-                result['msg'] = 'user.info:'
-            else:
-                result['msg'] = 'user.info: ' + msg
+            # Output msg in result, prepend "user.info: " for cloudforms compatibility
+            result['msg'] = 'user.info: ' + msg
             # Force display of result like debug
             result['_ansible_verbose_always'] = True
 
