@@ -12,7 +12,7 @@
 FROM registry.redhat.io/codeready-workspaces/stacks-java-rhel8:2.0
 
 ENV GRAALVM_VERSION=19.3.1
-ENV QUARKUS_VERSION=1.2.1.Final
+ENV QUARKUS_VERSION=1.3.2.Final
 ENV MVN_VERSION=3.6.3
 ENV GRAALVM_HOME="/usr/local/graalvm-ce-java8-${GRAALVM_VERSION}"
 ENV MAVEN_OPTS="-Xmx4G -Xss128M -XX:MetaspaceSize=1G -XX:MaxMetaspaceSize=2G -XX:+CMSClassUnloadingEnabled"
