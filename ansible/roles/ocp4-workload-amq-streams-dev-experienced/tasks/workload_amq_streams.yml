@@ -1,78 +1,46 @@
 ---
 # Implement your Workload deployment tasks here
 
-- name: "create operatorgroup in {{ ocp_project_amq_streams }}"
-  k8s:
-    state: present
-    namespace: "{{ ocp_project_amq_streams }}"
-    definition: "{{ lookup('template', role_path ~ '/templates/operatorgroup.j2' ) | from_yaml }}"
-  vars:
-    operator_group_name: "{{ amq_streams_operator_group_name }}"
-    ocp_project: "{{ ocp_project_amq_streams }}"
-
-- name: "create subscription for amq streams operator in {{ ocp_project_amq_streams }}"
-  k8s:
-    state: present
-    namespace: "{{ ocp_project_amq_streams }}"
-    definition: "{{ lookup('template', role_path ~ '/templates/subscription.j2' ) | from_yaml }}"
-  vars:
-    subscription_name: "{{ amq_streams_operator_subscription_name }}"
-    subscription_channel: "{{ amq_streams_operator_subscription_channel }}"
-    subscription_package_name: "{{ amq_streams_operator_subscription_package_name }}"
-    subscription_catalog_source: "{{ amq_streams_operator_subscription_catalog_source }}"
-    subscription_catalog_source_namespace: "{{ amq_streams_operator_subscription_catalog_source_namespace }}"
-    subscription_starting_csv: "{{ amq_streams_operator_subscription_starting_csv }}"
-
-- name: wait until installplan is created
+- name: get packagemanifest for amq streams operator
   k8s_facts:
-    api_version: operators.coreos.com/v1alpha1
-    kind: InstallPlan
-    namespace: "{{ ocp_project_amq_streams }}"
-  register: r_install_plan
-  retries: 30
-  delay: 5
-  until:
-    - r_install_plan|selectattr('clusterServiceVersionNames', 'contains', 'amqstreams')
+    api_version: packages.operators.coreos.com/v1
+    kind: PackageManifest
+    name: "{{ amq_streams_operator_packagemanifest_name }}"
+    namespace: openshift-marketplace
+  register: r_package_manifest
 
-- name: manually approve installplan
-  when: not amq_streams_operator_automatic_installplan_approval
-  block:
-  - name: set installplan name
-    set_fact:
-      amq_streams_operator_install_plan_name: "{{ r_install_plan.resources | to_json | from_json | json_query(query) }}"
-    vars:
-      query: >-
-        [?starts_with(spec.clusterServiceVersionNames[0], 'amqstreams')].metadata.name|[0]
-
-  - name: approve installplan
-    k8s:
-      state: present
-      namespace: "{{ ocp_project_amq_streams }}"
-      definition: "{{ lookup( 'template', './templates/installplan.j2' ) }}"
-    vars:
-      install_plan_name: "{{ amq_streams_operator_install_plan_name }}"
-
-- name: find all amq streams related CSVs
+- name: set facts for amq streams operator
   set_fact:
-    amq_streams_csvs:  "{{ r_install_plan.resources | to_json | from_json | json_query(query) }}"
-  vars:
-    query: >-
-      [?starts_with(spec.clusterServiceVersionNames[0], 'amqstreams')].spec.clusterServiceVersionNames
+    amq_streams_operator_subscription_channel: "{{ r_package_manifest.resources[0].status.defaultChannel }}"
+    amq_streams_operator_subscription_package_name: "{{ r_package_manifest.resources[0].status.packageName }}"
+    amq_streams_operator_subscription_catalog_source: "{{ r_package_manifest.resources[0].status.catalogSource }}"
+    amq_streams_operator_subscription_catalog_source_namespace: "{{ r_package_manifest.resources[0].status.catalogSourceNamespace }}"
 
-- name: wait until all CSVs are succeeded
+# On a shared cluster it could happen that the amq-streams operator is already installed
+# with a cluster wide scope. In that case we should not attempt to install it again with namespace scope.
+- name: get cluster-wide subscriptions
   k8s_facts:
     api_version: operators.coreos.com/v1alpha1
-    kind: ClusterServiceVersion
-    name: "{{ item }}"
-    namespace: "{{ ocp_project_amq_streams }}"
-  register: r_csv
-  retries: 180
-  delay: 10
-  until:
-  - r_csv.resources[0].status.phase is defined
-  - r_csv.resources[0].status.phase | length > 0
-  - r_csv.resources[0].status.phase == "Succeeded"
-  loop: "{{ amq_streams_csvs[0] }}"
+    kind: Subscription
+    namespace: openshift-operators
+  register: r_subscriptions
+
+- name: get amq-streams global subscription status
+  set_fact:
+    amq_streams_global_subscription_status: "{{ r_subscriptions.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: "[?starts_with(spec.name, '{{ amq_streams_operator_subscription_package_name }}')].status.state"
+
+- debug:
+    var: amq_streams_global_subscription_status
+
+- name: install amq-streams operator
+  include_tasks: workload_amq_streams_operator.yml
+  vars:     
+  when: >
+    not ((amq_streams_global_subscription_status is defined) and
+    (amq_streams_global_subscription_status | length > 0) and
+    (amq_streams_global_subscription_status[0] == "AtLatestKnown"))
 
 - name: create kafka cluster provisioner role
   k8s:
