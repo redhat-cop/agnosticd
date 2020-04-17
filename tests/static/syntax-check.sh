@@ -30,6 +30,7 @@ for i in \
         if [ ! -d ${ansible_path}/workdir/${env_type} ]; then
             echo "Download ${env_type}"
             git clone https://github.com/ansible/workshops.git ${ansible_path}/workdir/${env_type}
+            (cd ${ansible_path}/workdir/${env_type}; PAGER=cat git show --format=short --no-color)
         fi
         touch $(dirname "${i}")/env_secret_vars.yml
         extra_args=(
