@@ -1,0 +1,112 @@
+---
+
+- name: get default channel for 3scale operator
+  shell: |-
+    oc get packagemanifests {{ threescale_operator_package_name }} -o jsonpath='{.status.defaultChannel}'
+  register: threescale_defaultchannel
+
+- name: get currentCSV for default channel
+  shell: |-
+    oc get packagemanifests {{ threescale_operator_package_name }} -o jsonpath='{.status.channels[?(@.name == "{{ threescale_defaultchannel.stdout }}")].currentCSV}'
+  register: threescale_CSV
+
+- set_fact:
+    threescale_currentCSV: '{{threescale_CSV.stdout}}'
+
+- set_fact:
+    threescale_currentChannel: '{{threescale_defaultchannel.stdout}}'
+
+- name: Create OpenShift Objects for 3scale multitenant
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/3scale_project.j2
+  - ./templates/operatorgroup.j2
+  - ./templates/subscription.j2
+
+- name: "Create threescale-registry-auth image pull secret in {{ API_MANAGER_NS }}"
+  shell: |
+    oc create secret docker-registry threescale-registry-auth \
+        --docker-server=registry.redhat.io \
+        --docker-username='{{ rht_service_token_user }}' \
+        --docker-password='{{ rht_service_token_password }}' \
+        -n  {{ API_MANAGER_NS }}
+  ignore_errors: True
+
+# Wait for operator to be ready
+- pause:
+    minutes: 1
+
+- block:
+  - name: Deploy 3scale API Manager for OpenBanking
+    k8s:
+      state: present
+      merge_type:
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - ./templates/smtp.j2
+    - ./templates/system-storage.j2
+    - ./templates/apimanager.j2
+  when: use_rwo_for_cms|bool
+
+- block:
+  - name: Deploy 3scale API Manager for OpenBanking
+    k8s:
+      state: present
+      merge_type:
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - ./templates/smtp.j2
+    - ./templates/aws-auth.j2
+    - ./templates/apimanager-s3.j2
+  when: not use_rwo_for_cms|bool
+
+# DC gets created after a few seconds. Pause for a bit.
+- pause:
+    minutes: 1
+
+# The last Deployment run is apicast-production. So wait until it starts to ensure all pods are s
+# tarted.
+- name: Wait until apicast-production is running
+  command: >
+    oc rollout status dc/apicast-production --watch=true -n "{{ API_MANAGER_NS }}"
+
+# Routes are created after some delay. Wait here for routes to  be ready.
+- pause:
+    minutes: 1
+
+
+# Get the Master Access Token
+- name: Get the Master Access Token
+  shell: >
+    oc get secret system-seed -o json -n "{{ API_MANAGER_NS }}" | jq -r .data.MASTER_ACCESS_TOKEN | base64 -d
+  register: system_seed_master_token
+  ignore_errors: True
+
+# Get the Master Password
+- name: Get the Master Password
+  shell: >
+    oc get secret system-seed -o json -n "{{ API_MANAGER_NS }}" | jq -r .data.MASTER_PASSWORD | base64 -d
+  register: system_seed_master_password
+  ignore_errors: True
+
+- set_fact:
+    master_access_token: '{{system_seed_master_token["stdout"]}}'
+
+- set_fact:
+    master_password: '{{system_seed_master_password["stdout"]}}'
+
+- set_fact:
+    master_api_host: "https://{{ master_access_token }}@master.{{ocp_apps_domain}}"
+
+- set_fact:
+    create_tenant_url: "https://master.{{ocp_apps_domain}}/master/api/providers.xml" 
+
