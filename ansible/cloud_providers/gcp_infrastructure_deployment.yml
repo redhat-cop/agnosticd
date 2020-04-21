@@ -1,0 +1,201 @@
+---
+- name: Step 001 Deploy Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - step001
+    - deploy_infrastructure
+  tasks:
+    - name: Ensure gcloud is installed
+      environment:
+        PATH: /usr/bin
+      command: which gcloud
+      register: gcloud_result
+
+    - name: Fail if gcloud not available
+      fail:
+        msg: you need Google Cloud SDK installed
+      when: gcloud_result is failed
+
+    - name: Check for auto-generated SSH Key
+      stat:
+        path: "{{output_dir}}/{{env_authorized_key}}"
+      register: env_authorized_key_status
+      tags:
+        - check_for_env_keys
+
+    - name: Get SSH public key
+      set_fact:
+        ssh_key: "~/.ssh/{{key_name}}.pem"
+        ssh_key_data: "{{lookup('file', '~/.ssh/{{key_name}}.pub')}}"
+      tags:
+        - set_existing_ssh_key
+        - must
+        - create_inventory
+      when: not env_authorized_key_status.stat.exists
+
+    - name: Get SSH public key
+      set_fact:
+        ssh_key: "{{output_dir}}/{{env_authorized_key}}"
+        ssh_key_data: "{{lookup('file', '{{output_dir}}/{{env_authorized_key}}.pub')}}"
+      tags:
+        - set_generated_ssh_key
+        - must
+        - create_inventory
+      when: env_authorized_key_status.stat.exists
+
+    - name: Set the destination for the template
+      set_fact:
+        t_dest: "{{output_dir}}/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
+      tags:
+        - gcp_infrastructure_deployment
+        - validate_gcp_template
+        - gen_gcp_template
+
+    - name: Generate GCP deployment manager template
+      template:
+        src: "../configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.j2"
+        dest: "{{t_dest}}"
+      tags:
+        - gcp_infrastructure_deployment
+        - validate_gcp_template
+        - gen_gcp_template
+
+    - name: Starting Google deployment-manager with template
+      environment:
+        PATH: /usr/bin
+        CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ gcp_credentials_file }}"
+        CLOUDSDK_COMPUTE_REGION: "{{ gcp_region }}"
+        CLOUDSDK_CONFIG: "{{ output_dir }}/.gcloud-{{ guid }}"
+        CLOUDSDK_CORE_PROJECT: "{{ gcp_project_id }}"
+      command: >-
+        gcloud deployment-manager deployments
+        create "{{ project_tag }}-base"
+        --config "{{ t_dest }}"
+      register: gcp_deploy
+      tags:
+        - gcp_infrastructure_deployment
+        - gcp_deployment_manager
+      until: gcp_deploy is succeeded
+      retries: 0
+
+    - debug:
+        var: gcp_deploy
+        verbosity: 2
+      tags:
+        - gcp_infrastructure_deployment
+
+    - name: Run infra-gcp-create-inventory Role
+      import_role:
+        name: infra-gcp-create-inventory
+
+    - name: Fetch DNS zone Info
+      gcp_dns_managed_zone_facts:
+        dns_name: '{{ cluster_dns_zone + "."}}'
+        project: "{{ gcp_project_id }}"
+        auth_kind: "{{ gcp_auth_type }}"
+        service_account_file: "{{ gcp_credentials_file }}"
+      register: gcp_managed_zone
+      tags:
+        - gcp_infrastructure_deployment
+      when:
+        - cluster_dns_zone is defined
+
+    - name: Add delegation for NS to the main DNSZone
+      gcp_dns_resource_record_set:
+        project: "{{ gcp_project_id }}"
+        auth_kind: "{{ gcp_auth_type }}"
+        service_account_file: "{{ gcp_credentials_file }}"
+        managed_zone: "{{ gcp_managed_zone.resources[0] }}"
+        name: '{{ guid + "." + cluster_dns_zone + "."}}'
+        type: NS
+        ttl: 600
+        target:
+          - "{{ gcp_managed_zone.resources[0].nameServers[0] }}"
+          - "{{ gcp_managed_zone.resources[0].nameServers[1] }}"
+          - "{{ gcp_managed_zone.resources[0].nameServers[2] }}"
+          - "{{ gcp_managed_zone.resources[0].nameServers[3] }}"
+        state: present
+      tags:
+        - gcp_infrastructure_deployment
+      when:
+        - env_type != "ocp4-cluster"
+        - HostedZoneId != "none"
+
+    - name: Add bastion entry to the main DNSZone
+      gcp_dns_resource_record_set:
+        project: "{{ gcp_project_id }}"
+        auth_kind: "{{ gcp_auth_type }}"
+        service_account_file: "{{ gcp_credentials_file }}"
+        managed_zone: "{{ gcp_managed_zone.resources[0] }}"
+        name: '{{ "bastion." + guid + "." + cluster_dns_zone + "."}}'
+        type: A
+        ttl: 300
+        target:
+          - '{{ hostvars[item].public_ip_address }}'
+        state: present
+      with_items: "{{ groups['bastions'] }}"
+      tags:
+        - gcp_infrastructure_deployment
+        - gcp_set_bastion_dns
+      when:
+        - env_type == "ocp4-cluster"
+        - groups["bastions"] is defined 
+
+# Copy env_vars variables from the config to all hosts
+- import_playbook: ../include_vars.yml
+
+# TODO: use common infra role instead of this playbook
+- name: Configure local ssh config for bastion proxy use
+  import_playbook: "{{cloud_provider}}_ssh_config_setup.yml"
+  when: groups["bastions"] is defined and (groups["bastions"]|length>0)
+  tags:
+    - must
+    - create_inventory
+ 
+- name: wait_for_connection for all non-windows machines and set hostname
+  hosts:
+    - all:!windows:!network
+  gather_facts: false
+  become: true
+  tags:
+    - step001
+    - wait_ssh
+    - set_hostname
+  tasks:
+    - name: wait for linux host to be available
+      wait_for_connection:
+        timeout: 300
+      register: rwait
+      ignore_errors: true
+
+    - name: restart instance if wait_for_connection failed
+      become: false
+      command: "gcloud compute instances reset '{{inventory_hostname}}' --zone '{{ gcp_zone }}'"
+      delegate_to: localhost
+      environment:
+        CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ gcp_credentials_file }}"
+        CLOUDSDK_COMPUTE_REGION: "{{ gcp_region }}"
+        CLOUDSDK_CONFIG: "{{ output_dir }}/.gcloud-{{ guid }}"
+        CLOUDSDK_CORE_PROJECT: "{{ gcp_project_id }}"
+      when: rwait is failed
+
+    - name: wait for linux host to be available (retry)
+      wait_for_connection:
+      when: rwait is failed
+
+    - ping:
+      register: rping
+      retries: 3
+      delay: 10
+      until: rping is succeeded
+
+    - name: Populate /etc/hosts
+      lineinfile:
+        dest: /etc/hosts
+        regexp: ' {{hostvars[item].internaldns}}$'
+        line: '{{hostvars[item].private_ip_address}} {{hostvars[item].internaldns}}'
+      with_items: "{{ groups['all'] }}"
+
