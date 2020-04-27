@@ -1,0 +1,81 @@
+---
+
+# set internal util variables
+
+- set_fact:
+    _tenant_id: "{{ tenant_id_format | format(item|int) }}"
+    _tenant_count: "{{ item }}"
+    _tenant_admin_username: "{{ lab_users_name_format | format(item|int) }}"
+    _tenant_admin_password: "{{ lab_users_name_format | format(item|int) }}-password"
+    _tenant_admin_email: "{{ lab_users_name_format | format(item|int) }}@example.com"
+
+- debug: msg="creating tenant with id '{{ _tenant_id }}' and admin user {{ _tenant_admin_username }}"
+
+## tenants require a secret to specify the admin credentials
+## create the secret
+
+- debug: msg="creating credential secret for admin user {{ _tenant_admin_username }}"
+
+- set_fact:
+    _tenant_admin_secret_file: "{{ tmp_dir }}/tenant-{{ _tenant_count }}-secret.json"
+    _tenant_admin_secret_name: "{{ _tenant_id }}-admin-credentials"
+
+- name: process tenant {{ _tenant_id }} credentials secret template
+  template:
+    src: "{{ template_credential_secret }}"
+    dest: "{{ _tenant_admin_secret_file }}"
+  vars:
+    tenant_admin_secret: "{{ _tenant_admin_secret_name }}"
+    tenant_admin_password: "{{ _tenant_admin_password | b64encode }}"
+
+- name: create tenant {{ _tenant_id }} credentials secret
+  shell: oc create -f {{ _tenant_admin_secret_file }} -n {{ namespace }}
+  register: _action_create_secret
+  failed_when: _action_create_secret.rc != 0 and 'AlreadyExists' not in _action_create_secret.stderr
+
+# create the tenant custom resource and wait for it to reconcile
+# it is considered reconciled when it has a status block
+
+- debug: msg="creating tenant custom resource for tenant {{ _tenant_id }}"
+
+- set_fact:
+    _tenant_resource_file: "{{ tmp_dir }}/tenant-{{ _tenant_count }}-resource.json"
+    _tenant_detail_secret_name: "{{ _tenant_id }}-details"
+
+- name: process tenant {{ _tenant_id }} custom resource template
+  template:
+    src: "{{ template_tenant_resource }}"
+    dest: "{{ _tenant_resource_file }}"
+  vars:
+    tenant_name: "{{ _tenant_id }}"
+    tenant_admin_email: "{{ _tenant_admin_email }}"
+    tenant_admin_user: "{{ _tenant_admin_username }}"
+    tenant_admin_secret: "{{ _tenant_admin_secret_name }}"
+    tenant_detail_secret_name: "{{ _tenant_detail_secret_name }}"
+    tenant_detail_secret_namespace: "{{ namespace }}"
+
+- name: create tenant {{ _tenant_id }} custom resource
+  shell: oc create -f {{ _tenant_resource_file }} -n {{ namespace }}
+  register: _action_create_resource
+  failed_when: _action_create_resource.rc != 0 and 'AlreadyExists' not in _action_create_resource.stderr
+
+- debug: msg="tenant {{ _tenant_id }} created, waiting for it to be ready"
+
+- name: check if tenant {{ _tenant_id }} is reconciled
+  shell: oc get tenant {{ _tenant_id }} -n {{ namespace }} -o jsonpath='{.status.tenantId}'
+  register: _action_get_resource
+  until: _action_get_resource.rc == 0 and _action_get_resource.stdout != ''
+
+# details about the tenant are exported to a secret
+# get this secret and log the information in it
+
+- debug: msg="retrieving details for tenant {{ _tenant_id }}"
+
+- name: get tenant {{ _tenant_id }} host url from details secret {{ _tenant_detail_secret_name }}
+  shell: oc get secret {{ _tenant_detail_secret_name }} -n {{ namespace }} -o jsonpath='{.data.adminURL}'
+  register: _action_get_tenant_host
+
+- set_fact:
+    _tenant_host: "{{ _action_get_tenant_host.stdout | b64decode }}"
+
+- debug: msg="tenant {{ _tenant_id }} host is {{ _tenant_host }} with user {{ _tenant_admin_username }}"
