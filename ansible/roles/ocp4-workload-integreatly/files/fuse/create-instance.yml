@@ -1,0 +1,171 @@
+--- 
+- set_fact:
+    _instance_namespace: "{{ocp4_workload_integreatly_fuse_instance_id_format | format(item|int) }}"
+    _instance_count: "{{ item }}"
+    _instance_user: "{{ ocp4_workload_integreatly_users_name_format | format(item|int) }}"
+
+- debug: msg="creating fuse instance with user '{{ _instance_user }}' "
+
+# create namespace and label it
+- name : Create and switch to user fuse project and label fuse namespace 
+  k8s:
+    state: present
+    definition:
+      name: "{{ _instance_namespace }}"
+      api_version: v1 
+      kind: namespace
+      metadata:
+        name:  "{{ _instance_namespace }}"
+        labels:
+          integreatly: "true" 
+          user-fuse-online: "true"
+ 
+# Create fuse pull secret (not sure using k8s makes sense in this case)
+# shell: oc get secret syndesis-pull-secret -n {{ ocp4_workload_integreatly_fuse_namespace }} -o yaml | sed '/namespace:/d' | oc create -n {{ _instance_namespace }} -f -
+- name: Get existing fuse pull secret
+  k8s_info:
+    api_version: v1
+    kind: secret
+    name: syndesis-pull-secret
+    namespace: "{{ ocp4_workload_integreatly_fuse_namespace }}"
+  register: syndesis_pull_secret
+
+- set_fact:
+    _instance_pull_secret_file: "{{ ocp4_workload_integreatly_tmp_dir }}/instance-{{ _instance_user }}-fuse-pull-secret.yaml"
+
+- name: copy syndesis pull secret 
+  copy:
+    content: "{{syndesis_pull_secret.resources[0]}}" 
+    dest: "{{_instance_pull_secret_file}}"
+
+- name: remove existing resourceVersion, uid, change the namespace to instance namespace in the pull secret
+  shell: cat {{_instance_pull_secret_file}} | sed 's/\"resourceVersion\":[^,]*,/ /g' | sed 's/\"uid\":[^,]*,/ /g' | sed 's/{{ ocp4_workload_integreatly_fuse_namespace }}/{{_instance_namespace}}/g'
+  register: _instance_pull_secret
+
+- name: copy instance pull secret to a file
+  copy:
+    content: "{{_instance_pull_secret.stdout}}" 
+    dest: "{{_instance_pull_secret_file}}"
+
+- name: Create fuse pull secret from syndesis-pull-secret
+  k8s:
+    state: present
+    src: "{{_instance_pull_secret_file}}"
+
+# Give user view permission to the namespace
+#  shell: oc create rolebinding {{ _instance_user }}-view --clusterrole="view" --user={{ _instance_user }} -n {{ _instance_namespace }}
+- name: Give user view permission to the namespace
+  k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        namespace: "{{ _instance_namespace }}"
+        name: "{{ _instance_user }}-view"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: view
+      subjects:
+      - apiGroup: rbac.authorization.k8s.io
+        kind: User
+        name: "{{ _instance_user }}"
+
+# Create catalog source, (breaking changes around uid using k8s)
+- name: create configMap
+  shell: 'oc get configmap registry-cm-redhat-rhmi-fuse-operator -n {{ ocp4_workload_integreatly_fuse_operator_namespace }} -o yaml | sed "/namespace: {{ ocp4_workload_integreatly_fuse_operator_namespace }}/d" | oc create -n {{ _instance_namespace }} -f -'
+  register: _action_create_configmap
+  failed_when: _action_create_configmap.rc != 0 and 'AlreadyExists' not in _action_create_configmap.stderr
+
+- name: Create catalog source
+  shell: oc get catalogsource rhmi-registry-cs -n {{ ocp4_workload_integreatly_fuse_operator_namespace }} -o yaml | sed '/namespace:/d' | oc create -n {{ _instance_namespace }} -f -
+  delay: 20
+  register: _action_create_catalogsource
+  failed_when: _action_create_catalogsource.rc != 0 and 'AlreadyExists' not in _action_create_catalogsource.stderr
+
+# shell: oc get catalogsource rhmi-registry-cs -n {{ _instance_namespace }} -o jsonpath='{.status.connectionState.lastObservedState}'
+- name: "waiting for catalog source in {{ _instance_namespace }} namespace to be ready"
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: catalogsource
+    name: rhmi-registry-cs
+    namespace: "{{ _instance_namespace }}"
+  register: _action_catalog_source_ready
+  until:  _action_catalog_source_ready.resources[0].status.connectionState.lastObservedState == "READY"
+  delay: 5
+  retries: 100
+
+# Create operator group
+- set_fact:
+    _instance_operator_group_file: "{{ ocp4_workload_integreatly_tmp_dir }}/instance-{{ _instance_user }}-operator-group.yaml"
+
+- name: Process operator group template for {{_instance_namespace}}
+  template:
+    src: "{{ocp4_workload_integreatly_fuse_template_operator_group}}"
+    dest: "{{_instance_operator_group_file}}"
+  vars:
+    _instance_namespace: _instance_namespace
+
+- name: Create operator group
+  k8s:
+    state: present
+    src: "{{_instance_operator_group_file}}"
+
+# Create subscription
+- set_fact:
+    _instance_subscription_file: "{{ ocp4_workload_integreatly_tmp_dir }}/instance-{{ _instance_user }}-subscription.yaml"
+
+- name: Process subscription template for {{ _instance_namespace }}
+  template:
+    src: "{{ ocp4_workload_integreatly_fuse_template_subscription }}"
+    dest: "{{ _instance_subscription_file }}"
+  vars:
+    _instance_user: _instance_user
+    _instance_namespace: _instance_namespace
+
+- name: Create subscription
+  k8s:
+    state: present
+    src: "{{ _instance_subscription_file }}"
+
+# Waiting for installplan to become available
+- name: waiting for installplan to become available in {{_instance_namespace}}
+  shell: oc get installplans -n {{_instance_namespace}} --ignore-not-found=true | grep -v NAME | wc -l
+  register: _action_installplan_exists  
+  until:  _action_installplan_exists.stdout == "1"
+  delay: 5
+  retries: 30
+
+# Approve install plan
+- name: Approve installPlan
+  shell: "oc patch installplan $(oc get installplans -n {{_instance_namespace}} | grep -v NAME | awk '{print $1}') -n {{_instance_namespace}} --type='json' -p '[{'op': 'replace', 'path': '/spec/approved', 'value': true}]'"
+  register: _action_patch_installplan
+  failed_when: _action_patch_installplan.rc != 0
+
+# Create the Syndesis CR
+- set_fact:
+    _instance_syndensis_cr_file: "{{ ocp4_workload_integreatly_tmp_dir }}/instance-{{ _instance_user }}-syndensis-cr.yaml"
+
+- name: "Process the template for the Syndesis CR for {{_instance_namespace}}"
+  template:
+    src: "{{ ocp4_workload_integreatly_fuse_template_syndensis_cr }}"
+    dest: "{{ _instance_syndensis_cr_file }}"
+  vars:
+    _instance_namespace: _instance_namespace 
+    _instance_user: _instance_user  
+
+# shell: oc create -f {{ _instance_syndensis_cr_file }} -n {{ _instance_namespace }}
+- name: Create the Syndesis CR
+  k8s:
+    state: present
+    src: "{{ _instance_syndensis_cr_file }}"
+
+# Checking Fuse Online installation status (couldn't use k8s_info, status.phase not available till operator reconciles)
+- name: Checking Fuse Online installation status
+  shell: oc get syndesis --all-namespaces | grep Installed | grep {{ _instance_namespace }} | wc -l
+  register: _action_check_fuse_online_installation_status
+  until: _action_check_fuse_online_installation_status.stdout == "1"
+  delay: 5
+  retries: 60
+
