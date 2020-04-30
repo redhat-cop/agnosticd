@@ -1,0 +1,88 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Create OpenShift Service Mesh subscription
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/subscription.j2' ) }}"
+
+- name: Wait until InstallPlan is created
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: openshift-operators
+  register: r_install_plan
+  retries: 30
+  delay: 5
+  until:
+  - r_install_plan|selectattr('clusterServiceVersionNames', 'contains', 'servicemeshoperator')
+
+- name: Manually approve InstallPlan
+  when: not ocp4_workload_servicemesh_automatic_install_plan_approval
+  block:
+  - name: Set InstallPlan Name
+    set_fact:
+      _ocp4_workload_servicemesh_install_plan_name: "{{ r_install_plan.resources | to_json | from_json | json_query(query) }}"
+    vars:
+      query: >-
+        [?starts_with(spec.clusterServiceVersionNames[0], 'servicemeshoperator')].metadata.name|[0]
+
+  - name: Approve InstallPlan
+    k8s:
+      state: present
+      definition: "{{ lookup( 'template', './templates/installplan.j2' ) }}"
+
+- name: Find all Service Mesh related CSVs
+  set_fact:
+    _ocp4_workload_servicemesh_csvs:  "{{ r_install_plan.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'servicemeshoperator')].spec.clusterServiceVersionNames
+  
+- name: Wait until all CSVs are Succeeded
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ item }}"
+    namespace: openshift-operators
+  register: r_csv
+  retries: 15
+  delay: 5
+  until:
+  - r_csv.resources[0].status.phase is defined
+  - r_csv.resources[0].status.phase | length > 0
+  - r_csv.resources[0].status.phase == "Succeeded"
+  loop: "{{ _ocp4_workload_servicemesh_csvs[0] }}"
+
+- name: Deploy Service Mesh Control Plane
+  when: ocp4_workload_servicemesh_deploy_control_plane | bool
+  block:
+  - name: Create Service Mesh Namespace and Control Plane
+    k8s:
+      state: present
+      definition: "{{ lookup('file', item ) | from_yaml }}"
+    loop:
+    - ./files/namespace.yaml
+    - ./files/service_mesh_control_plane.yaml
+
+  # This is somewhat ugly but MUCH easier than trying to parse the ServiceMeshControlPlane status arrays...
+  - name: Wait for Service Mesh Control Plane to finish installation
+    shell: "oc get smcp -n istio-system | grep -v NAME | awk -c '{print $2}'"
+    register: r_smcp
+    retries: 40
+    delay: 10
+    until: r_smcp.stdout == "True"
+
+  - name: Create OpenShift Service Mesh Member Roll
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './templates/service_mesh_member_roll.j2' ) }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
