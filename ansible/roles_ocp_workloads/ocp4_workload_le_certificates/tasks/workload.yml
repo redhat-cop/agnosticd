@@ -1,0 +1,195 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Only execute the role when ocp4_workload_le_certificates_install_certificates is true
+  when: ocp4_workload_le_certificates_install_certificates | bool
+  block:
+
+  # The API Server hostname could also be retrieved like this:
+  # oc get infrastructures.config.openshift.io/cluster -o yaml
+  # Although that's the entire URL. Need to strip out https:// and :6443
+  - name: Determine API server hostname
+    shell: "oc whoami --show-server | cut -f 2 -d ':' | cut -f 3 -d '/' | sed 's/-api././'"
+    register: r_api_hostname
+
+  - name: Determine Wildcard Domain
+    k8s_facts:
+      api_version: operator.openshift.io/v1
+      kind: IngressController
+      name: default
+      namespace: openshift-ingress-operator
+    register: r_ingress_controller
+
+  - name: Print API and Wildcard Domain
+    debug:
+      msg: "API: {{ r_api_hostname.stdout }}, Wildcard Domain: {{ r_ingress_controller.resources[0].status.domain }}"
+
+  - name: Get Certificates for AWS
+    when: cloud_provider == "ec2"
+    block:
+    # /home/{{ ansible_user }}/.aws/credentials needs to exist before calling this role
+    - name: Create Let's Encrypt Certificates for AWS
+      include_role:
+        name: host-lets-encrypt-certs-certbot
+      vars:
+      - _certbot_domain: "{{ r_api_hostname.stdout }}"
+      - _certbot_wildcard_domain: "*.{{ r_ingress_controller.resources[0].status.domain }}"
+      - _certbot_dns_provider: "route53"
+      - _certbot_remote_dir: "/home/{{ ansible_user }}"
+      - _certbot_remote_dir_owner: "{{ ansible_user }}"
+      - _certbot_install_dir: "/home/{{ ansible_user }}/certificates"
+      - _certbot_install_dir_owner: "{{ ansible_user }}"
+      - _certbot_cache_archive_file: "{{ output_dir|default('/tmp') }}/{{ guid }}-certs.tar.gz"
+      - _certbot_renew_automatically: True
+      - _certbot_use_cache: True
+      - _certbot_force_issue: False
+      - _certbot_production: True
+      - _certbot_cron_job_name: LETS_ENCRYPT_RENEW
+      - use_python3:  "{{ all_use_python3 | default(True) | bool }}"
+      # production false results in unusable certificates
+      # (not possible to login to OCP)
+      # - _certbot_production: "{{ lets_encrypt_production|default(False)|bool}}"
+
+  - name: Get Certificates for OpenStack
+    when: cloud_provider == "osp"
+    block:
+    - name: Copy credentials to host temporarily
+      template:
+        src: ./templates/rfc2136.ini.j2
+        dest: /home/{{ ansible_user }}/.rfc2136.ini
+        owner: "{{ ansible_user }}"
+
+    - name: Create Let's Encrypt Certificates for OpenStack
+      include_role:
+        name: host-lets-encrypt-certs-certbot
+      vars:
+      - _certbot_domain: "{{ r_api_hostname.stdout }}"
+      - _certbot_wildcard_domain: "*.{{ r_ingress_controller.resources[0].status.domain }}"
+      - _certbot_dns_provider: "rfc2136"
+      - _certbot_remote_dir: "/home/{{ ansible_user }}"
+      - _certbot_remote_dir_owner: "{{ ansible_user }}"
+      - _certbot_install_dir: "/home/{{ ansible_user }}/certificates"
+      - _certbot_install_dir_owner: "{{ ansible_user }}"
+      - _certbot_cache_archive_file: "{{ output_dir|default('/tmp') }}/{{ guid }}-certs.tar.gz"
+      - _certbot_renew_automatically: True
+      - _certbot_use_cache: True
+      - _certbot_force_issue: False
+      - _certbot_production: True
+      - _certbot_cron_job_name: LETS_ENCRYPT_RENEW
+      - use_python3:  "{{ all_use_python3 | default(True) | bool }}"
+      # production false results in unusable certificates
+      # (not possible to login to OCP)
+      # - _certbot_production: "{{ lets_encrypt_production|default(False)|bool}}"
+
+    - name: Remove credentials once LE certs have been created
+      file:
+        state: absent
+        path: /home/{{ ansible_user }}/.rfc2136.ini
+      when: _certbot_setup_complete
+
+  - name: Install redeploy hook scripts
+    copy:
+      src: ./files/deploy_certs.sh
+      dest: "/home/{{ ansible_user }}/certbot/renewal-hooks/deploy/deploy_certs.sh"
+      mode: 0775
+      owner: "{{ ansible_user }}"
+
+  - name: Install redeploy hook playbook
+    copy:
+      src: "./files/deploy_certs.yml"
+      dest: "/home/{{ ansible_user }}/certbot/renewal-hooks/deploy/deploy_certs.yml"
+      mode: 0664
+      owner: "{{ ansible_user }}"
+
+  - name: Install redeploy secret templates
+    copy:
+      src: "./templates/{{ item }}"
+      dest: "/home/{{ ansible_user }}/certbot/renewal-hooks/deploy/{{ item }}"
+      mode: 0664
+      owner: "{{ ansible_user }}"
+    loop:
+    - api-certs.j2
+    - router-certs.j2
+
+  - name: Read Certificate
+    slurp:
+      src: "/home/{{ ansible_user }}/certificates/fullchain.pem"
+    register: server_cert
+
+  - name: Read Key
+    slurp:
+      src: "/home/{{ ansible_user }}/certificates/privkey.pem"
+    register: server_key
+
+  - name: Create Router Certificate
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './templates/router-certs.j2' ) | from_yaml }}"
+
+  - name: Add Certs to Router
+    k8s:
+      state: present
+      definition: "{{ lookup('file', './files/router-with-certs.yaml' ) | from_yaml }}"
+
+  - name: Install API Certificates
+    when: ocp4_workload_le_certificates_install_api | bool
+    block:
+    - name: Create API Certificate
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './templates/api-certs.j2' ) | from_yaml }}"
+
+    - name: Add Certs to API Server
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './templates/api-server.j2' ) | from_yaml }}"
+
+    # Sleep 6 minutes per David Eads.
+    # It takes about 70 seconds per API Server to
+    # restart with certificates (due to AWS
+    # Load Balancer). Therefore sleep
+    # 6 minutes to give the kube-apiserver
+    # cluster operator enough time to progress.
+    - name: Wait 6m for all APIservers to be back up
+      pause:
+        minutes: 6
+
+    - name: Find all Kube Configs
+      become: yes
+      find:
+        file_type: file
+        hidden: true
+        paths:
+        - /root
+        - /home
+        contains: "^ +certificate-authority-data:"
+        patterns: "*config*"
+        recurse: yes
+      register: r_config_files
+
+    - name: Fix Kube Configs
+      become: yes
+      replace:
+        path: "{{ item.path }}"
+        regexp: "^ +certificate-authority-data:.*"
+      loop: "{{r_config_files.files}}"
+
+    - name: Make sure API Calls succeed
+      k8s_facts:
+        api_version: config.openshift.io/v1
+        kind: Ingress
+        name: cluster
+      register: r_ingress_config
+      retries: 30
+      delay: 10
+      until: not r_ingress_config.failed
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

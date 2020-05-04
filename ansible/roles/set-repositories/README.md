@@ -1,31 +1,41 @@
-Role Name
-=========
+# set-repositories
 
-A brief description of the role goes here.
+Configure YUM/DNF repositories.
 
-Requirements
-------------
+## Requirements
 
-Any pre-requisites that may not be covered by Ansible itself or the role should be mentioned here. For instance, if the role uses the EC2 module, it may be a good idea to mention in this section that the boto package is required.
+FIXME
 
-Role Variables
---------------
+## Role Variables
 
-A description of the settable variables for this role should go here, including any variables that are in defaults/main.yml, vars/main.yml, and any variables that can/should be set via parameters to the role. Any variables that are read from other roles and/or the global scope (ie. hostvars, group vars, etc.) should be mentioned here as well.
+`repo_method` - Repository configuration method. May be set to `file`, `rhn`, or `satellite`.
 
-Dependencies
-------------
+`use_content_view` - FIXME
 
-A list of other roles hosted on Galaxy should go here, plus any details in regards to parameters that may need to be set for other roles, or variables that are used from other roles.
+### Repo Method satellite Variables
 
-Example Playbook
-----------------
+`set_repositories_satellite_hostname` -
+Hostname of satellite server.
+Required, but may be set as `set_repositories_satellite_url` or `satellite_url` for compatibility with previous versions.
 
-Including an example of how to use your role (for instance, with variables passed in as parameters) is always nice for users too:
+`set_repositories_satellite_ca_cert` -
+CA certificate used to validate satellite server TLS.
+Required unless `set_repositories_satellite_hostname` is `labsat.opentlc.com`.
 
-    - hosts: servers
-      roles:
-         - { role: username.rolename, x: 42 }
+`set_repositories_satellite_ca_rpm_url` -
+URL used to download the Katello/Satellite CA certificate configuration RPM.
+Default `https://{{ set_repositories_satellite_hostname }}/pub/katello-ca-consumer-latest.noarch.rpm`
+
+`set_repositories_satellite_activationkey` -
+Activation key to register to satellite. Optional, but may be set with `satellite_activationkey` for compatibility with previous versions.
+
+## Dependencies
+
+FIXME
+
+## Example Playbook
+
+FIXME
 
 License
 -------
@@ -35,4 +45,4 @@ BSD
 Author Information
 ------------------
 
-An optional section for the role authors to include contact information, or a website (HTML is not allowed).
+Red Hat, GPTE

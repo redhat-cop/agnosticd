@@ -1,8 +1,74 @@
 ---
 # Implement your Post Workload deployment tasks here
 # --------------------------------------------------
+  
+- name: get master host url from route
+  shell: oc get route -n {{ ocp4_workload_integreatly_defaults.namespace }} --selector=zync.3scale.net/route-to=system-master -o jsonpath='{.items[0].spec.host}'
+  register: _action_get_threescale_master_host
 
+- name: get master access token from secret
+  shell: oc get secret {{ ocp4_workload_integreatly_defaults.seed_secret_name }} -n {{ ocp4_workload_integreatly_defaults.namespace }} -o jsonpath='{.data.MASTER_ACCESS_TOKEN}'
+  register: _action_get_threescale_access_token
 
+- set_fact:
+    threescale_master_host: https://{{ _action_get_threescale_master_host.stdout }}
+    threescale_master_token: "{{ _action_get_threescale_access_token.stdout | b64decode }}"
+
+- name: debug
+  debug: 
+    msg: "found 3scale master host - {{ threescale_master_host }}"
+
+- name: create 3scale tenants
+  include_tasks: ../files/threescale/create-tenant.yml
+  with_sequence: count="{{ ocp4_workload_integreatly_defaults.user_count }}"
+  when: ocp4_workload_integreatly_defaults.action == "install"
+
+- name: Get current htpasswd secret
+  shell: oc get secret htpasswd-secret -n openshift-config -o json | jq -j '.data.htpasswd' | base64 --decode > /tmp/htpasswd
+
+- name: Backup htpasswd
+  shell: cp /tmp/htpasswd /tmp/htpasswd.backup
+
+- name: Generate dedicated admin password
+  shell: openssl rand -base64 12
+  register: _gen_password
+
+- name: Set dedicated admin password
+  set_fact:
+    _dedicated_admin_password: "{{ _gen_password.stdout }}"
+
+- name: Create dedicated admin user
+  shell: htpasswd -B -b /tmp/htpasswd {{ ocp4_workload_integreatly.dedicated_admin_username }} {{ _dedicated_admin_password }}
+
+- name: Ensure htpasswd Secret is absent
+  k8s:
+    state: absent
+    api_version: v1
+    kind: Secret
+    name: htpasswd-secret
+    namespace: openshift-config
+
+- name: Create new htpasswd secret
+  shell: oc create secret generic htpasswd-secret --from-file=htpasswd=/tmp/htpasswd -n openshift-config
+
+- name: Check for dedicated admins
+  shell: oc get groups dedicated-admins
+  register: group_output
+  ignore_errors: True
+
+- name: Create dedicated admin group
+  shell: oc adm groups new dedicated-admins {{ ocp4_workload_integreatly.dedicated_admin_username }}
+  when: group_output.rc == 1
+
+- name: Add dedicated admin user to dedicated admin group
+  shell: oc adm groups add-users dedicated-admins {{ ocp4_workload_integreatly.dedicated_admin_username }}
+  when: group_output.rc != 1
+
+- name: Print Overview
+  debug:
+    msg: "{{ item }}"
+  with_items:
+    - "user.info: Dedicated Admin User: {{ ocp4_workload_integreatly.dedicated_admin_username }} / {{ _dedicated_admin_password }} (This is the most privileged user account available to consultants and customers in RHMI production/poc environments.)"
 
 
 # Leave these as the last tasks in the playbook
