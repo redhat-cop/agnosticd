@@ -230,7 +230,7 @@ class OpenStackBmc(bmc.Bmc):
               logging.error(self._vm_name + ' power_on:' + str(e))
               return 0xc0
         else:
-          return 0xc0
+          return False
 
     def power_shutdown(self):
         """Gently power off while waiting for clean shutdown."""
