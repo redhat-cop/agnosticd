@@ -1,0 +1,131 @@
+---
+# Implement your Workload removal tasks here
+- name: Remove Knative Serving Installation
+  k8s:
+    state: absent
+    api_version: operator.knative.dev/v1alpha1
+    kind: KnativeServing
+    name: knative-serving
+    namespace: knative-serving
+
+- name: Remove Knative Eventing Installation
+  when: ocp4_workload_serverless_install_eventing | bool
+  k8s:
+    state: absent
+    api_version: operator.knative.dev/v1alpha1
+    kind: KnativeEventing
+    name: knative-eventing
+    namespace: knative-eventing
+
+- name: Wait until all KNative Serving pods have been removed
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: knative-serving
+  register: r_knative_pods
+  retries: 20
+  delay: 5
+  until: r_knative_pods.resources | length == 0
+
+- name: Wait until all KNative Eventing pods have been removed
+  when: ocp4_workload_serverless_install_eventing | bool
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: knative-eventing
+  register: r_knative_eventing_pods
+  retries: 20
+  delay: 5
+  until: r_knative_eventing_pods.resources | length == 0
+
+- name: Get Installed CSV
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: serverless-operator
+    namespace: openshift-operators
+  register: r_subscription
+
+- name: Remove CSV
+  when:
+  - r_subscription.resources | length > 0
+  - r_subscription.resources[0].status.currentCSV is defined
+  - r_subscription.resources[0].status.currentCSV | length > 0
+  k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: openshift-operators
+
+- name: Remove Subscription
+  k8s:
+    state: absent
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/subscription.j2
+
+- name: Remove knative-serving project
+  k8s:
+    state: absent
+    api_version: project.openshift.io/v1
+    kind: Project
+    name: knative-serving
+
+- name: Remove knative-eventing project
+  when: ocp4_workload_serverless_install_eventing | bool
+  k8s:
+    state: absent
+    api_version: project.openshift.io/v1
+    kind: Project
+    name: knative-eventing
+
+- name: Remove kn and kn bash completion
+  become: true
+  file:
+    state: absent
+    path: "{{ item }}"
+  loop:
+  - /usr/bin/kn
+  - /etc/bash_completion.d/kn
+
+- name: Find InstallPlan
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: openshift-operators
+  register: r_install_plans
+
+- name: Set InstallPlan Name
+  when: r_install_plans.resources | length > 0
+  set_fact:
+    _ocp4_workload_serverless_install_plan_name: "{{ r_install_plan.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'serverless-operator')].metadata.name|[0]
+
+- name: Remove InstallPlan
+  when:
+  - _ocp4_workload_serverless_install_plan_name | default( "" ) | length > 0
+  k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ _ocp4_workload_serverless_install_plan_name }}"
+    namespace: openshift-operators
+
+- name: Remove remaining knativeservings CRDs
+  k8s:
+    state: absent
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop:
+  - knativeservings.operator.knative.dev
+  - knativeservings.serving.knative.dev
+
+# Leave this as the last task in the playbook.
+- name: remove_workload tasks complete
+  debug:
+    msg: "Remove Workload tasks completed successfully."
+  when: not silent|bool
