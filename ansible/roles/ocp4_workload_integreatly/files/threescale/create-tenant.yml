@@ -1,81 +1,161 @@
 ---
 
-# set internal util variables
+# Set internal util variables
 
 - set_fact:
-    _tenant_id: "{{ ocp4_workload_integreatly_threescale_tenant_id_format | format(item|int) }}"
+    _tenant_id: "{{ ocp4_workload_integreatly_user_base }}{{ item | int }}-tenant"
     _tenant_count: "{{ item }}"
-    _tenant_admin_username: "{{ ocp4_workload_integreatly_threescale_users_name_format | format(item|int) }}"
-    _tenant_admin_password: "{{ lookup('password', '/dev/null length=15 chars=ascii_letters,digits') }}"
-    _tenant_admin_email: "{{ ocp4_workload_integreatly_threescale_users_name_format | format(item|int) }}@example.com"
+    _tenant_admin_username: "{{ ocp4_workload_integreatly_user_base }}{{ item | int }}"
+    _tenant_admin_password: "{{ ocp4_workload_integreatly_user_password }}"
+    _tenant_admin_email: "{{ ocp4_workload_integreatly_user_base }}{{ item | int }}@{{ ocp4_workload_integreatly_user_email_host }}"
+    _tenant_admin_secret_name: "{{ ocp4_workload_integreatly_user_base }}{{ item | int }}-admin-credentials"
 
-- debug: msg="creating tenant with id '{{ _tenant_id }}' and admin user {{ _tenant_admin_username }}"
+- debug:
+    msg: Creating tenant with id '{{ _tenant_id }}' and admin user {{ _tenant_admin_username }}
 
-## tenants require a secret to specify the admin credentials
-## create the secret
+## Tenants require a secret to specify the admin credentials
+## Create the secret
 
-- debug: msg="creating credential secret for admin user {{ _tenant_admin_username }}"
+- name: Get 3scale detail secret {{ ocp4_workload_integreatly_seed_secret_name }}
+  k8s_facts:
+    kind: Secret
+    name: "{{ ocp4_workload_integreatly_seed_secret_name }}"
+    namespace: "{{ ocp4_workload_integreatly_threescale_namespace }}"
+  register: _threescale_detail_secret
 
 - set_fact:
-    _tenant_admin_secret_file: "{{ ocp4_workload_integreatly_tmp_dir }}/tenant-{{ _tenant_count }}-secret.json"
-    _tenant_admin_secret_name: "{{ _tenant_id }}-admin-credentials"
+    _threescale_master_token: "{{ _threescale_detail_secret.resources[0].data.MASTER_ACCESS_TOKEN | b64decode }}"
+    _threescale_admin_token: "{{ _threescale_detail_secret.resources[0].data.ADMIN_ACCESS_TOKEN | b64decode }}"
 
-- name: process tenant {{ _tenant_id }} credentials secret template
-  template:
-    src: "{{ ocp4_workload_integreatly_threescale_template_credential_secret }}"
-    dest: "{{ _tenant_admin_secret_file }}"
+- set_fact:
+    _create_tenant_body:
+      access_token: "{{ _threescale_master_token }}"
+      org_name: "{{ _tenant_id }}"
+      username: "{{ _tenant_admin_username }}"
+      email: "{{ _tenant_admin_email }}"
+      password: "{{ _tenant_admin_password }}"
+
+- uri:
+    url: "{{ threescale_master_host }}/master/api/providers.json"
+    method: POST
+    body_format: json
+    body: "{{ _create_tenant_body | to_json }}"
+    status_code: [201]
+  register: _action_create_tenant
+
+- name: Create tenant details secret
+  k8s:
+    state: present
+    name: "{{ _tenant_admin_secret_name }}"
+    namespace: "{{ ocp4_workload_integreatly_threescale_namespace }}"
+    definition:
+      api_version: v1
+      kind: Secret
+      name: "{{ _tenant_admin_secret_name }}"
+      data:
+        admin_id: "{{ _action_create_tenant.json.signup.account.id | b64encode }}"
+        token: "{{ _action_create_tenant.json.signup.access_token.value | b64encode }}"
+        token_id: "{{ _action_create_tenant.json.signup.access_token.id | b64encode }}"
+        admin: "{{ _tenant_admin_username | b64encode }}"
+        admin_password: "{{ _tenant_admin_password | b64encode }}"
+        admin_domain: "{{ ('https://' + _action_create_tenant.json.signup.account.admin_domain) | b64encode }}"
+      type: Opaque
+
+- debug:
+    msg: "woop {{ _action_create_tenant }}"
+
+# Details about the tenant are exported to a secret
+# Get this secret and log the information in it
+
+- debug:
+    msg: Retrieving details for tenant {{ _tenant_id }}"
+
+- name: Get tenant details secret
+  k8s_facts:
+    kind: Secret
+    name: "{{ _tenant_admin_secret_name }}"
+    namespace: "{{ ocp4_workload_integreatly_threescale_namespace }}"
+  register: _tenant_details
+
+# - set_fact:
+#     _tenant_host: "{{ _action_get_tenant_host.stdout | b64decode }}"
+#     _tenant_token:  "{{ _action_get_tenant_token.stdout | b64decode }}"
+
+- debug:
+    msg: Tenant {{ _tenant_details.resources[0] }}
+
+- set_fact:
+    _tenant_host: "{{ _tenant_details.resources[0].data.admin_domain | b64decode }}"
+    _tenant_token: "{{ _tenant_details.resources[0].data.token | b64decode }}"
+
+# Update SSO client with redirect URL for client
+
+- name: Get 3scale workshop SSO client
+  k8s_facts:
+    api_version: "{{ ocp4_workload_integreatly_threescale_sso_client_version }}"
+    kind: "{{ ocp4_workload_integreatly_threescale_sso_client_kind }}"
+    name: "{{ ocp4_workload_integreatly_threescale_sso_client_name }}"
+    namespace: "{{ ocp4_workload_integreatly_threescale_sso_namespace }}"
+  register: _action_get_client
+
+- debug: msg="Client {{ _action_get_client.resources[0] }}"
+
+- set_fact:
+    _sso_redirect_uris: "{{ _action_get_client.resources[0].spec.client.redirectUris + [_tenant_host + '/*'] }}"
+
+- name: Get managed 3scale SSO client
+  k8s_facts:
+    api_version: "{{ ocp4_workload_integreatly_threescale_sso_client_version }}"
+    kind: "{{ ocp4_workload_integreatly_threescale_sso_client_kind }}"
+    name: "{{ ocp4_workload_integreatly_threescale_managed_sso_client }}"
+    namespace: "{{ ocp4_workload_integreatly_threescale_sso_namespace }}"
+  register: _action_get_threescale_managed_sso_client
+
+- name: Create 3scale workshop SSO client
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_integreatly_threescale_sso_namespace }}"
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', ocp4_workload_integreatly_threescale_sso_client_template_resource) }}"
   vars:
-    tenant_admin_secret: "{{ _tenant_admin_secret_name }}"
-    tenant_admin_password: "{{ _tenant_admin_password | b64encode }}"
+    ocp4_workload_integreatly_threescale_sso_client_redirect_uris: "{{ _sso_redirect_uris }}"
+    ocp4_workload_integreatly_threescale_sso_client_root_url: "{{ _action_get_threescale_managed_sso_client.resources[0].spec.client.rootUrl }}"
 
-- name: create tenant {{ _tenant_id }} credentials secret
-  shell: oc create -f {{ _tenant_admin_secret_file }} -n {{ ocp4_workload_integreatly_threescale_namespace }}
-  register: _action_create_secret
-  failed_when: _action_create_secret.rc != 0 and 'AlreadyExists' not in _action_create_secret.stderr
 
-# create the tenant custom resource and wait for it to reconcile
-# it is considered reconciled when it has a status block
+# Update 3scale tenant with SSO option
 
-- debug: msg="creating tenant custom resource for tenant {{ _tenant_id }}"
-
-- set_fact:
-    _tenant_resource_file: "{{ ocp4_workload_integreatly_tmp_dir }}/tenant-{{ _tenant_count }}-resource.json"
-    _tenant_detail_secret_name: "{{ _tenant_id }}-details"
-
-- name: process tenant {{ _tenant_id }} custom resource template
-  template:
-    src: "{{ ocp4_workload_integreatly_threescale_template_tenant_resource }}"
-    dest: "{{ _tenant_resource_file }}"
-  vars:
-    tenant_name: "{{ _tenant_id }}"
-    tenant_admin_email: "{{ _tenant_admin_email }}"
-    tenant_admin_user: "{{ _tenant_admin_username }}"
-    tenant_admin_secret: "{{ _tenant_admin_secret_name }}"
-    tenant_detail_secret_name: "{{ _tenant_detail_secret_name }}"
-    tenant_detail_secret_namespace: "{{ ocp4_workload_integreatly_threescale_namespace }}"
-
-- name: create tenant {{ _tenant_id }} custom resource
-  shell: oc create -f {{ _tenant_resource_file }} -n {{ ocp4_workload_integreatly_threescale_namespace }}
-  register: _action_create_resource
-  failed_when: _action_create_resource.rc != 0 and 'AlreadyExists' not in _action_create_resource.stderr
-
-- debug: msg="tenant {{ _tenant_id }} created, waiting for it to be ready"
-
-- name: check if tenant {{ _tenant_id }} is reconciled
-  shell: oc get tenant {{ _tenant_id }} -n {{ ocp4_workload_integreatly_threescale_namespace }} -o jsonpath='{.status.tenantId}'
-  register: _action_get_resource
-  until: _action_get_resource.rc == 0 and _action_get_resource.stdout != ''
-
-# details about the tenant are exported to a secret
-# get this secret and log the information in it
-
-- debug: msg="retrieving details for tenant {{ _tenant_id }}"
-
-- name: get tenant {{ _tenant_id }} host url from details secret {{ _tenant_detail_secret_name }}
-  shell: oc get secret {{ _tenant_detail_secret_name }} -n {{ ocp4_workload_integreatly_threescale_namespace }} -o jsonpath='{.data.adminURL}'
-  register: _action_get_tenant_host
+- name: Get SSO route
+  k8s_facts:
+    kind: Route
+    name: "{{ ocp4_workload_integreatly_sso_route_name }}"
+    namespace: "{{ ocp4_workload_integreatly_threescale_sso_namespace }}"
+  register: _action_get_sso_route
 
 - set_fact:
-    _tenant_host: "{{ _action_get_tenant_host.stdout | b64decode }}"
+    _tenant_sso_route: "https://{{ _action_get_sso_route.resources[0].spec.host }}/auth/realms/{{ ocp4_workload_integreatly_threescale_sso_realm }}"
 
-- debug: msg="tenant {{ _tenant_id }} host is {{ _tenant_host }} with user {{ _tenant_admin_username }}"
+- set_fact:
+    _tenant_auth_provider:
+      kind: keycloak
+      name: rhsso
+      client_id: "{{ ocp4_workload_integreatly_threescale_sso_client_name }}"
+      client_secret: "{{ ocp4_workload_integreatly_threescale_sso_client_secret }}"
+      site: "{{ _tenant_sso_route }}"
+      access_token: "{{ _tenant_token }}"
+      skip_ssl_certificate_verification: true
+      published: true
+
+- debug: msg="{{ _tenant_auth_provider | to_json }}"
+
+- uri:
+    url: "{{ _tenant_host }}/admin/api/account/authentication_providers.json"
+    method: POST
+    body_format: json
+    body: "{{ _tenant_auth_provider | to_json }}"
+    status_code: [201]
+  register: _action_create_sso
+
+- debug:
+    msg: "{{ _action_create_sso }}"
