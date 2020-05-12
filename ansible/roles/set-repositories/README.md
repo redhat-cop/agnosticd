@@ -14,7 +14,7 @@ FIXME
 
 ### Repo Method 'rhn' Variables
 
-IMPORTANT: When using `repo_method: rhn` only define the variables of one of the below options.
+**IMPORTANT:** When using `repo_method: rhn` only define the variables of one of the below options.
 
 **Option 1:** Register with credentials
 This option registers a system with Red Hat credentials and a pool id.
