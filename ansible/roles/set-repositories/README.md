@@ -16,7 +16,7 @@ FIXME
 
 IMPORTANT: When using `repo_method: rhn` only define the variables of one of the below options.
 
-*Option 1:* Register with credentials
+**Option 1:** Register with credentials
 This option registers a system with Red Hat credentials and a pool id.
 If using this method define these variables in a secrets file.
 
@@ -30,7 +30,7 @@ The password for the user name referenced in `rhel_subscription_user`.
 `rhsm_pool_ids` (Required)
 The pool id for the subscription to attach. By default `auto_attach` is false.
 
-*Option 2:* Register with an activation key.
+**Option 2:** Register with an activation key.
 These variables will register a system with an activation key.
 
 `rhel_subscription_activation_key` (Required)
