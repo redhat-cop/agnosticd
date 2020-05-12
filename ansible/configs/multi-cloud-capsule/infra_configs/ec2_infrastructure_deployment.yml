@@ -1,0 +1,126 @@
+---
+
+- import_playbook: ../../../cloud_providers/ec2_pre_checks.yml
+
+- name: Step 001.1 Deploy Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - step001
+    - step001.1
+    - deploy_infrastructure
+  tasks:
+    - name: Run infra-ec2-template-generate Role
+      import_role:
+        name: infra-ec2-template-generate
+
+    - name: Run infra-ec2-template-create Role
+      import_role:
+        name: infra-ec2-template-create
+      vars:
+        aws_region_loop: "{{aws_region}}"
+
+    - name: Run infra-ec2-template-create Role into FallBack region
+      include_role:
+        name: infra-ec2-template-create
+      vars:
+        aws_region_loop: "{{item}}"
+      with_items: "{{ fallback_regions }}"
+      when:
+        - fallback_regions is defined
+        - cloudformation_out is failed
+
+    - name: report Cloudformation error
+      fail:
+        msg: "FAIL {{ project_tag }} Create Cloudformation"
+      when: not cloudformation_out is succeeded
+      tags:
+        - provision_cf_template
+
+- name: Step 001.2 Create Inventory and SSH config setup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - step001
+    - step001.2
+    - create_inventory
+    - create_ssh_config
+  tasks:
+    # Sometimes the infra step is skipped, for example when scaling up a cluster.
+    # when step001.1 is skipped, aws_region_final is not defined.
+    - when: aws_region_final is not defined
+      include_tasks: ec2_detect_region_tasks.yml
+
+    - name: Run infra-ec2-create-inventory Role
+      import_role:
+        name: infra-ec2-create-inventory
+
+    - name: Run Common SSH Config Generator task file
+      import_tasks: ./infra-common-ssh-config-generate.yml
+
+# include global vars again, this time for all hosts now that the inventory is built
+- import_playbook: ../../../include_vars.yml
+  tags:
+    - create_inventory
+    - must
+
+- name: Step 001.3 Configure Linux Hosts and Wait for Connection
+  hosts:
+    - all:!windows:!network
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  become: true
+  tags:
+    - step001
+    - step001.3
+    - wait_ssh
+    - set_hostname
+  tasks:
+    - name: set facts for remote access
+      tags:
+        - create_inventory
+      set_fact:
+        aws_region_final: "{{hostvars['localhost'].aws_region_final}}"
+        ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|d() }} -F {{output_dir}}/{{ env_type }}_{{ guid }}_ssh_conf"
+
+    - name: Run infra-ec2-wait_for_linux_hosts Role
+      import_role:
+        name: infra-ec2-wait_for_linux_hosts
+
+    - name: Run infra-ec2-linux-set-hostname Role
+      import_role:
+        name: infra-ec2-linux-set-hostname
+
+- name: Step 001.4 Configure Windows Hosts and Wait for Connection
+  gather_facts: false
+  hosts:
+    - windows
+  tags:
+    - step001
+    - step001.4
+  tasks:
+    - name: set facts for remote access
+      tags:
+        - create_inventory
+      set_fact:
+        ansible_become: false
+        ansible_connection: winrm
+        ansible_host: "{{ public_dns_name }}"
+        ansible_password: "{{ hostvars['localhost'].windows_password | default(hostvars['localhost'].generated_windows_password) }}"
+        ansible_port: 5986
+        ansible_user: Administrator
+        ansible_winrm_server_cert_validation: ignore
+        aws_region_final: "{{hostvars['localhost'].aws_region_final}}"
+
+    - name: Run infra-ec2-wait_for_linux_hosts Role
+      import_role:
+        name: infra-ec2-wait_for_windows_hosts
+
+    - name: Set output_dir for all windows hosts
+      set_fact:
+        output_dir: "{{ hostvars.localhost.output_dir }}"

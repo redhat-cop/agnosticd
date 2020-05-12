@@ -8,10 +8,42 @@ static=${ORIG}/tests/static
 
 cd ${ORIG}
 
-for i in ${static}/scenarii/*.{yaml,yml}; do
-    config=$(basename "${i}")
+for YAMLLINT in $(find ansible -name .yamllint); do
+    echo $YAMLLINT
+    cd $(dirname $YAMLLINT)
+    yamllint .
+    cd ${ORIG}
+done
 
+for i in \
+    $(find ${ORIG}/ansible/configs -name 'sample_vars*.y*ml' | sort); do
+    echo
+    echo '##################################################'
+    echo "$(basename $(dirname ${i}))/$(basename ${i})"
+    echo '##################################################'
+
+
+    extra_args=()
+
+    config=$(basename $(dirname "${i}"))
+
+    if ! egrep --quiet ^env_type: ${i}; then
+        echo "No env_type found in ${i}"
+    fi
     env_type=$(egrep ^env_type: ${i}|cut -d' ' -f 2)
+
+    # Ansible Workshops AKA as Linklight needs to be downloaded
+    if [ "${env_type}" = linklight ] || [ "${env_type}" = ansible-workshops ]; then
+        if [ ! -d ${ansible_path}/workdir/${env_type} ]; then
+            echo "Download ${env_type}"
+            git clone https://github.com/ansible/workshops.git ${ansible_path}/workdir/${env_type}
+            (cd ${ansible_path}/workdir/${env_type}; PAGER=cat git show --format=short --no-color)
+        fi
+        touch $(dirname "${i}")/env_secret_vars.yml
+        extra_args=(
+            -e ANSIBLE_REPO_PATH=${ansible_path}
+        )
+    fi
 
     if [ -e "${ansible_path}/configs/${env_type}/hosts" ]; then
         inventory=(-i "${ansible_path}/configs/${env_type}/hosts")
@@ -19,32 +51,34 @@ for i in ${static}/scenarii/*.{yaml,yml}; do
         inventory=(-i "${static}/tox-inventory.txt")
     fi
 
-    echo
-    echo '############################'
-    echo "${config}"
-    echo '############################'
+    # Setup galaxy roles and collections, make sure it works
+    ansible-playbook --tags galaxy_roles \
+                     "${inventory[@]}" \
+                     ${ansible_path}/main.yml \
+                     ${extra_args[@]} \
+                     -e @${i}
 
     for playbook in \
         ${ansible_path}/main.yml \
-        ${ansible_path}/destroy.yml \
-        ${ansible_path}/configs/${env_type}/destroy_env.yml \
-        ${ansible_path}/configs/${env_type}/scaleup.yml; do
-        if [ -e "${playbook}" ]; then
-            echo
-            echo -n "With ANSIBLE_REPO_PATH: "
-            ansible-playbook --syntax-check \
-                             --list-tasks \
-                             "${inventory[@]}" \
-                             -e ANSIBLE_REPO_PATH=${ansible_path} \
-                             "${playbook}" \
-                             -e @${i}
-            echo -n "Without ANSIBLE_REPO_PATH: "
+        ${ansible_path}/destroy.yml; do
+        ansible-playbook --syntax-check \
+                         --list-tasks \
+                         "${inventory[@]}" \
+                         "${playbook}" \
+                         ${extra_args[@]} \
+                         -e @${i}
+    done
+    # lifecycle (stop / start)
 
-            ansible-playbook --syntax-check \
-                            --list-tasks \
-                            "${inventory[@]}" \
-                            "${playbook}" \
-                            -e @${i}
-        fi
+    for ACTION in stop start status; do
+        ansible-playbook --syntax-check \
+                        --list-tasks \
+                        "${inventory[@]}" \
+                        ${ansible_path}/lifecycle_entry_point.yml \
+                        ${extra_args[@]} \
+                        -e ACTION=${ACTION} \
+                        -e @${i}
     done
 done
+
+exit 0
