@@ -1,0 +1,96 @@
+--- 
+- set_fact:
+    _instance_namespace: "{{ ocp4_workload_integreatly_user_base }}{{ item | int }}-fuse"
+    _instance_count: "{{ item }}"
+    _instance_user: "{{ ocp4_workload_integreatly_user_base }}{{ item | int }}"
+
+- debug: msg="creating fuse instance with user '{{ _instance_user }}' "
+
+# create namespace and label it
+- name : Create and switch to user fuse project and label fuse namespace 
+  k8s:
+    state: present
+    definition:
+      name: "{{ _instance_namespace }}"
+      api_version: v1 
+      kind: namespace
+      metadata:
+        name:  "{{ _instance_namespace }}"
+        labels:
+          integreatly: "true" 
+          user-fuse-online: "true"
+ 
+# Create fuse pull secret (not sure using k8s makes sense in this case)
+- name: Get existing fuse pull secret
+  k8s_facts:
+    api_version: v1
+    kind: secret
+    name: syndesis-pull-secret
+    namespace: "{{ ocp4_workload_integreatly_fuse_namespace }}"
+  register: syndesis_pull_secret
+
+- set_fact:
+    _instance_pull_secret_file: "{{ ocp4_workload_integreatly_tmp_dir }}/instance-{{ _instance_user }}-fuse-pull-secret.yaml"
+
+- name: copy syndesis pull secret 
+  copy:
+    content: "{{syndesis_pull_secret.resources[0]}}" 
+    dest: "{{_instance_pull_secret_file}}"
+
+- name: remove existing resourceVersion, uid, change the namespace to instance namespace in the pull secret
+  shell: cat {{_instance_pull_secret_file}} | sed 's/\"resourceVersion\":[^,]*,/ /g' | sed 's/\"uid\":[^,]*,/ /g' | sed 's/{{ ocp4_workload_integreatly_fuse_namespace }}/{{_instance_namespace}}/g'
+  register: _instance_pull_secret
+
+- name: copy instance pull secret to a file
+  copy:
+    content: "{{_instance_pull_secret.stdout}}" 
+    dest: "{{_instance_pull_secret_file}}"
+
+- name: Create fuse pull secret from syndesis-pull-secret
+  k8s:
+    state: present
+    src: "{{_instance_pull_secret_file}}"
+
+# Give user view permission to the namespace
+#  shell: oc create rolebinding {{ _instance_user }}-view --clusterrole="view" --user={{ _instance_user }} -n {{ _instance_namespace }}
+- name: Give user view permission to the namespace
+  k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        namespace: "{{ _instance_namespace }}"
+        name: "{{ _instance_user }}-view"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: view
+      subjects:
+      - apiGroup: rbac.authorization.k8s.io
+        kind: User
+        name: "{{ _instance_user }}"
+
+# Create catalog source, (breaking changes around uid using k8s)
+- name: create configMap
+  shell: 'oc get configmap registry-cm-redhat-rhmi-fuse-operator -n {{ ocp4_workload_integreatly_fuse_operator_namespace }} -o yaml | sed "/namespace: {{ ocp4_workload_integreatly_fuse_operator_namespace }}/d" | oc create -n {{ _instance_namespace }} -f -'
+  register: _action_create_configmap
+  failed_when: _action_create_configmap.rc != 0 and 'AlreadyExists' not in _action_create_configmap.stderr
+
+- name: Create catalog source
+  k8s:
+    state: present
+    name: "{{ ocp4_workload_integreatly_fuse_workshop_operator_catalog_source_name }}"
+    namespace: "{{ _instance_namespace }}"
+    definition: "{{ lookup('template', ocp4_workload_integreatly_fuse_workshop_operator_catalog_source_template) }}"
+
+# Create operator templates
+
+- name: Process subscription template for {{ _instance_namespace }}
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item) }}"
+  with_items: "{{ ocp4_workload_integreatly_fuse_templates }}"
+  vars:
+    _instance_user: _instance_user
+    _instance_namespace: _instance_namespace
