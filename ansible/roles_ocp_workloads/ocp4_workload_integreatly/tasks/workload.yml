@@ -1,0 +1,216 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Create operator namespace {{ ocp4_workload_integreatly_namespace }}
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: "{{ ocp4_workload_integreatly_namespace }}"
+    state: present
+
+- name: Create expected resources
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_integreatly_namespace }}"
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item) | from_yaml }}"
+  loop:
+  - secret-smtp.yml.j2
+  - secret-pd.yml.j2
+  - secret-dms.yml.j2
+  - service-webhook.yml.j2
+
+# Expect the Minio operator to already be setup
+# Provision the Minio instance
+
+- name: Create Minio instance
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_integreatly_minio_namespace }}"
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item | from_yaml ) }}"
+  loop:
+  - minio-instance.yml.j2
+  - minio-service.yml.j2
+  - minio-route.yml.j2
+
+- name: Create external Minio instance route
+  k8s_facts:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: "{{ ocp4_workload_integreatly_minio_route_name }}"
+    namespace: "{{ ocp4_workload_integreatly_minio_namespace }}"
+  register: _minio_route
+  until: _minio_route.resources[0].spec.host != ''
+
+- set_fact:
+    _minio_hostname: https://{{ _minio_route.resources[0].spec.host }}
+
+- shell: AWS_ACCESS_KEY_ID={{ ocp4_workload_integreatly_minio_access_key }} AWS_SECRET_ACCESS_KEY={{ ocp4_workload_integreatly_minio_secret_key }} aws s3api --endpoint-url {{ _minio_hostname }} --region {{ ocp4_workload_integreatly_minio_bucket_region }} create-bucket --bucket {{ ocp4_workload_integreatly_minio_bucket_name }}
+  register: _create_bucket
+  retries: 20
+  delay: 60
+  failed_when: _create_bucket.rc != 0 and 'BucketAlreadyOwnedByYou' not in _create_bucket.stderr
+  until: _create_bucket.rc == 0 or 'BucketAlreadyOwnedByYou' in _create_bucket.stderr
+
+- name: Create Minio blobstorage override
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: threescale-blobstorage-{{ ocp4_workload_integreatly_custom_resource_name }}
+        namespace: "{{ ocp4_workload_integreatly_namespace }}"
+      data:
+        bucketName: "{{ ocp4_workload_integreatly_minio_bucket_name | b64encode }}"
+        bucketRegion: "{{ ocp4_workload_integreatly_minio_bucket_region | b64encode }}"
+        credentialKeyID: "{{ ocp4_workload_integreatly_minio_access_key | b64encode }}"
+        credentialSecretKey: "{{ ocp4_workload_integreatly_minio_secret_key | b64encode }}"
+        AWS_HOSTNAME: "{{ _minio_route.resources[0].spec.host | b64encode }}"
+        AWS_PATH_STYLE: "{{ true | b64encode }}"
+
+- set_fact:
+    _format_vars:
+      release: "{{ ocp4_workload_integreatly_release }}"
+      branch: "{{ ocp4_workload_integreatly_git_ref }}"
+
+- set_fact:
+    _operator_manifest_dir: "{{ ocp4_workload_integreatly_manifest_dir_format.format(**_format_vars) }}"
+
+# Retrieve CSVs
+- set_fact:
+    _operator_manifest_csv_paths: "{{ (_operator_manifest_csv_paths | default([])) + [lookup(ocp4_workload_integreatly_manifest_dir_type, _operator_manifest_dir + '/' + item.format(**_format_vars), split_lines=False) | from_yaml] }}"
+  with_items: "{{ ocp4_workload_integreatly_manifest_csv_formats }}"
+
+# Remove replaces field from CSV
+- set_fact:
+    _operator_manifest_standalone_csv_paths: "{{ (_operator_manifest_standalone_csv_paths | default([])) + [item | csv_filter_spec(['replaces'])] }}"
+  with_items: "{{ _operator_manifest_csv_paths }}"
+
+- debug: msg="{{ _operator_manifest_standalone_csv_paths }}"
+
+# Retrieve Packages
+- set_fact:
+    _operator_manifest_package_paths: "{{ (_operator_manifest_package_paths | default([])) + [lookup(ocp4_workload_integreatly_manifest_dir_type, _operator_manifest_dir + '/' + item.format(**_format_vars), split_lines=False) | from_yaml] }}"
+  with_items: "{{ ocp4_workload_integreatly_manifest_package_formats }}"
+
+
+# Retrieve CRDS
+- set_fact:
+    _operator_manifest_crd_paths: "{{ (_operator_manifest_crd_paths | default([])) + [lookup(ocp4_workload_integreatly_manifest_dir_type, _operator_manifest_dir + '/' + item.format(**_format_vars), split_lines=False) | from_yaml] }}"
+  with_items: "{{ ocp4_workload_integreatly_manifest_crd_formats }}"
+
+# By default the Integreatly operator will create it's own RHMI resource if one
+# isn't found in the namespace. Create the CRDs before OLM to allow an RHMI
+# resource to be created before the operator starts up.
+- name: Create expected CRDs to ensure automated RHMI CR isn't created on operator startup
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_integreatly_namespace }}"
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ item }}"
+  loop: "{{ _operator_manifest_crd_paths }}"
+
+- name: Create workshop RHMI resource
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1alpha1
+      kind: RHMI
+      metadata:
+        name: "{{ ocp4_workload_integreatly_custom_resource_name }}"
+        namespace: "{{ ocp4_workload_integreatly_namespace }}"
+      spec:
+        type: "{{ ocp4_workload_integreatly_custom_resource_type }}"
+        namespacePrefix: "{{ ocp4_workload_integreatly_prefix }}"
+        selfSignedCerts: "{{ ocp4_workload_integreatly_custom_resource_self_signed }}"
+        useClusterStorage: "{{ ocp4_workload_integreatly_custom_resource_cluster_storage }}"
+        # Monitoring reconciler requires prereq secrets to be defined explicitly
+        smtpSecret: "{{ ocp4_workload_integreatly_prefix }}smtp"
+        deadMansSnitchSecret: "{{ ocp4_workload_integreatly_prefix }}deadmanssnitch"
+        pagerDutySecret: "{{ ocp4_workload_integreatly_prefix }}pagerduty"
+
+- name: Create catalog source configmap
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{ ocp4_workload_integreatly_catalog_source_configmap_name }}"
+        namespace: "{{ ocp4_workload_integreatly_namespace }}"
+      data:
+        clusterServiceVersions: "{{ _operator_manifest_standalone_csv_paths | to_json }}"
+        customResourceDefinitions: "{{ _operator_manifest_crd_paths | to_json }}"
+        packages: "{{ _operator_manifest_package_paths | to_json }}"
+
+- name: Create catalog source
+  k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: CatalogSource
+      metadata:
+        name: "{{ ocp4_workload_integreatly_catalog_source_name }}"
+        namespace: "{{ ocp4_workload_integreatly_namespace }}"
+      spec:
+        configMap: "{{ ocp4_workload_integreatly_catalog_source_configmap_name }}"
+        displayName: "{{ ocp4_workload_integreatly_catalog_source_name }}"
+        publisher: RHMI
+        sourceType: configmap
+
+- name: Create operator group
+  k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: "{{ ocp4_workload_integreatly_operator_group_name }}"
+        namespace: "{{ ocp4_workload_integreatly_namespace }}"
+      spec:
+        targetNamespaces: "{{ [ocp4_workload_integreatly_namespace] }}"
+
+- name: Create subscription
+  k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: "{{ ocp4_workload_integreatly_operator_group_name }}"
+        namespace: "{{ ocp4_workload_integreatly_namespace }}"
+      spec:
+        source: "{{ ocp4_workload_integreatly_catalog_source_name }}"
+        channel: "{{ ocp4_workload_integreatly_subscription_channel }}"
+        installPlanApproval: "{{ ocp4_workload_integreatly_subscription_approval }}"
+        name: "{{ ocp4_workload_integreatly_subscription_group_package }}"
+        sourceNamespace: "{{ ocp4_workload_integreatly_namespace }}"
+
+- name: Check RHMI custom resource is in a ready state
+  k8s_facts:
+    api_version: integreatly.org/v1alpha1
+    kind: RHMI
+    name: "{{ ocp4_workload_integreatly_custom_resource_name }}"
+    namespace: "{{ ocp4_workload_integreatly_namespace }}"
+  register: _rhmi_cr
+  retries: 60
+  delay: 60
+  until: _rhmi_cr.resources[0].status is defined and _rhmi_cr.resources[0].status.stage == 'complete'
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
+  
