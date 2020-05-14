@@ -8,6 +8,13 @@ static=${ORIG}/tests/static
 
 cd ${ORIG}
 
+for YAMLLINT in $(find ansible -name .yamllint); do
+    echo $YAMLLINT
+    cd $(dirname $YAMLLINT)
+    yamllint .
+    cd ${ORIG}
+done
+
 for i in \
     $(find ${ORIG}/ansible/configs -name 'sample_vars*.y*ml' | sort); do
     echo

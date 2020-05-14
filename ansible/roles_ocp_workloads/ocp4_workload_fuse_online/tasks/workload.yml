@@ -1,0 +1,196 @@
+---
+
+- name: create project for user
+  k8s:
+    state: present
+    definition: "{{ lookup('template', role_path ~ '/templates/namespace.j2' ) | from_yaml }}"
+
+- name: delete existing limitrange
+  k8s:
+    state: absent
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    name: "{{ ocp4_workload_fuse_online_project }}-core-resource-limits"
+    api_version: v1
+    kind: LimitRange
+
+- name: create limitrange in namespace
+  k8s:
+    state: present
+    namespace:  "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/limitrange.j2' ) | from_yaml }}"
+
+- name: create OpenShift Objects for Fuse Online operator
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+    - ./files/syndesis-crd.yml
+    - ./files/syndesis-installer-role.yml
+    - ./files/syndesis-serviceaccount.yml
+    - ./files/syndesis-operator-role.yml
+    - ./files/syndesis-operator-install-rolebinding.yml
+    - ./files/syndesis-operator.yml
+
+- name: wait until Syndesis operator is deployed
+  k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: syndesis-operator
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+  register: r_syndesis_operator_deployment
+  retries: 50
+  delay: 10
+  until:
+    - r_syndesis_operator_deployment.resources[0].status.readyReplicas is defined
+    - r_syndesis_operator_deployment.resources[0].status.replicas is defined
+    - r_syndesis_operator_deployment.resources[0].status.readyReplicas == r_syndesis_operator_deployment.resources[0].status.replicas  
+
+- name: create image pull secret for registry.redhat.io
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('file', role_path ~ '/files/image-pull-secret.yml' ) | from_yaml }}"
+
+- name: link secret to syndesis operator sa
+  shell: oc secrets link syndesis-operator registry-credentials --for=pull -n {{ ocp4_workload_fuse_online_project }}
+
+- name: link secret to builder sa
+  shell: oc secrets link builder registry-credentials -n {{ ocp4_workload_fuse_online_project }}
+
+- name: install Syndesis custom resource
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('file', role_path ~ '/files/syndesis-cr.yml' ) | from_yaml }}"
+
+- name: check that Syndesis deployed correctly
+  k8s_info:
+    api_version: syndesis.io/v1alpha1
+    kind: Syndesis
+    name: app
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+  register: r_syndesis_cr
+  retries: 180
+  delay: 10
+  until:
+    - r_syndesis_cr.resources[0].status.phase is defined
+    - r_syndesis_cr.resources[0].status.phase == "Installed"
+
+# AMQ Broker
+- name: create OpenShift Objects for AMQ operator
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+    - ./files/amq-artemis-address-crd.yml
+    - ./files/amq-artemis-broker-crd.yml
+    - ./files/amq-artemis-scaledown-crd.yml
+    - ./files/amq-broker-operator-serviceaccount.yml
+    - ./files/amq-broker-operator-role.yml
+    - ./files/amq-broker-operator-rolebinding.yml
+    - ./files/amq-broker-operator.yml
+
+- name: wait until AMQ operator is deployed
+  k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: amq-broker-operator
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+  register: r_amq_broker_operator_deployment
+  retries: 50
+  delay: 10
+  until:
+    - r_amq_broker_operator_deployment.resources[0].status.readyReplicas is defined
+    - r_amq_broker_operator_deployment.resources[0].status.replicas is defined
+    - r_amq_broker_operator_deployment.resources[0].status.readyReplicas == r_amq_broker_operator_deployment.resources[0].status.replicas
+
+- name: install AMQ broker custom resource
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('file', role_path ~ '/files/amq-broker-cr.yml' ) | from_yaml }}"
+
+- name: wait until AMQ broker is deployed
+  k8s_info:
+    api_version: apps/v1
+    kind: StatefulSet
+    name: amq-broker-amqp-ss
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+  register: r_amq_broker_ss
+  retries: 60
+  delay: 10
+  until:
+    - r_amq_broker_ss.resources[0].status.readyReplicas is defined
+    - r_amq_broker_ss.resources[0].status.replicas is defined
+    - r_amq_broker_ss.resources[0].status.readyReplicas == r_amq_broker_ss.resources[0].status.replicas
+
+- name: install AMQ broker addresses custom resource
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+    - ./files/amq-broker-address-incomingorders.yml
+    - ./files/amq-broker-address-notifications.yml  
+
+# Coolstore Catalog Service
+- name: add the view role to the default service account
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('file', role_path ~ '/files/role-default-view.yml' ) | from_yaml }}"
+
+- name: create configmap for catalog service
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/catalog-service-configmap.j2' ) | from_yaml }}"
+
+- name: deploy the catalog service application
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/coolstore-catalog-mongodb-persistent.j2' ) | from_yaml }}"  
+
+- name: resume the catalog service
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    name: "{{ ocp4_workload_fuse_online_catalog_service_name }}"
+    definition:
+      apiVersion: apps.openshift.io/v1
+      kind: DeploymentConfig
+      spec:
+        paused: false
+
+- name: wait until catalog service is deployed
+  k8s_info:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    name: "{{ ocp4_workload_fuse_online_catalog_service_name }}"
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+  register: r_catalog_service_deployment
+  retries: 50
+  delay: 10
+  until:
+    - r_catalog_service_deployment.resources[0].status.readyReplicas is defined
+    - r_catalog_service_deployment.resources[0].status.replicas is defined
+    - r_catalog_service_deployment.resources[0].status.readyReplicas == r_catalog_service_deployment.resources[0].status.replicas
+
+- name: "grant syndesis installer privileges to {{ ocp_username }}"
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/syndesis-installer-rolebinding.j2' ) | from_yaml }}"
+
+- name: "give user {{ ocp_username }} admin privileges in namespace"
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_fuse_online_project }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/namespace-admin-rb.j2' ) | from_yaml }}"
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete
