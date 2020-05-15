@@ -1,0 +1,157 @@
+---
+- name: Get cluster version
+  k8s_facts:
+    api_version: config.openshift.io/v1
+    kind: ClusterVersion
+    name: version
+  register: r_cluster_version
+
+- name: Check if Elasticsearch Operator is already installed
+  k8s_facts:
+    api_version: v1
+    kind: Deployment
+    namespace: "openshift-operators-redhat"
+    name: "elasticsearch-operator"
+  register: r_eo_deployment_exists
+
+- name: Install Elasticsearch Operator if not installed
+  when: r_eo_deployment_exists.resources | length | int == 0
+  block:
+
+  - name: Get current stable channel for Elasticsearch
+    k8s_facts:
+      api_version: packages.operators.coreos.com/v1
+      kind: PackageManifest
+      name: elasticsearch-operator
+      namespace: openshift-marketplace
+    register: r_eo_channel
+
+  # Set Elasticsearch channel to the one matching the deployed cluster version. If no matching channel
+  # available set to defaultChannel from the subscription.
+  - name: Set Elasticsearch channel
+    set_fact:
+      logging_elasticsearch_channel: >-
+        {{ t_version_match_channel | default(r_eo_channel.resources[0].status.defaultChannel, true) }}
+    vars:
+      t_cluster_version: >-
+        {{ r_cluster_version.resources[0].spec.channel | regex_replace('.*-(\d+\.\d+)', '\1') }}
+      t_version_match_query: "[?name=='{{ t_cluster_version }}']|[0].name"
+      t_version_match_channel: >-
+        {{ r_eo_channel.resources[0].status.channels | json_query(t_version_match_query) }}
+
+  - name: Print Elasticsearch channel to be installed
+    debug:
+      msg: "Elasticsearch channel to be installed: {{ logging_elasticsearch_channel }}"
+
+  - name: Install Elasticsearch operator prerequisites
+    k8s:
+      state: present
+      definition: "{{ lookup('file', item ) | from_yaml }}"
+    loop:
+    - ./files/eo_namespace.yaml
+    - ./files/eo_operatorgroup.yaml
+    - ./files/eo_role.yaml
+    - ./files/eo_rolebinding.yaml
+
+  - name: Install Elasticsearch operator
+    k8s:
+      state: present
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - ./templates/eo_subscription.j2
+
+  - name: Wait for Elasticsearch operator to be ready
+    k8s_facts:
+      api_version: v1
+      kind: Deployment
+      namespace: "openshift-operators-redhat"
+      name: "elasticsearch-operator"
+    register: r_eo_deployment
+    retries: 30
+    delay: 10
+    until:
+    - r_eo_deployment.resources | length | int > 0
+    - r_eo_deployment.resources[0].status.availableReplicas is defined
+    - r_eo_deployment.resources[0].status.availableReplicas | int == r_eo_deployment.resources[0].spec.replicas | int
+
+- name: Get current stable channel for Cluster Logging
+  k8s_facts:
+    api_version: packages.operators.coreos.com/v1
+    kind: PackageManifest
+    name: cluster-logging
+    namespace: openshift-marketplace
+  register: r_logging_channel
+
+# Set Cluster Logging channel to the one matching the deployed cluster version. If no matching channel
+# available set to defaultChannel from the subscription.
+- name: Set Cluster Logging channel
+  set_fact:
+    logging_channel: >-
+      {{ t_version_match_channel | default(r_logging_channel.resources[0].status.defaultChannel, true) }}
+  vars:
+    t_cluster_version: >-
+      {{ r_cluster_version.resources[0].spec.channel | regex_replace('.*-(\d+\.\d+)', '\1') }}
+    t_version_match_query: "[?name=='{{ t_cluster_version }}']|[0].name"
+    t_version_match_channel: >-
+      {{ r_logging_channel.resources[0].status.channels | json_query(t_version_match_query) }}
+
+- name: Print Cluster Logging channel to be installed
+  debug:
+    msg: "Cluster Logging channel to be installed: {{ logging_channel }}"
+
+- name: Install OpenShift Logging Operator Prerequisites
+  k8s:
+    state: present
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/logging_namespace.yaml
+  - ./files/logging_operatorgroup.yaml
+  - ./files/logging_curator_configmap.yaml
+
+- name: Install OpenShift Logging Operator
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/logging_subscription.j2
+
+- name: Wait for Cluster Logging Operator to be ready
+  k8s_facts:
+    api_version: v1
+    kind: Deployment
+    namespace: "openshift-logging"
+    name: "cluster-logging-operator"
+  register: r_logging_deployment
+  retries: 30
+  delay: 10
+  until:
+  - r_logging_deployment.resources | length | int > 0
+  - r_logging_deployment.resources[0].status.availableReplicas is defined
+  - r_logging_deployment.resources[0].status.availableReplicas | int == r_logging_deployment.resources[0].spec.replicas | int
+
+- name: Create OpenShift ClusterLogging
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/cluster_logging.j2
+
+- name: Wait until Elasticsearch cluster status is green
+  k8s_facts:
+    api_version: logging.openshift.io/v1
+    kind: ClusterLogging
+    name: instance
+    namespace: openshift-logging
+  register: r_logging
+  retries: 30
+  delay: 10
+  ignore_errors: yes
+  until: 
+  - r_logging.resources[0].status.logStore.elasticsearchStatus[0].cluster.status is defined
+  - r_logging.resources[0].status.logStore.elasticsearchStatus[0].cluster.status == "green"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

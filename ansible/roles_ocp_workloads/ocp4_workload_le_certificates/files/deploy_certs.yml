@@ -1,0 +1,110 @@
+---
+# This playbook redeploys Lets Encrypt certificates
+# It does not renew the certs, which is done by the certbot cronjob.
+#
+# Please ensure CA and key have not changed.
+
+- hosts: localhost
+  gather_facts: no
+  become: no
+  vars:
+  - _certbot_install_dir: "/home/{{ ansible_user }}/certificates"
+  - _certbot_remote_dir: "/home/{{ ansible_user }}"
+  - _certbot_dir: "{{ _certbot_remote_dir }}/certbot"
+  tasks:
+  - name: Determine API server hostname
+    shell: "oc whoami --show-server | cut -f 2 -d ':' | cut -f 3 -d '/' | sed 's/-api././'"
+    register: r_api_hostname
+
+  - name: Compute domain name
+    set_fact:
+      _certbot_domain: "{{ r_api_hostname.stdout }}"
+
+  - name: "Install certificates into {{ _certbot_install_dir }}/{{ item }}"
+    copy:
+      src: "{{ _certbot_dir }}/config/live/{{ _certbot_domain }}/{{ item }}"
+      dest: "{{ _certbot_install_dir }}/{{ item }}"
+      remote_src: yes
+    loop:
+    - "cert.pem"
+    - "fullchain.pem"
+    - "chain.pem"
+    - "privkey.pem"
+
+  - name: Read Certificate
+    slurp:
+      src: "$HOME/certificates/fullchain.pem"
+    register: server_cert
+
+  - name: Read Key
+    slurp:
+      src: "$HOME/certificates/privkey.pem"
+    register: server_key
+
+  - name: Delete old Ingress Controller Certificate if present
+    k8s:
+      state: absent
+      api_version: v1
+      kind: Secret
+      name: router-certs
+      namespace: openshift-ingress
+
+  - name: Create new Ingress Controller Certificate
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './router-certs.j2' ) | from_yaml }}"
+
+  - name: Find Ingress Controller Pods
+    k8s_facts:
+      api_version: v1
+      kind: Pod
+      namespace: openshift-ingress
+      label_selectors:
+      - ingresscontroller.operator.openshift.io/deployment-ingresscontroller=default
+    register: r_ingress_controller_pods
+
+  - name: Delete all Ingress Controller Pods (to trigger rollout with new certificates)
+    k8s:
+      state: absent
+      api_version: v1
+      kind: Pod
+      namespace: openshift-ingress
+      name: "{{ item.metadata.name }}"
+    loop: "{{ r_ingress_controller_pods.resources }}"
+
+  - name: Delete old API Certificate if present
+    k8s:
+      state: absent
+      api_version: v1
+      kind: Secret
+      name: api-certs
+      namespace: openshift-config
+
+  - name: Create new API Certificate
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './api-certs.j2' ) | from_yaml }}"
+
+  - name: Find all Kube Configs
+    become: yes
+    become_user: root
+    find:
+      file_type: file
+      hidden: true
+      paths:
+      - /root
+      - /home
+      contains: "^ +certificate-authority-data:"
+      patterns: "*config*"
+      recurse: yes
+    register: r_config_files
+
+  - name: Fix Kube Configs
+    become: yes
+    become_user: root
+    lineinfile:
+      path: "{{ item.path }}"
+      regexp: "^ +certificate-authority-data:"
+      state: absent
+    loop: "{{r_config_files.files}}"
+
