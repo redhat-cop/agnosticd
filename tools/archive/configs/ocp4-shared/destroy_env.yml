@@ -1,0 +1,353 @@
+---
+- import_playbook: ../../setup_runtime.yml
+
+- name: Backup event log of the user
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: no
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  tasks:
+    - name: Create Infra Key
+      include_role:
+        name: infra-ec2-ssh-key
+      when: install_infra_ssh_key | default(false) | bool
+
+    - name: Get fact for stack
+      cloudformation_facts:
+        stack_name: "{{ project_tag }}"
+      register: stack_facts
+
+    - when: project_tag in stack_facts.ansible_facts.cloudformation
+      block:
+        - name: Grab and set stack creation_time
+          set_fact:
+            stack_creation_time: >-
+              {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_description.creation_time }}
+            stack_status: >-
+              {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_description.stack_status }}
+
+        - when: stack_status == "CREATE_COMPLETE"
+          block:
+            - name: Grab student user
+              set_fact:
+                student_stack_user: >-
+                  {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_outputs.StudentUser }}
+
+            - name: Backup event log for user
+              shell: >-
+                aws cloudtrail lookup-events
+                --lookup-attributes AttributeKey=Username,AttributeValue={{ student_stack_user }}
+                --start-time {{ stack_creation_time }}
+                --max-items 10000
+                > {{ output_dir }}/{{ env_type }}_{{ guid }}_cloudtrail_event_log.json
+              when:
+                - email is defined or owner is defined
+                - run_cloudtrail | default(true) | bool
+              failed_when: false
+
+- name: Build inventory
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: no
+  tasks:
+    - when: cloud_provider == 'ec2'
+      block:
+      - name: Run infra-ec2-create-inventory Role
+        include_role:
+          name: infra-ec2-create-inventory
+
+      - name: Run Common SSH Config Generator Role
+        include_role:
+          name: infra-common-ssh-config-generate
+        when: "'bastions' in groups"
+
+- import_playbook: ../../setup_runtime.yml
+
+- name: Start clientVM and cluster instances if they are stopped
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: no
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  tasks:
+    - when:
+        - stack_status is defined
+        - stack_status == 'CREATE_COMPLETE'
+      block:
+        - set_fact:
+            clientvm_id: "{{ hostvars[groups.bastions[0]].instance_id }}"
+          when:
+            - "'bastions' in groups"
+            - groups.bastions | length > 0
+
+        - fail:
+            msg: "No clientVM present"
+          when: >-
+            'bastions' not in groups or groups.bastions | length == 0
+
+        - when:
+            - stack_status is defined
+            - stack_status == 'CREATE_COMPLETE'
+          block:
+            - name: Start clientVM instance
+              command: "aws ec2 start-instances --instance-ids '{{clientvm_id}}'"
+              register: _startclientvm
+              until: _startclientvm is succeeded
+              retries: 10
+              delay: "{{ 60|random(start=3, step=1) }}"
+
+            - name: Get cluster instance Ids
+              command: >-
+                aws ec2 describe-instances
+                --filters
+                "Name=tag:clusterid,Values={{ cluster_name }}"
+                "Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped"
+                --query 'Reservations[*].Instances[*].InstanceId'
+                --output text
+              changed_when: false
+              # Sometimes deployment fails before any OCP instances is created, so comment this line:
+              # failed_when: instanceids.stdout | trim | length == 0
+              register: instanceids
+              until: instanceids is succeeded
+              retries: 10
+              delay: "{{ 60|random(start=3, step=1) }}"
+
+            - name: Start cluster instances
+              when: instanceids.stdout | trim | length > 0
+              command: >-
+                    aws ec2 start-instances --instance-ids {{ instanceids.stdout | trim }}
+              register: _startinstances
+              until: _startinstances is succeeded
+              retries: 10
+              delay: "{{ 60|random(start=3, step=1) }}"
+
+            - name: Wait for clientVM instance
+              command: "aws ec2 wait instance-running --instance-ids '{{clientvm_id}}'"
+
+            - name: Wait for cluster instances
+              when: instanceids.stdout | trim | length > 0
+              ignore_errors: true
+              command: >-
+                    aws ec2 wait instance-running
+                    --filters "Name=tag:clusterid,Values={{ cluster_name }}"
+
+- name: Destroy OCP 4 resources using the installer
+  hosts: bastions
+  gather_facts: false
+  become: no
+  run_once: yes
+  tasks:
+    - when:
+        - hostvars.localhost.stack_status is defined
+        - hostvars.localhost.stack_status == 'CREATE_COMPLETE'
+      block:
+        - name: Set facts for remote access
+          set_fact:
+            ansible_ssh_extra_args: >-
+              {{ ansible_ssh_extra_args|d() }}
+              -F {{hostvars.localhost.output_dir}}/{{ env_type }}_{{ guid }}_ssh_conf
+
+        - name: Wait for linux host to be available
+          wait_for_connection:
+            timeout: 20
+
+        - name: Pack an archive of everything in case something goes wrong
+          become: yes
+          archive:
+            path:
+              - /home
+              - /root
+            dest: /tmp/home.tar.gz
+          # TODO: remove ignore_errors when https://github.com/ansible/ansible/issues/42090 is fixed
+          ignore_errors: yes
+
+        - name: Fetch the archive
+          fetch:
+            flat: yes
+            src: /tmp/home.tar.gz
+            dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_user_home.tar.gz"
+
+        - stat:
+            path: /home/{{ ansible_user }}/{{ cluster_name }}/metadata.json
+          register: statclusterdir
+
+        - name: Wait for openshift-install to complete
+          command: pidof openshift-install
+          register: r_check_openshift_install_running
+          failed_when: r_check_openshift_install_running.rc == 0
+          changed_when: false
+          until: r_check_openshift_install_running.failed
+          retries: 360
+          delay: 10
+
+        - when: statclusterdir.stat.exists
+          block:
+          - name: destroy terraform resources (openshift-install destroy cluster)
+            command: openshift-install destroy cluster --dir=/home/{{ ansible_user }}/{{ cluster_name }}/
+            register: destroyr
+            async: 2400
+            poll: 30
+
+          - name: pack an archive of everything
+            archive:
+              path: /home/{{ansible_user}}/{{ cluster_name }}
+              dest: /tmp/{{ cluster_name }}.tar.gz
+
+          - name: get archive of environment target dir
+            fetch:
+              flat: yes
+              src: /tmp/{{ cluster_name }}.tar.gz
+              dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_{{ cluster_name }}.tar.gz"
+          - set_fact:
+              oktodelete: yes
+
+        - when: not statclusterdir.stat.exists
+          block:
+            - name: Detect cluster dir using the terraform file (/root)
+              find:
+                file_type: file
+                paths: /root
+                pattern: terraform.tfstate
+                recurse: yes
+                depth: 5
+              become: yes
+              register: findr
+
+            - name: Destroy all clusters
+              loop: "{{ findr.files }}"
+              include_tasks: destroy_cluster.yml
+              vars:
+                cluster_dir: "{{ item.path | dirname }}"
+                username: root
+
+            - name: Detect cluster dir using the terraform file (/home)
+              find:
+                file_type: file
+                paths: /home
+                pattern: terraform.tfstate
+                recurse: yes
+                depth: 5
+              become: yes
+              register: findr
+
+            - name: Destroy all clusters
+              loop: "{{ findr.files }}"
+              include_tasks: destroy_cluster.yml
+              vars:
+                cluster_dir: "{{ item.path | dirname }}"
+                username: "{{ item.path | dirname | regex_replace('/home/([^/]+).*', '\\1') }}"
+
+            - set_fact:
+                oktodelete: yes
+      always:
+        - name: Test if janitor is present
+          shell: command -v janitor
+          register: commandjanitor
+          delegate_to: localhost
+          failed_when: false
+          changed_when: false
+
+        - when:
+            - commandjanitor.rc == 0
+            - run_janitor | default(false) | bool
+          block:
+            - name: Run janitor to get existing resources
+              environment:
+                AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+                AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+                AWS_REGION: "{{aws_region_final|d(aws_region)}}"
+              command: >-
+                janitor
+                -u={{ hostvars.localhost.student_stack_user }}
+                -t='{{ hostvars.localhost.stack_creation_time }}'
+                -r
+                -quiet
+              register: janitorreg
+              delegate_to: localhost
+
+            - debug:
+                var: janitorreg.stdout
+
+            - name: Send email about remaining resources
+              when:
+                - janitorreg.stdout_lines | length > 0
+                - report_email is defined
+              mail:
+                subject: "OCP4 lab: Remaining resources found for user {{ hostvars.localhost.student_stack_user }}"
+                to: "{{ report_email }}"
+                subtype: html
+                body: |-
+                  <pre>
+                  {{ janitorreg.stdout }}
+                  </pre>
+                from: "{{ report_from_email | d(report_email) }}"
+                headers:
+                  - Reply-To={{ report_reply_to_email | d(report_email) }}
+              delegate_to: localhost
+
+            - name: Output janitor logs
+              when: report_email is not defined
+              debug:
+                var: janitorreg.stdout
+
+- name: Delete ocp4 provisioner stack
+  hosts: localhost
+  connection: local
+  gather_facts: False
+  become: no
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  tasks:
+    - set_fact:
+        aws_public_zone: "{{ guid }}.{{ subdomain_base_suffix | regex_replace('^\\.', '') }}."
+
+    - name: Grab zone ID
+      # use CLI here because the route53_zone module is not graceful and asks for all zones
+      # then iterates in python to find the one. This causes Throttling errors.
+      # https://github.com/ansible/ansible/blob/05c6ff79f9860dbd6b43cb4914ee749baf65b9f7/lib/ansible/modules/cloud/amazon/route53_zone.py#L145
+      command: >-
+        aws route53 list-hosted-zones-by-name
+        --dns-name {{ aws_public_zone }}
+        --max-items 4
+      register: awsroute53zone
+      changed_when: false
+
+    - name: delete zones
+      include_tasks: delete_zone.yml
+      vars:
+        _zone: "{{ loopzone }}"
+        _hostedzoneid: "{{ loopzone.Id | regex_replace('/hostedzone/', '') }}"
+      when:
+        - loopzone.Name == aws_public_zone
+      loop: "{{ awsroute53zone.stdout|from_json|json_query('HostedZones') }}"
+      loop_control:
+        loop_var: loopzone
+
+    - name: Run infra-ec2-template-destroy
+      include_role:
+        name: infra-ec2-template-destroy
+      when:
+        # Before deleting the provisioner, make sure destroy terraform successfully run.
+        - stack_status is defined
+        - stack_status == 'CREATE_COMPLETE'
+        - "'bastions' in groups"
+        - groups.bastions | length > 0
+        - hostvars[groups.bastions[0]].oktodelete
+
+    - name: Run infra-ec2-template-destroy
+      include_role:
+        name: infra-ec2-template-destroy
+      when:
+        # delete stack if stack creation failed
+        - stack_status is defined
+        - stack_status != 'CREATE_COMPLETE'

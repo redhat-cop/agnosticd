@@ -1,6 +1,36 @@
 ---
-# Implement your Pre Workload deployment tasks here
+- become: true
+  block:
+  - name: "Setup pre-requisite python packages"
+    package:
+      state: present
+      name:
+      - git
+      - python3-pip
 
+  - name: "Setup pre-requisite venv packages"
+    pip:
+      name: 
+      - virtualenv
+      - selinux
+      state: present
+      executable: /usr/bin/pip3
+  
+  - name: "Copy requirements.txt for k8s venv"
+    copy:
+      src: "../files/requirements.txt"
+      dest: "/tmp/requirements.txt"
+  
+  - name: "Create venv"
+    pip:
+      requirements: "/tmp/requirements.txt"
+      virtualenv: "/opt/virtualenvs/k8s-wload-migration"
+      virtualenv_site_packages: no
+      virtualenv_command: "/usr/local/bin/virtualenv"
+
+  - name: "Set Ansible interpreter to venv"
+    set_fact:
+      ansible_python_interpreter: /opt/virtualenvs/k8s-wload-migration/bin/python
 
 - wait_for:
     port: 22
@@ -9,39 +39,42 @@
   register: status
   ignore_errors: true
 
-- name: copy lab scripts to bastion
-  delegate_to: "{{ bastion_host | d( groups.bastions | first ) }}"
-  become: true
-  copy:
-    src: "{{ role_path }}/files/"
-    dest: "/root/"
+- block:
+  - name: "Downloading lab scripts [1]"
+    tempfile: 
+      state: directory
+    register: scripts_dir
 
-- name: "Downloading CPMA binary to bastion"
-  delegate_to: "{{ bastion_host | d( groups.bastions | first ) }}"
-  become: true
-  get_url:
-    url: "https://cpma.s3.us-east-2.amazonaws.com/cpma"
-    dest: "/root/cpma"
-    mode: "u+rwx"
+  - name: "Downloading lab scripts [2]"
+    git:
+      repo: "https://github.com/konveyor/mig-agnosticd"
+      dest: "{{ scripts_dir.path }}"
 
-# Leave these as the last tasks in the playbook
+  - name: "Downloading lab scripts [3]"
+    copy:
+      src: "{{ scripts_dir.path }}/demos/2020_Summit/labs/{{ item }}"
+      dest: "/home/{{ student_name }}"
+      remote_src: true
+      owner: "{{ student_name }}"
+      mode: "u+rwx"
+    loop:
+      - 'scripts'
+      - 'files'
 
-# For deployment onto a dedicated cluster (as part of the
-# cluster deployment) set workload_shared_deployment to False
-# This is the default so it does not have to be set explicitely
+  - name: "Downloading CPMA binary to bastion"
+    get_url:
+      url: "{{ item.src }}"
+      dest: "{{ item.dest }}"
+      owner: "{{ student_name }}"
+      mode: "u+rwx"
+    loop:
+      - { dest: "/home/{{ student_name }}/cpma", src: "https://cpma.s3.us-east-2.amazonaws.com/cpma" }
+  when: student_name is defined and not status.failed and groups.bastions is defined
+  delegate_to: "{{ groups.bastions | first }}"
+  become: yes
+
+# Leave this as the last task in the playbook.
 - name: pre_workload tasks complete
   debug:
     msg: "Pre-Workload tasks completed successfully."
-  when:
-  - not silent|bool
-  - not workload_shared_deployment|d(False)
-
-# For RHPDS deployment (onto a shared cluster) set
-# workload_shared_deployment to True
-# (in the deploy script or AgnosticV configuration)
-- name: pre_workload tasks complete
-  debug:
-    msg: "Pre-Software checks completed successfully"
-  when:
-  - not silent|bool
-  - workload_shared_deployment|d(False)
+  when: not silent|bool

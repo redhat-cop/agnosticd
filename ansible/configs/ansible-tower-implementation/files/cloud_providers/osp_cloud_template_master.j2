@@ -1,0 +1,225 @@
+#jinja2: lstrip_blocks: "True"
+---
+heat_template_version: 2018-03-02
+
+description: >-
+  Top level HOT for creating new project, network resources and instances.
+  This template relies on ResourceGroups and a nested template that is
+  called to provision instances, ports, & floating IPs.
+
+resources:
+
+  {{ guid }}-infra_key:
+    type: OS::Nova::KeyPair
+    properties:
+      name: {{ guid }}-infra_key
+      save_private_key: true
+
+{% if osp_project_create | bool %}
+  {{ guid }}-project_user:
+    type: OS::Keystone::User
+    properties:
+      name: {{ guid }}-user
+      password: {{ heat_user_password }}
+      domain: Default
+
+  {{ guid }}-project_role_user:
+    type: OS::Keystone::UserRoleAssignment
+    properties:
+      user: {get_resource: {{ guid }}-project_user}
+      roles:
+        - {project: {{ osp_project_name }}, role: _member_}
+        - {project: {{ osp_project_name }}, role: swiftoperator}
+    depends_on:
+      - {{ guid }}-project_user
+{% endif %}
+
+{% for network in networks %}
+  {{ network['name'] }}-network:
+    type: OS::Neutron::Net
+    properties:
+      name: "{{ guid }}-{{ network['name'] }}-network"
+      shared: {{ network['shared'] }}
+
+  {{ network['name'] }}-subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      name: "{{ guid }}-{{ network['name'] }}-subnet"
+      network_id: {get_resource: {{ network['name'] }}-network}
+{% if network['dns_nameservers'] is defined %}
+      dns_nameservers: {{ network['dns_nameservers'] }}
+{% endif %}
+      cidr: {{ network['subnet_cidr'] }}
+      gateway_ip: {{ network['gateway_ip'] }}
+      allocation_pools:
+        - start: {{ network['allocation_start'] }}
+          end: {{ network['allocation_end'] }}
+
+{% if network['create_router'] %}
+  {{ network['name'] }}-router:
+    type: OS::Neutron::Router
+    properties:
+      name: "{{ guid }}-{{ network['name'] }}-router"
+      external_gateway_info:
+        network: "{{ provider_network }}"
+
+  {{ network['name'] }}-router_private_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: {get_resource: {{ network['name'] }}-router}
+      subnet: {get_resource: {{ network['name'] }}-subnet}
+{% endif %}
+{% endfor %}
+
+  ###################
+  # Security groups #
+  ###################
+{% for security_group in security_groups | list + default_security_groups | list %}
+  {{ security_group['name'] }}:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: {{ guid }}-{{ security_group['name'] }}
+{% if security_group['description'] is defined %}
+      description: "{{ security_group['description'] }}"
+{% endif %}
+
+{% for rule in security_group.rules %}
+{% if rule['name'] is defined %}
+  {{ guid }}-{{ security_group['name'] }}-rule_{{ rule['name'] }}:
+{% else %}
+  {{ guid }}-{{ security_group['name'] }}-rule_{{ lookup('password', '/dev/null length=5 chars=ascii_letters,digits') }}:
+{% endif %}
+    type: OS::Neutron::SecurityGroupRule
+    properties:
+      security_group: {get_resource: {{ security_group['name'] }}}
+      direction: {{ rule['direction'] | default(rule.rule_type) | lower }}
+      protocol: {{ rule['protocol'] | lower }}
+{% if rule['description'] is defined %}
+      description: {{ rule['description'] }}
+{% endif %}
+{% if rule['port_range_min'] is defined or
+  rule.from_port is defined %}
+      port_range_min: {{ rule['port_range_min'] | default(rule.from_port) }}
+{% endif %}
+{% if rule['port_range_max'] is defined or
+  rule.to_port is defined %}
+      port_range_max: {{ rule['port_range_max'] | default(rule.to_port) }}
+{% endif %}
+{% if rule['remote_ip_prefix'] is defined or
+  rule.cidr is defined %}
+      remote_ip_prefix: {{ rule['remote_ip_prefix'] | default(rule.cidr) }}
+{% endif %}
+{% if rule['remote_group'] is defined or
+  rule.from_group is defined %}
+      remote_group: {get_resource: {{ rule['remote_group'] | default(rule.from_group) }}}
+{% endif %}
+    depends_on: {{ security_group['name'] }}
+{% endfor %}
+{% endfor %}
+
+  #############
+  # Instances #
+  #############
+{% for instance in instances %}
+  {% for myinstanceindex in range(instance.count|int) %}
+    {% set iname = instance.name if instance.count == 1 else [instance.name, loop.index] | join() %}
+  ########### {{ iname }} ###########
+  port_{{ iname }}:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: {{ instance['network'] | default('default') }}-network }
+      security_groups:
+    {% if instance.security_groups is defined %}
+      {% for security_group in instance.security_groups %}
+        - {get_resource: {{ security_group }}}
+      {% endfor %}
+    {% endif %}
+    depends_on:
+      - {{ instance['network'] | default('default') }}-router_private_interface
+
+
+    {% if instance.floating_ip | default(false) or instance.public_dns | default(false) %}
+  fip_{{ iname }}:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: {{ provider_network }}
+    depends_on:
+      - {{ instance['network'] | default('default') }}-router_private_interface
+
+  fip_association_{{ iname }}:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: {get_resource: fip_{{ iname }}}
+      port_id: {get_resource: port_{{ iname }}}
+    {% endif %}
+
+  server_{{ iname }}:
+    type: OS::Nova::Server
+    properties:
+      name: {{ iname }}
+      flavor: {{ instance.flavor.osp }}
+      key_name: {get_resource: {{ guid }}-infra_key}
+
+      block_device_mapping_v2:
+        - image: {{ instance.image_id }}
+          delete_on_termination: true
+          volume_size: {{ instance['rootfs_size'] | default(osp_default_rootfs_size) }}
+          boot_index: 0
+
+      user_data: |
+        #cloud-config
+        ssh_authorized_keys: {{ all_ssh_authorized_keys | to_json }}
+      user_data_format: RAW
+      networks:
+        - port: {get_resource: port_{{ iname }}}
+    {% if instance['metadata'] is defined %}
+      metadata: {{ instance.metadata | combine(default_metadata) | to_json }}
+    {% endif %}
+
+    {% if instance.tags is defined %}
+      # Convert EC2 tags
+      metadata:
+      {% for key, value in default_metadata.items() %}
+        '{{ key }}': {{ value | to_json }}
+      {% endfor %}
+      {% for tag in instance.tags %}
+        '{{ tag.key }}': {{ tag.value | to_json }}
+      {% endfor %}
+    {% endif %}
+
+    depends_on:
+      - {{ instance['network'] | default('default') }}-router_private_interface
+    {% if 'security_groups' in instance %}
+      {% for security_group in instance.security_groups %}
+      - {{ security_group }}
+      {% endfor %}
+    {% endif %}
+
+    {% if instance.volumes is defined %}
+  #### Volumes for {{ iname }} ####
+      {% for volume in instance.volumes %}
+        {% set loopvolume = loop %}
+        {% set vname = ["volume", iname, loopvolume.index] | join('_') %}
+  {{ vname }}:
+    type: OS::Cinder::Volume
+    properties:
+      size: {{ volume.volume_size }}
+          {% if volume.volume_name is defined %}
+      name: {{ volume.volume_name }}
+          {% endif %}
+
+  volume_attachment_{{ vname }}:
+    type: OS::Cinder::VolumeAttachment
+    properties:
+      volume_id: {get_resource: {{ vname }}}
+      instance_uuid: {get_resource: server_{{ iname }}}
+      {% endfor %}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+outputs:
+
+  {{ guid }}-infra_key:
+    description: The SSH infra key
+    value: {get_attr: [{{ guid }}-infra_key, private_key]}
