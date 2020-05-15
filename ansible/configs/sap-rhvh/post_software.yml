@@ -6,7 +6,7 @@
     - debug:
         msg: "Post-Software tasks Started"
 
-- name: Add RHV Manger Public Key to RHVH hosts authorized keys
+- name: Add RHV Manger Public Key to RHVH hosts authorized keys and configure nested
   hosts: rhvhs
   gather_facts: False
   become: yes
@@ -26,6 +26,20 @@
         path: /root/.ssh/authorized_keys
         line: "{{ pkey.content }}"
 
+    - name: Add nested parameters to modprobe
+      template:
+        src: "./files/kvm-nested.conf.j2"
+        dest: "/etc/modprobe.d/kvm-nested.conf"
+        force: yes
+
+    - name: Reload kvm_intel module
+      modprobe:
+        name: kvm_intel
+        state: "{{ item }}"
+      loop:
+        - absent
+        - present
+
 - name: Add Virtualization Hosts and Storage Domains
   hosts: rhvms
   gather_facts: False
@@ -39,40 +53,100 @@
         address: "{{ item }}"
         public_key: yes
         state: present
+        power_management_enabled: yes
         auth:
           hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
           insecure: yes
           username: 'admin@internal'
           password: '{{ ovirt_password }}'
-      with_items:
+      loop:
         - 'rhvh-{{ guid }}0.saplab.local'
         - 'rhvh-{{ guid }}1.saplab.local'
         - 'rhvh-{{ guid }}2.saplab.local'
 
-    - name: Ensure Gluster backend is added as the Storage Domain for the VMs 
+    - name: Ensure NFS Data backend is added as the Storage Domain for the VMs 
       ovirt_storage_domain:
-        name: gluster_data
+        name: vms_data
         host: 'rhvh-{{ guid }}0.saplab.local'
         data_center: Default
-        glusterfs:
-          address: 'rhvh-{{ guid }}0.saplab.local'
-          path: /data
+        nfs:
+          address: 'rhvm-{{ guid }}.saplab.local'
+          path: /rhv_data
+          mount_options: noexec,nosuid
         auth:
           hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
           insecure: yes
           username: 'admin@internal'
           password: '{{ ovirt_password }}'
 
-    - name: Ensure VMs required for SAP HANA shared stoarge are present
+    - name: Ensure all required logical networks are present
+      ovirt_network:
+        data_center: Default
+        name: "{{ item.name }}"
+        description: "{{ item.desc }}"
+        vm_network: true
+        clusters:
+          - name: Default
+            assigned: yes
+        auth:
+          hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
+          insecure: yes
+          username: 'admin@internal'
+          password: '{{ ovirt_password }}'
+      loop:
+        - { name: 'interconnect', desc: 'Cluster Interconnect' }
+        - { name: 'scaleout01', desc: 'Scale-Out Network DC1' }
+        - { name: 'scaleout02', desc: 'Scale-Out Network DC2' }
+        - { name: 'hana', desc: 'HANA Communication' }
+
+    - name: Ensure all the RHHI hosts are up to date
+      ovirt_host:
+        cluster: Default
+        name: "{{ item }}"
+        state: upgraded
+        timeout: 1200
+        auth:
+          hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
+          insecure: yes
+          username: 'admin@internal'
+          password: '{{ ovirt_password }}'
+      loop:
+        - 'rhvh-{{ guid }}0.saplab.local'
+        - 'rhvh-{{ guid }}1.saplab.local'
+        - 'rhvh-{{ guid }}2.saplab.local'
+      ignore_errors: yes
+
+    - name: Ensure all the Hosts have corresponding interfaces attached to logical networks
+      ovirt_host_network:
+        name: "{{ item[0] }}"
+        interface: "{{ item[1].if }}"
+        save: yes
+        networks:
+          - name: "{{ item[1].net }}"
+        auth:
+          hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
+          insecure: yes
+          username: 'admin@internal'
+          password: '{{ ovirt_password }}'
+      with_nested:
+        - [ 'rhvh-{{ guid }}0.saplab.local', 'rhvh-{{ guid }}1.saplab.local', 'rhvh-{{ guid }}2.saplab.local' ]
+        - [ {if: 'eth1', net: 'interconnect'}, {if: 'eth2', net: 'scaleout01'}, {if: 'eth3', net: 'scaleout02'}, {if: 'eth4', net: 'hana'} ]
+        
+
+    - name: Ensure VMs required for SAP HANA shared storage are present
       ovirt_vm:
         state: present
         cluster: Default
         name: "{{ item }}"
         memory: 8GiB
-        memory_guaranteed: 8GiB
+        memory_max: 8GiB
         cpu_cores: 2
         type: server
         operating_system: rhel_8x64
+        nics:
+          - name: eth0
+            interface: virtio
+            profile_name: ovirtmgmt
         auth:
           hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
           insecure: yes
@@ -82,16 +156,134 @@
         - dc1nfs
         - dc2nfs
 
-    - name: Ensure VMs required for SAP HANA HA landscape are present
+    - name: Ensure VMs required for SAP HANA HA in DC1 are present
       ovirt_vm:
         state: present
         cluster: Default
         name: "{{ item }}"
         memory: 32GiB
-        memory_guaranteed: 32GiB
+        memory_max: 32GiB
         cpu_cores: 4
         type: server
         operating_system: rhel_8x64
+        nics:
+          - name: eth0
+            interface: virtio
+            profile_name: ovirtmgmt
+          - name: eth1
+            interface: virtio
+            profile_name: interconnect
+          - name: eth2
+            interface: virtio
+            profile_name: hana
+          - name: eth3
+            interface: virtio
+            profile_name: scaleout01
+        auth:
+          hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
+          insecure: yes
+          username: 'admin@internal'
+          password: '{{ ovirt_password }}'
+      loop:
+        - dc1hana01
+        - dc1hana02
+        - dc1hana03
+        - dc1hana04
+
+    - name: Ensure VMs required for SAP HANA HA in DC2 are present
+      ovirt_vm:
+        state: present
+        cluster: Default
+        name: "{{ item }}"
+        memory: 32GiB
+        memory_max: 32GiB
+        cpu_cores: 4
+        type: server
+        operating_system: rhel_8x64
+        nics:
+          - name: eth0
+            interface: virtio
+            profile_name: ovirtmgmt
+          - name: eth1
+            interface: virtio
+            profile_name: interconnect
+          - name: eth2
+            interface: virtio
+            profile_name: hana
+          - name: eth3
+            interface: virtio
+            profile_name: scaleout02
+        auth:
+          hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
+          insecure: yes
+          username: 'admin@internal'
+          password: '{{ ovirt_password }}'
+      loop:
+        - dc2hana01
+        - dc2hana02
+        - dc2hana03
+        - dc2hana04
+
+    - name: Ensure VMs required for Majority Maker are present
+      ovirt_vm:
+        state: present
+        cluster: Default
+        name: majority
+        memory: 4GiB
+        memory_max: 4GiB
+        cpu_cores: 2
+        type: server
+        operating_system: rhel_8x64
+        nics:
+          - name: eth0
+            interface: virtio
+            profile_name: ovirtmgmt
+          - name: eth1
+            interface: virtio
+            profile_name: interconnect
+        auth:
+          hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
+          insecure: yes
+          username: 'admin@internal'
+          password: '{{ ovirt_password }}'
+
+    - name: Ensure new VMs have a boot disk device out from the local qcow2 image
+      ovirt_disk:
+        name: "root-{{ item }}"
+        vm_name: "{{ item }}"
+        interface: virtio
+        size: 50GiB
+        format: cow
+        image_path: /rhv_img/rhel-8.1.qcow2
+        storage_domain: vms_data
+        bootable: yes
+        auth:
+          hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
+          insecure: yes
+          username: 'admin@internal'
+          password: '{{ ovirt_password }}'
+      loop:
+        - dc1nfs
+        - dc2nfs
+        - dc1hana01
+        - dc1hana02
+        - dc1hana03
+        - dc1hana04
+        - dc2hana01
+        - dc2hana02
+        - dc2hana03
+        - dc2hana04
+        - majority
+
+    - name: Ensure HANA VMs have an extra disk for HANA software
+      ovirt_disk:
+        name: "data-{{ item }}"
+        vm_name: "{{ item }}"
+        interface: virtio
+        size: 50GiB
+        format: cow
+        storage_domain: vms_data
+        bootable: no
         auth:
           hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
           insecure: yes
@@ -107,21 +299,128 @@
         - dc2hana03
         - dc2hana04
 
-    - name: Ensure VMs required for Majority Maker are present
-      ovirt_vm:
-        state: present
-        cluster: Default
-        name: majority
-        memory: 4GiB
-        memory_guaranteed: 4GiB
-        cpu_cores: 2
-        type: server
-        operating_system: rhel_8x64
+    - name: Ensure NFS VMs have an extra disk for HANA shared volumes
+      ovirt_disk:
+        name: "data-{{ item }}"
+        vm_name: "{{ item }}"
+        interface: virtio
+        size: 200GiB
+        format: cow
+        storage_domain: vms_data
+        bootable: no
         auth:
           hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
           insecure: yes
           username: 'admin@internal'
           password: '{{ ovirt_password }}'
+      loop:
+        - dc1nfs
+        - dc2nfs
+    
+    - name: Ensure Affinity Group is created to place VMs on rhvh-{{ guid }}0.saplab.local hosts
+      ovirt_affinity_group:
+        auth:
+          hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
+          insecure: yes
+          username: 'admin@internal'
+          password: '{{ ovirt_password }}'
+        cluster: Default
+        description: "HANA DC1 Virtual Machines"
+        host_enforcing: no
+        host_rule: positive
+        hosts:
+          - 'rhvh-{{ guid }}0.saplab.local'
+        name: HANA_DC1
+        state: present
+        vm_enforcing: no
+        vm_rule: positive
+        vms:
+          - dc1hana01
+          - dc1hana02
+          - dc1hana03
+          - dc1hana04
+
+    - name: Ensure Affinity Group is created to place VMs on rhvh-{{ guid }}1.saplab.local hosts
+      ovirt_affinity_group:
+        auth:
+          hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
+          insecure: yes
+          username: 'admin@internal'
+          password: '{{ ovirt_password }}'
+        cluster: Default
+        description: "HANA DC2 Virtual Machines"
+        host_enforcing: no
+        host_rule: positive
+        hosts:
+          - 'rhvh-{{ guid }}1.saplab.local'
+        name: HANA_DC2
+        state: present
+        vm_enforcing: no
+        vm_rule: positive
+        vms:
+          - dc2hana01
+          - dc2hana02
+          - dc2hana03
+          - dc2hana04
+
+    - name: Ensure Affinity Group is created to place VMs on rhvh-{{ guid }}2.saplab.local hosts
+      ovirt_affinity_group:
+        auth:
+          hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
+          insecure: yes
+          username: 'admin@internal'
+          password: '{{ ovirt_password }}'
+        cluster: Default
+        description: "Non HANA Virtual Machines"
+        host_enforcing: no
+        host_rule: positive
+        hosts:
+          - 'rhvh-{{ guid }}2.saplab.local'
+        name: NON_HANA
+        state: present
+        vm_enforcing: no
+        vm_rule: positive
+        vms:
+          - dc1nfs
+          - dc2nfs
+          - majority
+
+    - name: Ensure cloud-init is configured in all the VMs
+      ovirt_vm:
+        name: "{{ item.hname }}"
+        cloud_init_persist: yes
+        state: running
+        cloud_init:
+          user_name: root
+          root_password: "{{ vms_root_password }}"
+          authorized_ssh_keys: "{{lookup('file', '{{output_dir}}/{{ env_authorized_key }}.pub')}}"
+          host_name: "{{ item.hname }}.saplab.local"
+          custom_script: |
+            runcmd:
+              - systemctl mask cloud-init
+              - nmcli c m 'System eth0' ipv4.addresses {{ item.addr }}/24
+              - nmcli c m 'System eth0' ipv4.gateway 192.168.47.1
+              - nmcli c m 'System eth0' ipv4.method manual
+              - nmcli c m 'System eth0' ipv6.method ignore
+              - nmcli c m 'System eth0' ipv4.dns 192.168.47.10
+              - chattr +i /etc/sysconfig/network-scripts/ifcfg-eth0
+        auth:
+          hostname: 'rhvm-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}'
+          insecure: yes
+          username: 'admin@internal'
+          password: '{{ ovirt_password }}'
+      loop:
+        - { hname: 'dc1nfs', addr: '192.168.47.100' }
+        - { hname: 'dc2nfs', addr: '192.168.47.200' }
+        - { hname: 'dc1hana01', addr: '192.168.47.101' }
+        - { hname: 'dc1hana02', addr: '192.168.47.102' }
+        - { hname: 'dc1hana03', addr: '192.168.47.103' }
+        - { hname: 'dc1hana04', addr: '192.168.47.104' }
+        - { hname: 'dc2hana01', addr: '192.168.47.201' }
+        - { hname: 'dc2hana02', addr: '192.168.47.202' }
+        - { hname: 'dc2hana03', addr: '192.168.47.203' }
+        - { hname: 'dc2hana04', addr: '192.168.47.204' }
+        - { hname: 'majority', addr: '192.168.47.99' }
 
 - name: Print out information for the user to consume the lab
   hosts: localhost
