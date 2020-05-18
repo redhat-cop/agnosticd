@@ -9,10 +9,10 @@
 # DOCKER_BUILDKIT=1 docker build --progress=plain --secret id=rhsm,src=rhsm.secret.yaml -t quay.io/username/quarkus-workshop-stack:VVV -f stack.Dockerfile .
 # docker push quay.io/username/quay.io/username/quarkus-workshop-stack:VVVV
 
-FROM registry.redhat.io/codeready-workspaces/stacks-java-rhel8:2.0
+FROM registry.redhat.io/codeready-workspaces/stacks-java-rhel8:2.1
 
 ENV GRAALVM_VERSION=19.3.1
-ENV QUARKUS_VERSION=1.3.2.Final
+ENV QUARKUS_VERSION=1.3.2.Final-redhat-00001
 ENV MVN_VERSION=3.6.3
 ENV GRAALVM_HOME="/usr/local/graalvm-ce-java8-${GRAALVM_VERSION}"
 ENV MAVEN_OPTS="-Xmx4G -Xss128M -XX:MetaspaceSize=1G -XX:MaxMetaspaceSize=2G -XX:+CMSClassUnloadingEnabled"
@@ -32,6 +32,8 @@ RUN wget -O /tmp/mvn.tar.gz https://www-us.apache.org/dist/maven/maven-3/${MVN_V
 
 RUN --mount=type=secret,id=rhsm username="$(grep RH_USERNAME /run/secrets/rhsm|cut -d= -f2)" && password="$(grep RH_PASSWORD /run/secrets/rhsm|cut -d= -f2)" && subscription-manager register --username $username --password $password --auto-attach && yum install -y gcc zlib-devel && yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm && yum install -y siege jq && subscription-manager remove --all && subscription-manager unregister
 
+COPY settings.xml /home/jboss/.m2
+
 USER jboss
 
 RUN cd /tmp && mkdir project && cd project && mvn io.quarkus:quarkus-maven-plugin:${QUARKUS_VERSION}:create -DprojectGroupId=org.acme -DprojectArtifactId=footest -Dextensions="quarkus-agroal,quarkus-arc,quarkus-hibernate-orm,quarkus-hibernate-orm-panache,quarkus-jdbc-h2,quarkus-jdbc-postgresql,quarkus-kubernetes,quarkus-scheduler,quarkus-smallrye-fault-tolerance,quarkus-smallrye-health,quarkus-smallrye-opentracing" && mvn -f footest clean compile package && cd / && rm -rf /tmp/project
@@ -43,6 +45,7 @@ RUN siege && sed -i 's/^connection = close/connection = keep-alive/' $HOME/.sieg
 RUN echo '-w "\n"' > $HOME/.curlrc
 
 USER root
+
 RUN chown -R jboss /home/jboss/.m2
 RUN chmod -R a+w /home/jboss/.m2
 USER jboss
