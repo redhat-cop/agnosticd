@@ -1,0 +1,88 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Ensure there is connectivity to OCP cluster as system:admin
+  command: oc whoami
+  register: whoami
+  changed_when: false
+
+- name: Fail if not system:admin
+  fail:
+    msg: "Not connected to OCP as system:admin"
+  when: whoami.stdout != "system:admin"
+
+- name: Ensure required templates are present
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    mode: 0666
+  loop:
+    - { src: ./templates/subscription.j2, dest: /tmp/subscription.yaml }
+    - { src: ./templates/multiClusterHub.j2, dest: /tmp/multiClusterHub.yaml }
+    - { src: ./templates/operatorGroup.j2, dest: /tmp/operatorGroup.yaml }
+
+- name: Ensure RHACM Namespace is present
+  shell: oc create namespace "{{ ocp4_workload_acm_app_policies_lab_acm_project }}"
+
+- name: Ensure RHACM OperatorGroup is present
+  shell: oc -n "{{ ocp4_workload_acm_app_policies_lab_acm_project }}" apply -f /tmp/operatorGroup.yaml
+
+- name: Ensure RHACM Subscription is present
+  shell: oc -n "{{ ocp4_workload_acm_app_policies_lab_acm_project }}" apply -f /tmp/subscription.yaml
+
+# Wait for the operator deployment
+- name: Wait until RHACM Subscription is Ready
+  command: oc -n "{{ ocp4_workload_acm_app_policies_lab_acm_project }}" get csv "{{ ocp4_workload_acm_app_policies_lab_acm_csv }}" -o jsonpath='{.status.phase}'
+  register: rhacm_csv_status
+  retries: 30
+  delay: 10
+  until: rhacm_csv_status.stdout == "Succeeded"
+
+# Create secret
+- name: Ensure RHACM Registry Secret is present
+  shell: oc -n "{{ ocp4_workload_acm_app_policies_lab_acm_project }}" create secret docker-registry advanced-cluster-management-registry --docker-server="{{ ocp4_workload_acm_app_policies_lab_docker_registry }}" --docker-username="{{ ocp4_workload_acm_app_policies_lab_docker_username }}" --docker-password="{{ ocp4_workload_acm_app_policies_lab_docker_password }}"
+
+- name: Ensure RHACM MultiClusterHub is present
+  shell: oc -n "{{ ocp4_workload_acm_app_policies_lab_acm_project }}" apply -f /tmp/multiClusterHub.yaml
+
+# Currently the MultiClusterHub object status reporting sometimes misses the latests state, a fix needs to be implemented to force a new reconcile in order to get the latest status: https://github.com/open-cluster-management/backlog/issues/2374
+# In order to workaround this we will patch the multiclusterhub resource after some time if the status is not correct, that will force a reconcile
+- name: Wait until RHACM MultiClusterHub is Ready (First Try)
+  shell: oc -n "{{ ocp4_workload_acm_app_policies_lab_acm_project }}" get MultiClusterHub multiclusterhub -o jsonpath='{.status.phase}'
+  register: rhacm_multiclusterhub_status
+  retries: 30
+  delay: 10
+  until: rhacm_multiclusterhub_status.stdout == "Running"
+  ignore_errors: true
+
+- name: Force a reconcile to force the operator to update the status
+  command: oc -n "{{ ocp4_workload_acm_app_policies_lab_acm_project }}" patch MultiClusterHub multiclusterhub -p '{"spec":{"forcedReconcile":false}}' --type=merge
+  when: rhacm_multiclusterhub_status.stdout == "Pending"
+
+- name: Wait until RHACM MultiClusterHub is Ready (Second Try)
+  shell: oc -n "{{ ocp4_workload_acm_app_policies_lab_acm_project }}" get MultiClusterHub multiclusterhub -o jsonpath='{.status.phase}'
+  register: rhacm_multiclusterhub_status_2
+  retries: 5
+  delay: 10
+  until: rhacm_multiclusterhub_status_2.stdout == "Running"
+  when: rhacm_multiclusterhub_status.stdout == "Pending"
+
+- name: Ensure helper scripts are Deployed
+  copy:
+    src: "{{ item }}"
+    dest: /usr/local/bin/
+    mode: 0755
+  become: true
+  loop:
+    - ./files/wait-for-deployment
+    - ./files/verify-contexts
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
