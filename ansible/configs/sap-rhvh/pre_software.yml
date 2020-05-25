@@ -125,20 +125,6 @@
     - step004
     - bastion_tasks
 
-- name: Prepare devices for Gluster
-  hosts: rhvhs
-  become: true
-  gather_facts: False
-  tasks:
-
-    - name: Create first partition
-      parted:
-        device: /dev/vdb
-        number: 1
-        flags: [ lvm ]
-        state: present
-        part_end: 1450GiB
-
 - name: dump all
   hosts: all
  
@@ -185,42 +171,31 @@
       when: item not in ['localhost', '127.0.0.1']
       with_items: "{{ groups['all'] }}"
 
-- name: Prepare Ansible inventories for RHHI and ssh_config 
-  hosts: rhvhs
-  become: True
-  gather_facts: True
+- name: Add RHV VMs resolution for every host
+  hosts: bastions
+  become: true
+  gather_facts: false
   tasks:
 
-    - name: Add Gluster Inventory
-      template:
-        src: "./files/rhhi-playbooks/gluster_inventory.j2"
-        dest: "/etc/ansible/roles/gluster.ansible/playbooks/hc-ansible-deployment/gluster_inventory.yml"
-        force: yes
+    - name: Add all the VMs info to /etc/hosts for 192.168.47.0 network
+      lineinfile:
+        path: /etc/hosts
+        state: present
+        line: "{{ item.addr }}    {{ item.hname }}    {{ item.hname }}.saplab.local"
+      loop:
+        - { hname: 'dc1nfs', addr: '192.168.47.100' }
+        - { hname: 'dc2nfs', addr: '192.168.47.200' }
+        - { hname: 'dc1hana01', addr: '192.168.47.101' }
+        - { hname: 'dc1hana02', addr: '192.168.47.102' }
+        - { hname: 'dc1hana03', addr: '192.168.47.103' }
+        - { hname: 'dc1hana04', addr: '192.168.47.104' }
+        - { hname: 'dc2hana01', addr: '192.168.47.201' }
+        - { hname: 'dc2hana02', addr: '192.168.47.202' }
+        - { hname: 'dc2hana03', addr: '192.168.47.203' }
+        - { hname: 'dc2hana04', addr: '192.168.47.204' }
+        - { hname: 'majority', addr: '192.168.47.99' }
 
-    - name: Add Extra Variables for Hosted Engine
-      template:
-        src: "./files/rhhi-playbooks/he_gluster_vars.j2"
-        dest: "/etc/ansible/roles/gluster.ansible/playbooks/hc-ansible-deployment/he_gluster_vars.json"
-        force: yes
-
-    - name: Enable only Gluster playbook
-      template:
-        src: "./files/rhhi-playbooks/hc_deployment.j2"
-        dest: "/etc/ansible/roles/gluster.ansible/playbooks/hc-ansible-deployment/hc_deployment.yml"
-        force: yes
-
-    - name: Ignore HostKeyChecking
-      blockinfile:
-        path: /etc/ssh/ssh_config
-        block: |
-          # Ignore localhost
-          Host localhost
-              StrictHostKeyChecking no
-          # Ignore RHVH servers
-          Host rhvh*
-              StrictHostKeyChecking no
-
-- name: Prepare responses for RHV Engine
+- name: Prepare responses for RHV Engine, ensure Data Store device has a file system and this is exported
   hosts: rhvms
   become: True
   gather_facts: True
@@ -231,6 +206,72 @@
         src: "./files/rhhi-playbooks/rhvm_answers.j2"
         dest: "/usr/local/src/rhvm_answers.ini"
         force: yes
+
+    - name: Create a xfs filesystem on /dev/vdc
+      filesystem:
+        fstype: xfs
+        dev: /dev/vdc
+
+    - name: Ensure RHV Data NFS directory exists
+      file:
+        path: "/rhv_data"
+        state: directory
+
+    - name: Ensure RHV images directory exists
+      file:
+        path: "/rhv_img"
+        state: directory
+
+    - name: Mount up device by UUID
+      mount:
+        path: /rhv_data
+        src: /dev/vdc
+        fstype: xfs
+        state: mounted
+
+    - name: Mount up device by UUID
+      mount:
+        path: /rhv_img
+        src: /dev/vdb
+        fstype: xfs
+        state: mounted
+    
+    - name: Ensure group "kvm" exists
+      group:
+        name: kvm
+        gid: 36
+        state: present
+      
+    - name: Ensure user 'vdsm' exist
+      user:
+        name: vdsm
+        uid: 36
+        group: kvm
+
+    - name: Ensure RHV Data owner is the required one for RHV
+      file:
+        path: /rhv_data
+        owner: vdsm
+        group: kvm
+        mode: '0775'
+
+    - name: 'Ensure required packages are installed'
+      package:
+        name: nfs-utils
+        state: installed
+
+    - name: "Ensure export file contains the directory to be shared"
+      lineinfile:
+        path: /etc/exports
+        state: present
+        regexp: "^/rhv_data"
+        line: "/rhv_data *(insecure,rw,no_root_squash,no_wdelay,sync)"
+
+    - name: 'Ensure nfs-server is restarted and running'
+      service:
+        name: nfs-server
+        state: restarted
+        enabled: yes
 
 - name: Ensure NFS Server is installed, SAP Software Device Mounted and Ansible Installed
   hosts: bastions

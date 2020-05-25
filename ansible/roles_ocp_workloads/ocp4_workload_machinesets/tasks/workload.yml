@@ -1,0 +1,62 @@
+---
+- name: Configure OpenShift 4 machinesets
+  include_role:
+    name: ocp4_machineset_config
+  vars:
+    ocp4_machineset_config_groups: "{{ ocp4_workload_machinesets_machineset_groups }}"
+    ocp4_machineset_config_disable_base_worker_machinesets: "{{ ocp4_workload_machinesets_disable_default_machinesets }}"
+
+- name: Wait for Nodes to be available
+  k8s_facts:
+    api_version: v1
+    kind: Node
+    label_selectors:
+    - "node-role.kubernetes.io/{{ item.role }}="
+  register: r_nodes
+  until:
+  - r_nodes.resources | length | int == item.total_replicas | int
+  delay: 30
+  retries: 25
+  loop: "{{ ocp4_workload_machinesets_machineset_groups }}"
+
+# The Machine Config Daemon and Node CA DaemonSets do not include
+# Universal Tolerations. So by adding taints to Infra and other 
+# nodes the Machine Config Daemon and Node CA DaemonSets
+# pods would be removed from those nodes.
+# This adds the necessary tolerations.
+# The Product fix is curently targeted for OpenShift 4.5.
+# See https://bugzilla.redhat.com/show_bug.cgi?id=1780318
+- name: Fix Machine Config and Node CA Daemon Sets (add Tolerations for new nodes)
+  k8s:
+    state: present
+    merge_type:
+    - merge
+    definition: "{{ lookup('template', '{{ item }}') }}"
+  loop:
+  - ./templates/machine-config-daemonset.j2
+  - ./templates/node-ca-daemonset.j2
+
+- name: Set up Infra Nodes when one MaschineSet group is called 'infra'
+  when:
+  - ocp4_workload_machinesets_machineset_groups | selectattr('name', 'contains', 'infra')
+  block:
+  - name: Configure Ingress Controllers and Image Registry
+    k8s:
+      state: present
+      merge_type:
+      - merge
+      definition: "{{ lookup('template', '{{ item }}') }}"
+    loop:
+    - ./templates/ingress-controller.j2
+    - ./templates/image-registry.j2
+
+  - name: Create Config Map for Cluster Monitoring
+    k8s:
+      state: present
+      definition: "{{ lookup('file', './files/cluster-monitoring-config.yml') }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
