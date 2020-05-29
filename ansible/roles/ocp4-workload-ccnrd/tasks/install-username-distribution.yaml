@@ -1,0 +1,85 @@
+---
+- name: search for username distribution tool
+  k8s_facts:
+    kind: DeploymentConfig
+    name: get-a-username
+    namespace: labs-infra
+  register: r_gau_dc
+
+- name: deploy redis
+  when: r_gau_dc.resources | list | length == 0
+  shell: >
+    oc process -f -
+    -p DATABASE_SERVICE_NAME=redis
+    -p REDIS_PASSWORD=redis
+    -p VOLUME_CAPACITY=1Gi
+    -p MEMORY_LIMIT=1Gi
+    -p REDIS_VERSION=5
+    | oc create -n labs-infra  -f -
+  args:
+    stdin: "{{ lookup('file', './files/redis-template.yaml') }}"
+
+- name: wait for redis to be ready
+  when: r_gau_dc.resources | list | length == 0
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: labs-infra
+    label_selectors:
+      - name = redis
+      - deploymentconfig = redis
+    field_selectors:
+      - status.phase=Running
+  register: r_redis_pod
+  retries: 120
+  delay: 10
+  until: r_redis_pod.resources | list | length == 1
+
+- name: url var
+  set_fact:
+    guides_urls: []
+
+- name: construct url argument for username distribution
+  set_fact:
+    guides_urls: "{{ guides_urls + ['http://guides-' + item.name + '-labs-infra.' + route_subdomain + item.path + '?userid=%USERNAME%;' + item.title ] if (item.name in modules) else guides_urls }}"
+  loop: "{{ module_titles }}"
+
+
+- name: deploy username distribution tool
+  when: r_gau_dc.resources | list | length == 0
+  shell: >
+    oc -n labs-infra new-app quay.io/openshiftlabs/username-distribution --name=get-a-username
+    -e LAB_REDIS_HOST=redis
+    -e LAB_REDIS_PASS=redis
+    -e LAB_TITLE={{ 'Containers & Cloud Native Roadshow' | quote }}
+    -e LAB_DURATION_HOURS=8h
+    -e LAB_USER_COUNT={{ num_users }}
+    -e LAB_USER_ACCESS_TOKEN={{ workshop_openshift_user_password }}
+    -e LAB_USER_PASS={{ workshop_openshift_user_password }}
+    -e LAB_USER_PREFIX=user
+    -e LAB_USER_PAD_ZERO=false
+    -e LAB_ADMIN_PASS={{ workshop_openshift_user_password }}
+    -e LAB_MODULE_URLS={{ guides_urls | join(',') | quote }}
+    -e LAB_EXTRA_URLS={{ ( console_url + ';OpenShift Console,https://codeready-labs-infra.' + route_subdomain + ';CodeReady Workspaces Console' ) | quote }}
+
+- name: expose username distribution tool
+  when: r_gau_dc.resources | list | length == 0
+  k8s:
+    api_version: route.openshift.io/v1
+    namespace: labs-infra
+    state: present
+    kind: Route
+    definition:
+      metadata:
+        name: get-a-username
+        labels:
+          app: get-a-username
+      spec:
+        host: ''
+        to:
+          kind: Service
+          name: get-a-username
+          weight: 100
+        port:
+          targetPort: 8080-tcp
+  register: Route
