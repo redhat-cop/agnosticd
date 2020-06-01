@@ -1,0 +1,136 @@
+---
+
+- name: "create operatorgroup in {{ ocp4_workload_amq_streams_dev_exp_project_gitea }}"
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_gitea }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/operatorgroup.j2' ) | from_yaml }}"
+  vars:
+    ocp4_workload_amq_streams_dev_exp_operator_group: "{{ ocp4_workload_amq_streams_dev_exp_gitea_operator_group }}"
+    ocp4_workload_amq_streams_dev_exp_project: "{{ ocp4_workload_amq_streams_dev_exp_project_gitea }}"
+
+- name: create gitea operator
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_gitea }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/gitea-operator.j2' ) | from_yaml }}"
+  vars:
+    ocp4_workload_amq_streams_dev_exp_namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_gitea }}"
+
+- name: create gitea deployment
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_gitea }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/gitea-server.j2' ) | from_yaml }}"
+
+- name: wait until gitea-server has running condition
+  command: >
+    oc get Gitea/gitea-server -o jsonpath='{.status.conditions[?(@.type=="Running")].status}' -n "{{ ocp4_workload_amq_streams_dev_exp_project_gitea }}"
+  register: r_gitea
+  retries: 180
+  delay: 10
+  until: r_gitea.stdout == "True"
+
+- name: check gitea deployment is running
+  k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: "{{ ocp4_workload_amq_streams_dev_exp_gitea_service_name }}"
+    namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_gitea }}"
+  register: r_gitea_deployment
+  retries: 180
+  delay: 10
+  until:
+    - r_gitea_deployment.resources[0].status.readyReplicas is defined
+    - r_gitea_deployment.resources[0].status.replicas is defined
+    - r_gitea_deployment.resources[0].status.readyReplicas == r_gitea_deployment.resources[0].status.replicas
+
+- name: search for gitea pod
+  k8s_info:
+    kind: Pod
+    namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_gitea }}"
+    label_selectors:
+      - app = gitea
+  register: r_gitea_pod
+
+- name: search for gitea route
+  k8s_info:
+    kind: Route
+    api_version: route.openshift.io/v1
+    namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_gitea }}"
+    label_selectors:
+      - app = gitea
+  register: r_gitea_route
+
+- name: wait for gitea route to respond with 200
+  uri:
+    url: "https://{{ r_gitea_route.resources[0].spec.host }}"
+    method: GET
+    validate_certs: false
+  register: r_gitea_route_status
+  retries: 180
+  delay: 10
+  until: r_gitea_route_status.status == 200
+
+- name: check if gitea admin user already exists
+  uri:
+    url: "https://{{ r_gitea_route.resources[0].spec.host }}/api/v1/users/{{ ocp4_workload_amq_streams_dev_exp_gitea_admin_name }}"
+    method: GET
+    validate_certs: false
+    status_code: 200, 404
+  register: r_giteaadmin_user
+  ignore_errors: true
+
+- name: create admin user in gitea
+  command: >
+    oc exec {{ r_gitea_pod.resources[0].metadata.name }}
+    -n {{ ocp4_workload_amq_streams_dev_exp_project_gitea }}
+    -- /home/gitea/gitea admin create-user --username {{ ocp4_workload_amq_streams_dev_exp_gitea_admin_name }}
+    --password {{ ocp4_workload_amq_streams_dev_exp_gitea_admin_password }}
+    --email {{ ocp4_workload_amq_streams_dev_exp_gitea_admin_name }}@workshop.com
+    --must-change-password=false --admin -c /home/gitea/conf/app.ini
+  when: r_giteaadmin_user.status == 404
+
+- name: check if gitea amq_streams_development_exp_labs project already exists
+  uri:
+    url: "https://{{ r_gitea_route.resources[0].spec.host }}/api/v1/repos/{{ ocp4_workload_amq_streams_dev_exp_gitea_admin_name }}/amq_streams_development_exp_labs"
+    method: GET
+    validate_certs: false
+    user: "{{ ocp4_workload_amq_streams_dev_exp_gitea_admin_name }}"
+    password: "{{ ocp4_workload_amq_streams_dev_exp_gitea_admin_password }}"
+    force_basic_auth: true
+    status_code: 200, 404
+  register: r_gitea_project
+  ignore_errors: true
+
+- name: get gitea user info
+  uri:
+    url: "https://{{r_gitea_route.resources[0].spec.host }}/api/v1/users/{{ ocp4_workload_amq_streams_dev_exp_gitea_admin_name }}"
+    method: GET
+    validate_certs: false
+    user: "{{ ocp4_workload_amq_streams_dev_exp_gitea_admin_name }}"
+    password: "{{ ocp4_workload_amq_streams_dev_exp_gitea_admin_password }}"
+    force_basic_auth: true
+  register: r_gitea_insystem_user
+  when: r_gitea_project.status == 404
+
+- name: deploy amq_streams_development_exp_labs into gitea
+  uri:
+    url: "https://{{ r_gitea_route.resources[0].spec.host }}/api/v1/repos/migrate"
+    method: POST
+    body: "{{ body }}"
+    status_code: 201
+    body_format: json
+    validate_certs: false
+    user: "{{ ocp4_workload_amq_streams_dev_exp_gitea_admin_name }}"
+    password: "{{ ocp4_workload_amq_streams_dev_exp_gitea_admin_password }}"
+    force_basic_auth: true
+  when: r_gitea_project.status == 404
+  vars:
+    body: >-
+      {
+        "clone_addr": "{{ ocp4_workload_amq_streams_dev_exp_github_repository }}",
+        "description": "",
+        "repo_name": "{{ ocp4_workload_amq_streams_dev_exp_gitea_repository_name }}",
+        "uid": {{ r_gitea_insystem_user.json.id | int }}
+      }
