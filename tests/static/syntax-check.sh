@@ -8,20 +8,29 @@ static=${ORIG}/tests/static
 
 cd ${ORIG}
 
+output=$(mktemp)
+
+set +e
 for YAMLLINT in $(find ansible -name .yamllint); do
-    echo $YAMLLINT
     cd $(dirname $YAMLLINT)
-    yamllint .
+    yamllint .  &> $output
+    if [ $? = 0 ]; then
+        echo "OK .......... yamllint ${YAMLLINT}"
+    else
+        echo "FAIL ........ yamllint ${YAMLLINT}"
+        echo
+        cat $output
+        exit 2
+    fi
     cd ${ORIG}
 done
+set -e
+
 
 for i in \
     $(find ${ORIG}/ansible/configs -name 'sample_vars*.y*ml' | sort); do
-    echo
-    echo '##################################################'
-    echo "$(basename $(dirname ${i}))/$(basename ${i})"
-    echo '##################################################'
 
+    item=$(basename $(dirname ${i}))/$(basename ${i})
 
     extra_args=()
 
@@ -35,9 +44,19 @@ for i in \
     # Ansible Workshops AKA as Linklight needs to be downloaded
     if [ "${env_type}" = linklight ] || [ "${env_type}" = ansible-workshops ]; then
         if [ ! -d ${ansible_path}/workdir/${env_type} ]; then
-            echo "Download ${env_type}"
-            git clone https://github.com/ansible/workshops.git ${ansible_path}/workdir/${env_type}
-            (cd ${ansible_path}/workdir/${env_type}; PAGER=cat git show --format=short --no-color)
+            set +e
+            git clone https://github.com/ansible/workshops.git ${ansible_path}/workdir/${env_type} &> $output
+            if [ $? = 0 ]; then
+                commit=$(cd ${ansible_path}/workdir/${env_type}; PAGER=cat git show --no-patch --format=oneline --no-color)
+                echo "OK .......... ${item} / Download ansible-workshop -- $commit"
+            else
+                echo "FAIL ........ ${item} / Download ansible-workshop"
+                echo
+                cat $output
+                exit 2
+            fi
+
+            set -e
         fi
         touch $(dirname "${i}")/env_secret_vars.yml
         extra_args=(
@@ -52,21 +71,40 @@ for i in \
     fi
 
     # Setup galaxy roles and collections, make sure it works
+    set +e
     ansible-playbook --tags galaxy_roles \
                      "${inventory[@]}" \
                      ${ansible_path}/main.yml \
                      ${extra_args[@]} \
-                     -e @${i}
+                     -e @${i} &> $output
+
+    if [ $? = 0 ]; then
+        echo "OK .......... Galaxy roles ${item}"
+    else
+        echo "FAIL ........ Galaxy roles ${item}"
+        echo
+        cat $output
+        exit 2
+    fi
 
     for playbook in \
         ${ansible_path}/main.yml \
         ${ansible_path}/destroy.yml; do
+
         ansible-playbook --syntax-check \
                          --list-tasks \
                          "${inventory[@]}" \
                          "${playbook}" \
                          ${extra_args[@]} \
-                         -e @${i}
+                         -e @${i} &> $output
+        if [ $? = 0 ]; then
+            echo "OK .......... syntax-check ${item} / ${playbook}"
+        else
+            echo "FAIL ........ syntax-check ${item} / ${playbook}"
+            echo
+            cat $output
+            exit 2
+        fi
     done
     # lifecycle (stop / start)
 
@@ -77,7 +115,15 @@ for i in \
                         ${ansible_path}/lifecycle_entry_point.yml \
                         ${extra_args[@]} \
                         -e ACTION=${ACTION} \
-                        -e @${i}
+                        -e @${i} &> $output
+        if [ $? = 0 ]; then
+            echo "OK .......... syntax-check ${item} / lifecycle ${ACTION}"
+        else
+            echo "FAIL ........ syntax-check ${item} / lifecycle ${ACTION}"
+            echo
+            cat $output
+            exit 2
+        fi
     done
 done
 
