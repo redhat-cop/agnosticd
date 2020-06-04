@@ -1,0 +1,121 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Ensure there is connectivity to OCP cluster as system:admin
+  command: oc whoami
+  register: whoami
+  changed_when: false
+
+- name: Fail if not system:admin
+  fail:
+    msg: "Not connected to OCP as system:admin"
+  when: whoami.stdout != "system:admin"
+
+- name: Ensure RHACM Namespace is present
+  k8s:
+    name: "{{ ocp4_workload_rhacm_acm_project }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+
+- name: Ensure RHACM OperatorGroup is present
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/operatorGroup.j2') }}"
+
+- name: Ensure RHACM Subscription is present
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/subscription.j2') }}"
+
+- name: Wait until some pods are running before checking the sub status
+  k8s_info:
+    kind: Pod
+    namespace: "{{ ocp4_workload_rhacm_acm_project }}"
+  register: pod_list
+  retries: 30
+  delay: 20
+  until: pod_list.resources | length != 0
+
+- name: Wait until RHACM Subscription is Ready
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ ocp4_workload_rhacm_acm_csv }}"
+    namespace: "{{ ocp4_workload_rhacm_acm_project }}"
+  register: rhacm_csv
+  retries: 30
+  delay: 20
+  until: rhacm_csv.resources[0].status.phase == "Succeeded"
+
+# Set facts needed to create the docker-registry secret
+- set_fact:
+    auth_secret_decoded: "{{ ocp4_workload_rhacm_docker_username }}:{{ ocp4_workload_rhacm_docker_password }}"
+
+- set_fact:  
+    auth_secret_encoded: "{{ auth_secret_decoded | b64encode }}"
+
+# DO NOT REMOVE spaces from the fact below, otherwise Ansible will transform the fact to a python list and the secret creation will fail
+- set_fact:
+    docker_config_decoded: ' {"auths":{"{{ ocp4_workload_rhacm_docker_registry }}":{"username":"{{ ocp4_workload_rhacm_docker_username }}","password":"{{ ocp4_workload_rhacm_docker_password }}","auth":"{{ auth_secret_encoded }}"}}} '
+
+# This fact will contain the base64 encoded information for accessing the tech-preview registry, fact is consumed in secret.j2 template
+- set_fact:
+    docker_config_encoded: "{{ docker_config_decoded | trim | b64encode }}"
+
+- name: Ensure RHACM  Registry Secret is present
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/secret.j2') }}"
+
+- name: Ensure RHACM MultiClusterHub is present
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/multiClusterHub.j2') }}"
+
+# Currently the MultiClusterHub object status reporting sometimes misses the latests state, a fix needs to be implemented to force a new reconcile in order to get the latest status: https://github.com/open-cluster-management/backlog/issues/2374
+# In order to workaround this we will patch the multiclusterhub resource after some time if the status is not correct, that will force a reconcile
+- name: Wait until RHACM MultiClusterHub is Ready (First Try)
+  k8s_info:
+    api_version: operators.open-cluster-management.io/v1beta1
+    kind: MultiClusterHub
+    name: "multiclusterhub"
+    namespace: "{{ ocp4_workload_rhacm_acm_project }}"
+  register: rhacm_multiclusterhub
+  retries: 30
+  delay: 20
+  until: rhacm_multiclusterhub.resources[0].status.phase == "Running"
+  ignore_errors: true
+
+#- name: Force a reconcile to force the operator to update the status
+- name: Force a reconcile to force the operator to update the MultiClusterHub object status
+  k8s:
+    state: present
+    merge_type: merge
+    definition:
+      apiVersion: operators.open-cluster-management.io/v1beta1
+      kind: MultiClusterHub
+      metadata:
+        name: multiclusterhub
+        namespace: "{{ ocp4_workload_rhacm_acm_project }}"
+      spec:
+        forcedReconcile: false
+  when: rhacm_multiclusterhub.resources[0].status.phase == "Pending"
+
+- name: Wait until RHACM MultiClusterHub is Ready (Second Try)
+  k8s_info:
+    api_version: operators.open-cluster-management.io/v1beta1
+    kind: MultiClusterHub
+    name: "multiclusterhub"
+    namespace: "{{ ocp4_workload_rhacm_acm_project }}"
+  register: rhacm_multiclusterhub_2
+  retries: 5
+  delay: 20
+  until: rhacm_multiclusterhub_2.resources[0].status.phase == "Running"
+  when: rhacm_multiclusterhub.resources[0].status.phase == "Pending"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
