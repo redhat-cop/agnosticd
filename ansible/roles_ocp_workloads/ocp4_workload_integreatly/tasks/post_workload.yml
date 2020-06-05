@@ -2,6 +2,45 @@
 # Implement your Post Workload deployment tasks here
 # --------------------------------------------------
 
+# Create dedicated admin user
+
+- name: Get current htpasswd secret
+  shell: oc get secret htpasswd-secret -n openshift-config -o json | jq -j '.data.htpasswd' | base64 --decode > /tmp/htpasswd
+
+- name: Backup htpasswd
+  shell: cp /tmp/htpasswd /tmp/htpasswd.backup
+
+- name: Create dedicated admin user
+  shell: htpasswd -B -b /tmp/htpasswd {{ ocp4_workload_integreatly_dedicated_admin_username }} {{ ocp4_workload_integreatly_dedicated_admin_user_password }}
+
+- name: Ensure htpasswd Secret is absent
+  k8s:
+    state: absent
+    api_version: v1
+    kind: Secret
+    name: htpasswd-secret
+    namespace: openshift-config
+  register: _delete_htpasswd_secret
+  until: _delete_htpasswd_secret is succeeded
+  retries: 3
+  delay: 5
+
+- name: Create new htpasswd secret
+  shell: oc create secret generic htpasswd-secret --from-file=htpasswd=/tmp/htpasswd -n openshift-config
+
+- name: Check for dedicated admins
+  shell: oc get groups dedicated-admins
+  register: group_output
+  ignore_errors: True
+
+- name: Create dedicated admin group
+  shell: oc adm groups new dedicated-admins {{ ocp4_workload_integreatly_dedicated_admin_username }}
+  when: group_output.rc == 1
+
+- name: Add dedicated admin user to dedicated admin group
+  shell: oc adm groups add-users dedicated-admins {{ ocp4_workload_integreatly_dedicated_admin_username }}
+  when: group_output.rc != 1
+
 # Handle per-user 3scale tenant setup
 
 - name: Get master host url from route
@@ -27,16 +66,53 @@
     - strategic-merge
     - merge
     definition: "{{ lookup('template', ocp4_workload_integreatly_threescale_sso_client_template_resource) }}"
+  register: _create_3scale_workshop_sso_client
+  retries: 3
+  delay: 5
+  until: _create_3scale_workshop_sso_client is succeeded
 
+# Create evals tenants
 - name: Create 3scale tenants
   include_tasks: ../files/threescale/create-tenant.yml
   with_sequence: count="{{ ocp4_workload_integreatly_user_count }}"
+  loop_control:
+    loop_var: _tenant_count
+  vars:
+    _tenant_id: "{{ ocp4_workload_integreatly_user_base }}{{ _tenant_count | int }}-tenant"
+    _tenant_admin_username: "{{ ocp4_workload_integreatly_user_base }}{{ _tenant_count | int }}"
+    _tenant_admin_password: "{{ ocp4_workload_integreatly_user_password }}"
+    _tenant_admin_email: "{{ ocp4_workload_integreatly_user_base }}{{ _tenant_count | int }}@{{ ocp4_workload_integreatly_user_email_host }}"
+    _tenant_admin_secret_name: "{{ ocp4_workload_integreatly_user_base }}{{ _tenant_count | int }}-admin-credentials"
+
+# Create dedicated admin tenant
+- name: Create 3scale dedicated admin tenant
+  include_tasks: ../files/threescale/create-tenant.yml
+  vars:
+    _tenant_id: "{{ ocp4_workload_integreatly_dedicated_admin_username }}-tenant"
+    _tenant_admin_username: "{{ ocp4_workload_integreatly_dedicated_admin_username }}"
+    _tenant_admin_password: "{{ ocp4_workload_integreatly_dedicated_admin_user_password }}"
+    _tenant_admin_email: "{{ ocp4_workload_integreatly_dedicated_admin_username }}@{{ ocp4_workload_integreatly_user_email_host }}"
+    _tenant_admin_secret_name: "{{ ocp4_workload_integreatly_dedicated_admin_username }}-admin-credentials"
 
 # Handle Fuse Online
 
 - name: create fuse instances
   include_tasks: ../files/fuse/create-instance.yml
   with_sequence: count="{{ ocp4_workload_integreatly_user_count }}"
+  loop_control:
+    loop_var: _instance_count
+  vars:
+    _instance_namespace: "{{ ocp4_workload_integreatly_user_base }}{{ _instance_count | int }}-fuse"
+    _instance_user: "{{ ocp4_workload_integreatly_user_base }}{{ _instance_count | int }}"
+    _tenant_admin_secret_name: "{{ ocp4_workload_integreatly_user_base }}{{ _instance_count | int }}-admin-credentials"
+
+# Create dedicated admin fuse instance
+- name: create dedicated admin fuse instance
+  include_tasks: ../files/fuse/create-instance.yml
+  vars:
+    _instance_namespace: "{{ ocp4_workload_integreatly_dedicated_admin_username }}-fuse"
+    _instance_user: "{{ ocp4_workload_integreatly_dedicated_admin_username }}"
+    _tenant_admin_secret_name: "{{ ocp4_workload_integreatly_dedicated_admin_username }}-admin-credentials"
 
 - name: Checking Fuse Online installation status
   shell: oc get syndesis --selector=rhmiWorkshop=true --all-namespaces | grep Installed | wc -l
@@ -45,41 +121,7 @@
   delay: 60
   retries: 30
 
-# Create dedicated admin user
-
-- name: Get current htpasswd secret
-  shell: oc get secret htpasswd-secret -n openshift-config -o json | jq -j '.data.htpasswd' | base64 --decode > /tmp/htpasswd
-
-- name: Backup htpasswd
-  shell: cp /tmp/htpasswd /tmp/htpasswd.backup
-
-
-- name: Create dedicated admin user
-  shell: htpasswd -B -b /tmp/htpasswd {{ ocp4_workload_integreatly_dedicated_admin_username }} {{ ocp4_workload_integreatly_dedicated_admin_user_password }}
-
-- name: Ensure htpasswd Secret is absent
-  k8s:
-    state: absent
-    api_version: v1
-    kind: Secret
-    name: htpasswd-secret
-    namespace: openshift-config
-
-- name: Create new htpasswd secret
-  shell: oc create secret generic htpasswd-secret --from-file=htpasswd=/tmp/htpasswd -n openshift-config
-
-- name: Check for dedicated admins
-  shell: oc get groups dedicated-admins
-  register: group_output
-  ignore_errors: True
-
-- name: Create dedicated admin group
-  shell: oc adm groups new dedicated-admins {{ ocp4_workload_integreatly_dedicated_admin_username }}
-  when: group_output.rc == 1
-
-- name: Add dedicated admin user to dedicated admin group
-  shell: oc adm groups add-users dedicated-admins {{ ocp4_workload_integreatly_dedicated_admin_username }}
-  when: group_output.rc != 1
+# Wait for installation to complete
 
 - name: Get RHMI custom resource
   k8s_facts:
@@ -88,6 +130,9 @@
     name: "{{ ocp4_workload_integreatly_custom_resource_name }}"
     namespace: "{{ ocp4_workload_integreatly_namespace }}"
   register: _rhmi_custom_resource
+  retries: 3
+  delay: 5
+  until: _rhmi_custom_resource is succeeded
 
 - name: Print Overview
   debug:
