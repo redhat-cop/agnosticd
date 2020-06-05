@@ -3,9 +3,14 @@
   gather_facts: false
   vars:
     api_user: "{{ guid }}"
+    default_metadata:
+      project: "{{ project |d('unknownproject')}}"
+      env_type: "{{ env_type |d('unknownenvtype') }}"
+      course_name: "{{ course_name | default('unkowncourse') }}"
+      purpose: "{{ purpose | default('unkownpurpose') }}"
   tasks:
     - set_fact:
-        api_pass: "{{ lookup('password', '/dev/null length=20 chars=ascii_letters') }}"
+        osp_migration_api_pass: "{{ lookup('password', '/dev/null length=20 chars=ascii_letters') }}"
 
     - import_tasks: pull_repo.yml
 
@@ -42,7 +47,7 @@
           project_guid: "{{ guid }}"
           project_description: "created:{{ ansible_date_time.epoch }}"
           project_api_user: "{{ guid }}"
-          project_api_pass: "{{ api_pass }}"
+          project_api_pass: "{{ osp_migration_api_pass }}"
           blueprint: "{{ project }}"
 
     # when deleting we need to be able to authenticate using that project
@@ -59,13 +64,23 @@
         user: "{{ osp_auth_username }}"
         role: "admin"
         project: "{{ osp_project_name }}"
+        
+    - name: Tag project with the name of the student
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ osp_auth_username }}"
+        OS_PASSWORD: "{{ osp_auth_password }}"
+        OS_PROJECT_NAME: "admin"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      command: openstack project set --tag "student={{ student_name }}" "{{ osp_project_name }}"  
 
     - name: Create objects inside the project
       register: stack_user_output
       environment:
         OS_AUTH_URL: "{{ osp_auth_url }}"
         OS_USERNAME: "{{ guid }}"
-        OS_PASSWORD: "{{ api_pass }}"
+        OS_PASSWORD: "{{ osp_migration_api_pass }}"
         OS_PROJECT_NAME: "{{ osp_project_name }}"
         OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
         OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
@@ -77,7 +92,7 @@
           public_net_id: "{{ external_network }}"
           api_url: "{{ osp_auth_url }}"
           api_user: "{{ guid }}"
-          api_pass: "{{ api_pass }}"
+          api_pass: "{{ osp_migration_api_pass }}"
           project_guid: "{{ guid }}"
           dns_domain: "{{ osp_cluster_dns_zone }}"
 
@@ -87,33 +102,49 @@
       vars:
         query: "stack.outputs[?@.output_key=='openstack_project_services'].output_value|[0]"
 
-    - set_fact:
+    - name: Save list of services
+      set_fact:
         openstack_project_services: {}
       when: openstack_project_services == ""
 
-    - debug:
-         msg: "user.info: you can connect to this environment from the following hostnames and services:"
+    - name: Print lab documentation as user.info
+      agnosticd_user_info:
+        msg: "Access to the documentation: {{ document_link }}"
+      when: document_link | default('') != ''
+      
+    - name: Print service access information as user.info
+      agnosticd_user_info:
+         msg: "You can connect to this environment from the following hostnames and services:"
       when: openstack_project_services != {}
 
-    - debug:
+    - name: Print service access information as user.info
+      agnosticd_user_info:
         msg: >-
-          user.info: - {{ item.1
+          - {{ item.1
           | replace(80,"http")
+          | replace(8443,"https")
           | replace(443,"https") }}://{{ item.0.key
           | regex_replace('REPL', guid) 
-          | regex_replace('DOMAIN$', osp_cluster_dns_zone) }}
-      when: "item.1 in ['80', '443']"
+          | regex_replace('DOMAIN$', osp_cluster_dns_zone) 
+          }}:{{ item.1 }}
+      when: "item.1 in ['80', '443', '8443']"
       loop: "{{ openstack_project_services | dict2items | subelements('value') }}"
 
-    - debug:
+    - name: Print service access information as user.info
+      agnosticd_user_info:
         msg: >-
-          user.info: - {{ item.0.key 
+          - {{ item.0.key 
           | regex_replace('REPL', guid)
           | regex_replace('DOMAIN$', osp_cluster_dns_zone) }} port 
           {{ item.1 }}
-      when: "item.1 not in ['80', '443']"
+      when: "item.1 not in ['80', '443', '8443']"
       loop: "{{ openstack_project_services | dict2items | subelements('value') }}"
       
+    - name: Print service access information as user.info
+      agnosticd_user_info:
+         msg: "NOTE: Some services are not available till some minutes after you receive this mail."
+      when: openstack_project_services != {}
+
     - name: Save infra_key content
       set_fact:
         infra_private_key_content: "{{ stack_user_output | json_query(query) }}"
@@ -138,7 +169,7 @@
       environment:
         OS_AUTH_URL: "{{ osp_auth_url }}"
         OS_USERNAME: "{{ guid }}"
-        OS_PASSWORD: "{{ api_pass }}"
+        OS_PASSWORD: "{{ osp_migration_api_pass }}"
         OS_PROJECT_NAME: "{{ osp_project_name }}"
         OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
         OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
@@ -149,6 +180,22 @@
             guid: "{{ guid }}"
       register: r_osp_facts
 
+
+    - set_fact:
+        cloud_tags_final: "{{ cloud_tags | from_json }}"
+      when:
+       - cloud_tags is defined
+       - cloud_tags is string
+
+    - set_fact:
+        cloud_tags_final: "{{ cloud_tags | d({}) }}"
+      when:
+        - cloud_tags is not defined
+        - cloud_tags is not string
+
+    - set_fact:
+        cloud_metadata: "{{ cloud_tags_final |combine(default_metadata) }}"
+
     - loop: "{{ r_osp_facts.ansible_facts.openstack_servers }}"
       loop_control:
         loop_var: _server
@@ -156,7 +203,7 @@
       environment:
         OS_AUTH_URL: "{{ osp_auth_url }}"
         OS_USERNAME: "{{ guid }}"
-        OS_PASSWORD: "{{ api_pass }}"
+        OS_PASSWORD: "{{ osp_migration_api_pass }}"
         OS_PROJECT_NAME: "{{ osp_project_name }}"
         OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
         OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
@@ -164,7 +211,7 @@
       os_server_metadata:
         name: "{{ _server.name }}"
         meta:
-          env_type: "{{ env_type }}"
+          "{{ cloud_metadata }}"
 
     - name: debug osp_facts
       debug:

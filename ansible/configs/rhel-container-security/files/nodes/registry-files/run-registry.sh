@@ -84,7 +84,7 @@ echo
 echo
 echo "Give the registry a minute or so to start then ..."
 echo "curl  --user user:password -k https://localhost:${LOCAL_PORT}/v2/_catalog"
-echo "podman login -u user -p password https://node1.bkozdemb.internal:5000"
+echo
 
 #
 # Helpful commands for debugging.
@@ -97,3 +97,4 @@ echo "podman login -u user -p password https://node1.bkozdemb.internal:5000"
 #podman login -u redhat -p redhat --cert-dir=/home/ec2-user/storage/registry/certs ip-172-31-38-186.ec2.internal:5000
 #podman push ip-172-31-38-186.ec2.internal:5000/registry
 #podman push --cert-dir=/home/ec2-user/storage/registry/certs ip-172-31-38-186.ec2.internal:5000/registry
+# echo "podman login -u user -p password https://<hostname>:5000"
