@@ -23,7 +23,7 @@ def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / CCN Roadshow for Dev Track (Training) -AV',
+    'Workshops / CCN Roadshow Dev Track (Training) -AV',
 ].join("\n")
 
 def region_choice = [
