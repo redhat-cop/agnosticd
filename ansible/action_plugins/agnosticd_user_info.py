@@ -51,21 +51,20 @@ class ActionModule(ActionBase):
         del tmp # tmp no longer has any effect
 
         msg = self._task.args.get('msg')
-        data = self._task.args.get('data', {})
+        data = self._task.args.get('data')
         user = self._task.args.get('user')
 
-        if not user and msg != None:
-            # Output msg in result, prepend "user.info: " for cloudforms compatibility
+        if msg:
             result['msg'] = 'user.info: ' + msg
-            # Force display of result like debug
-            result['_ansible_verbose_always'] = True
-
         if data:
             result['data'] = data
             if not isinstance(data, dict):
                 result['failed'] = True
                 result['error'] = 'data must be a dictionary of name/value pairs'
                 return result
+
+        # Force display of result like debug
+        result['_ansible_verbose_always'] = True
 
         try:
             output_dir = self._templar.template(
@@ -75,11 +74,11 @@ class ActionModule(ActionBase):
                     )
                 )
             )
-            if not user and msg != None:
+            if msg:
                 fh = open(os.path.join(output_dir, 'user-info.yaml'), 'a')
                 fh.write('- ' + json.dumps(msg) + "\n")
                 fh.close()
-            if data or user:
+            if data:
                 user_data = None
                 try:
                     fh = open(os.path.join(output_dir, 'user-data.yaml'), 'r')
@@ -95,16 +94,9 @@ class ActionModule(ActionBase):
                     if 'users' not in user_data:
                         user_data['users'] = {}
                     if user in user_data['users']:
-                        user_data_item = user_data['users'][user]
-                        user_data_item.update(data)
+                        user_data['users'][user].update(data)
                     else:
-                        user_data_item = data
-                        user_data['users'][user] = user_data_item
-                    if msg:
-                        if 'msg' in user_data_item:
-                            user_data_item['msg'] += "\n" + msg
-                        else:
-                            user_data_item['msg'] = msg
+                        user_data['users'][user] = data
                 else:
                     user_data.update(data)
 
