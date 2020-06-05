@@ -23,7 +23,7 @@ def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / CCN Roadshow for Dev Track (Small) -AV',
+    'Workshops (High-Cost Workloads) / CCN Roadshow for Dev Track (Small) -AV',
 ].join("\n")
 
 def region_choice = [
@@ -135,7 +135,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 90 \
+                          --timeout 120 \
                           --filter 'has completed'
                         """
                     ).trim()
