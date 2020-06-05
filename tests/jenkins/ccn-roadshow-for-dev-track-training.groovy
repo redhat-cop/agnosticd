@@ -32,6 +32,10 @@ def region_choice = [
     'emea_sandbox_gpte',
 ].join("\n")
 
+def course_module_list_choice = [
+    'm1,m2,m3,m4',
+].join("\n")
+
 pipeline {
     agent any
 
@@ -55,6 +59,11 @@ pipeline {
             description: 'Catalog item',
             name: 'region',
         )
+        choice(
+            choices: course_module_list_choice,
+            description: 'Catalog item',
+            name: 'course_module_list',
+        )
     }
 
     stages {
@@ -73,6 +82,7 @@ pipeline {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
+                    def course_module_list = params.course_module_list.trim()
                     def cfparams = [
                         'check=t',
                         'expiration=1',
@@ -81,7 +91,7 @@ pipeline {
                         "region=${region}",
                         'use_letsencrypt=f',
                         'users=3',
-                        'course_module_list=m1,m2,m3,m4',
+                        "course_module_list=${course_module_list}",
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
