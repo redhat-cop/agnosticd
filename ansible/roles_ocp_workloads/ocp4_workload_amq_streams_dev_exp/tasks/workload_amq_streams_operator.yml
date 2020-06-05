@@ -1,0 +1,77 @@
+---
+
+- name: "create operatorgroup in {{ ocp4_workload_amq_streams_dev_exp_project_amq_streams }}"
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_amq_streams }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/operatorgroup.j2' ) | from_yaml }}"
+  vars:
+    ocp4_workload_amq_streams_dev_exp_operator_group: "{{ ocp4_workload_amq_streams_dev_exp_amq_streams_operator_group }}"
+    ocp4_workload_amq_streams_dev_exp_project: "{{ ocp4_workload_amq_streams_dev_exp_project_amq_streams }}"
+
+- name: "create subscription for amq streams operator in {{ ocp4_workload_amq_streams_dev_exp_project_amq_streams }}"
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_amq_streams }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/subscription.j2' ) | from_yaml }}"
+  vars:
+    ocp4_workload_amq_streams_dev_exp_subscription_name: "{{ ocp4_workload_amq_streams_dev_exp_amq_streams_operator_subscription }}"
+    ocp4_workload_amq_streams_dev_exp_subscription_channel: "{{ amq_streams_operator_subscription_channel }}"
+    ocp4_workload_amq_streams_dev_exp_subscription_package_name: "{{ amq_streams_operator_subscription_package_name }}"
+    ocp4_workload_amq_streams_dev_exp_subscription_catalog_source: "{{ amq_streams_operator_subscription_catalog_source }}"
+    ocp4_workload_amq_streams_dev_exp_subscription_catalog_source_namespace: "{{ amq_streams_operator_subscription_catalog_source_namespace }}"
+    ocp4_workload_amq_streams_dev_exp_subscription_starting_csv: "{{ ocp4_workload_amq_streams_dev_exp_amq_streams_operator_subscription_starting_csv }}"
+
+- name: wait until installplan is created
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_amq_streams }}"
+  register: r_install_plan
+  retries: 30
+  delay: 5
+  until:
+    - r_install_plan.resources | length > 0
+    - r_install_plan.resources[0] | to_json | from_json | json_query(query) | length > 0
+  vars:
+    query: "spec.clusterServiceVersionNames[] | [?contains(@, 'amqstreams') == `true`]"
+
+- name: manually approve installplan
+  when: not ocp4_workload_amq_streams_dev_exp_amq_streams_operator_automatic_installplan_approval
+  block:
+  - name: set installplan name
+    set_fact:
+      ocp4_workload_amq_streams_dev_exp_amq_streams_operator_install_plan: "{{ r_install_plan.resources | to_json | from_json | json_query(query) }}"
+    vars:
+      query: >-
+        [?starts_with(spec.clusterServiceVersionNames[0], 'amqstreams')].metadata.name|[0]
+
+  - name: approve installplan
+    k8s:
+      state: present
+      namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_amq_streams }}"
+      definition: "{{ lookup( 'template', './templates/installplan.j2' ) }}"
+    vars:
+      install_plan_name: "{{ ocp4_workload_amq_streams_dev_exp_amq_streams_operator_install_plan }}"
+
+- name: find all amq streams related CSVs
+  set_fact:
+    ocp4_workload_amq_streams_dev_exp_amq_streams_csvs: "{{ r_install_plan.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'amqstreams')].spec.clusterServiceVersionNames
+
+- name: wait until all CSVs are succeeded
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ item }}"
+    namespace: "{{ ocp4_workload_amq_streams_dev_exp_project_amq_streams }}"
+  register: r_csv
+  retries: 180
+  delay: 10
+  until:
+  - r_csv.resources[0].status.phase is defined
+  - r_csv.resources[0].status.phase | length > 0
+  - r_csv.resources[0].status.phase == "Succeeded"
+  loop: "{{ ocp4_workload_amq_streams_dev_exp_amq_streams_csvs[0] }}"

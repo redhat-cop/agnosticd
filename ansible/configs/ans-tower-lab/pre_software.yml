@@ -1,79 +1,143 @@
 ---
-- name: Step 003 - Create env key
+- name: Step 003 Pre Software
   hosts: localhost
-  connection: local
   gather_facts: false
   become: false
-  tags:
-    - step003
-    - generate_env_keys
   tasks:
-    - name: Generate SSH keys
-      shell: ssh-keygen -b 2048 -t rsa -f "{{output_dir}}/{{env_authorized_key}}" -q -N ""
-      args:
-        creates: "{{output_dir}}/{{env_authorized_key}}"
+    - debug:
+        msg: "Step 003 Pre Software"
+
+    - import_role:
+        name: infra-local-create-ssh_key
       when: set_env_authorized_key | bool
 
-# Cloudformation template or equivalent should tag all hosts with Project:{{ env_type }}-{{ guid }}
 
-- name: Configure all hosts with Repositories, Common Files and Set environment key
-  hosts:
-    - all:!windows
+- name: Setup Strong password
+  hosts: localhost,bastions
+  gather_facts: false
+  become: false
+  tasks:
+    - name: setup on localhost
+      when: 
+        - software_to_deploy | d('None') != 'tower'
+        - inventory_hostname == 'localhost'
+      block:
+      - name: Setup strong tower admim password
+        set_fact:
+          tower_admin_password: "{{ lookup('password', '/dev/null length=12 chars=ascii_letters,digits') }}"
+
+      - name: Print tower admin initial password
+        debug: 
+          msg: "Tower_admin_password: {{ tower_admin_password }}"
+          verbosity: 2
+    
+    - name: setup on bastion
+      when: 
+        - software_to_deploy | d('None') == 'tower'
+        - inventory_hostname in groups['bastions]
+      block:
+      - name: Setup strong tower admim password
+        set_fact:
+          tower_admin_password: "{{ lookup('password', '/dev/null length=12 chars=ascii_letters,digits') }}"
+
+      - name: Print tower admin initial password
+        debug: 
+          msg: "Tower_admin_password: {{ tower_admin_password }}"
+          verbosity: 2
+
+
+- name: Configure all hosts with Repositories
+  hosts: all
   become: true
-  gather_facts: False
   tags:
     - step004
     - common_tasks
-  roles:
-    - { role: "set-repositories", when: 'repo_method is defined' }
-    - { role: "common", when: 'install_common' }
-    - { role: "set_env_authorized_key", when: 'set_env_authorized_key' }
+  tasks:
+    - import_role:
+        name: set-repositories 
+      when: repo_method is defined
+    
+    - import_role: 
+        name: set_env_authorized_key
+      when: set_env_authorized_key | bool
+      
+    - name: Install epel repository
+      yum:
+        name: https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+        state: present
+
 
 - name: Configuring Bastion Hosts
   hosts: bastions
   become: true
-  roles:
-    - { role: "bastion", when: 'install_bastion' }
   tags:
     - step004
     - bastion_tasks
-
-#- name: Inject and configure FTL on bastion as grader host
-#  hosts: bastions
-#  become: true
-#  tasks:
-#    - name: Setup FTL
-#      include_role:
-#        name: ftl-injector
-#  tags:
-#    - step004
-#    - ftl-injector  
-
-- name: Place Tower License from env_secret_vars on bastion
-  hosts: bastions
-  become: yes
-  tags:
-    - step003
-    - place_tower_license_file
   tasks:
-    - blockinfile:
-        create: yes
-        path: /root/tower_license.txt
-        block: "{{tower_license}}"
-      when: tower_license is defined
+    - import_role: 
+        name: common
+      when: install_common | bool
 
+    - import_role: 
+        name: bastion
+      when: install_bastion | bool
 
-- name: Configure windows machines
-  hosts:
-    - windows
-  gather_facts: False
-  tags:
-    - step004
-    - common_tasks
-    - windows_tasks
-  roles:
-    - role: windows-common
-      when: hostvars.localhost.install_win_ssh
+    - import_role: 
+        name: bastion-student-user 
+      when: install_student_user | bool
+
+    - import_role: 
+        name: bastion-opentlc-ipa
+      when: install_ipa_client | bool
+
+    - name: Create lab-setup directory
+      file: 
+        dest: "{{ lab_content_dir }}"
+        state: directory
+        recurse: yes
+        owner: root
+        group: users
+        mode: 0755
+
+    - name: setup ssh keys for {{ student_name }} user
+      when: 
+        - install_student_user | bool
+        - set_env_authorized_key | bool  
+      block:
+        - name: create /home/{{ student_name }}/.ssh
+          file:
+            dest: /home/{{ student_name }}/.ssh
+            mode: 0700
+            owner: "{{ student_name }}"
+            group: "users"
+            state: directory
+
+        - name: copy the environment .pem key
+          become: true
+          copy:
+            src: "{{ output_dir }}/{{ env_authorized_key }}"
+            dest: "/home/{{ student_name }}/.ssh/{{env_authorized_key}}.pem"
+            owner: "{{ student_name }}"
+            group: "users"
+            mode: 0400
+          
+        - name: copy the environment .pub key
+          become: true
+          copy:
+            src: "{{ output_dir }}/{{ env_authorized_key }}.pub"
+            dest: "/home/{{ student_name }}/.ssh/{{env_authorized_key}}.pub"
+            owner: "{{ student_name }}"
+            group: "users"
+            mode: 0400
+
+        - name: copy over host .ssh/config Template
+          become: true
+          copy:
+            src: "{{ output_dir }}/ssh-config-{{ env_type }}-{{ guid }}"
+            dest: /home/{{ student_name }}/.ssh/config
+            owner: "{{ student_name }}"
+            group: "users"
+            mode: 0400
 
 
 - name: PreSoftware flight-check
