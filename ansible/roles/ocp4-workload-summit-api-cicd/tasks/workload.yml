@@ -1,0 +1,204 @@
+---
+
+- name: Install camel-K & Tekton Pipelines operator from OLM to openshift-operators namespace
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/operators-project.j2
+  - ./templates/global-operators.j2
+  - ./templates/camel-k-subscription.j2
+  - ./templates/tekton-subscription.j2
+
+- name: Create OpenShift Objects for 3scale multitenant
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/3scale_project.j2
+  - ./templates/operatorgroup.j2
+  - ./templates/subscription.j2
+
+- name: "Create threescale-registry-auth image pull secret in {{ API_MANAGER_NS }}"
+  shell: |
+    oc create secret docker-registry threescale-registry-auth \
+        --docker-server=registry.redhat.io \
+        --docker-username='{{ rht_service_token_user }}' \
+        --docker-password={{ rht_service_token_password }} \
+        -n  {{ API_MANAGER_NS }}
+  ignore_errors: True
+
+- name: Deploy 3scale API Manager for OpenBanking
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/smtp.j2
+  - ./templates/system-storage.j2
+  - ./templates/apimanager.j2
+
+# DC gets created after a few seconds. Pause for a bit.
+- pause:
+    minutes: 1
+
+# The last Deployment run is apicast-production. So wait until it starts to ensure all pods are s
+# tarted.
+- name: Wait until apicast-production is running
+  command: >
+    oc rollout status dc/apicast-production --watch=true -n "{{ API_MANAGER_NS }}"
+
+# Routes are created after some delay. Wait here for routes to  be ready.
+- pause:
+    minutes: 1
+
+
+# Get the Master Access Token
+- name: Get the Master Access Token
+  shell: >
+    oc get secret system-seed -o json -n "{{ API_MANAGER_NS }}" | jq -r .data.MASTER_ACCESS_TOKEN | base64 -d
+  register: system_seed_master_token
+  ignore_errors: True
+
+- set_fact:
+    master_access_token: '{{system_seed_master_token["stdout"]}}'
+
+- set_fact:
+    master_api_host: "https://{{ master_access_token }}@master.{{ocp_apps_domain}}"
+
+- set_fact:
+    create_tenant_url: "https://master.{{ocp_apps_domain}}/master/api/providers.xml" 
+
+- block:
+  - set_fact:
+      orgName: "{{ dev_tenant }}"
+  - set_fact:
+      tenantAdminId: "{{ dev_tenant_admin }}"
+  - set_fact:
+      tenantAdminPasswd: "{{ dev_tenant_password }}"
+  - set_fact:
+      tenantGwProject: "{{ DEV_GW_PROJECT }}"
+  - set_fact:
+      tenantGwProjectDisplay: "{{ DEV_GW_PROJECT_DISPLAY }}"
+
+
+  - name: "Create Dev Tenant & Gateway"
+    include_tasks: tenant_loop.yml
+
+  - set_fact:
+      dev_tenant_endpoint: "{{ THREESCALE_PORTAL_ENDPOINT }}"
+
+  - set_fact:
+      dev_tenant_developer_user_id: "{{ developer_user_id.matches[0].id }}"
+
+# Create Prod Tenant & Gateway
+
+- block:
+  - set_fact:
+      orgName: "{{ prod_tenant }}"
+  - set_fact:
+      tenantAdminId: "{{ prod_tenant_admin }}"
+  - set_fact:
+      tenantAdminPasswd: "{{ prod_tenant_password }}"
+  - set_fact:
+      tenantGwProject: "{{ PROD_GW_PROJECT }}"
+  - set_fact:
+      tenantGwProjectDisplay: "{{ PROD_GW_PROJECT_DISPLAY }}"
+
+  - name: "Create Prod Tenant & Gateway"
+    include_tasks: tenant_loop.yml
+
+  - set_fact:
+      prod_tenant_endpoint: "{{ THREESCALE_PORTAL_ENDPOINT }}"
+
+  - set_fact:
+      prod_tenant_developer_user_id: "{{ developer_user_id.matches[0].id }}"
+
+
+# Create OpenBanking API Implementation Projects:
+- block:
+    - name: "**********  DEV API PROJECT  **********"
+      command: "oc adm new-project {{ DEV_API_PROJECT }} --admin={{ ocp_user }}  --description='{{ DEV_API_PROJECT_DISPLAY }}'"
+      register: create_proj
+      failed_when: create_proj.stderr != ""  and 'already exists' not in create_proj.stderr
+
+    - name: "**********  TEST API PROJECT  **********"
+      command: "oc adm new-project {{ TEST_API_PROJECT }} --admin={{ ocp_user }}  --description='{{ TEST_API_PROJECT_DISPLAY }}'"
+      register: create_proj
+      failed_when: create_proj.stderr != ""  and 'already exists' not in create_proj.stderr
+
+    - name: "**********  PROD API PROJECT  **********"
+      command: "oc adm new-project {{ PROD_API_PROJECT }} --admin={{ ocp_user }}  --description='{{ PROD_API_PROJECT_DISPLAY }}'"
+      register: create_proj
+      failed_when: create_proj.stderr != ""  and 'already exists' not in create_proj.stderr
+
+    - name: "**********  CICD PROJECT  **********"
+      command: "oc adm new-project {{ CICD_PROJECT }} --admin={{ ocp_user }}  --description='{{ CICD_PROJECT_DISPLAY }}'"
+      register: create_proj
+      failed_when: create_proj.stderr != ""  and 'already exists' not in create_proj.stderr
+
+# Set permissions for pipeline serviceaccount to the API projects:
+- block:
+  - name: "**********  CICD Project Create Service Account **********"
+    k8s:
+      state: present
+      definition:
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: camelk-pipeline
+          namespace: "{{ CICD_PROJECT }}"
+
+  - name: "**********  CICD Project Create Role **********"
+    k8s:
+      state: present
+      namespace: "{{ CICD_PROJECT }}"
+      merge_type:
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - ./templates/camel-k-pipeline-sa.j2
+
+  - name: "**********  CICD Project Create Role Binding **********"
+    k8s:
+      state: present
+      definition:
+        kind: RoleBinding
+        apiVersion: rbac.authorization.k8s.io/v1beta1
+        metadata:
+          name: camelk-pipeline
+          namespace: "{{ CICD_PROJECT }}"
+        subjects:
+          - kind: ServiceAccount
+            name: camelk-pipeline
+        roleRef:
+          kind: Role
+          name: camelk-pipeline
+          apiGroup: rbac.authorization.k8s.io
+
+ 
+  - name: "**********  DEV API PROJECT  Edit Access **********"
+    command: "oc policy add-role-to-user edit system:serviceaccount:{{ CICD_PROJECT }}:pipeline -n {{ DEV_API_PROJECT }}"
+ 
+  - name: "**********  TEST API PROJECT  Edit Access **********"
+    command: "oc policy add-role-to-user edit system:serviceaccount:{{ CICD_PROJECT }}:pipeline -n {{ TEST_API_PROJECT }}"
+ 
+  - name: "**********  PROD API PROJECT  Edit Access **********"
+    command: "oc policy add-role-to-user edit system:serviceaccount:{{ CICD_PROJECT }}:pipeline -n {{ PROD_API_PROJECT }}"
+
+  - name: "********** READ ACCESS to 3scale API Manager PROJECT ********"
+    command: "oc adm policy add-role-to-user view {{ocp_user}} -n {{API_MANAGER_NS}}"
+
+# Workload tasks complete
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete

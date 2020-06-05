@@ -8,11 +8,6 @@
       tags:
       - install_openshift
       block:
-        - name: Create deployinprogress file
-          file:
-            path: /tmp/deployinprogress
-            state: touch
-
         - name: Get awscli bundle
           get_url:
             url: https://s3.amazonaws.com/aws-cli/awscli-bundle.zip
@@ -22,10 +17,10 @@
           unarchive:
             src: /tmp/awscli-bundle.zip
             dest: /tmp/
-            remote_src: yes
+            remote_src: true
 
         - name: Install awscli
-          become: yes
+          become: true
           command: /tmp/awscli-bundle/install -i /usr/local/aws -b /bin/aws
           args:
             creates: /usr/local/aws
@@ -51,28 +46,28 @@
               aws_access_key_id = {{ hostvars.localhost.student_access_key_id }}
               aws_secret_access_key = {{ hostvars.localhost.student_secret_access_key }}
 
-        # For GA Releases 
+        # For GA Releases
         - name: Set URLs for OpenShift GA releases
-          when: not ocp4_installer_use_dev_preview | d(False) | bool
+          when: not ocp4_installer_use_dev_preview | default(false) | bool
           set_fact:
             ocp4_installer_url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp4_installer_version }}/openshift-install-linux-{{ ocp4_installer_version }}.tar.gz"
             ocp4_client_url: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp4_installer_version }}/openshift-client-linux-{{ ocp4_installer_version }}.tar.gz"
 
         - name: Get the OpenShift Installer
-          become: yes
+          become: true
           unarchive:
             src: "{{ ocp4_installer_url}} "
-            remote_src: yes
+            remote_src: true
             dest: /usr/bin
             mode: 0755
             owner: root
             group: root
 
         - name: Get the OpenShift CLI
-          become: yes
+          become: true
           unarchive:
             src: "{{ ocp4_client_url }}"
-            remote_src: yes
+            remote_src: true
             dest: /usr/bin
             mode: 0775
             owner: root
@@ -119,15 +114,27 @@
             src: "{{ install_config_template_path }}"
             dest: /home/{{ ansible_user }}/{{ cluster_name }}/install-config.yaml
 
+        - name: Make a copy of the cluster install config
+          copy:
+            remote_src: true
+            src: /home/{{ ansible_user }}/{{ cluster_name }}/install-config.yaml
+            dest: /home/{{ ansible_user }}/{{ cluster_name }}/install-config.yaml.bak
+
         - name: Run the installer
           tags:
           - run_installer
           command: openshift-install create cluster --dir=/home/{{ ansible_user }}/{{ cluster_name }}
           async: "{{ 2 * 60 * 60 }}"
+          register: r_openshift_install
+          until: >-
+            r_openshift_install.rc == 0 or
+            'validate AWS credentials: mint credentials check: error simulating policy: Throttling: Rate exceeded' not in r_openshift_install.stderr
+          delay: 300
+          retries: 10
 
         - name: Fetch kube config
           fetch:
-            flat: yes
+            flat: true
             src: /home/{{ ansible_user }}/{{ cluster_name }}/auth/{{ item }}
             dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_{{ item }}"
           loop:
@@ -143,7 +150,7 @@
 
         - name: Set up .kube/config
           copy:
-            remote_src: yes
+            remote_src: true
             src: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
             dest: "/home/{{ ansible_user }}/.kube/config"
 
@@ -153,14 +160,14 @@
             path: /root/.kube
             owner: root
             mode: 0700
-          become: yes
+          become: true
 
         - name: Set up .kube/config for root
           copy:
-            remote_src: yes
+            remote_src: true
             src: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
             dest: /root/.kube/config
-          become: yes
+          become: true
 
         - name: Get kubeadmin password
           slurp:
@@ -175,7 +182,7 @@
           retries: 10
           delay: 30
           until: routeconsole is succeeded
-          ignore_errors: yes
+          ignore_errors: true
 
         # Adjust for clusters with just one worker. Default is two routers with antiAffinity rules.
         # Which means that one router is pending. This doesn't work with Certificates
@@ -184,7 +191,7 @@
           environment:
             KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
           shell: "oc patch ingresscontroller default --type=merge --patch='{\"spec\": { \"replicas\": 1 }}' -n openshift-ingress-operator"
-          ignore_errors: yes
+          ignore_errors: true
 
         - name: Set webconsole address
           set_fact:
@@ -201,43 +208,53 @@
           environment:
             KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
           command: oc whoami --show-server
-          register: showserver
+          register: r_showserver
+
+        - name: Set openshift_api_url
+          set_fact:
+            openshift_api_url: "{{ r_showserver.stdout | trim }}"
 
         - name: Print Overview
-          debug:
+          agnosticd_user_info:
             msg: "{{ item }}"
-          with_items:
-            - "user.info: Openshift Master Console: {{ webconsole }}"
-            - "user.info: Openshift API for command line 'oc' client: {{ showserver.stdout | trim }}"
-            - "user.info: Download oc client from {{ ocp4_client_url }}"
+          loop:
+            - "Openshift Master Console: {{ webconsole }}"
+            - "Openshift API for command line 'oc' client: {{ openshift_api_url }}"
+            - "Download oc client from {{ ocp4_client_url }}"
+
+        - name: Print Overview
+          agnosticd_user_info:
+            data:
+              openshift_console_url: "{{ webconsole }}"
+              openshift_api_url: "{{ openshift_api_url }}"
+              openshift_client_download_url: "{{ ocp4_client_url }}"
 
         - name: Output htpasswd
-          debug:
-            msg: "user.info: This cluster has authentication enabled. You can use '{{ admin_user }}' with password '{{ admin_password }}' to access your cluster"
+          agnosticd_user_info:
+            msg: "This cluster has authentication enabled. You can use '{{ admin_user }}' with password '{{ admin_password }}' to access your cluster"
+            data:
+              openshift_admin_user: "{{ admin_user }}"
+              openshift_admin_password: "{{ admin_password }}"
           when:
             - admin_password is defined
             - install_idm == "htpasswd"
 
         - name: Output kubeadmin
-          debug:
-            msg: "user.info: Kubeadmin user / password: kubeadmin / {{ kubeadminr.content | b64decode }}"
+          agnosticd_user_info:
+            msg: "Kubeadmin user / password: kubeadmin / {{ kubeadminr.content | b64decode }}"
+            data:
+              openshift_kubeadmin_password: "{{ kubeadminr.content | b64decode }}"
           when: >-
             install_idm is not defined
             or install_idm != "htpasswd"
 
         - name: Print SSH warning
-          debug:
+          agnosticd_user_info:
             msg: "{{ item }}"
-          with_items:
-            - "user.info: "
-            - "user.info: You *CANNOT* SSH into this environment"
+          loop:
+            - ""
+            - "You *CANNOT* SSH into this environment"
           when: not install_student_user | bool
-
-      always:
-        - name: Delete deployinprogress lock file
-          file:
-            path: /tmp/deployinprogress
-            state: absent
 
 - name: Step 00xxxxx software
   hosts: localhost
@@ -245,20 +262,28 @@
   become: false
   tasks:
     # NOT Pre-installed
-    - name: Print Student aws access as user.info
-      debug:
-        msg: "{{ item }}"
-      with_items:
-        - "user.info: Top level domain: {{ subdomain_base_suffix }}"
-        - "user.info: "
-        - "user.info: WARNING: with great power comes great responsibility. We monitor usage."
-        - "user.info: Your AWS programmatic access:"
-        - "user.info: aws_access_key_id = {{ student_access_key_id }}"
-        - "user.info: aws_secret_access_key = {{ student_secret_access_key }}"
-      when:
+    - when:
         - not install_ocp4 | bool
         - student_access_key_id is defined
         - student_secret_access_key is defined
+      block:
+        - name: Print Student aws access as user.info
+          agnosticd_user_info:
+            msg: "{{ item }}"
+          loop:
+            - "Top level domain: {{ subdomain_base_suffix }}"
+            - ""
+            - "WARNING: with great power comes great responsibility. We monitor usage."
+            - "Your AWS programmatic access:"
+            - "aws_access_key_id = {{ student_access_key_id }}"
+            - "aws_secret_access_key = {{ student_secret_access_key }}"
+
+        - name: Set aws access user data
+          agnosticd_user_info:
+            data:
+              subdomain_base_suffix: "{{ subdomain_base_suffix }}"
+              aws_access_key_id: "{{ student_access_key_id }}"
+              aws_secret_access_key: "{{ student_secret_access_key }}"
 
     - when:
         - install_student_user | bool
@@ -266,13 +291,21 @@
         - student_password is defined or hostvars[groups.bastions.0].student_password is defined
       block:
         - name: Print Student SSH access as user.info
-          debug:
+          agnosticd_user_info:
             msg: "{{ item }}"
-          with_items:
-            - "user.info: "
-            - "user.info: SSH Access: ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix }}"
+            data:
+              student_ssh_command: >-
+                ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix }}
+          loop:
+            - ""
+            - "SSH Access: ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix }}"
 
         - name: Print Student SSH password as user.info
-          debug:
-            msg: "user.info: SSH password: {{ student_password | d(hostvars[groups.bastions.0].student_password) }}"
+          agnosticd_user_info:
+            msg: "SSH password: {{ student_ssh_password }}"
+            data:
+              student_ssh_password: "{{ student_ssh_password }}"
+          vars:
+            student_ssh_password: >-
+              {{ student_password | default(hostvars[groups.bastions.0].student_password) }}
           when: print_student_password | default(true) | bool

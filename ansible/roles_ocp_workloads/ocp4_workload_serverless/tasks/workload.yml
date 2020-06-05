@@ -1,0 +1,142 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Install kn CLI
+  become: true
+  unarchive:
+    src: "https://mirror.openshift.com/pub/openshift-v4/clients/serverless/{{ ocp4_workload_serverless_kn_version }}/kn-linux-amd64-{{ ocp4_workload_serverless_kn_version }}.tar.gz"
+    remote_src: yes
+    dest: /usr/bin
+    mode: 0775
+    owner: root
+    group: root
+  args:
+    creates: /usr/bin/kn
+
+- name: Create kn bash completion file
+  become: true
+  command: /usr/bin/kn completion bash >/etc/bash_completion.d/kn
+  args: 
+    creates: /etc/bash_completion.d/kn
+
+- name: Create OpenShift Serverless subscription
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/subscription.j2' ) }}"
+
+- name: Manually approve InstallPlan
+  when: not ocp4_workload_serverless_automatic_install_plan_approval | bool
+  block:
+  - name: Wait until InstallPlan is created
+    k8s_facts:
+      api_version: operators.coreos.com/v1alpha1
+      kind: InstallPlan
+      namespace: openshift-operators
+    register: r_install_plan
+    retries: 30
+    delay: 5
+    until:
+    - r_install_plan|selectattr('clusterServiceVersionNames', 'contains', 'serverless-operator')
+
+  - name: Set InstallPlan Name
+    set_fact:
+      _ocp4_workload_serverless_install_plan_name: "{{ r_install_plan.resources | to_json | from_json | json_query(query) }}"
+    vars:
+      query: >-
+        [?starts_with(spec.clusterServiceVersionNames[0], 'serverless-operator')].metadata.name|[0]
+
+  - name: Approve InstallPlan
+    k8s:
+      state: present
+      definition: "{{ lookup( 'template', './templates/installplan.j2' ) }}"
+
+- name: Get Installed CSV
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: serverless-operator
+    namespace: openshift-operators
+  register: r_subscription
+  retries: 30
+  delay: 5
+  until:
+  - r_subscription.resources[0].status.currentCSV is defined
+  - r_subscription.resources[0].status.currentCSV | length > 0
+
+- name: Wait until CSV is Installed
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: openshift-operators
+  register: r_csv
+  retries: 15
+  delay: 5
+  until:
+  - r_csv.resources[0].status.phase is defined
+  - r_csv.resources[0].status.phase | length > 0
+  - r_csv.resources[0].status.phase == "Succeeded"
+
+- name: Create knative-serving namespace and KNative Serving object
+  k8s:
+    state: present
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/ns-knative-serving.yaml
+  - ./files/knative_serving.yaml
+
+- name: Wait until KNative Serving installation is complete
+  when: ocp4_workload_serverless_wait_for_deploy | bool
+  k8s_facts:
+    api_version: operator.knative.dev/v1alpha1
+    kind: KnativeServing
+    name: knative-serving
+    namespace: knative-serving
+  register: r_kn_serving
+  retries: 30
+  delay: 10
+  until:
+  - r_kn_serving.resources[0].status.conditions[0].status is defined
+  - r_kn_serving.resources[0].status.conditions[0].status == "True"
+  - r_kn_serving.resources[0].status.conditions[1].status is defined
+  - r_kn_serving.resources[0].status.conditions[1].status == "True"
+  - r_kn_serving.resources[0].status.conditions[2].status is defined
+  - r_kn_serving.resources[0].status.conditions[2].status == "True"
+  - r_kn_serving.resources[0].status.conditions[3].status is defined
+  - r_kn_serving.resources[0].status.conditions[3].status == "True"
+
+- name: Install KNative Eventing
+  when: ocp4_workload_serverless_install_eventing | bool
+  block:
+  - name: Create knative-eventing namespace and KNative Eventing object
+    k8s:
+      state: present
+      definition: "{{ lookup('file', item ) | from_yaml }}"
+    loop:
+    - ./files/ns-knative-eventing.yaml
+    - ./files/knative_eventing.yaml
+
+  - name: Wait until KNative Eventing installation is complete
+    when: ocp4_workload_serverless_wait_for_deploy | bool
+    k8s_facts:
+      api_version: operator.knative.dev/v1alpha1
+      kind: KnativeEventing
+      name: knative-eventing
+      namespace: knative-eventing
+    register: r_kn_eventing
+    retries: 30
+    delay: 10
+    until:
+    - r_kn_eventing.resources[0].status.conditions[0].status is defined
+    - r_kn_eventing.resources[0].status.conditions[0].status == "True"
+    - r_kn_eventing.resources[0].status.conditions[1].status is defined
+    - r_kn_eventing.resources[0].status.conditions[1].status == "True"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

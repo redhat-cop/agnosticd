@@ -20,7 +20,15 @@ from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
 import json
+import yaml
 import os
+
+# Force yaml string representation for safe dump
+yaml.SafeDumper.yaml_representers[None] = lambda self, data: \
+    yaml.representer.SafeRepresenter.represent_str(
+        self,
+        str(data),
+    )
 
 from ansible.errors import AnsibleError, AnsibleUndefinedVariable
 from ansible.module_utils.six import string_types
@@ -31,7 +39,7 @@ class ActionModule(ActionBase):
     '''Print statements during execution and save user info to file'''
 
     TRANSFERS_FILES = False
-    _VALID_ARGS = frozenset(('msg','data'))
+    _VALID_ARGS = frozenset(('msg','data','user'))
 
     def run(self, tmp=None, task_vars=None):
         self._supports_check_mode = True
@@ -43,19 +51,21 @@ class ActionModule(ActionBase):
         del tmp # tmp no longer has any effect
 
         msg = self._task.args.get('msg')
-        data = self._task.args.get('data')
+        data = self._task.args.get('data', {})
+        user = self._task.args.get('user')
 
-        if msg:
+        if not user and msg != None:
+            # Output msg in result, prepend "user.info: " for cloudforms compatibility
             result['msg'] = 'user.info: ' + msg
+            # Force display of result like debug
+            result['_ansible_verbose_always'] = True
+
         if data:
             result['data'] = data
             if not isinstance(data, dict):
                 result['failed'] = True
                 result['error'] = 'data must be a dictionary of name/value pairs'
                 return result
-
-        # Force display of result like debug
-        result['_ansible_verbose_always'] = True
 
         try:
             output_dir = self._templar.template(
@@ -65,14 +75,41 @@ class ActionModule(ActionBase):
                     )
                 )
             )
-            if msg:
+            if not user and msg != None:
                 fh = open(os.path.join(output_dir, 'user-info.yaml'), 'a')
                 fh.write('- ' + json.dumps(msg) + "\n")
                 fh.close()
-            if data:
-                fh = open(os.path.join(output_dir, 'user-data.yaml'), 'a')
-                for k, v in data.items():
-                    fh.write("{0}: {1}\n".format(k, json.dumps(v)))
+            if data or user:
+                user_data = None
+                try:
+                    fh = open(os.path.join(output_dir, 'user-data.yaml'), 'r')
+                    user_data = yaml.safe_load(fh)
+                    fh.close()
+                except FileNotFoundError:
+                    pass
+
+                if user_data == None:
+                    user_data = {}
+
+                if user:
+                    if 'users' not in user_data:
+                        user_data['users'] = {}
+                    if user in user_data['users']:
+                        user_data_item = user_data['users'][user]
+                        user_data_item.update(data)
+                    else:
+                        user_data_item = data
+                        user_data['users'][user] = user_data_item
+                    if msg:
+                        if 'msg' in user_data_item:
+                            user_data_item['msg'] += "\n" + msg
+                        else:
+                            user_data_item['msg'] = msg
+                else:
+                    user_data.update(data)
+
+                fh = open(os.path.join(output_dir, 'user-data.yaml'), 'w')
+                yaml.safe_dump(user_data, stream=fh, explicit_start=True)
                 fh.close()
             result['failed'] = False
         except Exception as e:

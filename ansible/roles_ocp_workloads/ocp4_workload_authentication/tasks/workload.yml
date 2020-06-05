@@ -1,0 +1,181 @@
+---
+- name: Check that ocp4_workload_authentication_idm_type is defined and valid
+  assert:
+    that:
+    - ocp4_workload_authentication_idm_type is defined
+    - ocp4_workload_authentication_idm_type == "none" or ocp4_workload_authentication_idm_type == "htpasswd" or ocp4_workload_authentication_idm_type == "ldap"
+    fail_msg: "ocp4_workload_authentication_idm_type is not defined or not in ('none', 'htpasswd', 'ldap')."
+
+- name: Setup HTPasswd Authentication
+  when: ocp4_workload_authentication_idm_type == "htpasswd"
+  block:
+  - name: Generate cluster admin password
+    when: ocp4_workload_authentication_htpasswd_admin_password | default('') | length == 0
+    set_fact:
+      ocp4_workload_authentication_admin_password: "{{ lookup('password', '/dev/null length={{ ocp4_workload_authentication_htpasswd_admin_password_length }} chars=ascii_letters,digits') }}"
+
+  - name: Use provided admin password
+    when: ocp4_workload_authentication_htpasswd_admin_password | default('') | length > 0
+    set_fact:
+      ocp4_workload_authentication_admin_password: "{{ ocp4_workload_authentication_htpasswd_admin_password }}"
+
+  - name: Generate htpasswd hash for admin user
+    shell: >-
+      htpasswd -nb "admin" "{{ ocp4_workload_authentication_admin_password }}"|cut -d: -f2
+    register: r_htpasswd_line
+
+  - name: Set htpasswd admin password hash
+    set_fact:
+      ocp4_workload_authentication_admin_password_hash: "{{ r_htpasswd_line.stdout }}"
+    when:
+    - r_htpasswd_line is succeeded
+
+  - name: Generate user passwords
+    when: ocp4_workload_authentication_htpasswd_user_password | default('') | length == 0
+    set_fact:
+      ocp4_workload_authentication_user_password: "{{ lookup('password', '/dev/null length={{ ocp4_workload_authentication_htpasswd_user_password_length }} chars=ascii_letters,digits') }}"
+
+  - name: Use provided user passwords
+    when: ocp4_workload_authentication_htpasswd_user_password | default('') | length > 0
+    set_fact:
+      ocp4_workload_authentication_user_password: "{{ ocp4_workload_authentication_htpasswd_user_password }}"
+
+  - name: Generate htpasswd hash for user passwords
+    shell: >-
+      htpasswd -nb "userN" "{{ ocp4_workload_authentication_user_password }}"|cut -d: -f2
+    register: r_htpasswd_line
+
+  - name: Set htpasswd user password hash
+    set_fact:
+      ocp4_workload_authentication_user_password_hash: "{{ r_htpasswd_line.stdout }}"
+    when:
+    - r_htpasswd_line is succeeded
+
+  - name: Generate htpasswd file
+    template:
+      src: "htpasswd.j2"
+      dest: "/home/{{ ansible_user }}/users.htpasswd"
+      owner: "{{ ansible_user }}"
+      mode: 0664
+
+  - name: Ensure htpasswd Secret is absent
+    k8s:
+      state: absent
+      api_version: v1
+      kind: Secret
+      name: htpasswd-secret
+      namespace: openshift-config
+
+  - name: Create htpasswd secret from htpasswd file
+    shell: "oc create secret generic htpasswd-secret -n openshift-config --from-file=htpasswd=/home/{{ ansible_user }}/users.htpasswd"
+
+  - name: Update OAuth Configuration
+    k8s:
+      state: present
+      definition: "{{ lookup('file', item ) | from_yaml }}"
+    loop:
+    - ./files/oauth-htpasswd.yaml
+
+  - name: Retrieve API server configuration (for API endpoint)
+    k8s_facts:
+      api_version: config.openshift.io/v1
+      kind: Infrastructure
+      name: cluster
+    register: r_cluster
+
+  - name: Print User Information
+    debug:
+      msg: "{{ item }}"
+    loop:
+    - "user.info: HTPasswd Authentication is enabled on this cluster."
+    - "user.info: {{ ocp4_workload_authentication_htpasswd_user_base }}1 .. {{ ocp4_workload_authentication_htpasswd_user_base }}{{ ocp4_workload_authentication_htpasswd_user_count }} are created with password `{{ ocp4_workload_authentication_user_password }}`"
+    - "user.info: User `{{ ocp4_workload_authentication_admin_user }}` with password `{{ ocp4_workload_authentication_admin_password }}` is cluster admin."
+
+  - name: Print User Information for each User
+    agnosticd_user_info:
+      user: "{{ ocp4_workload_authentication_htpasswd_user_base }}{{ n }}"
+      data:
+        password: "{{ ocp4_workload_authentication_user_password }}"
+        login_command: "oc login -u {{ ocp4_workload_authentication_htpasswd_user_base }}{{ n }} -p {{ ocp4_workload_authentication_user_password }} {{ r_cluster.resources[0].status.apiServerURL }}"
+    loop: "{{ range(1, 1 + ocp4_workload_authentication_htpasswd_user_count | int) | list }}"
+    loop_control:
+      loop_var: n
+
+- name: Setup OpenTLC LDAP Authentication
+  when: ocp4_workload_authentication_idm_type == "ldap"
+  block:
+  - name: Check for LDAP Bind Password
+    when: ocp4_workload_authentication_ldap_bind_password is not defined
+    fail:
+      msg: LDAP Authentication is configured but LDAP BindPassword (ocp4_workload_authentication_ldap_bind_password) is not defined.
+
+  - name: Get IPA CA Cert
+    get_url:
+      url: "{{ ocp4_workload_authentication_ldap_ca_url }}"
+      dest: "/home/{{ ansible_user }}/ipa-ca.crt"
+      mode: 0660
+
+  - name: Ensure IPA CA Cert is absent
+    k8s:
+      state: absent
+      api_version: v1
+      kind: ConfigMap
+      name: opentlc-ldap-ca-cert
+      namespace: openshift-config
+
+  - name: Create IPA CA Cert ConfigMap
+    shell: "oc create configmap opentlc-ldap-ca-cert --from-file=ca.crt=/home/{{ ansible_user }}/ipa-ca.crt -n openshift-config"
+
+  - name: Ensure LDAP Bind Password Secret is absent
+    k8s:
+      state: absent
+      api_version: v1
+      kind: Secret
+      name: opentlc-ldap-secret
+      namespace: openshift-config
+
+  - name: Create LDAP Bind Password Secret
+    shell: "oc create secret generic opentlc-ldap-secret --from-literal=bindPassword=\"{{ ocp4_workload_authentication_ldap_bind_password }}\" -n openshift-config"
+
+  - name: Update OAuth Configuration
+    k8s:
+      state: present
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - ./templates/oauth-opentlc-ldap.j2
+
+  - name: Print User Information for OpenTLC LDAP
+    debug:
+      msg: "{{ item }}"
+    loop:
+    - "user.info: OpenTLC LDAP Authentication is enabled on this cluster."
+    - "user.info: Use your OpenTLC user and Password to log into this cluster."
+    - "user.info: User `{{ ocp4_workload_authentication_admin_user }}` is cluster admin."
+
+- name: Set up Cluster Admin User
+  when:
+  - ocp4_workload_authentication_idm_type != "none"
+  - ocp4_workload_authentication_admin_user is defined
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/cluster_role_binding.j2') | from_yaml }}"
+
+- name: Remove kubeadmin User
+  when:
+  - ocp4_workload_authentication_idm_type != "none"
+  - ocp4_workload_authentication_admin_user is defined
+  - ocp4_workload_authentication_remove_kubeadmin | bool
+  block:
+  - name: Remove kubeadmin user secret
+    k8s:
+      state: absent
+      api_version: v1
+      kind: Secret
+      namespace: kube-system
+      name: kubeadmin
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

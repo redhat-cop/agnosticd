@@ -111,28 +111,6 @@
             dest: "/home/{{ student_name }}/resources/pvc-registry.yaml"
             owner: "{{ student_name }}"
 
-        # In case we ever use Swift or something similar for bootstrap.ign
-        # - name: Create swift container for ignition
-        #   command: |
-        #     /usr/local/bin/openstack --os-cloud {{ osp_project_name }} container create ignition
-        #   become_user: "{{ student_name }}"
-
-        # - name: Set ACL for ignition container
-        #   command: |
-        #     /usr/local/bin/swift post --read-acl ".r:*,.rlistings" ignition
-        #   become_user: "{{ student_name }}"
-        #   environment:
-        #     OS_AUTH_URL: "{{ osp_auth_url }}"
-        #     OS_USERNAME: "{{ guid }}-user"
-        #     OS_PASSWORD: "{{ hostvars['localhost']['heat_user_password'] }}"
-        #     OS_PROJECT_NAME: "{{ osp_project_name }}"
-        #     OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
-
-        # - name: Add signing key for Swift tempurl
-        #   command: |
-        #     /usr/local/bin/openstack --os-cloud {{ osp_project_name }} object store account set --property Temp-URL-Key=redhatgpte
-        #   become_user: "{{ student_name }}"
-
 - name: Step 002 rootless podman
   hosts: bastions,utility
   gather_facts: false
@@ -200,8 +178,8 @@
   become: true
   vars:
     _certbot_dns_provider: "rfc2136"
-    _certbot_domain: "api.{{ guid }}.{{ osp_cluster_dns_zone }}"
-    _certbot_wildcard_domain: "*.apps.{{ guid }}.{{ osp_cluster_dns_zone }}"
+    _certbot_domain: "api.cluster-{{ guid }}.{{ osp_cluster_dns_zone }}"
+    _certbot_wildcard_domain: "*.apps.cluster-{{ guid }}.{{ osp_cluster_dns_zone }}"
     _certbot_remote_dir: "/home/{{ student_name }}"
     _certbot_remote_dir_owner: "{{ student_name }}"
     _certbot_install_dir: "/home/{{ student_name }}/certificates"
@@ -236,66 +214,114 @@
     - name: Update CA trust
       command: update-ca-trust
   
-- name: Step 005 Prep for FTL solver
+- name: Step 005 Run solver and performance test (optional)
   hosts: bastions
   gather_facts: false
   become: true
   tasks:
-    - when: test_enable
+  - name: Set python3
+    set_fact:
+      ansible_python_interpreter: /usr/bin/python3
+  
+  - name: Run the solver to install OpenShift
+    when: test_deploy_enable | d(False) | bool
+    block:
+    - name: Create pull secret file
+      file:
+        state: touch
+        path: "/home/{{ student_name }}/ocp_pullsecret.json"
+        mode: 0644
+        owner: "{{ student_name }}"
+
+    - name: Add pull secret to bastion
+      copy:
+        dest: "/home/{{ student_name }}/ocp_pullsecret.json"
+        content: "{{ test_deploy_pull_secret }}"
+
+    - name: Create neutral clouds.yaml directory
+      file:
+        path: /etc/openstack
+        state: directory
+        mode: 0644
+
+    - name: copy clouds.yaml to neutral location
+      copy:
+        remote_src: true
+        src: "/home/{{ student_name }}/.config/openstack/clouds.yaml"
+        dest: "/etc/openstack/clouds.yaml"
+        mode: 0644
+
+    - name: Run solver for lab 03
+      shell: /usr/local/bin/solve_lab ocp4_advanced_deployment 03_1
+      register: r_solve_lab_03
+      become_user: "{{ student_name }}"
+      environment:
+        OS_CLOUD: "{{ guid }}-project"
+        GUID: "{{ guid }}"
+        OPENSHIFT_DNS_ZONE: "{{ osp_cluster_dns_zone }}"
+        API_FIP: "{{ hostvars['localhost']['ocp_api_fip'] }}"
+        INGRESS_FIP: "{{ hostvars['localhost']['ocp_ingress_fip'] }}"
+      vars:
+        GUID: "{{ guid }}"
+
+    - name: Run the fio tests and report results
+      when: 
+        - test_deploy_enable | d(False) | bool
+        - test_deploy_results | d(False) | bool
       block:
-        - name: Set python3
-          set_fact:
-            ansible_python_interpreter: /usr/bin/python3
+      - name: Get metadata.json
+        stat:
+          path: /home/{{ student_name }}/openstack-upi/metadata.json
+        register: r_metadata
 
-        - name: Create pull secret file
-          file:
-            state: touch
-            path: "/home/{{ student_name }}/ocp_pullsecret.json"
-            mode: 0644
-            owner: "{{ student_name }}"
+      - name: Get the infra ID
+        shell: jq -r .infraID /home/{{ student_name }}/openstack-upi/metadata.json
+        register: r_infra_id
+        when: r_metadata.stat.exists
 
-        - name: Add pull secret to bastion
-          copy:
-            dest: "/home/{{ student_name }}/ocp_pullsecret.json"
-            content: "{{ test_pull_secret }}"
+      - name: create fio testing project
+        k8s:
+          name: fio-test
+          api_version: v1
+          kind: Namespace
+          state: present
 
-        - name: Create neutral clouds.yaml directory
-          file:
-            path: /etc/openstack
-            state: directory
-            mode: 0644
+      - name: give default sa privileged scc
+        shell: oc adm policy add-scc-to-user privileged system:serviceaccount:fio-test:default
 
-        - name: copy clouds.yaml to neutral location
-          copy:
-            remote_src: true
-            src: "/home/{{ student_name }}/.config/openstack/clouds.yaml"
-            dest: "/etc/openstack/clouds.yaml"
-            mode: 0644
+      - name: run job pod with fio-etcd-osp container
+        k8s:
+          state: present
+          definition: "{{ lookup('template', './files/fio-test-job.yaml.j2') }}"
+        vars:
+          INFRA_ID: "{{ r_infra_id.stdout }}"
 
-        - name: Check if metadata.json exists
-          stat:
-            path: /home/{{ student_name }}/openstack-upi/metadata.json
-          register: r_metadata
+      - name: Wait for job to finish (1h max)
+        k8s_facts:
+          api_version: batch/v1
+          kind: Job
+          name: fio-test
+          namespace: fio-test
+        register: r_fio_test_job
+        retries: 60
+        delay: 60
+        until: r_fio_test_job.resources[0].status.conditions | json_query(fio_query) | bool
+        vars:
+          fio_query: >-
+            [?type=='Complete'].status[] | [0]
+          INFRA_ID: "{{ r_infra_id.stdout }}"
 
-        - name: Get the infra ID
-          shell: jq -r .infraID $HOME/openstack-upi/metadata.json
-          register: r_infra_id
-          when: r_metadata.stat.exists
+      - name: Remove job
+        k8s:
+          name: fio-test
+          kind: Job
+          api_version: batch/v1
+          namespace: fio-test
+          state: absent
 
-        - name: Run solver for lab 03
-          shell: /usr/local/bin/solve_lab ocp4_advanced_deployment 03_1
-          register: r_solve_lab_03
-          become_user: "{{ student_name }}"
-          environment:
-            OS_CLOUD: "{{ guid }}-project"
-            GUID: "{{ guid }}"
-            OPENSHIFT_DNS_ZONE: "{{ osp_cluster_dns_zone }}"
-            API_FIP: "{{ hostvars['localhost']['ocp_api_fip'] }}"
-            INGRESS_FIP: "{{ hostvars['localhost']['ocp_ingress_fip'] }}"
-          vars:
-            GUID: "{{ guid }}"
-
-        - name: dump r_solve_lab_03
-          debug:
-            var: r_solve_lab_03
-        
+      - name: Remove fio testing project
+        k8s:
+          name: fio-test
+          kind: Namespace
+          api_version: v1
+          state: absent

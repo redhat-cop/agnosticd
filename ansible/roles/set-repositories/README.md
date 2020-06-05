@@ -1,31 +1,71 @@
-Role Name
-=========
+# set-repositories
 
-A brief description of the role goes here.
+Configure YUM/DNF repositories.
 
-Requirements
-------------
+## Requirements
 
-Any pre-requisites that may not be covered by Ansible itself or the role should be mentioned here. For instance, if the role uses the EC2 module, it may be a good idea to mention in this section that the boto package is required.
+FIXME
 
-Role Variables
---------------
+## Role Variables
 
-A description of the settable variables for this role should go here, including any variables that are in defaults/main.yml, vars/main.yml, and any variables that can/should be set via parameters to the role. Any variables that are read from other roles and/or the global scope (ie. hostvars, group vars, etc.) should be mentioned here as well.
+`repo_method` - Repository configuration method. May be set to `file`, `rhn`, or `satellite`.
 
-Dependencies
-------------
+`use_content_view` - FIXME
 
-A list of other roles hosted on Galaxy should go here, plus any details in regards to parameters that may need to be set for other roles, or variables that are used from other roles.
+### Repo Method 'rhn' Variables
 
-Example Playbook
-----------------
+**IMPORTANT:** When using `repo_method: rhn` only define the variables of one of the below options.
 
-Including an example of how to use your role (for instance, with variables passed in as parameters) is always nice for users too:
+**Option 1:** Register with credentials
+This option registers a system with Red Hat credentials and a pool id.
+If using this method define these variables in a secrets file.
 
-    - hosts: servers
-      roles:
-         - { role: username.rolename, x: 42 }
+`rhel_subscription_user` (Required)
+User name of the Red Hat account that will register the system.
+This is the same user name used to log into access.redhat.com
+
+`rhel_subscription_pass` (Required)
+The password for the user name referenced in `rhel_subscription_user`.
+
+`rhsm_pool_ids` (Required)
+The pool id for the subscription to attach. By default `auto_attach` is false.
+
+**Option 2:** Register with an activation key.
+These variables will register a system with an activation key.
+
+`rhel_subscription_activation_key` (Required)
+The unique activation key created within an account at access.redhat.com
+
+`rhel_subscription_org_id` (Required)
+The organization ID of the the account which created the activation key.
+
+`rhsm_pool_ids` (Required)
+The pool id for the subscription to attach. By default `auto_attach` is false.
+
+### Repo Method satellite Variables
+
+`set_repositories_satellite_hostname` -
+Hostname of satellite server.
+Required, but may be set as `set_repositories_satellite_url` or `satellite_url` for compatibility with previous versions.
+
+`set_repositories_satellite_ca_cert` -
+CA certificate used to validate satellite server TLS.
+Required unless `set_repositories_satellite_hostname` is `labsat.opentlc.com`.
+
+`set_repositories_satellite_ca_rpm_url` -
+URL used to download the Katello/Satellite CA certificate configuration RPM.
+Default `https://{{ set_repositories_satellite_hostname }}/pub/katello-ca-consumer-latest.noarch.rpm`
+
+`set_repositories_satellite_activationkey` -
+Activation key to register to satellite. Optional, but may be set with `satellite_activationkey` for compatibility with previous versions.
+
+## Dependencies
+
+FIXME
+
+## Example Playbook
+
+FIXME
 
 License
 -------
@@ -35,4 +75,4 @@ BSD
 Author Information
 ------------------
 
-An optional section for the role authors to include contact information, or a website (HTML is not allowed).
+Red Hat, GPTE

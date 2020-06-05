@@ -31,15 +31,24 @@ short_description: Display user information for agnosticd deployment and save in
 version_added: "2.9"
 
 description:
-- This module provides the capability of displaying user information in agnosticd processing while saving the output as a YAML list in the output directory.
+- This module provides the capability of displaying user information in agnosticd processing while saving the output as a YAML in the output directory.
+- Files "user-info.yaml" stores a list of messages to deliver to the environment owner and "user-data.yaml" store structured data.
+- Messages and data can be stored for specific users to support multi-user environments.
 - The string "user.info: " is prepended to the displayed output for compatibility with the prior practice of using the debug module with this special prefix string.
 
 options:
   msg:
     description:
-    - This is the message or data to display.
-    - It may be of any datatype.
-  required: true
+      - This is the message or data to display.
+      - It should be a string.
+  data:
+    description:
+      - Dictionary of data to store.
+      - Values may be of any type, deep data structures are discouraged.
+      - Subsequent calls to agnosticd_user_info will add new keys and update existing keys.
+  user:
+    description:
+      - User name if data or message should be set for a particular user.
 
 author:
 - Johnathan Kupferer

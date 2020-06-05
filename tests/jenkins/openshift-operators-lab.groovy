@@ -8,7 +8,7 @@ def cf_group = 'opentlc-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gucore@redhat.com'
+def notification_email = 'gpteinfrasev3@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -19,7 +19,7 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ssh_location = ''
+def openshift_location = ''
 
 
 // Catalog items
@@ -155,9 +155,9 @@ pipeline {
                     ).trim()
 
                     try {
-                    	def m = email =~ /<pre>. *ssh -i [^ ]+ *([^ <]+?) *<\/pre>/
-                    	ssh_location = m[0][1]
-                    	echo "ssh_location = '${ssh_location}'"
+                    	def m = email =~ /Openshift Master Console: (.*)/
+                    	openshift_location = m[0][1]
+                    	echo "openshift_location = '${openshift_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -169,6 +169,7 @@ pipeline {
             }
         }
 
+		/* Skipping it as of now
         stage('SSH') {
             steps {
                 withCredentials([
@@ -181,7 +182,7 @@ pipeline {
                     sh "ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_location} oc version"
                 }
             }
-        }
+        } */
 
         stage('Confirm before retiring') {
             when {

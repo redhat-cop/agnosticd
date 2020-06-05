@@ -8,7 +8,7 @@ def cf_group = 'rhpds-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gptezabbixalert@redhat.com'
+def notification_email = 'djana@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -25,26 +25,24 @@ def webapp_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / Integreatly Workshop',
+    'Workshops / RHMI (Integreatly) Workshop',
     'DevOps Team Testing Catalog / TEST - Integreatly Workshop',
     'DevOps Team Development Catalog / DEV - Integreatly Workshop',
 ].join("\n")
 
 def ocprelease_choice = [
     '3.11.104',
-    '3.11.43',
 ].join("\n")
 
-def ig_version_choice = [
-    '1.5.1',
-    '1.5.0',
-    '1.4.1',
+def app_version_choice = [
+    '1.6.0',
+    '1.5.2',
 ].join("\n")
 
 def region_choice = [
-    'na_openshiftbu',
-    'apac_openshift_bu',
-    'emea_openshiftbu',
+    'gpte_na',
+    'gpte_emea',
+    'gpte_apac',
 ].join("\n")
 
 pipeline {
@@ -71,9 +69,9 @@ pipeline {
             name: 'ocprelease',
         )
         choice(
-            choices: ig_version_choice,
+            choices: app_version_choice,
             description: 'Catalog item',
-            name: 'ig_version',
+            name: 'app_version',
         )
         choice(
             choices: region_choice,
@@ -97,20 +95,20 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def ig_version = params.ig_version.trim()
+                    def app_version = params.app_version.trim()
                     def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
                     def cfparams = [
-                        'expiration=2',
-                        'runtime=8',
+                        'expiration=3',
+                        'runtime=36',
                         "region=${region}",
                         'city=jenkins',
                         'salesforce=gptejen',
-                        'users=2',
+                        'users=1',
                         'check=t',
                         'check2=t',
                         'quotacheck=t',
-                        "app_version=${ig_version}",
+                        "app_version=${app_version}",
                         "ocprelease=${ocprelease}",
                         'notes=devops_automation_jenkins',
                     ].join(',').trim()
@@ -164,7 +162,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 120 \
+                          --timeout 150 \
                           --filter 'has completed'
                         """
                     ).trim()
