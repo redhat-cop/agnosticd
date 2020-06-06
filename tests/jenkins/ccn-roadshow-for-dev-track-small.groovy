@@ -32,10 +32,6 @@ def region_choice = [
     'emea_sandbox_gpte',
 ].join("\n")
 
-def course_module_list_choice = [
-    'm1,m2,m3,m4',
-].join("\n")
-
 pipeline {
     agent any
 
@@ -59,11 +55,6 @@ pipeline {
             description: 'Catalog item',
             name: 'region',
         )
-        choice(
-            choices: course_module_list_choice,
-            description: 'Catalog item',
-            name: 'course_module_list',
-        )
     }
 
     stages {
@@ -82,20 +73,6 @@ pipeline {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
-                    def course_module_list = params.course_module_list.trim()
-                    def cfparams = [
-                        'quotacheck=t',
-                        'check=t',
-                        'city=jenkins',
-                        "region=${region}",
-                        'salesforce=gptejen',
-                        'users=5',
-                        'use_letsencrypt=f',
-                        'expiration=2',
-                        'runtime=24',
-                        "course_module_list='${course_module_list}'",
-                        'notes=devops_automation_jenkins',
-                    ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -104,7 +81,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d '${cfparams}' \
+                          -d 'quotacheck=t,check=t,city=jenkins,region=${region},salesforce=gptejen,users=5,use_letsencrypt=f,expiration=2,runtime=24,course_module_list="m1,m2,m3,m4",notes=devops_automation_jenkins'
                         """
                     ).trim()
 
