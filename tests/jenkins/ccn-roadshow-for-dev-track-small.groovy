@@ -93,7 +93,7 @@ pipeline {
                         'use_letsencrypt=f',
                         'expiration=2',
                         'runtime=24',
-                        "course_module_list="+"'"+"${course_module_list}"+"'",
+                        "course_module_list='${course_module_list}'",
                         'notes=devops_automation_jenkins',
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
