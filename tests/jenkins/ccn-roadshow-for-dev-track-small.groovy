@@ -81,7 +81,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'quotacheck=t;check=t;city=jenkins;region=${region};salesforce=gptejen;users=5;use_letsencrypt=f;expiration=2;runtime=24;course_module_list=m1,m2,m3,m4;notes=devops_automation_jenkins'
+                          -d 'quotacheck=t,check=t,city=jenkins,region=${region},salesforce=gptejen,users=5,use_letsencrypt=f,expiration=2,runtime=24,course_module_list='''m1,m2,m3,m4''',notes=devops_automation_jenkins'
                         """
                     ).trim()
 
