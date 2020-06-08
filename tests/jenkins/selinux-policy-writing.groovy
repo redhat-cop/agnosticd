@@ -27,7 +27,10 @@ def choices = [
 ].join("\n")
 
 def region_choice = [
-    'global_gpte',
+    'na_gpte',
+    'na2_gpte',
+    'emea_gpte',
+    'apac_gpte',
 ].join("\n")
 
 pipeline {
@@ -72,6 +75,7 @@ pipeline {
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
                     def cfparams = [
+                        'status=t',
                         'check=t',
                         'expiration=2',
                         'runtime=8',
