@@ -88,6 +88,7 @@ pipeline {
                     def student_workloads = params.student_workloads.trim()
                     def region = params.region.trim()
                     def cfparams = [
+                        'status=t',
                         'check=t',
                         'check2=t',
                         'salesforce=gptejen',

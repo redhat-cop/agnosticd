@@ -112,7 +112,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'expiration=5,runtime=8,ocprelease=${ocprelease},region=${region},nodes=${nodes}'
+                          -d 'status=t,expiration=5,runtime=8,ocprelease=${ocprelease},region=${region},nodes=${nodes}'
                         """
                     ).trim()
 
