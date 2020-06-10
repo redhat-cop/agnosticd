@@ -91,7 +91,7 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def users = users.region.trim()
+                    def users = params.users.trim()
                     def region = params.region.trim()
                     def ocprelease = params.ocprelease.trim()
                     def cfparams = [
