@@ -23,7 +23,7 @@ def ip_address = ''
 
 // Catalog items
 def choices = [
-    'Workshops / SELinux Policy Writing',
+    'Red Hat Summit 2020 / SELinux Policy Writing',
 ].join("\n")
 
 def region_choice = [
