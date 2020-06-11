@@ -58,7 +58,7 @@ pipeline {
             name: 'catalog_item',
         )
         string(
-            defaultValue: 7,
+            defaultValue: '7',
             description: 'Users',
             name: 'users',
         )
