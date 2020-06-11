@@ -39,8 +39,6 @@ def region_choice = [
     'azure_westeurope',
 ].join("\n")
 
-def noofusers = "7"
-
 pipeline {
     agent any
 
@@ -60,7 +58,7 @@ pipeline {
             name: 'catalog_item',
         )
         string(
-            defaultValue: noofusers,
+            defaultValue: 7,
             description: 'Users',
             name: 'users',
         )
