@@ -56,6 +56,11 @@ pipeline {
             description: 'Catalog item',
             name: 'region',
         )
+        string(
+            defaultValue: '5',
+            description: 'Users',
+            name: 'users',
+        )
     }
 
     stages {
@@ -74,13 +79,15 @@ pipeline {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
+                    def users = params.users.trim()
                     def cfparams = [
                         'status=t',
                         'check=t',
-                        'expiration=2',
+                        'expiration=1',
                         'runtime=8',
-                        "region=${region}",
                         'quotacheck=t',
+                        "region=${region}",
+                        "users=${users}",
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
