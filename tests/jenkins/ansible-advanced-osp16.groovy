@@ -91,7 +91,7 @@ pipeline {
                         'check=t',
                         'expiration=7',
                         'runtime=10',
-                        'quotacheck=t'
+                        'quotacheck=t',
                         "environment=${environment}",
                         "region=${region}",
                     ].join(',').trim()
