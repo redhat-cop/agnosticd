@@ -19,15 +19,23 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def external_host=''
+def ssh_location=''
 
 // Catalog items
 def choices = [
-    'OPENTLC Automation / Ansible Tower Implementation 3.3',
+    'OPENTLC Automation / Ansible Tower Implementation',
 ].join("\n")
 
 def region_choice = [
-    'global_gpte',
+    'na_osp',
+    'emea_osp',
+    'apac_osp',
+].join("\n")
+
+def environment_choice = [
+    'PROD',
+    'TEST',
+    'DEV',
 ].join("\n")
 
 pipeline {
@@ -47,6 +55,11 @@ pipeline {
             choices: choices,
             description: 'Catalog item',
             name: 'catalog_item',
+        )
+        choice(
+            choices: environment_choice,
+            description: 'Environment',
+            name: 'environment',
         )
         choice(
             choices: region_choice,
@@ -70,14 +83,16 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
+                    def environment = params.environment.trim()
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
                         'check=t',
                         'expiration=7',
-                        'runtime=4',
+                        'runtime=10',
+                        'quotacheck=t',
+                        "environment=${environment}",
                         "region=${region}",
-                        'quotacheck=t'
                     ].join(',').trim()
 
                     echo "'${catalog}' '${item}'"
@@ -119,10 +134,9 @@ pipeline {
                     ).trim()
 
                     try {
-                    	def m = email =~ /External Hostname<\/TH><TD>(.*)/
-                    	def mm = email =~ /(.*)<\/TD><\/TR><TR><TH>Internal IP Address/
-                    	external_host = m[0][1].replaceAll("=","") + mm[0][1].replaceAll(" ","")
-                    	echo "External-Host='${external_host}'"
+                    	def m = email =~ /SSH Access: (.*)/
+						ssh_location = m[0][1]
+						echo "SSH Access: ${ssh_location}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
