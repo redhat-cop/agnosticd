@@ -25,8 +25,8 @@ def webapp_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / RHMI (Integreatly-2) Workshop',
     'DevOps Team Testing Catalog / TEST - RHMI (Integreatly-2) Workshop',
+    'Workshops / RHMI (Integreatly-2) Workshop',
     'DevOps Team Development Catalog / DEV - RHMI (Integreatly-2) Workshop',
 ].join("\n")
 
@@ -161,7 +161,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
+                          --timeout 300 \
                           --filter 'has completed'
                         """
                     ).trim()
