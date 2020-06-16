@@ -1,7 +1,6 @@
 # vim: set ft=ansible
 ---
 # Implement your Workload deployment tasks here
-
 - name: Create spark-notebook ImageStreamTag in openshift project
   k8s:
     namespace: "openshift"
@@ -181,11 +180,6 @@
   retries: 18
   delay: 10
 
-- name: copy ausgeben.csv to bastion
-  copy:
-    src: "files/ausgeben.csv"
-    dest: /tmp/ausgeben.csv
-
 - name: Get the cluster apps domain
   k8s_facts:
     api_version: config.openshift.io/v1
@@ -198,23 +192,92 @@
     cluster_apps_domain: "{{ cluster_apps_domain_out.resources[0].spec.domain}}"
     notebook_suffix: "/notebooks/data-engineering-and-machine-learning-workshop.git/source/notebooks/hybrid-data-engineering.ipynb"
 
-- name: Insert user data into CSV file
-  lineinfile: 
-    path: /tmp/ausgeben.csv
-    line: "user{{ item }},openshift,{\"Notebook URL\":\"http://jupyterhub-opendatahub-user{{ item }}.{{ cluster_apps_domain }}/user/user{{ item }}{{ notebook_suffix }}\"}"
-  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+- name: make sure the guides project exists
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: guides
 
-- name: get the ausgeben route details
+- name: search for username distribution tool
   k8s_facts:
-    api_version: route.openshift.io/v1
-    kind: Route
-    name: ausgeben
-    namespace: lab-data-eng
-  register: route_out
+    kind: DeploymentConfig
+    name: get-a-username
+    namespace: guides
+  register: r_gau_dc
 
-- name: POST ausgeben user data
-  shell: "curl -F \"file=@/tmp/ausgeben.csv\" http://{{ route_out.resources[0].spec.host }}/load_csv_data"
- 
+- name: deploy redis
+  when: r_gau_dc.resources | list | length == 0
+  shell: >
+    oc process -f -
+    -p DATABASE_SERVICE_NAME=redis
+    -p REDIS_PASSWORD=redis
+    -p VOLUME_CAPACITY=1Gi
+    -p MEMORY_LIMIT=1Gi
+    -p REDIS_VERSION=latest
+    | oc create -n guides  -f -
+  args:
+    stdin: "{{ lookup('file', 'redis-template.yaml') }}"
+
+- name: wait for redis to be ready
+  when: r_gau_dc.resources | list | length == 0
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: guides
+    label_selectors:
+      - name = redis
+      - deploymentconfig = redis
+    field_selectors:
+      - status.phase=Running
+  register: r_redis_pod
+  retries: 120
+  delay: 10
+  until: r_redis_pod.resources | list | length == 1
+  
+- name: deploy username distribution tool
+  when: r_gau_dc.resources | list | length == 0
+  shell: >
+    oc -n guides new-app quay.io/openshiftlabs/username-distribution:1.2 --name=get-a-username
+    -e LAB_REDIS_HOST=redis
+    -e LAB_REDIS_PASS=redis
+    -e LAB_TITLE={{ 'Data Engineering Workshop' | quote }}
+    -e LAB_DURATION_HOURS=8h
+    -e LAB_USER_COUNT={{ num_users }}
+    -e LAB_USER_ACCESS_TOKEN={{ 'openshift' | quote }}
+    -e LAB_USER_PASS={{ 'openshift' | quote }}
+    -e LAB_USER_PREFIX=user
+    -e LAB_USER_PAD_ZERO=false
+    -e LAB_ADMIN_PASS={{ 'openshift' | quote }}
+    -e LAB_MODULE_URLS={{ ( 'http://jupyterhub-opendatahub-%USERNAME%.' + cluster_apps_domain + '/user/%USERNAME%' + notebook_suffix + ';Workshop Jupyter Notebook') | quote }}
+
+- name: expose username distribution tool
+  k8s:
+    api_version: route.openshift.io/v1
+    namespace: guides
+    state: present
+    kind: Route
+    definition:
+      metadata:
+        name: get-a-username
+        labels:
+          app: get-a-username
+      spec:
+        host: ''
+        to:
+          kind: Service
+          name: get-a-username
+          weight: 100
+        port:
+          targetPort: 8080-tcp
+  register: r_route
+
+- debug:
+    msg:
+    - "user.info: Credentials URL for students: http://{{ r_route.result.spec.host }}"
+
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
   debug:
