@@ -31,7 +31,7 @@ def choices = [
 ].join("\n")
 
 def ocprelease_choice = [
-    '4.3',
+    '4.3.0',
 ].join("\n")
 
 def app_version_choice = [
