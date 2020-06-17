@@ -167,16 +167,9 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (https:\/\/master\.[^ ]+)/
-                        openshift_location = m[0][1]
-                        echo "openshift_location = '${openshift_location}'"
-
                         m = email =~ /Solution Explorer URL: (https:\/\/[^ \n]+)/
                         webapp_location = m[0][1]
                         echo "webapp_location = '${webapp_location}'"
-
-                        m = email =~ /Cluster Admin User: ([^ \n]+ \/ [^ \n]+)/
-                        echo "Custer Admin User: ${m[0][1]}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
