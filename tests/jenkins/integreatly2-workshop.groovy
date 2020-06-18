@@ -168,8 +168,7 @@ pipeline {
 
                     try {
                         m = email =~ /Solution Explorer URL: (https:\/\/[^ \n]+)/
-                        webapp_location = m[0][1]
-                        echo "webapp_location = '${webapp_location}'"
+                        echo "Solution_Explorer_URL = m[0][1]"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -245,7 +244,7 @@ pipeline {
 
     post {
         failure {
-            git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
+        	git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
             /* retire in case of failure */
             withCredentials(
                 [
@@ -261,6 +260,7 @@ pipeline {
             }
 
             /* Print ansible logs */
+            /*
             withCredentials([
                 string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
                 sshUserPrivateKey(
@@ -273,7 +273,7 @@ pipeline {
                     "bin/logs.sh ${guid}" || true
                 """.trim()
                 )
-            }
+            }*/
 
             withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
                 mail(
@@ -284,7 +284,7 @@ pipeline {
                     from: credentials.split(':')[0]
               )
             }
-            withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
+            /*withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
                 sh(
                     """
                       curl -H 'Content-Type: application/json' \
@@ -292,9 +292,9 @@ pipeline {
                       -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :rage: ${env.JOB_NAME} (${env.BUILD_NUMBER}) failed GUID=${guid}. It appears that ${env.BUILD_URL}/console is failing, somebody should do something about that.\"}'\
                     """.trim()
                 )
-            }
+            }*/
         }
-        fixed {
+        /*fixed {
             withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
                 sh(
                     """
@@ -304,6 +304,6 @@ pipeline {
                     """.trim()
                 )
             }
-        }
+        }*/
     }
 }
