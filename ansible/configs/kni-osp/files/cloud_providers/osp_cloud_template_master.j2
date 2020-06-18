@@ -1,0 +1,262 @@
+heat_template_version: 2018-03-02
+
+description: Top level HOT for creating new project, network resources, and instances. This template relies on ResourceGroups and a nested template that is called to provision instances, ports, & floating IPs.
+
+resources:
+
+  {{ guid }}-infra_key:
+    type: OS::Nova::KeyPair
+    properties:
+      name: {{ guid }}-infra_key
+      save_private_key: True
+
+{% if osp_project_create | bool %}
+  {{ guid }}-project_user:
+    type: OS::Keystone::User
+    properties:
+      name: {{ guid }}-user
+      password: {{ heat_user_password }}
+      domain: Default
+
+  {{ guid }}-project_role_user:
+    type: OS::Keystone::UserRoleAssignment
+    properties:
+      user: { get_resource: {{ guid }}-project_user }
+      roles:
+        - {project: {{ osp_project_name }}, role: _member_ }
+        - {project: {{ osp_project_name }}, role: swiftoperator }
+    depends_on:
+      - {{ guid }}-project_user
+{% endif %}
+
+{% for network in networks %}
+  {{ network['name'] }}-network:
+    type: OS::Neutron::Net
+    properties:
+      name: "{{ guid }}-{{ network['name'] }}-network"
+      shared: {{ network['shared'] }}
+
+  {{ network['name'] }}-subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      name: "{{ guid }}-{{ network['name'] }}-subnet"
+      network_id: { get_resource: {{ network['name'] }}-network }
+      cidr: {{ network['subnet_cidr'] }}
+{% if network['dns_nameservers'] is defined %}
+      dns_nameservers: {{ network['dns_nameservers'] }}
+{% endif %}
+
+{% if network['allocation_start'] is defined %}
+      gateway_ip: {{ network['gateway_ip'] }}
+      allocation_pools:
+      -  start: {{ network['allocation_start'] }}
+         end: {{ network['allocation_end'] }}
+{% else %}
+      enable_dhcp: False
+{% endif %}
+
+{% if network['create_router'] %}
+  {{ network['name'] }}-router:
+    type: OS::Neutron::Router
+    properties:
+      name: "{{ guid }}-{{ network['name'] }}-router"
+      external_gateway_info:
+        network: "{{ provider_network }}"
+
+  {{ network['name'] }}-router_private_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: { get_resource: {{ network['name'] }}-router }
+      subnet: { get_resource: {{ network['name'] }}-subnet }
+{% endif %}
+{% endfor %}
+
+{% for security_group in security_groups %}
+  {{ security_group['name'] }}:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: {{ guid }}-{{ security_group['name'] }}
+{% if security_group['description'] is defined %}
+      description: "{{ security_group['description'] }}"
+{% endif %}
+
+{% for rule in security_group.rules %}
+{% if rule['name'] is defined %}
+  {{ security_group['name'] }}-rule_{{ rule['name'] }}:
+{% else %}
+  {{ security_group['name'] }}-rule_{{ lookup('password', '/dev/null length=5 chars=ascii_letters,digits') }}:
+{% endif %}
+    type: OS::Neutron::SecurityGroupRule
+    properties:
+      security_group: { get_resource: {{ security_group['name'] }} }
+      direction: {{ rule['direction'] }}
+      protocol: {{ rule['protocol'] }}
+{% if rule['description'] is defined %}
+      description: {{ rule['description'] }}
+{% endif %}
+{% if rule['port_range_min'] is defined %}
+      port_range_min: {{ rule['port_range_min'] }}
+{% endif %}
+{% if rule['port_range_max'] is defined %}
+      port_range_max: {{ rule['port_range_max'] }}
+{% endif %}
+{% if rule['remote_ip_prefix'] is defined %}
+      remote_ip_prefix: {{ rule['remote_ip_prefix'] }}
+{% endif %}
+{% if rule['remote_group'] is defined %}
+      remote_group: { get_resource: {{ rule['remote_group'] }} }
+{% endif %}
+    depends_on: {{ security_group['name'] }}
+{% endfor %}
+{% endfor %}
+
+
+{% for instance in instances %}
+  {{instance['name']}}:
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: {{ instance['count'] }}
+      resource_def:
+        type: {{ heat_nested_template }}
+        properties:
+          network_private: { get_resource: {{ network_private }}-network }
+          volume_size: {{ instance['rootfs_size'] | default(osp_default_rootfs_size) }}
+          key_name: { get_resource: {{ guid }}-infra_key }
+          security_groups:
+{% for security_group in instance.security_groups %}
+            - {{ guid }}-{{ security_group }}
+{% endfor %}
+          provider_network: {{ provider_network }}
+{% if instance['count'] > 1 %}
+          instance_name: {{ instance['name'] }}%index%
+{% else %}
+          instance_name: {{ instance['name'] }}
+{% endif %}
+          instance_flavor: {{ instance['flavor'].osp }}
+{% if instance.create_vol %}
+          src_img: false
+          mkvol: true
+          instance_image: {{ instance['image_id'] }}
+          volume_name: {{ instance['name'] }}%index%-volume
+{% else %}
+          src_img: false
+          mkvol: false
+          instance_image: {{ instance['image_id'] }}
+          volume_name: {{ instance['name'] }}%index%-volume
+{% endif %}
+          volumes_attach: {{ instance['attach_vol'] }}
+{% if instance.floating_ip %}
+          instance_fip: true
+{% else %}
+          instance_fip: false
+{% endif %}
+{% if instance.app_ip is defined %}
+{% if instance['count'] > 1 %}
+          instance_app_ip: {{ instance['app_ip'] }}%index%
+{% else %}
+          instance_app_ip: {{ instance['app_ip'] }}
+{% endif %}
+          instance_app_mac: {{ instance['app_mac'] }}%index%
+{% endif %}
+{% if instance.pxenet %}
+          instance_bmc: true
+{% if instance['count'] > 1 %}
+          instance_pxe_ip: {{ instance['pxe_ip'] }}%index%
+{% else %}
+          instance_pxe_ip: {{ instance['pxe_ip'] }}
+{% endif %}
+          instance_pxe_mac: {{ instance['pxe_mac'] }}%index%
+{% else %}
+          instance_pxe_ip: False
+          instance_bmc: false
+          instance_pxe_mac: False
+{% endif %}
+{% if instance.no_security is defined %}
+          port_security: False
+          port_insecure: True
+{% else %}
+          port_security: True
+          port_insecure: False
+{% endif %}
+          network_pxe: { get_resource: {{ network_pxe }}-network }
+          ocp_api_vip: {{ ocp_api_vip }}
+          ocp_app_vip: {{ ocp_app_vip }}
+          instance_metadata:
+            guid: "{{ guid }}"
+            env_type: "{{ env_type }}"
+{% if instance['metadata'] %}
+{% for data in instance['metadata'] %}
+{% for key, value in data.items() %}
+            {{ key }}: {{ value }}
+{% endfor %}
+{% endfor %}
+{% endif %}
+    depends_on:
+    {% if instance.floating_ip %}
+      - {{ instance['network'] }}-router_private_interface
+    {% endif %}
+{% for security_group in instance.security_groups %}
+      - {{ security_group }}
+{% endfor %}
+{% endfor %}
+
+
+{% if openshift_fip_provision %}
+  ocp_api_vip_port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: appnet-network }
+      port_security_enabled: true
+      fixed_ips:
+        - ip_address: {{ ocp_api_vip }}
+
+  ocp_api_fip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: "{{ provider_network }}"
+
+  ocp_api_vip:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: ocp_api_fip }
+      port_id: { get_resource: ocp_api_vip_port }
+    depends_on:
+      - appnet-router_private_interface
+
+  ocp_apps_vip_port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: appnet-network }
+      port_security_enabled: true
+      fixed_ips:
+        - ip_address: {{ ocp_app_vip }}
+
+  ocp_ingress_fip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: "{{ provider_network }}"
+
+  ocp_app_vip:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: ocp_ingress_fip }
+      port_id: { get_resource: ocp_apps_vip_port }
+    depends_on:
+      - appnet-router_private_interface
+{% endif %}
+
+outputs:
+
+  {{ guid }}-infra_key:
+    description: The SSH infra key
+    value: { get_attr: [ {{ guid }}-infra_key, private_key ] }
+
+{% if openshift_fip_provision %}
+  ocp_api_fip:
+    description: The floating IP of the OpenShift API
+    value: { get_attr: [ ocp_api_fip, floating_ip_address ] }
+
+  ocp_ingress_fip:
+    description: The floating IP of the OpenShift ingress
+    value: { get_attr: [ ocp_ingress_fip, floating_ip_address ] }
+{% endif %}

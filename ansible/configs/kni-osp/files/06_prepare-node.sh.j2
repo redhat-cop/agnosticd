@@ -1,0 +1,97 @@
+#!/bin/bash
+# Generate oc & openshift-baremetal-install binary
+# Build registry & rhcos caching httpd
+ORIG_PWD=$(pwd)
+cp $(pwd)/install-config.yaml install-config.yaml.orig
+#export VERSION=4.3.12
+export VERSION={{ my_ocp_version }}
+case $VERSION in
+  *nightly*) export RELEASE_IMAGE=$(curl -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp-dev-preview/$VERSION/release.txt| grep 'Pull From: quay.io' | awk -F ' ' '{print $3}' | xargs) ;;
+  *) export RELEASE_IMAGE=$(curl -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$VERSION/release.txt| grep 'Pull From: quay.io' | awk -F ' ' '{print $3}' | xargs) ;;
+esac
+
+export PATH=$PATH:$(pwd)
+export CMD=openshift-baremetal-install
+export EXTRACT_DIR=$(pwd)
+export PULLSECRET=/home/cloud-user/pull-secret.json
+
+build_installer() {
+  SUBVER=`echo "${VERSION:0:3}"`
+  echo "Building $SUBVER openshift-baremetal-install with OpenStack hardware profile..."
+  cd $HOME
+  sudo dnf -y install libvirt-devel go
+  wget -c https://dl.google.com/go/go1.13.10.linux-amd64.tar.gz
+  sudo tar -C /usr/local -xzf go1.13.10.linux-amd64.tar.gz
+  export PATH=/usr/local/go/bin:$PATH
+  export PATH=$PATH:$HOME/scripts
+  export GOPATH=/home/cloud-user/go
+  mkdir -p $HOME/go/src/github.com/openshift
+  cd $HOME/go/src/github.com/openshift
+  git clone --single-branch --branch release-$SUBVER https://github.com/openshift/installer.git
+  cd installer/
+  cp $HOME/scripts/profile/profile.go vendor/github.com/metal3-io/baremetal-operator/pkg/hardware/profile.go
+  #vi vendor/github.com/metal3-io/baremetal-operator/pkg/hardware/profile.go
+  TAGS="baremetal libvirt" hack/build.sh
+  cp bin/openshift-install $HOME/scripts/openshift-baremetal-install
+  cd $HOME/scripts/
+  echo "Completed $SUBVER openshift-baremetal-install with OpenStack hardware profile!"
+}
+
+# cp $HOME/scripts/*.yaml $HOME/
+
+case $VERSION in
+  *nightly*) curl -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp-dev-preview/$VERSION/openshift-client-linux-$VERSION.tar.gz | tar zxvf - oc ;;
+  *) curl -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$VERSION/openshift-client-linux-$VERSION.tar.gz | tar zxvf - oc ;;
+esac
+
+sudo cp oc /usr/local/bin/
+case $VERSION in
+  *nightly*) build_installer ;;
+  *) oc adm release extract --registry-config "${PULLSECRET}" --command=$CMD --to "${EXTRACT_DIR}" ${RELEASE_IMAGE} ;;
+esac
+
+sudo yum -y install podman httpd httpd-tools
+sudo mkdir -p /opt/registry/{auth,certs,data}
+sudo openssl req -newkey rsa:4096 -nodes -sha256 -keyout /opt/registry/certs/domain.key -x509 -days 365 -out /opt/registry/certs/domain.crt -subj "/C=US/ST=NorthCarolina/L=Raleigh/O=Red Hat/OU=Marketing/CN=provision.{{ my_ocp_domain }}"
+sudo cp /opt/registry/certs/domain.crt $(pwd)/domain.crt
+sudo chown cloud-user:cloud-user $(pwd)/domain.crt
+sudo cp /opt/registry/certs/domain.crt /etc/pki/ca-trust/source/anchors/
+sudo update-ca-trust extract
+
+sudo htpasswd -bBc /opt/registry/auth/htpasswd dummy dummy
+
+sudo podman create --name poc-registry --net host -p 5000:5000 -v /opt/registry/data:/var/lib/registry:z -v /opt/registry/auth:/auth:z -e "REGISTRY_AUTH=htpasswd" -e "REGISTRY_AUTH_HTPASSWD_REALM=Registry" -e "REGISTRY_HTTP_SECRET=ALongRandomSecretForRegistry" -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd -v /opt/registry/certs:/certs:z -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/domain.crt -e REGISTRY_HTTP_TLS_KEY=/certs/domain.key docker.io/library/registry:2
+
+sudo podman start poc-registry
+sudo podman ps
+sleep 10
+
+
+export IRONIC_DATA_DIR=/opt/ocp/ironic
+export IRONIC_IMAGES_DIR="${IRONIC_DATA_DIR}/html/images"
+export IRONIC_IMAGE=quay.io/metal3-io/ironic:master
+sudo mkdir -p $IRONIC_IMAGES_DIR
+sudo chown -R "${USER}:${USER}" "$IRONIC_DATA_DIR"
+sudo find $IRONIC_DATA_DIR -type d -print0 | xargs -0 chmod 755
+sudo chmod -R +r $IRONIC_DATA_DIR
+sudo podman pod create -n ironic-pod
+sudo podman run -d --net host --privileged --name httpd --pod ironic-pod -v $IRONIC_DATA_DIR:/shared --entrypoint /bin/runhttpd ${IRONIC_IMAGE}
+
+sudo podman ps
+sleep 10
+
+{% if my_ocp_offline %}
+export UPSTREAM_REPO="registry.svc.ci.openshift.org/ocp/release:$VERSION"
+export PULLSECRET=/home/cloud-user/pull-secret.json
+export LOCAL_REG='provision.{{ osp_cluster_dns_zone }}:5000'
+export LOCAL_REPO='ocp4/openshift4'
+oc adm release mirror -a $PULLSECRET --from=$UPSTREAM_REPO --to-release-image=$LOCAL_REG/$LOCAL_REPO:$VERSION --to=$LOCAL_REG/$LOCAL_REPO
+
+sed -i -e 's/^/  /' $(pwd)/domain.crt
+echo "additionalTrustBundle: |" >> $(pwd)/install-config.yaml
+cat $(pwd)/domain.crt >> $(pwd)/install-config.yaml
+{% endif %}
+
+echo -e 'y\n'|ssh-keygen -t rsa -q -f "$HOME/.ssh/id_rsa" -N ""
+SSHKEY=$HOME/.ssh/id_rsa.pub
+sed -i "s/SSH_KEY/$(sed 's:/:\\/:g' $SSHKEY)/" $(pwd)/install-config.yaml
