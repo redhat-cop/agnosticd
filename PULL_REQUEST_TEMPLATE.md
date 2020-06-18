@@ -1,3 +1,8 @@
+<!--- Please read first:
+
+https://github.com/redhat-cop/agnosticd/blob/development/docs/Contributing.adoc
+
+-->
 ##### SUMMARY
 <!--- Describe the change below, including rationale and design decisions -->
 
