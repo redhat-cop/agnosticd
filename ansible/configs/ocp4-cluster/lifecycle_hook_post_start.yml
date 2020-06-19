@@ -79,3 +79,43 @@
       when: r_new_csrs.resources | length > 0
       command: "oc adm certificate approve {{ item.metadata.name }}"
       loop: "{{ r_new_csrs.resources }}"
+
+    # Get OpenShift Version to determine if we need additional recovery actions
+    - name: Get OpenShift ClusterVersion
+      k8s_facts:
+        api_version: config.openshift.io/v1
+        kind: ClusterVersion
+        name: version
+      register: r_cluster_version
+    - name: Set ocp4_cluster_version fact
+      set_fact:
+        ocp4_cluster_version: "{{ r_cluster_version.resources[0].status.history[0].version }}"
+
+    # Only do the following recovery actions on 4.4.7 and higher 4.4 OpenShift versions
+    # Before 4.4.7 the cluster would still be broken. Starting in 4.5 this won't be necessary
+    # Also only do when previously there were certificates to be approved
+    - name: Workaround for OCP 4.4 bug (API Servers need restarting)
+      when:
+      - ocp4_cluster_version is version_compare('4.4.7', '>=')
+      - ocp4_cluster_version is version_compare('4.5.0', '<')
+      - r_csrs.resources | length > 0 or r_new_csrs.resources | length > 0
+      block:
+      - name: Wait 5 minutes for things to settle
+        pause:
+          seconds: 300
+
+      - name: Find openshift-apiserver pods
+        k8s_facts: 
+          api_version: v1
+          kind: Pod
+          namespace: openshift-apiserver
+        register: r_apiserver_pods
+
+      - name: Restart openshift-apiserver pods
+        k8s:
+          state: absent
+          api_version: v1
+          kind: Pod
+          namespace: openshift_apiserver
+          name: "{{ item.metadata.name }}"
+        loop: "{{ r_apiserver_pods.resources }}"
