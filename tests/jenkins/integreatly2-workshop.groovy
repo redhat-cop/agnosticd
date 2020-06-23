@@ -168,7 +168,7 @@ pipeline {
 
                     try {
                         m = email =~ /Solution Explorer URL: (https:\/\/[^ \n]+)/
-                        echo "Solution_Explorer_URL = m[0][1]"
+                        echo "Solution_Explorer_URL = ${m[0][1]}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -203,7 +203,7 @@ pipeline {
 
                 sh "./opentlc/delete_svc_guid.sh '${guid}'"
             }
-            post {
+            	 {
                 failure {
                     withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
                         mail(
