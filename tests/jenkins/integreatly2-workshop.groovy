@@ -25,7 +25,7 @@ def webapp_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / RHMI (Integreatly-2) Workshop',
+    'Workshops / RHMI v2 Workshop',
     'DevOps Team Testing Catalog / TEST - RHMI (Integreatly-2) Workshop',
     'DevOps Team Development Catalog / DEV - RHMI (Integreatly-2) Workshop',
 ].join("\n")
