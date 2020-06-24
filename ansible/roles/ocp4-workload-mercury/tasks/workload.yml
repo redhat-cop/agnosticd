@@ -1,11 +1,106 @@
 ---
 # Implement your Workload deployment tasks here
-
 - name: Setting up workload for user
   debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
+###
+# Project Mercury users configuration
+# ---
+# Skip in case OAuth/htpasswd is not yet configured in the cluster
 
+- name: "Project Mercury :: Check if cluster OAuth is configured"
+  k8s_info:
+    api_version: v1
+    kind: Secret
+    name: htpasswd-secret
+    namespace: openshift-config
+  register: r_htpasswd
+
+- name: "Project Mercury :: Check if './files/users.htpasswd' exist to update cluster OAuth"
+  when: r_htpasswd | d('') | length > 0
+  block:
+
+  - name: "Try copying './files/users.htpasswd' file onto the target filesystem"
+    copy:
+      src: "./files/users.htpasswd"
+      dest: "/home/{{ ansible_user }}/users.htpasswd"
+      owner: "{{ ansible_user }}"
+      mode: 0664
+    register: r_htpasswd_copy
+    ignore_errors: true
+
+  - name: "Generate htpasswd-secret resource definition Yaml using 'oc command'"
+    when: not r_htpasswd_copy.failed | bool
+    command: "oc create secret generic htpasswd-secret -n openshift-config --from-file=htpasswd=/home/{{ ansible_user }}/users.htpasswd --dry-run -o yaml"
+    register: r_htpasswd_res_yaml
+
+  - name: Create htpasswd-secret from htpasswd file and generated Yaml description
+    when: r_htpasswd_res_yaml | d('') | length > 0
+    k8s:
+      state: present
+      merge_type:
+        - strategic-merge
+        - merge
+      definition: "{{ r_htpasswd_res_yaml.stdout }}"
+
+  - name: Delete the users.htpasswd file generated on the target filesystem
+    when: not r_htpasswd_copy.failed | bool
+    file:
+      state: absent
+      dest: "/home/{{ ansible_user }}/users.htpasswd"
+
+###
+# Projects
+
+- name: "Project Mercury :: Add new project named 'mercury'"
+  include_tasks: create_project.yaml
+  vars:
+    user: "{{ ocp_username }}"
+    name: "mercury"
+    display_name: "Project Mercury"
+
+###
+# OpenShift Pipelines operator install
+- name: 'Project Mercury :: Install the OpenShift Pipelines operator task'
+  include_role:
+    name: ocp4-workload-pipelines
+  vars:
+    become_override: yes
+
+###
+# Nexus GPTE's operator install and server deployment
+- name: 'Project Mercury :: Install the Nexus operator and deploy its server task'
+  include_role:
+    name: ocp4-workload-nexus-operator
+  vars:
+    become_override: yes
+
+
+###
+# OpenShit ServiceMesh operator install
+# - name: 'Project Mercury :: Install the OpenShift ServiceMesh operator task'
+#   include_role:
+#     name: ocp4-workload-servicemesh
+#   vars:
+#     become_override: yes
+
+###
+# 3scale Operator
+# ---
+
+# - name: Create '3scale-operator' project
+#   include_tasks: create_project.yaml
+#   vars:
+#     user: "{{ ocp_username }}"
+#     name: "3scale-system"
+
+# Sets up the RWX storage provider required for 3scale
+- name: Configure NFS Server workload to provide RWX storage class
+  include_role:
+    name: ocp4-workload-nfs-server
+  vars:
+    become_override: yes
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
