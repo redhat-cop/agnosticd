@@ -1,0 +1,295 @@
+---
+- name: Step 005 - Post software
+  hosts: bastions
+  become: no
+  gather_facts: False
+  environment:
+    KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+  tasks:
+  - debug:
+      msg: "Post-Software Steps starting"
+
+- name: Step 005.1 - Post Software flight-check
+  hosts: bastions
+  run_once: yes
+  gather_facts: false
+  become: false
+  tags:
+  - post_flight_check
+  tasks:
+  - when:
+    - install_ocp4 | default( False ) | bool
+    - run_smoke_tests | default( False ) | bool
+    environment:
+      KUBECONFIG: "{{ cluster_name }}/auth/kubeconfig"
+    ignore_errors: yes
+    block:
+    - name: Get API for command line
+      command: oc whoami --show-server
+      register: showserver
+
+    - name: Ensure web console is known
+      when: webconsole is not defined
+      block:
+      - name: Get console route
+        command: oc get route -n openshift-console console -o json
+        register: routeconsole
+        retries: 10
+        delay: 30
+        until: routeconsole is succeeded
+        ignore_errors: yes
+
+      - name: Set webconsole address
+        set_fact:
+          webconsole: "http://{{ routeconsole.stdout | from_json | json_query('spec.host') }}"
+        when: routeconsole is succeeded
+
+    - name: Check DNS webconsole
+      command: nslookup "{{ webconsole | urlsplit('hostname') }}"
+      register: checkdnswebconsole
+      changed_when: false
+      retries: 15
+      until: checkdnswebconsole is succeeded
+      delay: 30
+
+    - name: Check DNS API
+      command: nslookup "{{ showserver.stdout | trim | urlsplit('hostname') }}"
+      register: checkdnsapi
+      changed_when: false
+
+    - name: Webconsole
+      uri:
+        url: "{{ webconsole }}"
+        validate_certs: no
+      register: testwebconsole
+      retries: 5
+      until: testwebconsole is succeeded
+      delay: 60
+
+    - name: Cluster-info
+      command: oc cluster-info
+      register: clusterinfor
+      changed_when: false
+
+    - name: Create project
+      command: oc new-project postflightcheck
+      register: newproject
+
+    - name: New-app
+      command: oc new-app cakephp-mysql-persistent -n postflightcheck
+      register: newapp
+
+    - name: Wait for mysql
+      command: timeout 300 oc rollout status dc/mysql -w -n postflightcheck
+      register: mysqlw
+      changed_when: false
+
+    - name: Wait for php
+      command: timeout 300 oc rollout status dc/cakephp-mysql-persistent -w -n postflightcheck
+      register: phpw
+      changed_when: false
+      retries: 2
+      delay: 60
+      until: phpw is succeeded
+
+    - name: Get route
+      command: >-
+        oc get route
+        -l template=cakephp-mysql-persistent
+        --no-headers
+        -o json
+        -n postflightcheck
+      register: getroute
+      changed_when: false
+      retries: 10
+      delay: 5
+      until: getroute is succeeded
+
+    - name: Test that route is reachable
+      uri:
+        url: "http://{{ getroute.stdout|from_json|json_query('items[0].spec.host') }}"
+      register: testroute
+      retries: 15
+      delay: 5
+      until: testroute is succeeded
+
+    - name: Delete project
+      command: oc delete project postflightcheck
+
+    - name: Switch back to default project
+      command: oc project default
+
+    - debug:
+        msg: "{{ item }}"
+      loop:
+      - "user.info: "
+      - "user.info: Post Flight Check"
+      - "user.info: DNS Web Console ............... {{ 'OK' if checkdnswebconsole.rc == 0 else 'FAIL' }}"
+      - "user.info: DNS API ....................... {{ 'OK' if checkdnsapi.rc == 0 else 'FAIL' }}"
+      - "user.info: Web console ................... {{ 'OK' if testwebconsole is succeeded else 'FAIL' }}"
+      - "user.info: API ........................... {{ 'OK' if clusterinfor.rc == 0 else 'FAIL' }}"
+      - "user.info: Create Project with PV ........ {{ 'OK' if newproject.rc == 0 else 'FAIL' }}"
+      - "user.info: App deployed .................. {{ 'OK' if phpw.rc == 0 and mysqlw.rc == 0 else 'FAIL' }}"
+      - "user.info: Route ......................... {{ 'OK' if testroute is succeeded else 'FAIL' }}"
+
+    - name: Fail smoke tests
+      when:
+      - run_smoke_tests | default( False ) | bool
+      - >-
+        checkdnswebconsole.rc != 0
+        or checkdnsapi.rc != 0
+        or testwebconsole is failed
+        or clusterinfor.rc != 0
+        or newproject.rc != 0
+        or phpw.rc != 0
+        or mysqlw.rc != 0
+        or testroute is failed
+      fail:
+        msg: "FAIL Smoke tests"
+      ignore_errors: no
+
+# Deploy Workloads
+- name: Step 005.2 - Deploy Infra and Student Workloads
+  import_playbook: workloads.yml
+
+# Workarounds to enable cluster shutdown before 24h are over
+- name: Step 005.3 - Enable Cluster Shutdown and Resume
+  hosts: bastions
+  run_once: yes
+  gather_facts: false
+  become: false
+  environment:
+    KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+  tasks:
+  - when:
+    - install_ocp4 | default( False ) | bool
+    - ocp4_enable_cluster_shutdown | default( False ) | bool
+    block:
+    - name: Set Ansible Python interpreter to k8s virtualenv
+      set_fact:
+        ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+    - name: Create Daemon Set to renew Bootstrap Credentials
+      k8s:
+        state: present
+        definition: "{{ lookup('file', './files/kubelet-bootstrap-cred-manager-ds.yaml' ) | from_yaml }}"
+    - name: Delete initial Bootstrap Secrets to force regeneration
+      k8s:
+        state: absent
+        api_version: v1
+        kind: Secret
+        name: "{{ item }}"
+        namespace: openshift-kube-controller-manager-operator
+      loop:
+      - "csr-signer-signer"
+      - "csr-signer"
+
+- name: Step 005.4 Run performance test (optional)
+  hosts: bastions
+  gather_facts: false
+  become: false
+  environment:
+    KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+  tasks:
+  - name: Run fio tests for etcd performance
+    when: test_deploy_results | default( False ) | bool
+    block:
+    - name: Set Ansible Python interpreter to k8s virtualenv
+      set_fact:
+        ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+
+    - name: Get metadata.json
+      stat:
+        path: /home/{{ ansible_user }}/{{ cluster_name }}/metadata.json
+      register: r_metadata
+
+    - name: Get the infra ID
+      shell: jq -r .infraID /home/{{ ansible_user }}/{{ cluster_name }}/metadata.json
+      register: r_infra_id
+      when: r_metadata.stat.exists
+
+    - name: create fio testing project
+      k8s:
+        name: fio-test
+        api_version: v1
+        kind: Namespace
+        state: present
+
+    - name: give default sa privileged scc
+      shell: oc adm policy add-scc-to-user privileged system:serviceaccount:fio-test:default
+
+    - name: run job pod with fio-etcd-osp container
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './files/fio-test-job.yaml.j2') }}"
+      vars:
+        INFRA_ID: "{{ r_infra_id.stdout }}"
+
+    - name: Wait for job to finish (1h max)
+      k8s_facts:
+        api_version: batch/v1
+        kind: Job
+        name: fio-test
+        namespace: fio-test
+      register: r_fio_test_job
+      retries: 60
+      delay: 60
+      until: r_fio_test_job.resources[0].status.conditions | json_query(fio_query) | bool
+      vars:
+        fio_query: >-
+          [?type=='Complete'].status[] | [0]
+        INFRA_ID: "{{ r_infra_id.stdout }}"
+
+    - name: Remove job
+      k8s:
+        name: fio-test
+        kind: Job
+        api_version: batch/v1
+        namespace: fio-test
+        state: absent
+
+    - name: Remove fio testing project
+      k8s:
+        name: fio-test
+        kind: Namespace
+        api_version: v1
+        state: absent
+
+- name: Step 005.5 Remove AWS Credentials from Bastion
+  hosts: bastions
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Remove AWS Credentials directory from bastion
+    when: cloud_provider == 'ec2'
+    file:
+      path: "/home/{{ ansible_user }}/.aws"
+      state: absent
+
+- name: Step 005.6 Print Student Info
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Print Student Information
+    when: install_student_user | bool
+    block:
+    - name: Store bastion hostname as a fact
+      set_fact:
+        bastion_hostname: "{{groups['bastions'].0 }}"
+    - name: print out user.info
+      debug:
+        msg: "{{ item }}"
+      loop:
+      - "user.info: You can access your bastion via SSH:"
+      - "user.info: ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix if cloud_provider == 'ec2' else '.'+ocp4_base_domain }}"
+      - "user.info: "
+      - "user.info: Make sure you use the username '{{ student_name }}' and the password '{{ hostvars[bastion_hostname]['student_password'] }}' when prompted."
+
+- name: Step 005.7 Tell CloudForms we are done
+  hosts: localhost
+  run_once: yes
+  gather_facts: false
+  become: false
+  tasks:
+  - debug:
+      msg: "Post-Software checks completed successfully"
