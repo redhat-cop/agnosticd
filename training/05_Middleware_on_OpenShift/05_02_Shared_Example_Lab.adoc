@@ -1,0 +1,419 @@
+include::../../tools/00_0_Lab_Header.adoc[]
+
+== Shared Cluster Workload - Lab
+
+.Goals
+
+* Understand Shared OCP Clusters access requests
+* Understand the use of the Bastion
+* Understand Roles and Quotas in share cluster user access
+* Deploy a simple application on OCP
+* Practice using the Ansible `k8s` Module
+* Use best-practices in Ansible for awaiting OCP task completion
+* Use the Ansible module `agonsticd_user_info`
+* Practice removing OCP resources applicable during deprovisioning workload
+* Change the value of variables that create OpenShift resouces
+
+include::../../tools/00_0_Lab_Setup.adoc[]
+
+[[labexercises]]
+:numbered:
+
+== Overview
+
+TODO: the basics here
+
+We will be copying assets from the example role `$HOME/agnosticd/ansible/roles_ocp_workloads/ocp4_workload_example_shared_cluster/` into your role.
+
+=== About Shared Clusters
+
+TODO: what happens with CloudForms -> OSP user provisioning
+
+== Update your own OCP4 Workload Role for Shared Clusters
+
+=== Update the Default role variables
+
+We'll be changing the value of the `ocp4_workload_${USER}_project_name` variable during our workload development.
+
+. Update your `default/main.yml` file to reflect the new variable names and default value
++
+[source,yaml]
+----
+---
+become_override: False <1>
+ocp_username: wkulhane-redhat.com
+silent: False
+
+# If your workload needs customization options provide variables to be used.
+# Variable names must be prefixed by the role name "<role name>_<variable>".
+# Because this example workload is called "ocp4_workload_example_shared_cluster"
+# the variables should be named "ocp4_workload_example_shared_cluster_variable".
+
+# You can override the defaults as parameters to the Ansible run that runs
+# your workload.
+
+# Project to create for the example application
+ocp4_workload_example_<YOUR USER>_project_name: "example-default-{{ ocp_username }}" <2>
+----
+<1> Do you recall what this does?  Does the ocp-workload base config run as root by default?
+<2> Note the important new name here
+
+=== Update the `workload.yml`
+
+This workload.yml does the following:
+
+* creates a project with a custom name for the user
+* deploys a sample application with YAML manifests
+* watches the deployment and reports success and failure TODO
+* reports the route to the application to the user
+
+==== Create Resources as Jinja2 Templates Using the `k8s` module
+
+One method of creating configurable OpenShift resources is to use Jinja2 templates.
+
+Over the course of this lab you will be updating Ansible variables to experiment with custom OpenShift project names.
+
+. Copy the jinja2 template from the ocp4_workload_example_shared_cluster workload into your workload:
++
+[source,sh]
+----
+cp $HOME/ansible/roles_ocp_workloads/ocp4_workload_example_shared_cluster/templates/project.j2 \
+$HOME/ansible/roles_ocp_workloads/ocp4_workload_example_${USER}/templates/project.j2
+----
+
+. Edit the template to reflect the proper variable name for your role:
++
+.`$HOME/ansible/roles_ocp_workloads/ocp4_workload_example_${USER}/templates/project.j2`
+[source,yaml]
+----
+apiVersion: project.openshift.io/v1
+kind: Project
+metadata:
+  annotations:
+    openshift.io/description: ""
+    openshift.io/display-name: ""
+    openshift.io/requester: '{{ ocp_username }}'
+  name: '{{ ocp4_workload_EDIT_THIS_project_name }}' <1>
+spec:
+  finalizers:
+  - kubernetes
+----
+<1> modify the Jinja2 template variable name to align with your role.
+
+. Update your playbook to create a project with a jinja2 template:
++
+[source,yaml]
+----
+- name: create project for user by using a jinja2 template in the role
+  k8s:
+    state: present
+    definition: "{{ lookup('template', role_path ~ '/templates/project.j2' ) | from_yaml }}"
+----
+
+==== Create OpenShift Resources as static yaml manifest files
+
+. Copy the static YAML manifest files from the ocp4_workload_example_shared_cluster workload into your workload:
++
+[source,sh]
+----
+cp $HOME/ansible/roles_ocp_workloads/ocp4_workload_example_shared_cluster/files/*.yaml \
+$HOME/ansible/roles_ocp_workloads/ocp4_workload_example_${USER}/files/
+----
+
+. Update your playbook to create a deployment, service, and route with Kuberentes YAML manifests:
++
+[source,yaml]
+----
+- name: deploy example app using specific manifests
+  k8s:
+    state: present
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+    namespace: "{{ ocp4_workload_EDIT_THIS_project_name }}" <1>
+  loop:
+    - ./files/hello_openshift_deployment.yaml
+    - ./files/hello_openshift_service.yaml
+    - ./files/hello_openshift_route.yaml
+----
+<1> modify the Jinja2 template variable name to align with your role.
+
+==== Watch for OpenShift Resource Creation
+
+In this step, you'll watch for your pod replicas to be deployed. Take what you know about how OpenShift resource status messages express their state, and use ansible to watch for that status change.
+
+. Update your playbook to query the deployment, register the output in an ansible variable, and interrogate that variable for the status change expressing the correct deployment of replicas.  Be careful to cast the variables as the appropriate type for the comparison.
++
+[source,yaml]
+----
+- name: await application availability by querying the OpenShift API
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: "{{ ocp4_workload_example_shared_cluster_project_name }}" <1>
+    name: "hello-openshift"
+  register: r_hello_openshift_deployment
+  retries: 30
+  delay: 10
+  until:
+    - r_hello_openshift_deployment.resources | length | int > 0
+    - r_hello_openshift_deployment.resources[0].status.availableReplicas is defined
+    - r_hello_openshift_deployment.resources[0].status.availableReplicas | int == r_hello_openshift_deployment.resources[0].spec.readyReplicas | int
+----
+<1> modify the Jinja2 template variable name to align with your role.
+
+WARNING: `k8s_facts` has been deprecated.  Use only `k8s_info` to query OpenShift. More info about `*_facts` vs. `*_info` here: https://github.com/ansible/ansible/issues/54280
+
+==== Query OpenShift and Supply Info to Users
+
+With any luck, the above task completed successfully.  You now need to report that and the useful information provided by OpenShift back to the user.
+
+. Query the OpenShift API for the Route created for this application and supply it to the user with the GPTE custom Ansible module `agnosticd_user_info`:
++
+[source,yaml]
+----
+- name: get route by querying the OpenShift API
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: "hello-openshift"
+    namespace: "{{ ocp4_workload_example_shared_cluster_project_name }}" <1>
+  register: r_app_route
+
+- name: notify user of route with "user.info " in logs.  CloudForms will see this and send email to users
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+    - ""
+    - "Use the following route to access your application {{ r_app_route.resources[0].spec.host }}"
+    - ""
+----
+<1> modify the Jinja2 template variable name to align with your role.
+
+=== Update Role Metadata and ReadMe
+
+As in the Simple Lab, update the metadata and readme to reflect the changes you have made.
+
+. Edit the `meta/main.yml` file to ensure that you and your role can be identified properly in the AgnosticD and Ansible Galaxy tools.
+. Take some time to thoroughly edit the README.adoc file. Describe the tasks you add to each of the included tasks.
+Make sure users and operators of your workload will understand its purpose and any gotchas you experienced or think might arise.
+
+Your workload is now properly reconfigured and is ready to begin testing.
+
+== Setup Your Testing Execution Enviornment
+
+All of this is very much the same as the Simple Lab.  Note that the OpenShift resources created will be owned by the `ocp_username`.
+
+=== `<role name>_vars.yaml` File
+
+As in the Simple Lab, consider the often used variables that your deployers will need, and detail them and their use here.
+
+. Edit the `<role name>_vars.yaml` file to suit the new goals of your role:
++
+[source,yaml]
+----
+---
+become_override: False
+ocp_username: wkulhane-redhat.com
+silent: False
+
+# If your workload needs customization options provide variables to be used.
+# Variable names must be prefixed by the role name "<role name>_<variable>".
+# Because this example workload is called "ocp4_workload_example_shared_cluster"
+# the variables should be named "ocp4_workload_example_variable".
+
+# You can override the defaults as parameters to the Ansible run that runs
+# your workload.
+
+# Project to create for the example application
+ocp4_workload_EDIT_THIS_project_name: "example-default-{{ ocp_username }}" <1>
+----
+<1> modify the Jinja2 template variable name to align with your role.
+
+=== Environment Variables
+
+As in the Simple Lab, consider the variables you'll be using for this entire development session, and put them in your environment.
+
+Set up Environment Variables indicating the bastion host you want to run this role to run on. 
+
+. Change the various values to match your environment.
+[source,sh]
+----
+export GUID=1001
+export TARGET_HOST="bastion.dev.openshift.opentlc.com"
+export OCP_USERNAME="wkulhane-redhat.com"
+export ANSIBLE_USER="ec2-user"
+export WORKLOAD="ocp4_workload_example_${USER}"
+----
+
+=== Command Line Variables
+
+As in the Simple Lab, consider the variables you are likely to be changing between test runs of the workload, and set them on the command line.
+
+The `ansible-playbook` command that you will be running evaluates variables in order of appearance, last one wins.  The last variables on the command line override all prior variables.
+
+. Examine this command line.  *Do not execute this.*  Understand the structure of the command.
++
+[source,sh]
+----
+ansible-playbook -i ${TARGET_HOST}, -vvv ./configs/ocp-workloads/ocp-workload.yml \ <1>
+    -e @./ocp4_workload_${USER}_vars.yaml \ <2>
+    -e"ansible_user=${ANSIBLE_USER}" \ <3>
+    -e"ansible_ssh_private_key_file=~/.ssh/keytoyourhost.pem" \
+    -e"ocp_username=${OCP_USERNAME}" \
+    -e"ocp_workload=${WORKLOAD}" \
+    -e"guid=${GUID}" \
+    -e"ACTION=create" <4>
+----
+<1> This is the base config that understands how to deploy ocp-workloads.  Note that we are running very, very, very verbose.
+<2> This is the sample role vars file you setup above.
+<3> This is a variable with a value derived from a shell environment variable.  It will override variable of the same name that occured prior in this command line.
+<4> The set of playbooks to be run from the workload role, as defined in `tasks/main.yml`
+
+== Run the Workload with Verbose logs
+
+You are now ready to start the deployment of your workload, and the first step of the deploy-test-fix-remove loop of developing workload roles.
+
+. Create a shell script file with the following, or run it directly from the command line.
++
+[source,sh]
+----
+# a TARGET_HOST is specified in the command line, without using an inventory file
+cd $HOME/agnosticd/
+ansible-playbook -i ${TARGET_HOST}, -vvv ./configs/ocp-workloads/ocp-workload.yml \
+    -e @./ocp4_workload_${USER}_vars.yaml \
+    -e"ansible_ssh_private_key_file=~/.ssh/keytoyourhost.pem" \
+    -e"ansible_user=${ANSIBLE_USER}" \
+    -e"ocp_username=${OCP_USERNAME}" \
+    -e"ocp_workload=${WORKLOAD}" \
+    -e"guid=${GUID}" \
+    -e"ACTION=create"
+----
++
+[IMPORTANT]
+====
+All these parameters can be delivered to the `./configs/ocp-workload.yml` playbook the way that works best for you.
+
+For example, you can include them all literally in the shell script file, or export them into your environment, or you can put the majority of them in the `<role name>_vars.yaml` file.
+
+As above, we recommend setting variables as follows:
+
+* `<role name>_vars.yaml` file for safe example variables for all deployers.
+* Environment variables for settings that will not change for your current development working session.
+* `ansible-playbook -e` variable settings for values that will change between your test runs.
+====
+
+. The output of the run should be quite verbose.  Examine the output for the desired outcomes.  You should see verbose output thanks to the `-vvv` in the `ansible-playbook` command AND debugging output thanks to the `silent: False` variable.
+
+. After inspecting the output, you might be able to run the command again to correct errors.  Before you run the command again, you might need to remove the workload and the OpenShift resources you created.
+
+== Remove the Workload
+
+You might need to prepare and run the `remove.yml` playbook from this workload to reset the cluster to run another test without interference from resources created by this run.
+
+In the case of the Shared Cluster, you have OpenShift resources that need to be deleted - otherwise the next iteration of workload development will fail.
+
+IMPORTANT: In production, when a user has finished a demo or a class it is important that the deployment system is capable of cleaning up the environment.  Removing the resources saves money and reduces toil for operations.
+
+. Use the `k8s` ansible module to remove the Project owned by the `ocp_username`
++
+[source,yaml]
+----
+- name: delete the project, which deletes all the objects created by this workload
+  k8s:
+   api_version: v1
+   kind: Project
+   name: "{{ ocp4_workload_EDIT_THIS_project_name }}" <1>
+   state: absent
+----
+<1> modify the Jinja2 template variable name to align with your role.
+
+== Modify Variables and Run Again
+
+During testing, you'll want it to be easy to experiment with different parameters and values.  Use the command line for quick chnages to test.  You can also use the environment to make changing those values, too.  You may use the `<role name>_vars.yaml` file to inform deployers, or changed the `default/main.yml` to set a default for the role.
+
+. Change a command line variable to output different data and execute it:
++
+[source,sh]
+----
+ansible-playbook -i ${TARGET_HOST}, -vvv ./configs/ocp-workloads/ocp-workload.yml \
+    -e @./ocp4_workload_${USER}_vars.yaml \
+    -e"ansible_ssh_private_key_file=~/.ssh/keytoyourhost.pem" \
+    -e"ansible_user=${ANSIBLE_USER}" \
+    -e"ocp_username=${OCP_USERNAME}" \
+    -e"ocp_workload=${WORKLOAD}" \
+    -e"guid=${GUID}" \
+    -e"ACTION=create" \
+    -e"ocp4_workload_EDIT_THIS_project_name=example-cli-{OCP_USERNAME}" <1>
+----
++
+<1> Edit the role variable "ocp4_workload_EDIT_THIS_project_name to match your role
+
+== Validate changes in OpenShift
+
+Examine Changed Project name
+
+Watch the logs carefully to see if your OpenShift resources were created properly.
+
+Also watch the log carefully to see that the Ansible module `agonsticd_user_info` emitted the proper messages to the user.
+It should have communicated the route of the deployed application.
+
+. Use the `oc` cli tool to make sure your project name and assets were created properly.
++
+[source,sh]
+----
+oc get projects
+----
+
+=== [OPTIONAL] Role Defaults Variables File
++
+Perhaps you have tested and are confident in your variable names and values, go ahead and enshrine them in the `defaults/main.yml`.
+Every deployer that does not set this variable explicitly will pick up this value.
+This is the BEST place to document your variables - other than the README.
+
+. Edit the `defaults/main.yml` default role variables file:
++
+[source,yaml]
+----
+become_override: False
+ocp_username: wkulhane-redhat.com
+silent: False
+
+# If your workload needs customization options provide variables to be used.
+# Variable names must be prefixed by the role name "<role name>_<variable>".
+# Therefore because this example workload is called "ocp4_workload_example" the variables
+# should be named "ocp4_workload_example_variable".
+#
+# You can override the defaults as parameters to the Ansible run that runs
+# your workload.
+
+# Project to create for the example application
+ocp4_workload_EDIT_THIS_project_name: "example-default-{{ ocp_username }}" <1>
+----
+<1> modify the Jinja2 template variable name to align with your role.
+
+. Remove the variable from your `<role name>_vars.yaml` file OR omit the `<role name>_vars.yaml` from the command.
++
+[source,sh]
+----
+ansible-playbook -i ${TARGET_HOST}, -vvv ./configs/ocp-workloads/ocp-workload.yml \
+    -e @./ocp4_workload_${USER}_vars.yaml \ <1>
+    -e"ansible_ssh_private_key_file=~/.ssh/keytoyourhost.pem" \
+    -e"ansible_user=${ANSIBLE_USER}" \
+    -e"ocp_username=${OCP_USERNAME}" \
+    -e"ocp_workload=${WORKLOAD}" \
+    -e"guid=${GUID}" \
+    -e"ACTION=create"
+----
+<1> change contents of this file, or omit this line
+
+== Lab Complete
+
+Congratulations!
+
+You are now familiar with:
+
+* start creating, modifying, and deleteing OpenShift resources.
+* sending debug information to your customers/students.
+
+Go onto the next lab, where you will
+
+* Perpare a dedicated cluster for use in your workshop/demo!
