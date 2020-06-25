@@ -50,9 +50,22 @@
       state: absent
       dest: "/home/{{ ansible_user }}/users.htpasswd"
 
+# Sets up the Cluster auto-scaling
+- name: 'Project Mercury :: Configure the OCP4 cluster autoscaler'
+  include_role:
+    name: ocp4-workload-cluster-autoscale
+  vars:
+    become_override: yes
+
+# Sets up the Cluster with User quota
+- name: 'Project Mercury :: Configure the OCP4 cluster autoscaler'
+  include_role:
+    name: ocp4-workload-cluster-autoscale
+  vars:
+    become_override: yes
+
 ###
 # Projects
-
 - name: "Project Mercury :: Add new project named 'mercury'"
   include_tasks: create_project.yaml
   vars:
@@ -69,15 +82,6 @@
     become_override: yes
 
 ###
-# Nexus GPTE's operator install and server deployment
-- name: 'Project Mercury :: Install the Nexus operator and deploy its server task'
-  include_role:
-    name: ocp4-workload-nexus-operator
-  vars:
-    become_override: yes
-
-
-###
 # OpenShit ServiceMesh operator install
 # - name: 'Project Mercury :: Install the OpenShift ServiceMesh operator task'
 #   include_role:
@@ -89,18 +93,116 @@
 # 3scale Operator
 # ---
 
-# - name: Create '3scale-operator' project
-#   include_tasks: create_project.yaml
-#   vars:
-#     user: "{{ ocp_username }}"
-#     name: "3scale-system"
+- name: 'Project Mercury :: Setting up the 3scale in the cluster'
+  when:
+    - ocp4_workload_mercury_threescale_registry_token is defined
+  block:
 
-# Sets up the RWX storage provider required for 3scale
-- name: Configure NFS Server workload to provide RWX storage class
+  - name: Create '3scale' project
+    include_tasks: create_project.yaml
+    vars:
+      user: "{{ ocp_username }}"
+      name: "3scale"
+      display_name: "3scale Operator"
+
+  # Sets up the RWX storage provider required for 3scale
+  - name: Configure NFS Server workload to provide RWX storage class
+    include_role:
+      name: ocp4-workload-nfs-server
+    vars:
+      become_override: yes
+  
+  - name: Create the Secret object for 3scale registry authentication
+    k8s:
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: threescale-registry-auth
+          namespace: 3scale
+        data:
+          .dockerconfigjson: "{{ ocp4_workload_mercury_threescale_registry_token }}"
+        type: kubernetes.io/dockerconfigjson
+
+  - name: Wait until the Secret object is installed for 3scale install
+    k8s_info:
+      api_version: v1
+      kind: Secret
+      name: threescale-registry-auth
+      namespace: 3scale
+    register: r_secret
+    retries: 30
+    delay: 5
+    until:
+      - r_secret.resources | list | length > 0
+
+  - name: Create the OperatorGroup for Red Hat 3scale
+    k8s:
+      state: present
+      merge_type:
+        - strategic-merge
+        - merge
+      definition:
+        apiVersion: operators.coreos.com/v1
+        kind: OperatorGroup
+        metadata:
+          name: 3scale-operatorgroup
+          namespace: 3scale
+        spec:
+          targetNamespaces:
+          - 3scale
+
+  - name: Create the Subscription object for Red Hat 3scale
+    k8s:
+      state: present
+      merge_type:
+        - strategic-merge
+        - merge
+      definition:
+        apiVersion: operators.coreos.com/v1alpha1
+        kind: Subscription
+        metadata:
+          name: 3scale-operatorgroup
+          namespace: 3scale
+          spec:
+            channel: threescale-2.8
+            name: 3scale-operator
+            source: redhat-operators
+            sourceNamespace: openshift-marketplace
+
+  - name: Wait until the OperatorGroup object is installed for 3scale install
+    k8s_info:
+      api_version: operators.coreos.com/v1
+      kind: OperatorGroup
+      name: 3scale-operatorgroup
+      namespace: 3scale
+    register: r_operatorgroup
+    retries: 30
+    delay: 5
+    until:
+      - r_operatorgroup.resources | list | length > 0
+
+  - name: Wait until the Subscription object is installed for 3scale install
+    k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: Subscription
+      name: 3scale-operator
+      namespace: 3scale
+    register: r_subscription
+    retries: 30
+    delay: 5
+    until:
+      - r_subscription.resources | list | length > 0
+
+###
+# Nexus GPTE's operator install and server deployment
+- name: 'Project Mercury :: Install the Nexus operator and deploy its server task'
   include_role:
-    name: ocp4-workload-nfs-server
+    name: ocp4-workload-nexus-operator
   vars:
     become_override: yes
+
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
