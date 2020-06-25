@@ -168,7 +168,8 @@ pipeline {
 
                     try {
                         m = email =~ /Solution Explorer URL: (https:\/\/[^ \n]+)/
-                        echo "Solution_Explorer_URL = ${m[0][1]}"
+                        webapp_location = ${m[0][1]}
+                        echo "Solution_Explorer_URL = ${webapp_location}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -203,7 +204,7 @@ pipeline {
 
                 sh "./opentlc/delete_svc_guid.sh '${guid}'"
             }
-            	 {
+            post {
                 failure {
                     withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
                         mail(
@@ -238,6 +239,70 @@ pipeline {
                         --server '${imap_server}' \
                         --filter 'has been deleted'"""
                 }
+            }
+        }
+    }
+
+    post {
+        failure {
+            git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
+            /* retire in case of failure */
+            withCredentials(
+                [
+                    usernameColonPassword(credentialsId: opentlc_creds, variable: 'credentials'),
+                    usernameColonPassword(credentialsId: opentlc_admin_creds, variable: 'admin_credentials')
+                ]
+            ) {
+                sh """
+                export uri="${cf_uri}"
+                export DEBUG=true
+                ./opentlc/delete_svc_guid.sh '${guid}'
+                """
+            }
+
+            /* Print ansible logs */
+            withCredentials([
+                string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
+                sshUserPrivateKey(
+                    credentialsId: ssh_creds,
+                    keyFileVariable: 'ssh_key',
+                    usernameVariable: 'ssh_username')
+            ]) {
+                sh("""
+                    ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
+                    "bin/logs.sh ${guid}" || true
+                """.trim()
+                )
+            }
+
+            withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
+                mail(
+                    subject: "${env.JOB_NAME} (${env.BUILD_NUMBER}) failed GUID=${guid}",
+                    body: "It appears that ${env.BUILD_URL} is failing, somebody should do something about that.",
+                    to: "${notification_email}",
+                    replyTo: "${notification_email}",
+                    from: credentials.split(':')[0]
+              )
+            }
+            withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
+                sh(
+                    """
+                      curl -H 'Content-Type: application/json' \
+                      -X POST '${HOOK_URL}' \
+                      -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :rage: ${env.JOB_NAME} (${env.BUILD_NUMBER}) failed GUID=${guid}. It appears that ${env.BUILD_URL}/console is failing, somebody should do something about that.\"}'\
+                    """.trim()
+                )
+            }
+        }
+        fixed {
+            withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
+                sh(
+                    """
+                      curl -H 'Content-Type: application/json' \
+                      -X POST '${HOOK_URL}' \
+                      -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :smile: ${env.JOB_NAME} is now FIXED, see ${env.BUILD_URL}/console\"}'\
+                    """.trim()
+                )
             }
         }
     }
