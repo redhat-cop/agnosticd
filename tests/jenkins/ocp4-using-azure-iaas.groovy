@@ -23,9 +23,9 @@ def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / OCP4 using Azure IAAS',
-    'DevOps Team Testing Catalog / TEST - OCP4 using Azure IAAS',
-    'DevOps Team Development Catalog / DEV - OCP4 using Azure IAAS',
+    'Workshops / OpenShift 4.4 on Azure Self-Managed',
+    'DevOps Team Testing Catalog / TEST - OpenShift 4 on Azure Self-Managed',
+    'DevOps Team Development Catalog / DEV - OpenShift 4 on Azure Self-Managed',
 ].join("\n")
 
 def ocprelease_choice = [
