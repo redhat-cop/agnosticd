@@ -4,6 +4,13 @@
   debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
+- name: Run shell 'oc' command to retrieve the cluster subdomain
+  shell: "oc whoami --show-server | cut -d'.' -f 2,3,4,5 | cut -d':' -f 1"
+  register: r_shell
+
+- set_fact: subdomain_base={{ r_shell.stdout_lines[0] }}
+- set_fact: ocp_apps_domain=apps.{{ subdomain_base }}
+
 ###
 # Project Mercury users configuration
 # ---
@@ -58,18 +65,17 @@
       dest: "/home/{{ ansible_user }}/users.htpasswd"
 
 # Sets up the Cluster auto-scaling
-- name: 'Project Mercury :: Configure the OCP4 cluster autoscaler'
-  include_role:
-    name: ocp4-workload-cluster-autoscale
-  vars:
-    become_override: yes
+# - name: 'Project Mercury :: Configure the OCP4 cluster autoscaler'
+#   include_role:
+#     name: ocp4-workload-cluster-autoscale
+#   vars:
+#     become_override: yes
+#     _autoscale_machineset_min_replicas: "{{ autoscale_machineset_min_replicas }}"
+#     _autoscale_machineset_max_replicas: "{{ autoscale_machineset_max_replicas }}"
+#     _autoscale_cluster_max_replicas: "{{ autoscale_cluster_max_replicas }}"
+#     _autoscale_cluster_enable_scaledown: "{{ autoscale_cluster_enable_scaledown }}"
 
 # Sets up the Cluster with User quota
-- name: 'Project Mercury :: Configure the OCP4 cluster autoscaler'
-  include_role:
-    name: ocp4-workload-cluster-autoscale
-  vars:
-    become_override: yes
 
 ###
 # Projects
@@ -104,6 +110,7 @@
     - ocp4_workload_mercury_threescale_registry_token is defined
   block:
 
+  # create the "3scale" project and namespace
   - name: Create '3scale' project
     include_tasks: create_project.yaml
     vars:
@@ -117,89 +124,26 @@
       name: ocp4-workload-nfs-server
     vars:
       become_override: yes
-  
-  - name: Create the Secret object for 3scale registry authentication
-    k8s:
-      state: present
-      definition:
-        apiVersion: v1
-        kind: Secret
-        metadata:
-          name: threescale-registry-auth
-          namespace: 3scale
-        data:
-          .dockerconfigjson: "{{ ocp4_workload_mercury_threescale_registry_token }}"
-        type: kubernetes.io/dockerconfigjson
+      _nfs_provided_storage_class: "{{ nfs_provided_storage_class }}"
+      _nfs_pvc_size: "{{ nfs_pvc_size }}"
+      _nfs_pv_provided_size: "{{ nfs_pv_provided_size }}"
 
-  - name: Wait until the Secret object is installed for 3scale install
-    k8s_info:
-      api_version: v1
-      kind: Secret
-      name: threescale-registry-auth
-      namespace: 3scale
-    register: r_secret
-    retries: 30
-    delay: 5
-    until:
-      - r_secret.resources | list | length > 0
+  # install 3scale operator
+  - name: install 3scale operator
+    include_tasks: install_3scaleoperator.yaml
 
-  - name: Create the OperatorGroup for Red Hat 3scale
+  # deploy staging API manager instance
+  - name: Create 3scale API Manager instance Staging
+    vars:
+      _3scale_apimanager_instancename: staging
     k8s:
       state: present
       merge_type:
-        - strategic-merge
-        - merge
-      definition:
-        apiVersion: operators.coreos.com/v1
-        kind: OperatorGroup
-        metadata:
-          name: 3scale-operatorgroup
-          namespace: 3scale
-        spec:
-          targetNamespaces:
-          - 3scale
-
-  - name: Create the Subscription object for Red Hat 3scale
-    k8s:
-      state: present
-      merge_type:
-        - strategic-merge
-        - merge
-      definition:
-        apiVersion: operators.coreos.com/v1alpha1
-        kind: Subscription
-        metadata:
-          name: 3scale-operator
-          namespace: 3scale
-          spec:
-            channel: threescale-2.8
-            name: 3scale-operator
-            source: redhat-operators
-            sourceNamespace: openshift-marketplace
-
-  - name: Wait until the OperatorGroup object is installed for 3scale install
-    k8s_info:
-      api_version: operators.coreos.com/v1
-      kind: OperatorGroup
-      name: 3scale-operatorgroup
-      namespace: 3scale
-    register: r_operatorgroup
-    retries: 30
-    delay: 5
-    until:
-      - r_operatorgroup.resources | list | length > 0
-
-  - name: Wait until the Subscription object is installed for 3scale install
-    k8s_info:
-      api_version: operators.coreos.com/v1alpha1
-      kind: Subscription
-      name: 3scale-operator
-      namespace: 3scale
-    register: r_subscription
-    retries: 30
-    delay: 5
-    until:
-      - r_subscription.resources | list | length > 0
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+      - ./templates/3scale-operator-3-apimanager.yaml.j2
 
 ###
 # Nexus GPTE's operator install and server deployment
