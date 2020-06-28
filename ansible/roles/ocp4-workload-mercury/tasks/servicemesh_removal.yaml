@@ -1,0 +1,171 @@
+---
+# Implement your Workload removal tasks here
+
+- name: Find all Service Mesh Member Rolls
+  k8s_info:
+    api_version: maistra.io/v1
+    kind: ServiceMeshMemberRoll
+  register: r_smmr
+
+- name: Remove all Service Mesh Member Rolls
+  when: (r_smmr.resources | length > 0)
+  k8s:
+    state: absent
+    definition: "{{ item }}"
+  loop: "{{ r_smmr.resources }}"
+
+- name: Find all Service Mesh Control Planes
+  k8s_info:
+    api_version: maistra.io/v1
+    kind: ServiceMeshControlPlane
+  register: r_smcp
+
+- name: Remove all Service Mesh Control Planes
+  when: (r_smcp.resources | length > 0)
+  k8s:
+    state: absent
+    definition: "{{ item }}"
+  loop: "{{ r_smcp.resources }}"
+
+- name: Wait until all Service Mesh Control Planes have disappeared
+  k8s_info:
+    api_version: maistra.io/v1
+    kind: ServiceMeshControlPlane
+  register: r_smcp
+  until: r_smcp.resources | length == 0
+
+- name: Get all InstallPlans
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: openshift-operators
+  register: r_install_plans
+
+- name: Find Service Mesh InstallPlan Name
+  set_fact:
+    ocp4_workload_servicemesh_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'servicemeshoperator')].metadata.name|[0]
+
+- name: Remove OpenShift Service - Istio project and all created resources
+  k8s:
+    kind: Project
+    api_version: project.openshift.io/v1
+    name: istio-system
+    state: absent
+    wait: true
+
+- name: Wait until all Istio pods have been removed
+  k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: istio-system
+  register: r_istio_pods
+  retries: 20
+  delay: 5
+  until: r_istio_pods.resources | length == 0
+
+- name: Remove InstallPlan
+  when:
+    - ("servicemesh" in modules)
+    - ocp4_workload_servicemesh_install_plan_name is defined
+    - ocp4_workload_servicemesh_install_plan_name |d("") | length > 0
+  k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ ocp4_workload_servicemesh_install_plan_name }}"
+    namespace: openshift-operators
+
+- name: Remove istio-node DaemonSet
+  when: ("servicemesh" in modules)
+  k8s:
+    state: absent
+    api_version: v1
+    kind: DaemonSet
+    name: istio-node
+    namespace: openshift-operators
+
+- name: Remove OpenShift ServiceMesh Operator subscriptions
+  when: ("servicemesh" in modules)
+  k8s:
+    kind: Subscription
+    api_version: operators.coreos.com/v1alpha1
+    name: "{{ item }}"
+    namespace: openshift-operators
+    state: absent
+    wait: true
+  loop:
+    - servicemeshoperator
+    - kiali-ossm
+    - jaeger-product
+    - elasticsearch-operator
+
+- name: Gather all OpenShift ServiceMesh CSVs
+  when: ("servicemesh" in modules)
+  k8s_info:
+    kind: ClusterServiceVersion
+    api_version: operators.coreos.com/v1alpha1
+    namespace: openshift-operators
+  register: r_ossm_csvs
+
+- name: Convert retrieved CSVs to JSON
+  when: ("servicemesh" in modules) and (r_ossm_csvs.resources | length > 0)
+  set_fact:
+    _r_ossm_csvs_json: "{{ r_ossm_csvs.resources | to_json }}"
+
+- name: Remove OpenShift ServiceMesh remaining operators CSVs
+  when: ("servicemesh" in modules) and (r_ossm_csvs.resources | length > 0)
+  k8s:
+    kind: ClusterServiceVersion
+    api_version: operators.coreos.com/v1alpha1
+    name: "{{ item }}"
+    namespace: openshift-operators
+    state: absent
+  with_items:
+    - "{{ _r_ossm_csvs_json | from_json | json_query('[?starts_with(metadata.name, `elasticsearch-operator`)].metadata.name') }}"
+    - "{{ _r_ossm_csvs_json | from_json | json_query('[?starts_with(metadata.name, `jaeger-operator`)].metadata.name') }}"
+    - "{{ _r_ossm_csvs_json | from_json | json_query('[?starts_with(metadata.name, `kiali-operator`)].metadata.name') }}"
+    - "{{ _r_ossm_csvs_json | from_json | json_query('[?starts_with(metadata.name, `servicemeshoperator`)].metadata.name') }}"
+
+- name: Gather all OpenShift ServiceMesh CRDs
+  when: ("servicemesh" in modules)
+  k8s_info:
+    kind: CustomResourceDefinition
+    api_version: apiextensions.k8s.io/v1
+    label_selectors:
+      - release=istio
+  register: r_ossm_crds
+
+- name: Remove OpenShift ServiceMesh CRDs with 'release=istio' label and known ones
+  when:
+  k8s:
+    kind: CustomResourceDefinition
+    api_version: apiextensions.k8s.io/v1
+    name: "{{ item.metadata.name | default(item) }}"
+    state: absent
+  with_items:
+    - "{{ r_ossm_crds.resources | default(omit) }}"
+    - servicemeshcontrolplanes.maistra.io
+    - kialis.kiali.io
+    - jaegers.jaegertracing.io
+    - elasticsearches.logging.openshift.io
+    - servicemeshmemberrolls.maistra.io
+    - servicemeshmembers.maistra.io
+    - monitoringdashboards.monitoring.kiali.io
+
+# - name: Remove OpenShift ServiceMesh Deployments .. CSVs
+#   k8s:
+#     kind: Deployment
+#     api_version: apps/v1
+#     name: "{{ item }}"
+#     namespace: openshift-operators
+#     state: absent
+#     # wait: true
+#   loop:
+#     - jaeger-operator
+#     - kiali-operator
+#     # - knative-serving-operator
+#     - istio-operator
+#     - elasticsearch-operator
