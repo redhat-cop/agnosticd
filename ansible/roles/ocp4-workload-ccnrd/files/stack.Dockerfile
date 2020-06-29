@@ -1,11 +1,11 @@
 # To build this stack:
 # docker build -t quay.io/username/cloudnative-workspaces-quarkus:VVV -f stack.Dockerfile .
-# docker push quay.io/username/quay.io/username/cloudnative-workspaces-quarkus:VVVV
+# docker push quay.io/username/cloudnative-workspaces-quarkus:VVVV
 
 FROM registry.redhat.io/codeready-workspaces/plugin-java11-rhel8:latest
 
 ENV GRAALVM_VERSION=19.3.1
-ENV QUARKUS_VERSION=1.3.2.Final-redhat-00001
+ENV QUARKUS_VERSION=1.3.4.Final-redhat-00001
 ENV TKN_VERSION=0.8.0
 ENV KN_VERSION=0.12.0
 ENV OC_VERSION=4.4
