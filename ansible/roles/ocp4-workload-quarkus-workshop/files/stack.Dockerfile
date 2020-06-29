@@ -1,11 +1,11 @@
 # To build this stack:
 # docker build -t quay.io/username/quarkus-workshop-stack:VVV -f stack.Dockerfile .
-# docker push quay.io/username/quay.io/username/quarkus-workshop-stack:VVVV
+# docker push quay.io/username/quarkus-workshop-stack:VVVV
 
 FROM registry.redhat.io/codeready-workspaces/plugin-java11-rhel8:latest
 
 ENV GRAALVM_VERSION=19.3.1
-ENV QUARKUS_VERSION=1.3.2.Final-redhat-00001
+ENV QUARKUS_VERSION=1.3.4.Final-redhat-00001
 ENV GRAALVM_HOME="/usr/local/graalvm-ce-java11-${GRAALVM_VERSION}"
 ENV PATH="/usr/local/maven/apache-maven-${MVN_VERSION}/bin:${PATH}"
 
