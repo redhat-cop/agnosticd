@@ -63,7 +63,7 @@ Create the `mvnrepo-token-secret` as below, replacing with your GitHub _username
 
 ## Product Deployment SD
 
-    $ oc create -f <path/to/app-product-deployment.yaml> -n mercury
+    $ oc create -f https://raw.githubusercontent.com/rmarins/agnosticd/mercury-setup/ansible/roles/ocp4-workload-mercury/files/deployment/app-product-deployment.yaml -n mercury
 
     imagestream.image.openshift.io/product-deployment created
     buildconfig.build.openshift.io/product-deployment created
@@ -73,7 +73,7 @@ Create the `mvnrepo-token-secret` as below, replacing with your GitHub _username
 
 ## Product Directory SD
 
-    $ oc create -f <path/to/app-product-directory.yaml> -n mercury
+    $ oc create -f https://raw.githubusercontent.com/rmarins/agnosticd/mercury-setup/ansible/roles/ocp4-workload-mercury/files/deployment/app-product-directory.yaml -n mercury
 
     imagestream.image.openshift.io/product-directory created
     buildconfig.build.openshift.io/product-directory created
@@ -83,7 +83,7 @@ Create the `mvnrepo-token-secret` as below, replacing with your GitHub _username
 
 ## Customer Offer SD
 
-    $ oc create -f <path/to/app-customer-offer.yaml> -n mercury
+    $ oc create -f https://raw.githubusercontent.com/rmarins/agnosticd/mercury-setup/ansible/roles/ocp4-workload-mercury/files/deployment/app-customer-offer.yaml -n mercury
 
     imagestream.image.openshift.io/customer-offer created
     buildconfig.build.openshift.io/customer-offer created
@@ -93,7 +93,7 @@ Create the `mvnrepo-token-secret` as below, replacing with your GitHub _username
 
 ## Customer Product and Service Eligibility SD
 
-    $ oc create -f <path/to/app-customer-eligibility.yaml> -n mercury
+    $ oc create -f https://raw.githubusercontent.com/rmarins/agnosticd/mercury-setup/ansible/roles/ocp4-workload-mercury/files/deployment/app-customer-eligibility.yaml -n mercury
 
     imagestream.image.openshift.io/customer-eligibility created
     buildconfig.build.openshift.io/customer-eligibility created
@@ -101,15 +101,9 @@ Create the `mvnrepo-token-secret` as below, replacing with your GitHub _username
     service/customer-eligibility created
     route.route.openshift.io/customer-eligibility created
 
-To get the URL for the Swagger UI type the following:
-
-    $ echo "http://$( oc get routes/customer-eligibility -n mercury -o jsonpath='{.spec.host}' )/swagger-ui"
-    
-    http://customer-eligibility-mercury.apps.your-cluster.domain.com/swagger-ui
-
 ## Servicing Order UI
 
-    $ oc create -f <path/to/app-servicing-order-ui.yaml> -n mercury
+    $ oc create -f https://raw.githubusercontent.com/rmarins/agnosticd/mercury-setup/ansible/roles/ocp4-workload-mercury/files/deployment/app-servicing-order-ui.yaml -n mercury
 
     imagestream.image.openshift.io/openjdk-11 created
     imagestream.image.openshift.io/servicing-order-ui created
