@@ -22,8 +22,8 @@ The following accesses and resources will be required to fully deploy the Projec
     * rh-mercury/mercury-camel-sd
     * rh-mercury/product-eligibility-DMN
     * rh-mercury/servicing-order-ui
-  * [SSH key access to your GitHub account](https://docs.github.com/en/github/authenticating-to-github/creating-a-personal-access-token)
-  * [GitHub API Token (OAuth) to your account](https://docs.github.com/en/github/authenticating-to-github/adding-a-new-ssh-key-to-your-github-account)
+  * [SSH key access to your GitHub account](https://docs.github.com/en/github/authenticating-to-github/adding-a-new-ssh-key-to-your-github-account)
+  * [GitHub API Token (OAuth) to your account](https://docs.github.com/en/github/authenticating-to-github/creating-a-personal-access-token)
 
 You can create a fork of the projects you have accessed and keep them separate. Keep in mind to have the same level of access permission that you have been granted.
 
@@ -36,7 +36,7 @@ First, create the project namespace where the demo will be deployed.
     $ oc new-project mercury
 
 
-The GitHub key based authentication requires a SSH key pairs. Refer to [SSH key access to your GitHub account](https://docs.github.com/en/github/authenticating-to-github/creating-a-personal-access-token).
+The GitHub key based authentication requires a SSH key pairs. Refer to [SSH key access to your GitHub account](https://docs.github.com/en/github/authenticating-to-github/adding-a-new-ssh-key-to-your-github-account).
 
 Before using the SSH key to access the Project Mercury repository, create the secret:
 
@@ -51,7 +51,7 @@ In order to use the GitHub Packages we're setting up a custom Maven `settings.xm
     $ oc create configmap "settings-mvn" -n mercury \
         --from-file settings.xml=https://raw.githubusercontent.com/rmarins/agnosticd/mercury-setup/ansible/roles/ocp4-workload-mercury/files/deployment/build-mvn-settings.xml
 
-This Maven settings file is using two environment variables that need are referenced in the artifacts deployment resource definition: `GITHUBUSER` and `GITHUBTOKEN`. We'll define another secret to retrieve these sensitive information and define it as needed. To do so, create a [GitHub API Token (OAuth) to your account](https://docs.github.com/en/github/authenticating-to-github/adding-a-new-ssh-key-to-your-github-account).
+This Maven settings file is using two environment variables that need are referenced in the artifacts deployment resource definition: `GITHUBUSER` and `GITHUBTOKEN`. We'll define another secret to retrieve these sensitive information and define it as needed. To do so, create a [GitHub API Token (OAuth) to your account](https://docs.github.com/en/github/authenticating-to-github/creating-a-personal-access-token).
 
 Create the `mvnrepo-token-secret` as below, replacing with your GitHub _username_ and generated _token_:
 
