@@ -48,8 +48,12 @@ The business object model definitions used on the demo are imported from the Git
 
 In order to use the GitHub Packages we're setting up a custom Maven `settings.xml` used when building the container images from the source code (S2I). Create the `configmap` that holds the Maven settings file available on this current directory:
 
+    $ curl -o build-mvn-settings.xml https://raw.githubusercontent.com/rmarins/agnosticd/mercury-setup/ansible/roles/ocp4-workload-mercury/files/deployment/build-mvn-settings.xml
+
     $ oc create configmap "settings-mvn" -n mercury \
-        --from-file settings.xml=https://raw.githubusercontent.com/rmarins/agnosticd/mercury-setup/ansible/roles/ocp4-workload-mercury/files/deployment/build-mvn-settings.xml
+        --from-file settings.xml=build-mvn-settings.xml
+
+    configmap/settings-mvn created
 
 This Maven settings file is using two environment variables that need are referenced in the artifacts deployment resource definition: `GITHUBUSER` and `GITHUBTOKEN`. We'll define another secret to retrieve these sensitive information and define it as needed. To do so, create a [GitHub API Token (OAuth) to your account](https://docs.github.com/en/github/authenticating-to-github/creating-a-personal-access-token).
 
