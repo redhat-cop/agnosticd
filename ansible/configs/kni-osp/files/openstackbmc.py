@@ -99,8 +99,8 @@ class OpenStackBmc(bmc.Bmc):
         self._project_name = project_name
         self._vm_name = vm_name
         self._pxe_image = pxe_image
-        self._boot_order_changed = False
-        self._server_unrescued = False
+        self._boot_order_changed = False 
+        self._server_unrescued = False 
 
     def disconnect(self):
         """Disconnect from the OpenStack API server."""
@@ -158,7 +158,8 @@ class OpenStackBmc(bmc.Bmc):
 
             if self._vm.status in ['STARTED','ACTIVE','BUILDING', 'RESCUE']:
                 if self._vm.status == "ACTIVE" and self._server_unrescued:
-                  self._client.compute.stop_server(self._vm)
+                  t = threading.Thread(target=self._client.compute.stop_server, args=[self._vm])
+                  t.start()
                   self._server_unrescued = False
                   return "off"
                 logging.info('returning power state ON for vm ' + self._vm_name)
@@ -170,46 +171,66 @@ class OpenStackBmc(bmc.Bmc):
                   metadata = self._client.compute.get_server_metadata(self._vm)
                   if self._boot_order_changed == "network":
                     logging.info('autostart (rescue) ' + self._vm_name + ' using' + self._boot_order_changed)
-                    self._client.compute.rescue_server(self._vm,image_ref=self._pxe_image)
+                    t = threading.Thread(target=self._client.compute.rescue_server, args=[self._vm], kwargs={'image_ref': self._pxe_image})
+                    t.start()
                   else:
                     logging.info('autostart (unrescue) ' + self._vm_name + ' using ' + self._boot_order_changed)
                     try:
-                      self._client.compute.unrescue_server(self._vm)
+                           
+                        if self._vm.task_state == "stopped":
+                            t = threading.Thread(target=self._client.compute.unrescue_server, args=[self._vm])
+                            t.start()
                     except:
-                      pass
-                    self._client.compute.start_server( self._vm)
+                        pass
+                    t = threading.Thread(target=self._client.compute.start_server, args=[self._vm])
+                    t.start()
                   self._boot_order_changed = False
                 logging.info('returning power state OFF for vm ' + self._vm_name)
                 return "off"
 
         except Exception as e:
             logging.error(self._vm_name + ' get_power_state:' + str(e))
-            return 0xc0
+            if self._vm.status in ['STARTED','ACTIVE','BUILDING', 'RESCUE']:
+                return "on"
+            return "off"
 
         return "off"
 
     def power_off(self):
         """Cut the power without waiting for clean shutdown."""
         self._vm = self.get_vm( self._vm_name)
-        logging.info("Power OFF called for VM " + self._vm_name + " with state: " + self._vm.status)
+        logging.info("Power OFF called for VM " + self._vm_name + " with state: " + self._vm.status + " with task_state: " + str(self._vm.task_state))
         if self._vm.status in ['STARTED','ACTIVE']:
+          if self._vm.task_state in ["powering-off","unrescuing"]:
+              return  0
+          if self._vm.task_state == "stopped":
+              return 0
           try:
-              self._client.compute.stop_server( self._vm)
+              t = threading.Thread(target=self._client.compute.stop_server, args=[self._vm])
+              t.start()
           except Exception as e:
               logging.error(self._vm_name + ' power_off:' + str(e))
+              logging.error("Returning 0xc0")
               return 0xc0
         elif self._vm.status in ['RESCUE']:
           try:
-              self._client.compute.unrescue_server(self._vm)
-              self._server_unrescued = True
+              if self._vm.task_state not in ["unrescuing"]:
+                t = threading.Thread(target=self._client.compute.unrescue_server, args=[self._vm])
+                t.start()
+                self._server_unrescued = True
+              logging.error("Return 0 because RESCUE")
+              return 0
               #self._client.compute.reset_server_state(self._vm,"active")
               #self._client.compute.stop_server( self._vm)
           except Exception as e:
               logging.error(self._vm_name + ' power_off:' + str(e))
+              logging.error("Returning 0xc0")
               return 0xc0
         elif self._vm.status in ['SHUTOFF']:
-          return False
+          logging.error("Return False because SHUTOFF")
+          return 0
         else:
+          logging.info("Return 0xc0")
           return 0xc0
 
     def power_on(self):
@@ -221,13 +242,16 @@ class OpenStackBmc(bmc.Bmc):
           try:
               current = ""
               if "bootorder" in metadata.metadata:
-                 current = metadata.metadata["bootorder"]
+                current = metadata.metadata["bootorder"]
               if current == "network":
-                self._client.compute.rescue_server(self._vm,image_ref=self._pxe_image)
+                t = threading.Thread(target=self._client.compute.rescue_server, args=[self._vm], kwargs={'image_ref': self._pxe_image})
+                t.start()
               else:
-                self._client.compute.start_server( self._vm)
+                t = threading.Thread(target=self._client.compute.start_server, args=[self._vm])
+                t.start()
           except Exception as e:
-              logging.error(self._vm_name + ' power_on:' + str(e))
+              logging.info(self._vm_name + ' power_on:' + str(e))
+              logging.info("Returning 0xc0")
               return 0xc0
         else:
           return False
@@ -238,7 +262,8 @@ class OpenStackBmc(bmc.Bmc):
         self._vm = self.get_vm( self._vm_name)
         if self._vm.status == 'STARTED':
           try:
-              self._client.compute.stop_server( self._vm)
+              t = threading.Thread(target=self._client.compute.stop_server, args=[self._vm])
+              t.start()
           except Exception as e:
               logging.error(self._vm_name + ' power_shutdown:' + str(e))
               return 0xc0
@@ -313,3 +338,4 @@ if __name__ == '__main__':
 
     while True:
         time.sleep(1)
+
