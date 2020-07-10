@@ -23,7 +23,7 @@ def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / OCP4 ACM Managed',
+    'Workshops / OCP4 ACM Managed - TECH PREVIEW',
     'DevOps Team Development Catalog / DEV - OCP4 ACM Managed',
 ].join("\n")
 
