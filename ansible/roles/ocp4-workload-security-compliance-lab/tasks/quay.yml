@@ -1,74 +1,99 @@
 ---
 
-- name: create the quay-enterprise project
-  command: "{{ openshift_cli }} new-project quay-enterprise"
+- name: "create the quay project"
+  k8s:
+    state: present
+    name: "{{ quay_project_name }}"
+    kind: Project
+    api_version: project.openshift.io/v1
 
-- name: clone the quay operator project
-  git:
-    repo: https://github.com/sabre1041/quay-operator.git
-    dest: "{{ tmp_dir }}/quay-operator"
+- name: Create Quay Operator OperatorGroup
+  k8s:
+    state: present
+    namespace: "{{ quay_project_name }}" 
+    definition: "{{ lookup('template', 'quay-SubscriptionGroup.yaml.j2') }}"
 
-- name: Explicitly switch to the correct commit
-  command: "git checkout 4ba1d1620e92776dd40decad9e8d2cc5ac49df7f"
-  args:
-    chdir: "{{ tmp_dir }}/quay-operator"
+- name: Create Quay Operator Subscription
+  k8s:
+    state: present
+    namespace: "{{ quay_project_name }}" 
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: quay-operator
+        namespace: "{{ quay_project_name }}"
+      spec:
+        channel: "{{ quay_channel }}"
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+        name: quay-operator
+        startingCSV: "{{ quay_csv }}"
+        installPlanApproval: Manual
 
-- name: Update operator version
-  replace:
-    path: "{{ tmp_dir }}/quay-operator/deploy/operator.yaml"
-    regexp: "image: quay.io/redhat-cop/quay-operator:latest"
-    replace: "image: quay.io/redhat-cop/quay-operator:v0.0.1"
-
-- name: Create openshift quay objects
-  command: "{{ openshift_cli }} create -f {{ item }}"
-  args:
-    chdir: "{{ tmp_dir }}/quay-operator"
-  with_items:
-    - deploy/crds/cop_v1alpha1_quayecosystem_crd.yaml
-    - deploy/service_account.yaml
-    - deploy/cluster_role.yaml
-    - deploy/cluster_role_binding.yaml
-    - deploy/role.yaml
-    - deploy/role_binding.yaml
-    - deploy/operator.yaml
-  ignore_errors: true
-
-- name: grant admin roles...
-  command: "{{ openshift_cli }} adm policy add-role-to-user admin system:serviceaccount:quay-enterprise:quay-operator -n quay-enterprise"
-
-- name: create the quay secret for pulling the image
-  command: "{{ openshift_cli }} create secret docker-registry coreos-pull-secret --docker-server=quay.io  --docker-username='{{ quay_pull_user }}' --docker-password='{{ quay_pull_password }}'"
-
-- name: Delete quay limitrange
-  command: "{{ openshift_cli }} delete limitrange --all -n quay-enterprise"
-  ignore_errors: true
-
-- name: deploy the quay operator
-  command: "{{ openshift_cli }} create -f quay_cr.yml"
-  args:
-    chdir: "{{ tmp_dir}}/files"
-
-- name: wait for quay to deploy
-  shell:  "{{ openshift_cli }} get pods  -n quay-enterprise | grep quayecosystem-quay"
-  register: result
-  until: result.stdout.find("Running") != -1
+- name: wait for the status of the Quay subscription to not be empty
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: quay-operator
+    namespace: "{{ quay_project_name }}"
+  register: operator_subscription_out
+  until: 
+    - operator_subscription_out is defined
+    - operator_subscription_out.resources is defined
+    - operator_subscription_out.resources[0] is defined
+    - operator_subscription_out.resources[0].status is defined
+    - operator_subscription_out.resources[0].status.installplan is defined
   retries: 30
-  delay: 10
+  delay: 20
 
-- name: create a secure route for quay
-  command: "{{ openshift_cli }} create route edge quay-secure --service=quayecosystem-quay -n quay-enterprise"
+- name: patch the installplan to approve it
+  k8s:
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: InstallPlan
+      metadata:
+        namespace: "{{ quay_project_name }}"
+        name: "{{ operator_subscription_out.resources[0].status.installplan.name }}"
+      spec:
+        approved: true
+
+- name: Get an existing LimitRanges
+  k8s_info:
+    api_version: v1
+    kind: LimitRange
+    namespace: "{{ quay_project_name }}"
+  register: quay_limit_ranges
+
+- name: Remove LimitRanges
+  k8s:
+    state: absent
+    api_version: v1
+    kind: LimitRange
+    namespace: "{{ item.metadata.namespace }}"
+    name: "{{ item.metadata.name }}"
+  loop: "{{ quay_limit_ranges.resources }}"
+
+- name: create redhat pull secret
+  command: "{{ openshift_cli }} -n {{ quay_project_name }} create secret docker-registry redhat-pull-secret --docker-server=quay.io  --docker-username='{{ quay_pull_user }}' --docker-password='{{ quay_pull_password }}'"
+
+- name: create quay admin password secret
+  command: "{{ openshift_cli }} -n {{ quay_project_name }} create secret generic quay-admin-password --from-literal=superuser-username={{ quay_admin_user }} --from-literal=superuser-password={{ quay_admin_password }} --from-literal=superuser-email=quay@example.com"
+
+- name: Deploy Quay Operator
+  k8s:
+    state: present
+    namespace: "{{ quay_project_name }}" 
+    definition: "{{ lookup('file', 'quay_cr.yml') }}"
+
+
+- name: wait for quay to be running
+  uri:
+    url: https://{{ quay_route }}
+    status_code: 200
+    validate_certs: false
+  register: result
+  until: result.status == 200
+  retries: 30
+  delay: 30
   ignore_errors: true
-
-- name: create quay-mysql project
-  command: "{{ openshift_cli }} new-project quay-mysql"
-
-- name: Remove quay mysql limitrange
-  command: "{{ openshift_cli }} delete limitrange --all -n quay-mysql"
-  ignore_errors: true
-
-- name: deploy quay mysql
-  command:  "{{ openshift_cli }} new-app --name mysql mysql-persistent -p MYSQL_USER=quay -p MYSQL_PASSWORD=quay -p MYSQL_DATABASE=quay -p MYSQL_ROOT_PASSWORD=quay -p VOLUME_CAPACITY=10Gi -n quay-mysql"
-  
-- name: wait for quay mysql to deploy
-  command: "{{ openshift_cli }} rollout status dc/mysql -n quay-mysql"
-  async: 300

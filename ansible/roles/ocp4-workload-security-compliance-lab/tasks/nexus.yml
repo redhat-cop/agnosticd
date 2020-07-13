@@ -1,12 +1,11 @@
 ---
-## Sonatype Nexus Install
+
 - assert:
     that:
       - nexus_image_version is version('3.0','>=')
       - nexus_image_version is version('4.0','<')
     msg: "This role only supports nexus 3 images. Change 'nexus_image_version' parameter"
 
-# create project
 - name: check if nexus project {{ nexus_project_name }} exists
   shell: "{{ openshift_cli }} get project {{ nexus_project_name }}"
   register: nexus_project_result
@@ -35,7 +34,6 @@
     - project_annotations is not none
     - project_annotations|trim() != ""
 
-# deploy nexus    
 - name: check if nexus exists
   shell: "{{ openshift_cli }} get service {{ nexus_service_name }} -n {{ nexus_project_name }}"
   register: nexus_result
@@ -65,6 +63,12 @@
   shell: "{{ openshift_cli }} set resources dc/{{ nexus_service_name }} --limits=cpu={{ nexus_max_cpu }},memory={{ nexus_max_memory }} --requests=cpu={{ nexus_min_cpu }},memory={{ nexus_min_memory }} -n {{ nexus_project_name }}"
   ignore_errors: true
 
+- name: set an exec action as a liveness probe to run 'cat /nexus-data/admin.password'
+  shell: "{{ openshift_cli }} set probe dc/{{ nexus_service_name }} --liveness -- cat /nexus-data/admin.password"
+
+- name: set an HTTP readiness probe for port 8081 and path / over HTTP on the pod IP
+  shell: "{{ openshift_cli }} set probe dc/{{ nexus_service_name }} --readiness --get-url=http://:8081/ --initial-delay-seconds=30"
+
 - name: get nexus route
   shell: "{{ openshift_cli }} get route {{ nexus_service_name }} -o jsonpath='{ .spec.host }' -n {{ nexus_project_name }}"
   register: nexus_route_output
@@ -76,6 +80,7 @@
 - set_fact:
     nexus_rest_endpoint: "http://{{ nexus_route }}/service/siesta/rest"
   when: nexus_image_version is version('3.8','<')
+
 - set_fact:
     nexus_rest_endpoint: "http://{{ nexus_route }}/service/rest"
   when: nexus_image_version is version('3.8','>=')
@@ -89,20 +94,36 @@
   retries: 30
   delay: 30
 
-# Using groovy scripts to configure nexus:
+- name: get nexus pod name
+  shell: "{{ openshift_cli }} get pods --field-selector=status.phase=Running --no-headers -o custom-columns=\":metadata.name\" -n {{ nexus_project_name }} | grep nexus | grep -v 'deploy'"
+  register: pnresult
 
-- name: Upload scripts
+- name: get nexus admin password
+  shell: "{{ openshift_cli }} exec {{ pnresult.stdout_lines[0] }} cat /nexus-data/admin.password -n {{ nexus_project_name }}"
+  register: pwresult
+
+- name: set nexus facts
+  set_fact:
+    nexus_admin_password_current: "{{ pwresult.stdout_lines[0] }}"
+
+# - name: create the nexus-config configmap specifying a specific file
+#   shell: "{{ openshift_cli }} create configmap nexus-config --from-file={{ tmp_dir }}/admin.password -n {{ nexus_project_name }}"
+#
+# - name: mount the nexus-config configmap in the filesystem of the nexus container
+#   shell: "{{ openshift_cli }} set volume dc/nexus --add -t configmap --configmap-name=nexus-config -m /nexus-data/admin.password --sub-path=admin.password -n {{ nexus_project_name }}"
+
+- name: upload groovy scripts to configure nexus
   include_tasks: ./upload_script.yml
   with_items:
     - update_password
     - setup_user
 
-- name: Create additional admin user {{ nexus_admin_user }}
+- name: create additional admin user {{ nexus_admin_user }}
   import_tasks: ./call_script.yml
   vars:
     script_name: setup_user
     args: # this structure will be parsed by the groovy JsonSlurper
-      username: "{{ nexus_admin_user }}" 
+      username: "{{ nexus_admin_user }}"
       first_name: "Admin"
       last_name: "User"
       email: "admin@none.com"
@@ -110,12 +131,11 @@
       password: "{{ nexus_admin_password }}"
   when: nexus_admin_user != "admin"
 
-# This task need to be the last one as the admin's password will be changed
-- name: Update admin password for base user admin
+- name: update admin password for base user admin
   import_tasks: ./call_script.yml
   vars:
     script_name: update_password
-    args: 
+    args:
       username: "admin"
       new_password: "{{ nexus_admin_password }}"
-  when: current_nexus_admin_password != nexus_admin_password
+  when: nexus_admin_password_current != nexus_admin_password
