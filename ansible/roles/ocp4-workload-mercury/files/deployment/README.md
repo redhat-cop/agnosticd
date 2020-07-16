@@ -63,6 +63,8 @@ Create the `mvnrepo-token-secret` as below, replacing with your GitHub _username
         --from-literal token=<my_GitHub_api_token> \
         --from-literal user=<my_GitHub_username>
 
+    secret/mvnrepo-token-secret created
+
 # 3. Deploy demo artifacts
 
 ## Product Deployment SD
