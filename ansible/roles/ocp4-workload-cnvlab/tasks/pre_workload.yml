@@ -1,0 +1,153 @@
+---
+# Implement your Pre Workload deployment tasks here
+# -------------------------------------------------
+
+- name: Install Squid for proxy in lab
+#  package:
+#    name:
+#      - squid
+#      - screen
+#      - qemu-img
+#      - httpd
+#    state: present
+  command: dnf install squid qemu-img httpd -y
+  args:
+    warn: false
+  become: true
+
+- name: Grab Squid config file
+  get_url:
+    url: https://raw.githubusercontent.com/RHFieldProductManagement/openshift-virt-labs/rhpds/configs/squid.conf
+    dest: /etc/squid/squid.conf
+    mode: '0755'
+    owner: squid
+  become: true
+
+- name: Apply correct SELinux file context for squid.conf
+  command: restorecon -v /etc/squid/squid.conf
+  become: true
+
+- name: Start Squid service
+  service:
+    name: squid
+    state: started
+    enabled: yes
+  become: true
+
+- name: Create NFS directories for PV's
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: 0777
+  with_items:
+    - /mnt/nfs/one
+    - /mnt/nfs/two
+    - /mnt/nfs/three
+    - /mnt/nfs/four
+  become: true
+
+- name: Create /etc/exports file for NFS storage
+  copy:
+    dest: "/etc/exports"
+    content: "/mnt/nfs     *(rw,sync,no_root_squash)\n"
+  become: true
+
+- name: Apply correct SELinux file context for /etc/exports
+  command: restorecon -v /etc/exports
+  become: true
+
+- name: Set SEBool's for NFS Export RW
+  command: setsebool -P nfs_export_all_rw 1
+  become: true
+
+- name: Set SEBool's for NFS Export RO
+  command: setsebool -P nfs_export_all_ro 1
+  become: true
+
+#- name: Set default SELinux context for NFS directory
+#  shell: semanage fcontext -a -t public_content_rw_t  "/mnt/nfs(/.*)?"
+#  become: true
+
+- name: Relabel NFS Storage
+  command: restorecon -Rv /mnt/nfs
+  become: true
+
+- name: Start NFS server
+  service:
+    name: nfs-server
+    state: started
+    enabled: yes
+  become: true
+
+- name: Start rpcbind service
+  service:
+    name: rpcbind
+    state: started
+    enabled: yes
+  become: true
+
+- name: Check if OpenStack security group for bastion exists
+  shell: openstack security group list | grep bastion-secgroup
+  register: secgroupexists
+  ignore_errors: yes
+
+- name: Create OpenStack security group for bastion
+  shell: openstack security group create bastion-secgroup --description "Bastion Customised SecGroup"
+  when: secgroupexists.rc == 1
+
+- name: Configure the security group ACL's (TCP)
+  shell: openstack security group rule create bastion-secgroup --protocol tcp --dst-port {{ item }} --remote-ip 0.0.0.0/0
+  loop:
+    - 111
+    - 2049
+    - 20048
+  ignore_errors: yes
+
+- name: Configure the security group ACL's (UDP)
+  shell: openstack security group rule create bastion-secgroup --protocol udp --dst-port {{ item }} --remote-ip 0.0.0.0/0
+  loop:
+    - 111
+    - 2049
+    - 20048
+  ignore_errors: yes  
+
+- name: Add new sec-group to bastion host
+  shell: openstack server add security group bastion bastion-secgroup
+  ignore_errors: yes
+
+- name: Create extra OpenStack ports for VM's that need DHCP
+  shell: openstack port create --network {{ guid }}-ocp-network --mac-address de:ad:be:ef:00:{{ item }} --disable-port-security cnv-port{{ item }}
+  loop:
+    - "01"
+    - "02"
+    - "03"
+    - "04"
+  ignore_errors: yes
+
+- name: Check if additional ports are already created for L2 connectivity
+  shell: openstack port list | grep port2
+  register: portexists
+  ignore_errors: yes
+
+- name: Create additional ports for VM L2 connectivity
+  shell: openstack port create --network {{ guid }}-ocp-network --disable-port-security port2-{{ item }}
+  with_lines: oc get nodes | awk '/worker/ {print $1;}'                              
+  ignore_errors: yes
+  when: portexists.rc == 1
+
+- name: Add second NIC to each of the workers for direct L2 network
+  shell: openstack server add port {{ item }} port2-{{ item }}
+  with_lines: oc get nodes | awk '/worker/ {print $1;}'
+  ignore_errors: yes
+
+# For RHPDS deployment (onto a shared cluster) set
+# workload_shared_deployment to True
+# (in the deploy script or AgnosticV configuration)
+- name: pre_workload tasks complete
+  debug:
+    msg: "Pre workload deployment setup completed successfully"
+  when:
+  - not silent|bool
+  - workload_shared_deployment|default(False)
