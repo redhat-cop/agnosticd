@@ -1,0 +1,232 @@
+#!/bin/bash
+export OSP_PROJECT="{{ osp_project_name }}"
+export GUID="{{ guid }}"
+export ORIG_PWD=$(pwd)
+export VERSION={{ my_ocp_version }}
+export SUBVER=`echo "${VERSION:0:3}"`
+export PATH=$PATH:$(pwd)
+export CMD=openshift-baremetal-install
+export EXTRACT_DIR=$(pwd)
+export PULLSECRET=/home/cloud-user/pull-secret.json
+export OFFLINE={{ my_ocp_offline }}
+
+############ DO NOT TOUCH BEYOND THIS POINT ##############
+setup_services() {
+  sudo cp `pwd`/dhcp/dhcpd.conf /etc/dhcp/dhcpd.conf
+  sudo systemctl enable dhcpd --now
+  sudo cp `pwd`/named/named.conf /etc/named.conf
+  sudo chmod 640 /etc/named.conf
+  sudo chown root:named /etc/named.conf
+  sudo restorecon -RFv /etc/named.conf
+  sudo cp `pwd`/named/0.20.10.in-addr.arpa /var/named
+  sudo cp `pwd`/named/{{ my_ocp_domain }}.zone /var/named
+  sudo systemctl enable named --now
+  echo "search {{ guid }}.{{ osp_cluster_dns_zone }}"|sudo tee /etc/resolv.conf
+  echo "search {{ osp_cluster_dns_zone }}"| sudo tee -a /etc/resolv.conf
+  echo "nameserver 10.20.0.2"|sudo tee -a /etc/resolv.conf
+  openstack --os-cloud=$OSP_PROJECT subnet unset --dns-nameserver 8.8.8.8 $GUID-appnet-subnet
+  openstack --os-cloud=$OSP_PROJECT subnet set --dns-nameserver 10.20.0.2 $GUID-appnet-subnet
+  sleep 5
+}
+
+build_bridges() {
+  export PROV_CONN="eth0"
+  sudo nmcli connection add ifname provisioning type bridge con-name provisioning
+  sudo nmcli con add type bridge-slave ifname "$PROV_CONN" master provisioning
+  sudo nmcli connection modify provisioning ipv4.addresses 172.22.0.1/24 ipv4.method manual
+  sudo nmcli con down provisioning
+  sudo nmcli con up provisioning
+  export MAIN_CONN="eth1"
+  sudo nmcli connection add ifname baremetal type bridge con-name baremetal
+  sudo nmcli con add type bridge-slave ifname "$MAIN_CONN" master baremetal
+  sudo nmcli con down "Wired connection 1";sudo pkill dhclient;sudo dhclient baremetal
+  sudo nmcli connection modify baremetal ipv4.addresses {{ hostvars['provision']['private_ip_address']}}/24 ipv4.method manual
+  sudo nmcli connection modify baremetal ipv4.gateway 10.20.0.1
+  sudo nmcli con down baremetal; sudo nmcli con up baremetal
+}
+
+setup_libvirt() {
+  sudo systemctl --now enable libvirtd
+  sudo systemctl status libvirtd
+  sudo usermod --append --groups libvirt cloud-user
+  sudo virsh pool-define-as --name default --type dir --target /var/lib/libvirt/images
+  sudo virsh pool-start default
+  sudo virsh pool-autostart default
+  sudo virsh pool-list
+}
+
+setup_firewalld() {
+  sudo yum -y install firewalld
+  sudo systemctl --now enable firewalld
+  sudo systemctl status firewalld
+  sudo firewall-cmd --add-service=dns --permanent
+  sudo firewall-cmd --add-service=http  --permanent
+  sudo firewall-cmd --add-port=5000/tcp  --permanent
+  sudo firewall-cmd --add-service=dhcp  --permanent
+  sudo firewall-cmd --reload
+  sudo systemctl restart dhcpd
+  sudo systemctl restart named
+}
+
+build_installer() {
+  echo "Building $SUBVER openshift-baremetal-install with OpenStack hardware profile..."
+  cd $HOME
+  sudo dnf -y install libvirt-devel go
+  wget -c https://dl.google.com/go/go1.13.10.linux-amd64.tar.gz
+  sudo tar -C /usr/local -xzf go1.13.10.linux-amd64.tar.gz
+  export PATH=/usr/local/go/bin:$PATH
+  export PATH=$PATH:$HOME/scripts
+  export GOPATH=/home/cloud-user/go
+  mkdir -p $HOME/go/src/github.com/openshift
+  cd $HOME/go/src/github.com/openshift
+  git clone --single-branch --branch release-$SUBVER https://github.com/openshift/installer.git
+  cd installer/
+  cp $HOME/scripts/profile/profile.go vendor/github.com/metal3-io/baremetal-operator/pkg/hardware/profile.go
+  #vi vendor/github.com/metal3-io/baremetal-operator/pkg/hardware/profile.go
+  TAGS="baremetal libvirt" hack/build.sh
+  cp bin/openshift-install $HOME/scripts/openshift-baremetal-install
+  cd $HOME/scripts/
+  echo "Completed $SUBVER openshift-baremetal-install with OpenStack hardware profile!"
+}
+
+get_oc_bin() {
+  case $VERSION in
+    *nightly*) curl -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp-dev-preview/$VERSION/openshift-client-linux-$VERSION.tar.gz | tar zxvf - oc ;;
+    *) curl -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$VERSION/openshift-client-linux-$VERSION.tar.gz | tar zxvf - oc ;;
+  esac
+
+  sudo cp oc /usr/local/bin/
+}
+
+set_disconnected() {
+  export IRONIC_DATA_DIR=/opt/ocp/ironic
+  export IRONIC_IMAGES_DIR="${IRONIC_DATA_DIR}/html/images"
+  export IRONIC_IMAGE=quay.io/metal3-io/ironic:master
+  export UPSTREAM_REPO="registry.svc.ci.openshift.org/ocp/release:$VERSION"
+  export PULLSECRET=/home/cloud-user/pull-secret.json
+  export LOCAL_REG='provision.{{ guid }}.{{ osp_cluster_dns_zone }}:5000'
+  export LOCAL_REPO='ocp4/openshift4'
+
+  sudo mkdir -p $IRONIC_IMAGES_DIR
+  sudo chown -R "${USER}:${USER}" "$IRONIC_DATA_DIR"
+  sudo find $IRONIC_DATA_DIR -type d -print0 | xargs -0 chmod 755
+  sudo chmod -R +r $IRONIC_DATA_DIR
+  sudo podman pod create -n ironic-pod
+  sudo podman run -d --net host --privileged --name httpd --pod ironic-pod -v $IRONIC_DATA_DIR:/shared --entrypoint /bin/runhttpd ${IRONIC_IMAGE}
+
+  sudo podman ps
+  sleep 10
+
+  cat > ~/reg-secret.txt << EOF
+  "$LOCAL_REG": {
+    "email": "dummy@redhat.com",
+    "auth": "ZHVtbXk6ZHVtbXk="
+  }
+  EOF
+
+  cp $PULLSECRET $PULLSECRET.orig
+  cat $PULLSECRET | \
+          jq ".auths += {`cat ~/reg-secret.txt`}" > $PULLSECRET
+
+  cat $PULLSECRET | tr -d '[:space:]' > tmp-secret
+  mv -f tmp-secret $PULLSECRET
+  rm -f ~/reg-secret.txt
+
+  oc adm release mirror -a $PULLSECRET --from=$UPSTREAM_REPO --to-release-image=$LOCAL_REG/$LOCAL_REPO:$VERSION --to=$LOCAL_REG/$LOCAL_REPO
+
+  sed -i -e 's/^/  /' $(pwd)/domain.crt
+  echo "additionalTrustBundle: |" >> $(pwd)/install-config.yaml
+  cat $(pwd)/domain.crt >> $(pwd)/install-config.yaml
+  sed -i "s/pullSecret:.*/pullSecret: \'$(cat $PULLSECRET)\'/g" $(pwd)/install-config.yaml
+
+}
+
+disconnected_refresh_rhcos() {
+  OPENSHIFT_INSTALLER=`pwd`/openshift-baremetal-install
+  IRONIC_DATA_DIR=/opt/ocp/ironic
+  OPENSHIFT_INSTALL_COMMIT=$($OPENSHIFT_INSTALLER version | grep commit | cut -d' ' -f4)
+  OPENSHIFT_INSTALLER_MACHINE_OS=${OPENSHIFT_INSTALLER_MACHINE_OS:-https://raw.githubusercontent.com/openshift/installer/$OPENSHIFT_INSTALL_COMMIT/data/data/rhcos.json}
+  MACHINE_OS_IMAGE_JSON=$(curl "${OPENSHIFT_INSTALLER_MACHINE_OS}")
+  MACHINE_OS_INSTALLER_IMAGE_URL=$(echo "${MACHINE_OS_IMAGE_JSON}" | jq -r '.baseURI + .images.openstack.path')
+  MACHINE_OS_INSTALLER_IMAGE_SHA256=$(echo "${MACHINE_OS_IMAGE_JSON}" | jq -r '.images.openstack.sha256')
+  MACHINE_OS_IMAGE_URL=${MACHINE_OS_IMAGE_URL:-${MACHINE_OS_INSTALLER_IMAGE_URL}}
+  MACHINE_OS_IMAGE_NAME=$(basename ${MACHINE_OS_IMAGE_URL})
+  MACHINE_OS_IMAGE_SHA256=${MACHINE_OS_IMAGE_SHA256:-${MACHINE_OS_INSTALLER_IMAGE_SHA256}}
+  MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_URL=$(echo "${MACHINE_OS_IMAGE_JSON}" | jq -r '.baseURI + .images.qemu.path')
+  MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_SHA256=$(echo "${MACHINE_OS_IMAGE_JSON}" | jq -r '.images.qemu.sha256')
+  MACHINE_OS_BOOTSTRAP_IMAGE_URL=${MACHINE_OS_BOOTSTRAP_IMAGE_URL:-${MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_URL}}
+  MACHINE_OS_BOOTSTRAP_IMAGE_NAME=$(basename ${MACHINE_OS_BOOTSTRAP_IMAGE_URL})
+  MACHINE_OS_BOOTSTRAP_IMAGE_SHA256=${MACHINE_OS_BOOTSTRAP_IMAGE_SHA256:-${MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_SHA256}}
+  MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256=$(echo "${MACHINE_OS_IMAGE_JSON}" | jq -r '.images.qemu["uncompressed-sha256"]')
+  MACHINE_OS_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256=${MACHINE_OS_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256:-${MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256}}
+  CACHED_MACHINE_OS_IMAGE="${IRONIC_DATA_DIR}/html/images/${MACHINE_OS_IMAGE_NAME}"
+  if [ ! -f "${CACHED_MACHINE_OS_IMAGE}" ]
+  then
+    echo "rhcos-refresh : Fetching new RHCOS image: $CACHED_MACHINE_OS_IMAGE..."
+    curl -g --insecure -L -o "${CACHED_MACHINE_OS_IMAGE}" "${MACHINE_OS_IMAGE_URL}"
+    echo "${MACHINE_OS_IMAGE_SHA256} ${CACHED_MACHINE_OS_IMAGE}" | tee ${CACHED_MACHINE_OS_IMAGE}.sha256sum
+    sha256sum --strict --check ${CACHED_MACHINE_OS_IMAGE}.sha256sum
+  else
+    echo "rhcos-refresh : Already cached RHCOS image: $CACHED_MACHINE_OS_IMAGE"
+  fi
+  CACHED_MACHINE_OS_BOOTSTRAP_IMAGE="${IRONIC_DATA_DIR}/html/images/${MACHINE_OS_BOOTSTRAP_IMAGE_NAME}"
+  if [ ! -f "${CACHED_MACHINE_OS_BOOTSTRAP_IMAGE}" ]
+  then
+    echo "rhcos-refresh : Fetching new RHCOS image: $CACHED_MACHINE_OS_BOOTSTRAP_IMAGE..."
+    curl -g --insecure -L -o "${CACHED_MACHINE_OS_BOOTSTRAP_IMAGE}" "${MACHINE_OS_BOOTSTRAP_IMAGE_URL}"
+    echo "${MACHINE_OS_BOOTSTRAP_IMAGE_SHA256} ${CACHED_MACHINE_OS_BOOTSTRAP_IMAGE}" | tee ${CACHED_MACHINE_OS_BOOTSTRAP_IMAGE}.sha256sum
+    sha256sum --strict --check ${CACHED_MACHINE_OS_BOOTSTRAP_IMAGE}.sha256sum
+  else
+    echo "rhcos-refresh : Already cached RHCOS image: $CACHED_MACHINE_OS_BOOTSTRAP_IMAGE"
+  fi
+  echo "RHCOS_QEMU_IMAGE=$MACHINE_OS_BOOTSTRAP_IMAGE_NAME?sha256=$MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256"
+  RHCOS_QEMU_IMAGE=$MACHINE_OS_BOOTSTRAP_IMAGE_NAME?sha256=$MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256
+  echo "RHCOS_OPENSTACK_IMAGE=$MACHINE_OS_IMAGE_NAME?sha256=$MACHINE_OS_IMAGE_SHA256"
+  RHCOS_OPENSTACK_IMAGE=$MACHINE_OS_IMAGE_NAME?sha256=$MACHINE_OS_IMAGE_SHA256
+  sed -i "s/RHCOS_QEMU_IMAGE/$RHCOS_QEMU_IMAGE/g" `pwd`/install-config.yaml
+  sed -i "s/RHCOS_OPENSTACK_IMAGE/$RHCOS_OPENSTACK_IMAGE/g" `pwd`/install-config.yaml
+  sed -i "s/RHCOS_OPENSTACK_IMAGE/$RHCOS_OPENSTACK_IMAGE/g" `pwd`/metal3-config.yaml
+  echo "rhcos-refresh : Completed RHCOS refresh..."
+}
+
+grab_ipmi_ports() {
+  for NODE in $( openstack --os-cloud=$OSP_PROJECT server list|egrep "worker|master"|cut -d\| -f3|sed 's/ //g' )
+  do
+   NAME=$(echo $NODE|sed 's/.$//')
+   NUMBER=$(echo $NODE|sed 's/[^0-9]*//g')
+   PXEMAC=$(openstack --os-cloud=$OSP_PROJECT  port list --network $GUID-pxe-network|grep $NAME|grep "\-$NUMBER\-"|cut -d\| -f 4|sed 's/ //g')
+   IPMIPORT=$(openstack --os-cloud=$OSP_PROJECT server show $NODE|grep ipmihost|cut -d\| -f3|cut -d, -f7|cut -d\: -f2|cut -d\' -f1)
+   echo "$NODE $PXEMAC $IPMIPORT"
+   NODEBMC=$NODE"BMC"
+   sed -i "s/$NODEBMC/$IPMIPORT/g" `pwd`/install-config.yaml
+   sed -i "s/hardwareProfile.*/hardwareProfile\:\ openstack/g" `pwd`/install-config.yaml
+  done
+}
+
+setup_services
+build_bridges
+setup_libvirt
+get_oc_bin
+case $VERSION in
+  4.5*) build_installer ;;
+  *nightly*) build_installer ;;
+  *) oc adm release extract --registry-config "${PULLSECRET}" --command=$CMD --to "${EXTRACT_DIR}" ${RELEASE_IMAGE} ;;
+esac
+grab_ipmi_ports
+if [[ $OFFLINE ]]
+then
+  set_disconnected
+  disconnected_refresh_rhcos
+  export LOCAL_REG='provision.{{ guid }}.{{ my_ocp_domain }}:5000'
+  export LOCAL_REPO='ocp4/openshift4'
+  export OPENSHIFT_INSTALL_RELEASE_IMAGE_OVERRIDE=${LOCAL_REG}/${LOCAL_REPO}:${VERSION}
+fi
+mkdir `pwd`/ocp
+cp `pwd`/install-config.yaml `pwd`/ocp
+case $VERSION in
+  4.3*) `pwd`/openshift-baremetal-install --dir=ocp create manifests
+        cp `pwd`/metal3-config.yaml `pwd`/ocp/openshift/99_metal3-config.yaml
+        ;;
+     *) ;;
+esac
+`pwd`/openshift-baremetal-install --dir=ocp --log-level debug create cluster
