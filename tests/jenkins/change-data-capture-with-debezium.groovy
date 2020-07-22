@@ -24,6 +24,9 @@ def openshift_location = ''
 // Catalog items
 def choices = [
     'Workshops / Change Data Capture with Debezium',
+    'DevOps Team Testing Catalog / TEST - Change Data Capture with Debezium',
+    'DevOps Team Development Catalog / DEV - Change Data Capture with Debezium',
+    DEV - Change Data Capture with Debezium
 ].join("\n")
 
 def region_choice = [
