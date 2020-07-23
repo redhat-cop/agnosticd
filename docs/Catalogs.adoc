@@ -1,0 +1,279 @@
+= Using Operator Catalog Mirrors
+
+== Overview
+
+Operators in OpenShift change quite frequently - even within operator subscription channels. Also the available ClusterServiceVersions for any given operator change very frequently with older versions being removed from the catalog - even though the container images making up the operator and/or managed applications still exist in the various container registries.
+
+In order to have a predictable environment for demos or classroom environments it is preferable to install exactly the operator version that the demo / lab was written for.
+
+One way to achieve this is by creating an Operator Catalog mirror. There are 4 catalogs in OpenShift (as of July 2020):
+
+* Red Hat Operators
+* Certified Operators
+* Community Operators
+* Marketplace Operators
+
+Mirroring a catalog means creating a snapshop of a catalog at a state in time. This snapshot is created as a container image and needs to be hosted in a (public) container registry.
+
+While the online catalog may be updated with newer releases of any given operator the mirrored catalog will always contain the same cluster service versions for any given operator.
+
+The process for mirroring an operator catalog is:
+
+. Create a repository in a container registry - for example https://quay.io
+. Create a service account in the container registry with push/write permission in order to create the mirrored container image
+. Mirror the catalog
+. Create an OpenShift project and OperatorGroup (optional: only for operators that can be installed in projects other than `openshift-operators`)
+. Create a *CatalogSource* in the project you want to install the operator in pointing to the mirrored operator catalog image
+. Create a *Subscription* in the project you want to install the operator in pointing to the catalog source you just created. Because there may be newer operator versions than the one you want in the catalog mirror make sure to set the *installPlanApproval* field to *Manual* to prevent automatic updates.
+. Approve the install plan
+. Wait for the operator to be running
+. Optional: Create the custom resources for the operator to "do it's magic".
+
+== Mirroring an Operator Catalog (common steps for all OpenShift versions)
+
+* Determine the Catalogs that you want to mirror.
+** On a bastion VM for an OpenShift cluster find the currently available Catalog Sources
++
+[source]
+----
+$ oc get catalogsource -n openshift-marketplace
+
+NAME                  DISPLAY               TYPE   PUBLISHER   AGE
+certified-operators   Certified Operators   grpc   Red Hat     76d
+community-operators   Community Operators   grpc   Red Hat     76d
+redhat-marketplace    Red Hat Marketplace   grpc   Red Hat     76d
+redhat-operators      Red Hat Operators     grpc   Red Hat     76d
+----
+
+* In Quay.io (or any other container registry) create a new public repository for every catalog that you want to mirror. It is recommended to use the type of catalog in the name.
++
+Examples:
+
+** olm_mirror_redhat_catalog
+** olm_mirror_community_catalog
+** olm_mirror_certified_catalog
+
+* Create a robot (service) account for your organization new repo (e.g. `gpte-devops-automation+catalogmirror`).
+* Grant *Write* permissions to the robot account for all newly created repositories.
+* On the bastion VM authenticate with the (Quay) container registry and create a JSON auth file containing the authentication information.
++
+[source]
+----
+$ podman login quay.io --authfile=quay_catalog.json --username gpte-devops-automation+catalogmirror --password <token>
+
+Login Succeeded!
+----
+
+* Make sure you have your OpenShift pull secret available in a file  `ocp_pullsecret.json`.
+* Create a combined pull secret to include both Red Hat and your registry's tokens:
++
+[source]
+----
+$ jq -c --argjson var "$(jq .auths ./quay_catalog.json)" '.auths += $var' ./ocp_pullsecret.json > ./merged_pullsecret.json
+
+# Validate the merged Pull Secret
+$ jq . merged_pullsecret.json
+----
+
+== Catalog mirror process for 4.4/4.5
+
+The following process works for both OpenShift 4.4 and OpenShift 4.5.
+
+[NOTE]
+====
+* Docs for 4.4: https://docs.openshift.com/container-platform/4.4/operators/olm-restricted-networks.html
+* Docs for 4.5: https://docs.openshift.com/container-platform/4.5/operators/olm-managing-custom-catalogs.html
+====
+
+* Create catalog images for redhat-operators, community-operators and certified-operators catalogs using the version of the base image and the current date the tag (e.g. v4.5_2020_07_23).
++
+You need to build the catalog mirror images for all OpenShift versions that you need to run on. You can not use an image built from the OpenShift 4.4 image on an OpenShift 4.5 cluster.
++
+[source]
+----
+# Set OpenShift Version
+OCP_VERSION=v4.4
+# OCP_VERSION=v4.5
+
+# Red Hat Operators Catalog
+oc adm catalog build \
+  --appregistry-org redhat-operators \
+  --from=registry.redhat.io/openshift4/ose-operator-registry:${OCP_VERSION} \
+  --filter-by-os="linux/amd64" \
+  --to=quay.io/gpte-devops-automation/olm_mirror_redhat_catalog:${OCP_VERSION}_$(date +"%Y_%m_%d") \
+  -a merged_pullsecret.json
+
+# Community Operators Catalog
+oc adm catalog build \
+  --appregistry-org community-operators \
+  --from=registry.redhat.io/openshift4/ose-operator-registry:${OCP_VERSION} \
+  --filter-by-os="linux/amd64" \
+  --to=quay.io/gpte-devops-automation/olm_mirror_community_catalog:${OCP_VERSION}_$(date +"%Y_%m_%d") \
+  -a merged_pullsecret.json
+
+# Certified Operators Catalog
+oc adm catalog build \
+  --appregistry-org certified-operators \
+  --from=registry.redhat.io/openshift4/ose-operator-registry:${OCP_VERSION} \
+  --filter-by-os="linux/amd64" \
+  --to=quay.io/gpte-devops-automation/olm_mirror_certified_catalog:${OCP_VERSION}_$(date +"%Y_%m_%d") \
+  -a merged_pullsecret.json
+----
+
+////
+== Process for OCP 4.5
+
+[NOTE]
+Docs: https://docs.openshift.com/container-platform/4.5/operators/olm-managing-custom-catalogs.html
+
+* Extract `opm` binary
++
+[source]
+----
+$ OCP_VERSION=v4.5
+$ oc image extract registry.redhat.io/openshift4/ose-operator-registry:v4.5 \
+    -a ./merged_pullsecret.json \
+    --path /usr/bin/opm:. \
+    --confirm
+
+$ chmod +x ./opm
+$ sudo chown root:root ./opm
+$ sudo mv ./opm /usr/local/bin
+$ opm version
+Version: version.Version{OpmVersion:"1.12.3", GitCommit:"", BuildDate:"2020-07-17T21:40:20Z", GoOs:"linux", GoArch:"amd64"}
+----
+
+* Build the index
+
+[source]
+----
+opm index add \
+  --bundles quay.io/gpte-devops-automation/test-operator:v0.1.0 \
+  --tag quay.io/gpte-devops-automation/test-catalog:2020_07_20
+----
+////
+
+== Installing an operator from a mirrored catalog
+
+In order to install an operator from a mirrored catalog you need to create a new catalog source pointing to the mirrored image. You will need to know which project to install into. If it is _not_ the `openshift-operators` project you will need to create the project and create an OperatorGroup for the project.
+
+=== Example for OpenShift Pipelines
+
+OpenShift Pipelines is probably the simplest example to use. It installs into the `openshift-operators` namespace - and when the operator is running it automatically creates the `openshift-pipelines` namespace with all required pods. There is nothing else to do than create the CatalogSource, Subscription, and approve the InstallPlan.
+
+. Create a *CatalogSource* in the `openshift-operators` project pointing to your mirrored catalog image:
++
+.CatalogSource
+[source,yaml]
+----
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: redhat-operators-snapshot
+  namespace: openshift-operators
+spec:
+  sourceType: grpc
+  image: quay.io/gpte-devops-automation/olm_mirror_redhat_catalog:v4.5_2020_07_23
+  displayName: "Red Hat Operators Snapshot (2020/07/22)"
+  publisher: "GPTE"
+----
+
+. Create a *Subscription* in the `openshift-operators` project pointing to the catalog source you just created. Make sure to set the `channel` and `startingCSV` to the specific operator version you want to install. Also set the `installPlanApproval` flag to `Manual`.
++
+[WARNING]
+Setting one subscription to `Manual` converts all current and future subscriptions in that project `Manual`.
++
+.Subscription
+[source,yaml]
+----
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: openshift-pipelines-operator-rh
+  namespace: openshift-operators
+spec:
+  channel: "ocp-4.4"
+  installPlanApproval: Manual
+  name: openshift-pipelines-operator-rh
+  source: redhat-operators-snapshot
+  sourceNamespace: openshift-operators
+  startingCSV: "openshift-pipelines-operator.v1.0.1"
+----
+
+. Approve the *InstallPlan*.
+
+=== Example for Code Ready Workspaces
+
+This operator goes into its own project. Therefore you need to create the project as well as an operator group managing the project before you can create the subscription.
+
+. Create the *Project* for the operator to be installed into.
++
+.Project
+[source,yaml]
+----
+apiVersion: project.openshift.io/v1
+kind: Project
+metadata:
+  name: codeready-workspaces
+----
+
+. Create the *OperatorGroup* that will be responsible for the operator. Make sure to specify the project to be managed under `targetNamespaces` (this is usually the same project as the project you just created).
++
+.OperatorGroup
+[source,yaml]
+----
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: crw-operatorgroup
+  namespace: codeready-workspaces
+spec:
+  targetNamespaces:
+  - codeready-workspaces
+----
+
+. Now create the *CatalogSource* in _your_ project pointing to your mirrored catalog image
++
+.CatalogSource
+[source,yaml]
+----
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: redhat-operators-snapshot
+  namespace: codeready-workspaces
+spec:
+  sourceType: grpc
+  image: quay.io/gpte-devops-automation/olm_mirror_redhat_catalog:v4.5_2020_07_23
+  displayName: "Red Hat Operators Snapshot (2020/07/23)"
+  publisher: "GPTE"
+----
+
+. Create a *Subscription* in _your_ project pointing to the catalog source you just created. Make sure to set the `channel` and `startingCSV` to the specific operator version you want to install. Also set the `installPlanApproval` flag to `Manual`.
++
+.Subscription
+[source,yaml]
+----
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: codeready-workspaces
+  namespace: codeready-workspaces
+spec:
+  channel: latest
+  installPlanApproval: Manual
+  name: codeready-workspaces
+  source: redhat-operators-snapshot
+  sourceNamespace: codeready-workspaces
+  startingCSV: crwoperator.v2.2.0
+----
+
+. Approve the *InstallPlan*.
+
+=== Example OpenShift workload roles
+
+A few roles already support the optional use of Snapshots. These may be helpful when developing your own workload roles.
+
+* CodeReady Workspaces: ../ansible/roles_ocp_workloads/ocp4_workload_codeready_workspaces
+* OpenShift Pipelines: ../ansible/roles_ocp_workloads/ocp4_workload_pipelines
+* OpenShift Serverless: ../ansible/roles_ocp_workloads/ocp4_workload_serverless
