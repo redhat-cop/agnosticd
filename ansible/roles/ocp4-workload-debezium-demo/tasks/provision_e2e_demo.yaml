@@ -1,0 +1,117 @@
+---
+- name: Create Demo Namespace
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ e2e_namespace }}'
+    state: present
+
+- name: Create Kafka Cluster
+  k8s:
+    state: present
+    namespace: '{{ e2e_namespace }}'
+    resource_definition: "{{ lookup('template', 'kafka-demo.yaml.j2') }}"
+
+- name: Enable anyuid on Namespace
+  k8s:
+    state: present
+    namespace: '{{ e2e_namespace }}'
+    resource_definition: "{{ lookup('template', 'scc-anyuid.yaml.j2') }}"
+  vars:
+    scc_namespace: '{{ e2e_namespace }}'
+
+- name: Deploy Debezium Tooling
+  k8s:
+    state: present
+    namespace: '{{ e2e_namespace }}'
+    resource_definition: "{{ lookup('template', 'debezium-tooling.yaml.j2') }}"
+
+- name: Create Data SQL ConfigMap
+  k8s:
+    state: present
+    namespace: '{{ e2e_namespace }}'
+    resource_definition: "{{ lookup('template', 'configmap-data-sql.yaml.j2') }}"
+
+- name: Deploy MS SQL Server Database 
+  k8s:
+    state: present
+    namespace: '{{ e2e_namespace }}'
+    resource_definition: "{{ lookup('template', 'mssql-server-linux.yaml.j2') }}"
+
+- name: Wait for Database to Start 
+  k8s_facts:
+    kind: Deployment
+    name: mssql-server-linux
+    namespace: '{{ e2e_namespace }}'
+    api_version: apps/v1
+  register: mssql_resource
+  until: >-
+    (mssql_resource.resources is defined)
+    and (mssql_resource.resources|length>0)
+    and (mssql_resource.resources[0].status is defined)
+    and (mssql_resource.resources[0].status.readyReplicas is defined)
+    and (mssql_resource.resources[0].status.readyReplicas > 0)
+  retries: 30
+  delay: 10
+
+- name: Configure CDC in Database
+  shell: "oc -n {{ e2e_namespace }} exec deployment/mssql-server-linux -- /opt/mssql-tools/bin/sqlcmd -S mssql-server-linux -U sa -P 'Password!' -i /opt/workshop/data.sql"
+
+- name: Wait for Kafka Cluster to start
+  k8s_facts:
+    kind: Kafka
+    name: demo
+    namespace: '{{ e2e_namespace }}'
+    api_version: kafka.strimzi.io/v1beta1
+  register: kafka_resource
+  until: >-
+    (kafka_resource.resources is defined) 
+    and (kafka_resource.resources|length>0)
+    and (kafka_resource.resources[0].status is defined) 
+    and (kafka_resource.resources[0].status.conditions is defined)
+    and (kafka_resource.resources[0].status.conditions[0].type == 'Ready') 
+  retries: 30
+  delay: 10
+
+- name: Deploy Debezium Kafka Connect
+  k8s:
+    state: present
+    namespace: '{{ e2e_namespace }}'
+    resource_definition: "{{ lookup('template', 'kafka-connect.yaml.j2') }}"
+  vars:
+    kc_name: debezium
+    connectors_image: '{{ debezium_connectors_image }}'
+
+- name: Deploy MSSQL Server Connector
+  k8s:
+    state: present
+    namespace: '{{ e2e_namespace }}'
+    resource_definition: "{{ lookup('template', 'kafka-connector-mssql.yaml.j2') }}"
+
+- name: Deploy MyPHP Legacy App
+  k8s:
+    state: present
+    namespace: '{{ e2e_namespace }}'
+    resource_definition: "{{ lookup('template', 'apache-php-app.yaml.j2') }}"
+
+- name: Deploy Camel Kafka Connect
+  k8s:
+    state: present
+    namespace: '{{ e2e_namespace }}'
+    resource_definition: "{{ lookup('template', 'kafka-connect.yaml.j2') }}"
+  vars:
+    kc_name: camel
+    connectors_image: '{{ camel_kafka_connectors_image }}'
+
+- name: Provision Elasticsearch
+  k8s:
+    state: present
+    namespace: '{{ e2e_namespace }}'
+    resource_definition: "{{ lookup('template', 'elasticsearch.yaml.j2') }}"
+
+- name: Deploy Elasticsearch Server Connector
+  k8s:
+    state: present
+    namespace: '{{ e2e_namespace }}'
+    resource_definition: "{{ lookup('template', 'kafka-connector-elastic.yaml.j2') }}"
+
