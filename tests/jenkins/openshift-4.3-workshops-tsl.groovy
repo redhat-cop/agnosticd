@@ -26,7 +26,9 @@ def choices = [
     'Workshops (High-Cost Workloads) / OpenShift 4.3 Workshop (Training)',
     'Workshops (High-Cost Workloads) / OpenShift 4.3 Workshop (Small)',
     'Workshops (High-Cost Workloads) / OpenShift 4.3 Workshop (Large)',
-    'DevOps Team Development Catalog / DEV - OpenShift 4.3 Workshop',
+    'DevOps Team Development Catalog / DEV - OpenShift 4.3 Workshop (Large)',
+    'DevOps Team Development Catalog / DEV - OpenShift 4.3 Workshop (Small)',
+    'DevOps Team Development Catalog / DEV - OpenShift 4.3 Workshop (Training)',
 ].join("\n")
 
 def region_choice = [
