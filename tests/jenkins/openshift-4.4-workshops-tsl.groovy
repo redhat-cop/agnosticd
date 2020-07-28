@@ -33,6 +33,7 @@ def choices = [
 
 def region_choice = [
     'na_gpte',
+	'na2_gpte',
     'apac_gpte',
     'emea_gpte',
 ].join("\n")
