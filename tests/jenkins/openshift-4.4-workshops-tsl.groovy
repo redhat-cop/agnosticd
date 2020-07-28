@@ -8,7 +8,7 @@ def cf_group = 'rhpds-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'djana@redhat.com'
+def notification_email = 'gpteinfrasev3@redhat.com'
 def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
@@ -19,18 +19,20 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ssh_location = ''
+def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / Change Data Capture with Debezium',
-    'DevOps Team Testing Catalog / TEST - Change Data Capture with Debezium',
-    'DevOps Team Development Catalog / DEV - Change Data Capture with Debezium',
+    'Workshops (High-Cost Workloads) / OpenShift 4.4 Workshop (Training)',
+    'Workshops (High-Cost Workloads) / OpenShift 4.4 Workshop (Small)',
+    'Workshops (High-Cost Workloads) / OpenShift 4.4 Workshop (Large)',
+    'DevOps Team Development Catalog / DEV - OpenShift 4.4 Workshop (Large)',
+    'DevOps Team Development Catalog / DEV - OpenShift 4.4 Workshop (Small)',
+    'DevOps Team Development Catalog / DEV - OpenShift 4.4 Workshop (Training)',
 ].join("\n")
 
 def region_choice = [
     'na_gpte',
-    'na2_gpte',
     'apac_gpte',
     'emea_gpte',
 ].join("\n")
@@ -78,17 +80,15 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
-                        'check=t',
-                        'check2=t',
-                        'salesforce=gptejen',
-                        'city=jenkins',
-                        'notes=devops_automation_jenkins',
-                        'expiration=2',
-                        'runtime=10',
                         'quotacheck=t',
-                        'users=2',
+                        'check=t',
+                        'city=jenkins',
                         "region=${region}",
+                        'salesforce=gptejen',
+                        'users=5',
                         'use_letsencrypt=f',
+                        'expiration=1',
+                        'runtime=9',
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
@@ -139,15 +139,15 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 120 \
+                          --timeout 90 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                        def m = email =~ /SSH Access: (.*)/
-						ssh_location = m[0][1]
-						echo "SSH Access: ${ssh_location}"
+                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
+                        openshift_location = m[0][1]
+                        echo "openshift_location = '${openshift_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
