@@ -23,17 +23,13 @@ def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops (High-Cost Workloads) / OpenShift 4.3 Workshop (Training)',
-    'Workshops (High-Cost Workloads) / OpenShift 4.3 Workshop (Small)',
-    'Workshops (High-Cost Workloads) / OpenShift 4.3 Workshop (Large)',
-    'DevOps Team Development Catalog / DEV - OpenShift 4.3 Workshop (Large)',
-    'DevOps Team Development Catalog / DEV - OpenShift 4.3 Workshop (Small)',
-    'DevOps Team Development Catalog / DEV - OpenShift 4.3 Workshop (Training)',
+    'Workshops (High-Cost Workloads) / OpenShift 4.4 Workshop (Large)',
+    'DevOps Team Development Catalog / DEV - OpenShift 4.4 Workshop (Large)',
 ].join("\n")
 
 def region_choice = [
     'na_gpte',
-    'na2_gpte',
+	'na2_gpte',
     'apac_gpte',
     'emea_gpte',
 ].join("\n")
@@ -88,8 +84,8 @@ pipeline {
                         'salesforce=gptejen',
                         'users=5',
                         'use_letsencrypt=f',
-                        'expiration=1',
-                        'runtime=9',
+                        'expiration=2',
+                        'runtime=24',
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
