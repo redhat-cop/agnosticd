@@ -120,6 +120,22 @@ pipeline {
                     --filter 'has started'"""
             }
         }
+        
+        stage('Wait for second email') {
+            environment {
+                credentials=credentials("${imap_creds}")
+            }
+            steps {
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                    branch: 'development'
+
+                sh """./tests/jenkins/downstream/poll_email.py \
+                    --server '${imap_server}' \
+                    --guid ${guid} \
+                    --timeout 30 \
+                    --filter 'has updated'"""
+            }
+        }
 
         stage('Wait for last email and parse OpenShift and App location') {
             environment {
@@ -137,8 +153,7 @@ pipeline {
                           --server '${imap_server}' \
                           --guid ${guid} \
                           --timeout 90 \
-                          --filter 'has completed'
-                        """
+                          --filter 'has completed'"""
                     ).trim()
 
                     try {
