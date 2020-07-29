@@ -1,13 +1,17 @@
 ---
 - name: Get cluster version
-  k8s_facts:
+  k8s_info:
     api_version: config.openshift.io/v1
     kind: ClusterVersion
     name: version
   register: r_cluster_version
 
+# ------------------------------------
+# Install Elasticsearch Operator
+# ------------------------------------
+
 - name: Check if Elasticsearch Operator is already installed
-  k8s_facts:
+  k8s_info:
     api_version: v1
     kind: Deployment
     namespace: "openshift-operators-redhat"
@@ -19,15 +23,15 @@
   block:
 
   - name: Get current stable channel for Elasticsearch
-    k8s_facts:
+    k8s_info:
       api_version: packages.operators.coreos.com/v1
       kind: PackageManifest
       name: elasticsearch-operator
       namespace: openshift-marketplace
     register: r_eo_channel
 
-  # Set Elasticsearch channel to the one matching the deployed cluster version. If no matching channel
-  # available set to defaultChannel from the subscription.
+  # Set Elasticsearch channel to the one matching the deployed cluster version.
+  # If no matching channel available set to defaultChannel from the subscription.
   - name: Set Elasticsearch channel
     set_fact:
       logging_elasticsearch_channel: >-
@@ -53,37 +57,94 @@
     - ./files/eo_role.yaml
     - ./files/eo_rolebinding.yaml
 
-  - name: Install Elasticsearch operator
+  - name: Create Elasticsearch Catalogsource for use with catalog snapshot
+    when: ocp4_workload_logging_use_catalog_snapshot | bool
     k8s:
       state: present
-      definition: "{{ lookup('template', item ) | from_yaml }}"
-    loop:
-    - ./templates/eo_subscription.j2
+      definition: "{{ lookup('template', './templates/eo_catalogsource.j2' ) | from_yaml }}"
 
-  - name: Wait for Elasticsearch operator to be ready
-    k8s_facts:
-      api_version: v1
-      kind: Deployment
-      namespace: "openshift-operators-redhat"
-      name: "elasticsearch-operator"
-    register: r_eo_deployment
+  - name: Install Elasticsearch subscription
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './templates/eo_subscription.j2' ) | from_yaml }}"
+
+  - name: Wait until InstallPlan is created
+    k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: InstallPlan
+      namespace: openshift-operators-redhat
+    register: r_install_plans
+    vars:
+      _query: >-
+        [?starts_with(spec.clusterServiceVersionNames[0], 'elasticsearch-operator')]
     retries: 30
-    delay: 10
+    delay: 5
     until:
-    - r_eo_deployment.resources | length | int > 0
-    - r_eo_deployment.resources[0].status.availableReplicas is defined
-    - r_eo_deployment.resources[0].status.availableReplicas | int == r_eo_deployment.resources[0].spec.replicas | int
+    - r_install_plans.resources | length > 0
+    - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+  - name: Set InstallPlan name
+    set_fact:
+      ocp4_workload_logging_elasticsearch_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(query) }}"
+    vars:
+      query: >-
+        [?starts_with(spec.clusterServiceVersionNames[0], 'elasticsearch-operator')].metadata.name|[0]
+
+  - name: Get InstallPlan
+    k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: InstallPlan
+      name: "{{ ocp4_workload_logging_elasticsearch_install_plan_name }}"
+      namespace: openshift-operators-redhat
+    register: r_install_plan
+    
+  - name: Approve InstallPlan if necessary
+    when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+    k8s:
+      state: present
+      definition: "{{ lookup( 'template', './templates/eo_installplan.j2' ) }}"
+
+  - name: Get Installed CSV
+    k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: Subscription
+      name: "elasticsearch-operator-{{ logging_elasticsearch_channel }}"
+      namespace: openshift-operators-redhat
+    register: r_subscription
+    retries: 30
+    delay: 5
+    until:
+    - r_subscription.resources[0].status.currentCSV is defined
+    - r_subscription.resources[0].status.currentCSV | length > 0
+
+  - name: Wait until CSV is installed
+    k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: ClusterServiceVersion
+      name: "{{ r_subscription.resources[0].status.currentCSV }}"
+      namespace: openshift-operators-redhat
+    register: r_csv
+    retries: 15
+    delay: 5
+    until:
+    - r_csv.resources[0].status.phase is defined
+    - r_csv.resources[0].status.phase | length > 0
+    - r_csv.resources[0].status.phase == "Succeeded"
+
+# ------------------------------------
+# Install Cluster Logging Operator
+# ------------------------------------
 
 - name: Get current stable channel for Cluster Logging
-  k8s_facts:
+  k8s_info:
     api_version: packages.operators.coreos.com/v1
     kind: PackageManifest
     name: cluster-logging
     namespace: openshift-marketplace
   register: r_logging_channel
 
-# Set Cluster Logging channel to the one matching the deployed cluster version. If no matching channel
-# available set to defaultChannel from the subscription.
+# Set Cluster Logging channel to the one matching the deployed cluster version.
+# If no matching channel available set to defaultChannel from the subscription.
 - name: Set Cluster Logging channel
   set_fact:
     logging_channel: >-
@@ -99,45 +160,105 @@
   debug:
     msg: "Cluster Logging channel to be installed: {{ logging_channel }}"
 
-- name: Install OpenShift Logging Operator Prerequisites
+- name: Install OpenShift Logging operator prerequisites
   k8s:
     state: present
     definition: "{{ lookup('file', item ) | from_yaml }}"
   loop:
   - ./files/logging_namespace.yaml
   - ./files/logging_operatorgroup.yaml
-  - ./files/logging_curator_configmap.yaml
 
-- name: Install OpenShift Logging Operator
+- name: Install Logging Curator config map for OCP 4.4 and earlier
+  when: logging_channel is version_compare('4.4', '<=')
   k8s:
     state: present
-    definition: "{{ lookup('template', item ) | from_yaml }}"
-  loop:
-  - ./templates/logging_subscription.j2
+    definition: "{{ lookup('file', './files/logging_curator_configmap.yaml' ) | from_yaml }}"
+  
+- name: Create Catalogsource for use with catalog snapshot
+  when: ocp4_workload_logging_use_catalog_snapshot | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/catalogsource.j2' ) | from_yaml }}"
 
-- name: Wait for Cluster Logging Operator to be ready
-  k8s_facts:
-    api_version: v1
-    kind: Deployment
-    namespace: "openshift-logging"
-    name: "cluster-logging-operator"
-  register: r_logging_deployment
+- name: Install OpenShift Logging subscription
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/logging_subscription.j2' ) | from_yaml }}"
+
+- name: Wait until InstallPlan is created
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: openshift-logging
+  register: r_install_plans
+  vars:
+    _query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'clusterlogging')]
   retries: 30
-  delay: 10
+  delay: 5
   until:
-  - r_logging_deployment.resources | length | int > 0
-  - r_logging_deployment.resources[0].status.availableReplicas is defined
-  - r_logging_deployment.resources[0].status.availableReplicas | int == r_logging_deployment.resources[0].spec.replicas | int
+  - r_install_plans.resources | length > 0
+  - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+- name: Set InstallPlan name
+  set_fact:
+    ocp4_workload_logging_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'clusterlogging')].metadata.name|[0]
+
+- name: Get InstallPlan
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ ocp4_workload_logging_install_plan_name }}"
+    namespace: openshift-logging
+  register: r_install_plan
+  
+- name: Approve InstallPlan if necessary
+  when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+  k8s:
+    state: present
+    definition: "{{ lookup( 'template', './templates/installplan.j2' ) }}"
+
+- name: Get Installed CSV
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: cluster-logging
+    namespace: openshift-logging
+  register: r_subscription
+  retries: 30
+  delay: 5
+  until:
+  - r_subscription.resources[0].status.currentCSV is defined
+  - r_subscription.resources[0].status.currentCSV | length > 0
+
+- name: Wait until CSV is installed
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: openshift-logging
+  register: r_csv
+  retries: 15
+  delay: 5
+  until:
+  - r_csv.resources[0].status.phase is defined
+  - r_csv.resources[0].status.phase | length > 0
+  - r_csv.resources[0].status.phase == "Succeeded"
+
+# ------------------------------------
+# Install Cluster Logging
+# ------------------------------------
 
 - name: Create OpenShift ClusterLogging
   k8s:
     state: present
-    definition: "{{ lookup('template', item ) | from_yaml }}"
-  loop:
-  - ./templates/cluster_logging.j2
+    definition: "{{ lookup('template', './templates/cluster_logging.j2' ) | from_yaml }}"
 
 - name: Wait until Elasticsearch cluster status is green
-  k8s_facts:
+  k8s_info:
     api_version: logging.openshift.io/v1
     kind: ClusterLogging
     name: instance
