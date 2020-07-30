@@ -23,8 +23,8 @@ def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops (High-Cost Workloads) / OpenShift 4.4 Workshop (Small)',
-    'DevOps Team Development Catalog / DEV - OpenShift 4.4 Workshop (Small)',
+    'Workshops / OpenShift 4.5 Workshop',
+    'DevOps Team Development Catalog / DEV - OpenShift 4.5 Workshop',
 ].join("\n")
 
 def region_choice = [
@@ -77,15 +77,16 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
-                        'quotacheck=t',
                         'check=t',
-                        'city=jenkins',
-                        "region=${region}",
+                        'check2=t',
                         'salesforce=gptejen',
-                        'users=5',
-                        'use_letsencrypt=f',
+                        'city=jenkins',
+                        'notes=devops_automation_jenkins',
                         'expiration=2',
-                        'runtime=24',
+                        'quotacheck=t',
+                        'users=10',
+                        "region=${region}",
+                        'use_letsencrypt=f',
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
@@ -136,7 +137,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
+                          --timeout 90 \
                           --filter 'has completed'
                         """
                     ).trim()
