@@ -1,0 +1,114 @@
+---
+- name: Get OAuth URL
+  k8s_facts:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: oauth-openshift
+    namespace: openshift-authentication
+  register: _action_get_oauth_route
+
+- name: Get RHMI Cluster SSO URL
+  k8s_facts:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: keycloak-edge
+    namespace: redhat-rhmi-rhsso
+  register: _action_get_cluster_sso_route
+
+- name: Get cluster console resource
+  k8s_facts:
+    api_version: config.openshift.io/v1
+    kind: Console
+    name: cluster
+  register: _action_get_console
+
+- name: Set facts for SSO IDP
+  set_fact:
+    ocp4_workload_integreatly_sso_idp_oauth_url: "https://{{ _action_get_oauth_route.resources[0].spec.host }}"
+    ocp4_workload_integreatly_console_url: "{{ _action_get_console.resources[0].status.consoleURL }}"
+
+- name: Create expected resources
+  k8s:
+    state: present
+    namespace: redhat-rhmi-rhsso
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item) | from_yaml }}"    
+  retries: 3
+  delay: 5
+  register: _create_resources
+  until: _create_resources is succeeded
+  loop:
+  - keycloakrealm-idp.yml.j2
+
+
+- name: Create SSO OAuth Secret
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: openshift
+        namespace: openshift-config
+      data:
+        clientSecret: "{{ 'openshift' | b64encode }}"
+      type: Opaque
+
+- name: Update cluster OAuth with SSO IDP
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition:
+      apiVersion: config.openshift.io/v1
+      kind: OAuth
+      metadata:
+        name: cluster
+      spec:
+        identityProviders:
+        - name: "{{ ocp4_workload_integreatly_sso_idp_realm_name }}"
+          mappingMethod: claim
+          type: OpenID
+          openID:
+            ca:
+              name: ""
+            clientID: "{{ ocp4_workload_integreatly_sso_idp_realm_name }}-client"
+            clientSecret:
+              name: "{{ ocp4_workload_integreatly_sso_idp_client_secret }}"
+            issuer: "https://{{ _action_get_cluster_sso_route.resources[0].spec.host }}/auth/realms/{{ ocp4_workload_integreatly_sso_idp_realm_name }}"
+            claims:
+              preferredUsername:
+              - preferred_username
+              email:
+              - email
+              name:
+              - name
+
+- name: Get the RHMI custom resource
+  k8s_facts:
+    api_version: integreatly.org/v1alpha1
+    kind: RHMI
+    name: "{{ ocp4_workload_integreatly_custom_resource_name }}"
+    namespace: "{{ ocp4_workload_integreatly_namespace }}"
+  register: _action_get_rhmi
+
+- name: Set fact for cluster SSO URL
+  set_fact:
+    _cluster_sso_url: "{{ _action_get_rhmi.resources[0].status.stages.authentication.products.rhsso.host }}"
+
+- name: Update cluster logout redirect URL
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition:
+      apiVersion: config.openshift.io/v1
+      kind: Console
+      metadata:
+        name: cluster
+      spec:
+        authentication:
+          logoutRedirect: "{{ _cluster_sso_url }}/auth/realms/{{ ocp4_workload_integreatly_sso_idp_realm_name }}/protocol/openid-connect/logout?redirect_uri={{ _action_get_console.resources[0].status.consoleURL }}"

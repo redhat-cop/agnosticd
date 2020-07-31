@@ -7,13 +7,35 @@
 - set_fact:
     project_name: "opendatahub-{{ user_name }}"
 
-- debug:
-    msg: "Deploying Open Data Hub to project {{ project_name }} and adding {{ user_name }}"
+- name: "Create ODH project for {{ user_name }}"
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: "{{ project_name }}"
 
-- name: Verify user can create projects
-  command: "oc auth can-i create project"
-  register: canicreateprojects
-  failed_when: canicreateprojects.stdout != 'yes'
+- name: "Get any LimitRanges in {{ project_name }}"
+  k8s_facts:
+    kind: LimitRange
+    namespace: "{{ project_name }}"
+  register: limit_ranges
+
+- name: "DEBUG: Available LimitRanges in {{ project_name }}"
+  debug:
+    msg: "{{ item }}"
+  loop: "{{ limit_ranges.resources | list }}"
+  when: not silent|bool
+
+- name: "Delete any limitranges in {{ project_name }}"
+  k8s:
+    state: absent
+    kind: LimitRange
+    api_version: v1
+    definition: "{{ item }}"
+  loop: "{{ limit_ranges.resources | list }}"
+  when: limit_ranges.resources
 
 - name: "Create CephObjectStoreUser for {{ user_name }}"
   k8s:
@@ -23,62 +45,12 @@
       kind: CephObjectStoreUser
       metadata:
         name: "{{ user_name }}"
-        namespace: rook-ceph
+        namespace: "{{ ocs_namespace }}"
       spec:
-        store: my-store
+        store: ocs-storagecluster-cephobjectstore
         displayName: "{{ user_name }}"
 
-## obtain secrets for each user
-- name: Get Ceph Access and Secret Key
-  k8s_facts:
-    name: "rook-ceph-object-user-my-store-{{ user_name }}"
-    namespace: rook-ceph
-    kind: Secret
-  register: secret
-
-- name: Set the user S3 secrets
-  set_fact:
-    s3_access_key: "{{ secret.resources[0].data.AccessKey | b64decode }}"
-    s3_secret_key: "{{ secret.resources[0].data.SecretKey | b64decode }}"
-
-####################################################################################################
-## OPEN DATA HUB
-####################################################################################################
-- name: "Make sure project {{ project_name }} is not there"
-  k8s:
-    state: absent
-    name: "{{ project_name }}"
-    kind: Project
-    api_version: project.openshift.io/v1
-
-- name: Ensure project is done terminating if it was being terminated
-  k8s_facts:
-    api_version: project.openshift.io/v1
-    kind: Project
-    name: "{{ project_name }}"
-  register: result
-  failed_when: result.resources | length > 0
-  retries: 60
-  until: result.resources | length == 0
-
-- name: "Creating project {{ project_name }}"
-  k8s:
-    state: present
-    name: "{{ project_name }}"
-    kind: ProjectRequest
-    api_version: project.openshift.io/v1
-
-- name: Create Open Data Hub operator RBAC
-  k8s:
-    state: present
-    definition: "{{ item }}"
-    namespace: "{{ project_name }}"
-  loop:
-    - "{{ lookup('file', 'service_account.yaml') }}"
-    - "{{ lookup('file', 'role.yaml') }}"
-    - "{{ lookup('file', 'role_binding.yaml') }}"
-
-- name: Make '{{ user_name }}' project admin
+- name: "Make {{ user_name }} an admin of {{ project_name }}"
   k8s:
     state: present
     definition:
@@ -95,7 +67,7 @@
         name: admin
         apiGroup: rbac.authorization.k8s.io
 
-- name: Make '{{ user_name }}' ODH admin
+- name: "Make {{ user_name }} ODH admin"
   k8s:
     state: present
     definition:
@@ -112,7 +84,7 @@
         name: opendatahub-admin
         apiGroup: rbac.authorization.k8s.io
 
-- name: Make '{{ user_name }}' Seldon user
+- name: "Make {{ user_name }} Seldon user"
   k8s:
     state: present
     definition:
@@ -128,6 +100,16 @@
         kind: ClusterRole
         name: seldon-user
         apiGroup: rbac.authorization.k8s.io
+
+- name: "Create Open Data Hub operator RBAC in {{ project_name }}"
+  k8s:
+    state: present
+    definition: "{{ item }}"
+    namespace: "{{ project_name }}"
+  loop:
+    - "{{ lookup('file', 'deploy_service_account.yaml') }}"
+    - "{{ lookup('file', 'deploy_role.yaml') }}"
+    - "{{ lookup('file', 'deploy_role_binding.yaml') }}"
 
 ####################################################################################################
 # STRIMZI SETUP
@@ -145,27 +127,6 @@
 # END STRIMZI
 ####################################################################################################
 
-- name: "Get the limitranges in {{ project_name }}"
-  k8s_facts:
-    kind: LimitRange
-    namespace: "{{ project_name }}"
-  register: limit_ranges
-
-- name: "DEBUG: Available LimitRanges in {{ project_name }}"
-  debug:
-    msg: "{{ item }}"
-  loop: "{{ limit_ranges.resources | list }}"
-  when: not silent|bool
-
-- name: "Delete the limitranges in {{ project_name }}"
-  k8s:
-    state: absent
-    kind: LimitRange
-    api_version: v1
-    definition: "{{ item }}"
-  loop: "{{ limit_ranges.resources | list }}"
-  when: limit_ranges.resources
-
 - name: 'Add Open Data Hub to the project "Installed Operators" in {{ project_name }}'
   k8s:
     state: present
@@ -173,4 +134,12 @@
     definition: "{{ item }}"
   loop:
     - "{{ lookup('template', 'opendatahub-operator.operatorgroup.yaml.j2') }}"
-    - "{{ lookup('template', 'opendatahub-operator.v0.4.0.clusterserviceversion.yaml.j2') }}"
+    - "{{ lookup('template', 'opendatahub-operator.v0.5.2.clusterserviceversion.yaml.j2') }}"
+
+- name: 'Create the OBC for {{ user_name }}'
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  loop:
+    - "{{ lookup('template', 'user-obc.yaml.j2') }}"

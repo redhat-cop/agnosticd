@@ -1,0 +1,82 @@
+---
+- name: Create Earth Kafka Namespace
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ kafka_earth_namespace }}'
+    state: present
+
+- name: Create Earth Kafka Cluster
+  k8s:
+    state: present
+    namespace: '{{ kafka_earth_namespace }}'
+    resource_definition: "{{ lookup('template', 'kafka-earth.yaml.j2') }}"
+
+- name: Create Earth Database Namespace
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ db_earth_namespace }}'
+    state: present
+
+- name: Enable anyuid on Earth Database Namespace
+  shell: "oc adm policy add-scc-to-user anyuid -z default -n {{ db_earth_namespace }}"
+
+- name: Check if DB has been deployed
+  k8s_facts:
+    kind: DeploymentConfig
+    name: mssql-server-linux
+    namespace: '{{ db_earth_namespace }}'
+    api_version: v1
+  register: db_exists
+
+- name: Deploy DB
+  block:
+  - name: Deploy Earth Database
+    shell: "oc new-app {{ mssqlserver_image }}:{{ mssqlserver_version }} \
+            -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=Password!' \
+            -e 'MSSQL_PID=Standard' -e 'MSSQL_AGENT_ENABLED=true' \
+            --name mssql-server-linux -n {{ db_earth_namespace }}"
+  - name: Create Earth Data SQL ConfigMap
+    k8s:
+      state: present
+      namespace: '{{ db_earth_namespace }}'
+      resource_definition: "{{ lookup('template', 'configmap-data-sql.yaml.j2') }}"
+  - name: Mount ConfigMap Volume
+    shell: "oc set volume dc/mssql-server-linux --add --name=earth-data \
+            --type=configmap --mount-path=/opt/workshop \
+            --configmap-name=earth-data-sql -n {{ db_earth_namespace }}"
+  - name: Add Post Hook
+    shell: "oc set deployment-hook dc/mssql-server-linux -n {{ db_earth_namespace }} --post \
+            -c mssql-server-linux --failure-policy=retry --volumes earth-data \
+            -- /opt/mssql-tools/bin/sqlcmd -S mssql-server-linux.{{ db_earth_namespace }}.svc \
+            -U sa -P Password! -i /opt/workshop/earth-data.sql"
+  when: (db_exists.resources is undefined) or (db_exists.resources | length == 0)
+
+- name: Create Earth Application Namespace
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ app_earth_namespace }}'
+    state: present
+
+- name: Enable anyuid on Earth Database Namespace
+  shell: "oc adm policy add-scc-to-user anyuid -z default -n {{ app_earth_namespace }}"
+
+- name: Check if DB has been deployed
+  k8s_facts:
+    kind: DeploymentConfig
+    name: my-apache-php-app
+    namespace: '{{ app_earth_namespace }}'
+    api_version: v1
+  register: app_exists
+
+- name: Deploy Application
+  block:
+  - name: Deploy Earth Application
+    shell: "oc new-app quay.io/hguerreroo/my-apache-php-app:latest \
+            -e 'SERVER_NAME=mssql-server-linux.{{ db_earth_namespace }}.svc' \
+            -n {{ app_earth_namespace }}"
+  - name: Create Earth Application Route
+    shell: "oc expose service my-apache-php-app --name=www -n {{ app_earth_namespace }}"
+  when: (app_exists.resources is undefined) or (app_exists.resources | length == 0)
