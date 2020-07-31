@@ -20,7 +20,6 @@ def ssh_admin_host = 'admin-host-na'
 // state variables
 def guid=''
 def openshift_location = ''
-def guidSmall=''
 
 // Catalog items
 def choices = [
@@ -88,6 +87,7 @@ pipeline {
                         'users=10',
                         "region=${region}",
                         'use_letsencrypt=f',
+                        'runtime=9',
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
@@ -100,11 +100,8 @@ pipeline {
                           -d '${cfparams}' \
                         """
                     ).trim()
-                    
-                    guidSmall = ${guid}.split('-')[1]
 
                     echo "GUID is '${guid}'"
-                    echo "Generated GUID is '${guidSmall}'"
                 }
             }
         }
@@ -140,7 +137,7 @@ pipeline {
                         script: """
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
-                          --guid ${guidSmall} \
+                          --guid ${guid} \
                           --timeout 120 \
                           --filter 'has completed'
                         """
