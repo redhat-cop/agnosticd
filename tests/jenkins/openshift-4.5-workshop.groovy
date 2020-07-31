@@ -87,7 +87,7 @@ pipeline {
                         'users=10',
                         "region=${region}",
                         'use_letsencrypt=f',
-                        'runtime=9',
+                        'runtime=10',
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
