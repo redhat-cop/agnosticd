@@ -19,25 +19,19 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def rhdemo_location = ''
-
+def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / Ansible Linux Automation',
-    'DevOps Team Testing Catalog / TEST - Ansible Linux Automation Workshop',
-    'DevOps Team Development Catalog / DEV Ansible Linux Automation Workshop',
-].join("\n")
-
-def student_workloads_choice = [
-    'linklight_engine_tower',
+    'Workshops (High-Cost Workloads) / OpenShift 4.4 Workshop (Small)',
+    'DevOps Team Development Catalog / DEV - OpenShift 4.4 Workshop (Small)',
 ].join("\n")
 
 def region_choice = [
-    'na_ansiblebu',
-    'apac_ansiblebu',
-    'emea_ansiblebu',
-    'japan_ansiblebu',
+    'na_gpte',
+	'na2_gpte',
+    'apac_gpte',
+    'emea_gpte',
 ].join("\n")
 
 pipeline {
@@ -57,11 +51,6 @@ pipeline {
             choices: choices,
             description: 'Catalog item',
             name: 'catalog_item',
-        )
-        choice(
-            choices: student_workloads_choice,
-            description: 'Catalog item',
-            name: 'student_workloads',
         )
         choice(
             choices: region_choice,
@@ -85,20 +74,19 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def student_workloads = params.student_workloads.trim()
                     def region = params.region.trim()
                     def cfparams = [
-                        'check=t',
-                        'check2=t',
-                        'salesforce=gptejen',
-                        'expiration=2',
-                        'runtime=8',
+                        'status=t',
                         'quotacheck=t',
+                        'check=t',
+                        'city=jenkins',
                         "region=${region}",
-                        'users=2',
-                        "student_workloads=${student_workloads}",
+                        'salesforce=gptejen',
+                        'users=5',
+                        'use_letsencrypt=f',
+                        'expiration=2',
+                        'runtime=24',
                     ].join(',').trim()
-
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -115,7 +103,8 @@ pipeline {
                 }
             }
         }
-
+        // Skip this step because sometimes the completed email arrives
+        // before the 'has started' email
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -124,11 +113,10 @@ pipeline {
                 git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
-
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
                     --guid ${guid} \
-                    --timeout 20 \
+                    --timeout 30 \
                     --filter 'has started'"""
             }
         }
@@ -148,15 +136,15 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 40 \
+                          --timeout 150 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                        def m = email =~ /The list of VMs for this workshop is available at: (http:\/\/[^ \n]+)/
-                        rhdemo_location = m[0][1]
-                        echo "rhdemo_location = '${rhdemo_location}'"
+                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
+                        openshift_location = m[0][1]
+                        echo "openshift_location = '${openshift_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email

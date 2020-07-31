@@ -23,14 +23,71 @@ def external_host = ''
 
 
 // Catalog items
-def choices = [
-    'OPENTLC Automation / Ansible Advanced - OpenStack',
+def catalog_choices = [
+    'Novello Testing',
+].join("\n")
+
+// Catalog items
+def catalog_item_choices = [
+    'N-3scale API Mgmt & Service Mesh',
+    'N-3scale API Mgmt & Service Mesh',
+    'N-3scale OCP VM AI',
+    'N-AI OCP VM',
+    'N-AMQ OCP VM',
+    'N-AMQ Online Foundations',
+    'N-AMQ Streams Foundations',
+    'N-Ansible Advanced - OpenStack',
+    'N-Ansible Tower Implementation 3.3',
+    'N-App Migration to OCP',
+    'N-cee-cf-110',
+    'N-cee-sf-016',
+    'N-CloudForms 4.5 Foundations Lab',
+    'N-Decision Manager 7 Experienced',
+    'N-Decision Manager 7 Foundations',
+    'N-EAP 7 Development',
+    'N-Gluster Storage 3.1 Foundations Lab',
+    'N-HANA scaleout internal',
+    'N-MSA Orchestration using PAM 7',
+    'N-OpenStack 10 Concepts and Architecture',
+    'N-OpenStack 10 Implementation',
+    'N-OpenStack 12 Implementation',
+    'N-OpenStack 13 Implementation',
+    'N-OpenStack Advanced Networking',
+    'N-OSP16 HA  (Overcloud installed)',
+    'N-PAM 7: Advanced',
+    'N-PAM 7: Case Management',
+    'N-PAM 7: Foundations',
+    'N-Red Hat Ceph Storage 2.0 Foundations',
+    'N-Red Hat Virtualization 4 Imp',
+    'N-RHEL 7 Implementation Lab',
+    'N-RHEL 7 Troubleshooting Lab',
+    'N-RHEL 8 New Features For Exp. Admins',
+    'N-RHSUMMIT20: OCP4.3 ON OSP16',
+    'N-RHTE19: Dynamic Case Mgmt',
+    'N-RHTE19: E2E API Lifecycle Mgmt',
+    'N-RHTE19: Emergency Response Quarkus',
+    'N-RHTE19: Quarkus / Kogito',
+    'N-RHV 4.0 Foundations Lab',
+    'N-Satellite 6.2 Foundations lab',
+    'N-Satellite 6.5 Implementation Lab',
+    'N-Satellite 6 Foundations Lab',
+    'N-Satellite 6 Implementation Lab',
+    'N-TEST OpenShift 4 Config Lab (OSP)',
 ].join("\n")
 
 def region_choice = [
-    'na',
-    'apac',
-    'emea',
+    'NA - DEV',
+    'EMEA - DEV',
+    'APAC - DEV',
+    'NA',
+    'EMEA',
+    'APAC',
+].join("\n")
+
+def environment_choice = [
+    'DEV',
+    'TEST',
+    'PROD',
 ].join("\n")
 
 pipeline {
@@ -47,7 +104,12 @@ pipeline {
                 name: 'confirm_before_delete'
         )
         choice(
-            choices: choices,
+            choices: catalog_choices,
+            description: 'Catalog',
+            name: 'catalog',
+        )
+        choice(
+            choices: catalog_item_choices,
             description: 'Catalog item',
             name: 'catalog_item',
         )
@@ -55,6 +117,11 @@ pipeline {
             choices: region_choice,
             description: 'Catalog item',
             name: 'region',
+        )
+        choice(
+            choices: environment_choice,
+            description: 'Environment',
+            name: 'environment',
         )
     }
 
@@ -71,15 +138,19 @@ pipeline {
                 git url: 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 script {
-                    def catalog = params.catalog_item.split(' / ')[0].trim()
-                    def item = params.catalog_item.split(' / ')[1].trim()
+                    def catalog = params.catalog.trim()
+                    def item = params.catalog_item.trim()
                     def region = params.region.trim()
+                    def environment = params.environment.trim()
                     def cfparams = [
+                        'status=t',
                         'check=t',
-                        'expiration=7',
-                        'runtime=8',
+                        'check2=t',
+                        'expiration=2',
+                        'runtime=10',
+                        'quotacheck=t',
                         "region=${region}",
-                        'quotacheck=t'
+                        "environment=${environment}",
                     ].join(',').trim()
 
                     echo "'${catalog}' '${item}'"
@@ -99,7 +170,7 @@ pipeline {
             }
         }
 
-		// This kind of CI send only one mail
+        // This kind of CI send only one mail
         stage('Wait to receive and parse email') {
             environment {
                 credentials=credentials("${imap_creds}")
