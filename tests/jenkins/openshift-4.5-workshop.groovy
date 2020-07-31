@@ -101,6 +101,7 @@ pipeline {
                     ).trim()
 
                     echo "GUID is '${guid}'"
+                    echo "Generated GUID is '${guid}.split('-')[1]'"
                 }
             }
         }
@@ -136,8 +137,8 @@ pipeline {
                         script: """
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
-                          --guid ${guid} \
-                          --timeout 90 \
+                          --guid ${guid}.split('-')[1] \
+                          --timeout 120 \
                           --filter 'has completed'
                         """
                     ).trim()
