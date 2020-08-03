@@ -82,7 +82,7 @@ pipeline {
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd'
+                git url: 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
@@ -93,11 +93,11 @@ pipeline {
                     guid = sh(
                         returnStdout: true,
                         script: """
-                          ./opentlc/order_svc_guid.sh \
+						  ./opentlc/order_svc_guid.sh \
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,expiration=7,runtime=10,region=${region},environment=${environment}'
+                          -d 'status=t,check=t,expiration=7,runtime=10,region=${region},environment=${environment}'
                         """
                     ).trim()
 

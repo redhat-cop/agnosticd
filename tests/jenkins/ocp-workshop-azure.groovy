@@ -86,6 +86,7 @@ pipeline {
                     def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
                     def cfparams = [
+                        'status=t',
                         'check=t',
                         'quotacheck=t',
                         "ocprelease=${ocprelease}",

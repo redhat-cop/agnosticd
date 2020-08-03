@@ -2,8 +2,8 @@
 // CloudForms
 def opentlc_creds = 'b93d2da4-c2b7-45b5-bf3b-ee2c08c6368e'
 def opentlc_admin_creds = '73b84287-8feb-478a-b1f2-345fd0a1af47'
-def cf_uri = 'https://labs.opentlc.com'
-def cf_group = 'opentlc-access-cicd'
+def cf_uri = 'https://rhpds.redhat.com'
+def cf_group = 'rhpds-access-cicd'
 // IMAP
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
@@ -19,15 +19,17 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def external_host=''
+def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'OPENTLC Automation / Ansible Tower Implementation 3.3',
+    'Workshops (High-Cost Workloads) / CCN Roadshow for Dev Track Small -AV',
 ].join("\n")
 
 def region_choice = [
-    'global_gpte',
+    'na_sandbox_gpte',
+    'apac_sandbox_gpte',
+    'emea_sandbox_gpte',
 ].join("\n")
 
 pipeline {
@@ -71,14 +73,6 @@ pipeline {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
-                    def cfparams = [
-                        'check=t',
-                        'expiration=7',
-                        'runtime=4',
-                        "region=${region}",
-                        'quotacheck=t'
-                    ].join(',').trim()
-
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -87,7 +81,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d '${cfparams}' \
+                          -d 'status=t,quotacheck=t,check=t,city=jenkins,region=${region},salesforce=gptejen,users=5,use_letsencrypt=f,expiration=2,runtime=24,notes=devops_automation_jenkins,course_module_list=m1\\,m2\\,m3\\,m4'
                         """
                     ).trim()
 
@@ -95,14 +89,30 @@ pipeline {
                 }
             }
         }
-		
-		// This kind of CI send only one mail
-        stage('Wait to receive and parse email') {
+        // Skip this step because sometimes the completed email arrives
+        // before the 'has started' email
+        stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                    branch: 'development'
+
+                sh """./tests/jenkins/downstream/poll_email.py \
+                    --server '${imap_server}' \
+                    --guid ${guid} \
+                    --timeout 30 \
+                    --filter 'has started'"""
+            }
+        }
+
+        stage('Wait for last email and parse OpenShift and App location') {
+            environment {
+                credentials=credentials("${imap_creds}")
+            }
+            steps {
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 script {
@@ -112,16 +122,15 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 30 \
-                          --filter 'is building'
+                          --timeout 120 \
+                          --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                    	def m = email =~ /External Hostname<\/TH><TD>(.*)/
-                    	def mm = email =~ /(.*)<\/TD><\/TR><TR><TH>Internal IP Address/
-                    	external_host = m[0][1].replaceAll("=","") + mm[0][1].replaceAll(" ","")
-                    	echo "External-Host='${external_host}'"
+                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
+                        openshift_location = m[0][1]
+                        echo "openshift_location = '${openshift_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -131,13 +140,6 @@ pipeline {
                 }
             }
         }
-        
-        stage ('Wait to complete provision') {
-        	steps {
-				echo "Wait for 30 minutes for deployment to complete"
-				sleep 1800 // seconds
-			}
-		}
 
         stage('Confirm before retiring') {
             when {

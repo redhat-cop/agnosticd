@@ -4,7 +4,7 @@
 
 FROM registry.redhat.io/codeready-workspaces/plugin-java11-rhel8:latest
 
-ENV OC_VERSION=4.4
+ENV OC_VERSION=4.5
 ENV GRAALVM_VERSION=19.3.1
 ENV QUARKUS_VERSION=1.3.4.Final-redhat-00001
 ENV GRAALVM_HOME="/usr/local/graalvm-ce-java11-${GRAALVM_VERSION}"
