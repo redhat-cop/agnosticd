@@ -1,0 +1,267 @@
+---
+- name: Step 005 - Post software
+  hosts: bastions
+  become: no
+  gather_facts: False
+  tasks:
+  - debug:
+      msg: "Post-Software Steps starting"
+
+- name: Step 005.1 - Post Software flight-check
+  hosts: bastions
+  run_once: yes
+  gather_facts: false
+  become: false
+  tags:
+  - post_flight_check
+  tasks:
+  - when:
+    - install_ocp4 | default( False ) | bool
+    - run_smoke_tests | default( False ) | bool
+    environment:
+      KUBECONFIG: "{{ cluster_name }}/auth/kubeconfig"
+    ignore_errors: yes
+    block:
+    - name: Get API for command line
+      command: oc whoami --show-server
+      register: showserver
+
+    - name: Ensure web console is known
+      when: webconsole is not defined
+      block:
+      - name: Get console route
+        command: oc get route -n openshift-console console -o json
+        register: routeconsole
+        retries: 10
+        delay: 30
+        until: routeconsole is succeeded
+        ignore_errors: yes
+
+      - name: Set webconsole address
+        set_fact:
+          webconsole: "http://{{ routeconsole.stdout | from_json | json_query('spec.host') }}"
+        when: routeconsole is succeeded
+
+    - name: Check DNS webconsole
+      command: nslookup "{{ webconsole | urlsplit('hostname') }}"
+      register: checkdnswebconsole
+      changed_when: false
+      retries: 15
+      until: checkdnswebconsole is succeeded
+      delay: 30
+
+    - name: Check DNS API
+      command: nslookup "{{ showserver.stdout | trim | urlsplit('hostname') }}"
+      register: checkdnsapi
+      changed_when: false
+
+    - name: Webconsole
+      uri:
+        url: "{{ webconsole }}"
+        validate_certs: no
+      register: testwebconsole
+      retries: 5
+      until: testwebconsole is succeeded
+      delay: 60
+
+    - name: Cluster-info
+      command: oc cluster-info
+      register: clusterinfor
+      changed_when: false
+
+    - name: Create project
+      command: oc new-project postflightcheck
+      register: newproject
+
+    - name: New-app
+      command: oc new-app cakephp-mysql-persistent -n postflightcheck
+      register: newapp
+
+    - name: Wait for mysql
+      command: timeout 300 oc rollout status dc/mysql -w -n postflightcheck
+      register: mysqlw
+      changed_when: false
+
+    - name: Wait for php
+      command: timeout 300 oc rollout status dc/cakephp-mysql-persistent -w -n postflightcheck
+      register: phpw
+      changed_when: false
+      retries: 2
+      delay: 60
+      until: phpw is succeeded
+
+    - name: Get route
+      command: >-
+        oc get route
+        -l template=cakephp-mysql-persistent
+        --no-headers
+        -o json
+        -n postflightcheck
+      register: getroute
+      changed_when: false
+      retries: 10
+      delay: 5
+      until: getroute is succeeded
+
+    - name: Test that route is reachable
+      uri:
+        url: "http://{{ getroute.stdout|from_json|json_query('items[0].spec.host') }}"
+      register: testroute
+      retries: 15
+      delay: 5
+      until: testroute is succeeded
+
+    - name: Delete project
+      command: oc delete project postflightcheck
+
+    - name: Switch back to default project
+      command: oc project default
+
+    - debug:
+        msg: "{{ item }}"
+      loop:
+      - "user.info: "
+      - "user.info: Post Flight Check"
+      - "user.info: DNS Web Console ............... {{ 'OK' if checkdnswebconsole.rc == 0 else 'FAIL' }}"
+      - "user.info: DNS API ....................... {{ 'OK' if checkdnsapi.rc == 0 else 'FAIL' }}"
+      - "user.info: Web console ................... {{ 'OK' if testwebconsole is succeeded else 'FAIL' }}"
+      - "user.info: API ........................... {{ 'OK' if clusterinfor.rc == 0 else 'FAIL' }}"
+      - "user.info: Create Project with PV ........ {{ 'OK' if newproject.rc == 0 else 'FAIL' }}"
+      - "user.info: App deployed .................. {{ 'OK' if phpw.rc == 0 and mysqlw.rc == 0 else 'FAIL' }}"
+      - "user.info: Route ......................... {{ 'OK' if testroute is succeeded else 'FAIL' }}"
+
+    - name: Fail smoke tests
+      when:
+      - run_smoke_tests | default( False ) | bool
+      - >-
+        checkdnswebconsole.rc != 0
+        or checkdnsapi.rc != 0
+        or testwebconsole is failed
+        or clusterinfor.rc != 0
+        or newproject.rc != 0
+        or phpw.rc != 0
+        or mysqlw.rc != 0
+        or testroute is failed
+      fail:
+        msg: "FAIL Smoke tests"
+      ignore_errors: no
+
+# Deploy Workloads
+- name: Step 005.2 - Deploy Infra and Student Workloads
+  import_playbook: workloads.yml
+
+- name: Deploy custom workloads in OCP
+  hosts: bastions
+  run_once: yes
+  gather_facts: false
+  become: false
+  environment:
+    KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+  tasks:
+    - name: Add additional tasks for specific workloads
+      include_tasks: custom_workloads.yml
+
+# This block may apply in the future for other demos where SAPGUI
+# could be required for further development
+# - name: Deploy SAP GUI in the bastion Host
+#   hosts: bastions
+#   run_once: yes
+#   gather_facts: false
+#   become: true
+#   tasks:
+#     - name: Add required packages for SAP GUI
+#       yum:
+#         name:
+#           - xauth
+#           - libXtst
+#           - /nfs/SAPGUI/jdk-8u251-linux-x64.rpm
+
+#     - name: Install SAP GUI
+#       command: java -jar /nfs/SAPGUI/PlatinGUI750Linux_1.JAR install -G
+
+- name: Restart HANA DB
+  hosts: hanas
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Ensure HANA instance is stopped in the secondary node
+      shell: |
+          /usr/sap/{{ sap_hana_deployment_hana_sid | upper }}/HDB{{ sap_hana_deployment_hana_instance_number }}/HDB stop
+      args:
+        executable: /bin/bash
+      become: yes
+      become_user: "{{ sap_hana_deployment_hana_sid | lower }}adm"
+      
+    - name: Ensure HANA instance is started in the secondary node
+      shell: |
+          /usr/sap/{{ sap_hana_deployment_hana_sid | upper }}/HDB{{ sap_hana_deployment_hana_instance_number }}/HDB start
+      args:
+        executable: /bin/bash
+      become: yes
+      become_user: "{{ sap_hana_deployment_hana_sid | lower }}adm"
+
+    - name: Import SFLIGHT schema for demo purposes
+      shell: |
+          /usr/sap/{{ sap_hana_deployment_hana_sid | upper }}/HDB{{ sap_hana_deployment_hana_instance_number }}/exe/hdbsql \
+          -i {{ sap_hana_deployment_hana_instance_number }} -u SYSTEM -p {{ sap_hana_deployment_hana_db_system_password }} -d {{ sap_hana_deployment_hana_sid }} -m <<EOF
+          IMPORT "SFLIGHT"."SMACOURSE", \
+            "SFLIGHT"."STICKET", \
+            "SFLIGHT"."SDESSERT", \
+            "SFLIGHT"."SMEALT", \
+            "SFLIGHT"."SCURX", \
+            "SFLIGHT"."STRAVELAG", \
+            "SFLIGHT"."SFLIMEAL", \
+            "SFLIGHT"."SFLIGHT", \
+            "SFLIGHT"."SCPLANE", \
+            "SFLIGHT"."SNVOICE", \
+            "SFLIGHT"."SPPLANE", \
+            "SFLIGHT"."SMEAL", \
+            "SFLIGHT"."SCITAIRP", \
+            "SFLIGHT"."SCARPLAN", \
+            "SFLIGHT"."SCARR", \
+            "SFLIGHT"."SCOUNTER", \
+            "SFLIGHT"."SPFLI", \
+            "SFLIGHT"."SAIRPORT", \
+            "SFLIGHT"."SBUSPART", \
+            "SFLIGHT"."SAPLANE", \
+            "SFLIGHT"."SMENU", \
+            "SFLIGHT"."SSTARTER", \
+            "SFLIGHT"."SCURR", \
+            "SFLIGHT"."SGEOCITY", \
+            "SFLIGHT"."SCUSTOM", \
+            "SFLIGHT"."SBOOK" \
+          FROM '/software/SFLIGHT' WITH REPLACE THREADS 8;
+          EOF
+      args:
+        executable: /bin/bash
+      become: yes
+      become_user: "{{ sap_hana_deployment_hana_sid | lower }}adm"
+
+- name: Step 005.6 Print Student Info
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Print Student Information
+    when: install_student_user | bool
+    block:
+    - name: Store bastion hostname as a fact
+      set_fact:
+        bastion_hostname: "{{groups['bastions'].0 }}"
+    - name: print out user.info
+      debug:
+        msg: "{{ item }}"
+      loop:
+      - "user.info: You can access your bastion via SSH:"
+      - "user.info: ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix if cloud_provider == 'ec2' else '.'+ocp4_base_domain }}"
+      - "user.info: "
+      - "user.info: Make sure you use the username '{{ student_name }}' and the password '{{ hostvars[bastion_hostname]['student_password'] }}' when prompted."
+
+- name: Step 005.7 Tell CloudForms we are done
+  hosts: localhost
+  run_once: yes
+  gather_facts: false
+  become: false
+  tasks:
+  - debug:
+      msg: "Post-Software checks completed successfully"

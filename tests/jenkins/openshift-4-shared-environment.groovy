@@ -91,6 +91,7 @@ pipeline {
                     def region = params.region.trim()
                     def nodes = params.nodes.trim()
                     def cfparams = [
+                        'status=t',
                         'check=t',
                         'expiration=14',
                         'runtime=8',
