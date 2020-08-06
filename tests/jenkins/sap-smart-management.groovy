@@ -24,7 +24,8 @@ def ssh_location = ''
 
 // Catalog items
 def choices = [
-    'OPENTLC Automation / Ansible-Advanced-OSP16',
+    'Workshops / SAP Smart Management',
+    'Pre-Prod Catalog Items / SAP Smart Management',
 ].join("\n")
 
 def region_choice = [
