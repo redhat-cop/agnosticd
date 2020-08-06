@@ -19,7 +19,7 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def openshift_location = ''
+def ip_addr = ''
 
 // Catalog items
 def choices = [
@@ -135,9 +135,9 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /The ssh command to use is ssh (.*)/
-                        openshift_location = m[0]
-                        echo "openshift_location = '${openshift_location}'"
+                        def m = email =~ /IP Address: (.*)/
+                        ip_addr = m[0]
+                        echo "openshift_location = '${ip_addr}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
