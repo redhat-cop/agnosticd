@@ -135,8 +135,8 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (https:\/\/[^ \n]+)/
-                        openshift_location = m[0][1]
+                        def m = email =~ /The ssh command to use is ssh (.*)/
+                        openshift_location = m[0]
                         echo "openshift_location = '${openshift_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
