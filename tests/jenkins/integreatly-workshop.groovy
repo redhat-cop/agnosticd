@@ -99,6 +99,7 @@ pipeline {
                     def ocprelease = params.ocprelease.trim()
                     def region = params.region.trim()
                     def cfparams = [
+                        'status=t',
                         'expiration=3',
                         'runtime=36',
                         "region=${region}",
