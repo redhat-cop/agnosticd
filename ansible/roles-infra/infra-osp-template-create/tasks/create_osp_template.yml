@@ -1,6 +1,6 @@
 - name: Check for running Heat stacks
   command: >-
-    openstack stack list -f json
+    openstack stack list --property stack_status=CREATE_IN_PROGRESS --format json
   environment:
     OS_AUTH_URL: "{{ osp_auth_url }}"
     OS_USERNAME: "{{ osp_auth_username | default(osp_auth_username_member) }}"
@@ -11,22 +11,11 @@
   register: r_stack_list
   until: 
   - r_stack_list.stdout | from_json | json_query(create_stacks) | length <= osp_max_create_in_progress
-  - r_stack_list.stdout | from_json | json_query(update_stacks) | length <= osp_max_update_in_progress
   retries: 10
   delay: "{{ 300 | random(start=120) }}"
   vars:
     create_stacks: >-
       [?"Stack Status"=='CREATE_IN_PROGRESS']
-    update_stacks: >-
-      [?"Stack Status"=='UPDATE_IN_PROGRESS']
-
-- name: Get the number of updating stacks
-  debug:
-    msg: The number of updating stacks is {{ r_stack_list.stdout | from_json | json_query(query) | count | default(0) }}
-  vars:
-    query: >
-      [?"Stack Status"=='UPDATE_IN_PROGRESS']
-  verbosity: 2
 
 - name: Get the number of creating stacks
   debug:
@@ -34,7 +23,14 @@
   vars:
     query: >
       [?"Stack Status"=='CREATE_IN_PROGRESS']
-  verbosity: 2
+
+- name: Verify stack does not already exist
+  assert:
+    that: r_stack_list.stdout | from_json | json_query(stack_name) | count > 0
+    fail_msg: "The stack base-stack-{{ guid }} already exists."
+  vars:
+    stack_name: >-
+      [?"Stack Name"=='base-stack-{{ guid }}']
 
 - environment:
     OS_AUTH_URL: "{{ osp_auth_url }}"
@@ -44,26 +40,21 @@
     OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
     OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
   block:
-  - name: Update Heat stack from generated template
-    when: r_stack_list.stdout | from_json | json_query(stack_name)
+  - name: Do a dry run of stack creation
     command: >-
-      openstack stack update -f json --wait
-      -t {{ heat_master_template }}
-      base-stack-{{ guid }}
-    vars:
-      stack_name: >-
-        [?"Stack Name"=='base-stack-{{ guid }}']
-    register: r_hot_out_update
+      openstack stack create --dry-run -vvv
+      -t {{ heat_master_template }} -f json base-stack-{{ guid }}
+    changed_when: false
+    register: heat_validation
+    until: heat_validation is succeeded
+    retries: "{{ heat_retries }}"
+    delay: 20
 
   - name: Create Heat stack from generated template
-    when: not r_stack_list.stdout | from_json | json_query(stack_name)
     command: >-
       openstack stack create -f json --wait
       -t {{ heat_master_template }}
       base-stack-{{ guid }}
-    vars:
-      stack_name: >-
-        [?"Stack Name"=='base-stack-{{ guid }}']
     register: r_hot_out_create
 
   - name: Grab outputs
