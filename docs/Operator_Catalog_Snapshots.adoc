@@ -1,0 +1,266 @@
+= Using Operator Catalog Snapshots
+
+== Overview
+
+Operators in OpenShift change quite frequently - even within operator subscription channels. And sometimes these changes introduce breaking changes.
+
+Also every time an operator gets updated the available ClusterServiceVersions change within a channel. And very frequently older ClusterServiceVersions are removed from the catalog. This makes sense because with generally available operators updates within a channel should not break anything. For operators that are still in development (development or tech preview) breaking changes are very common however.
+
+While previous versions of a CSV (the YAML definitions) may be removed from a catalog, the container images making up a specific version of an operator and/or managed applications are never removed.
+
+In order to have a predictable environment for demos, workshops or classroom environments it is preferable to install exactly the operator version that the demo / workshop / lab was written for. But because available CSVs keep changing there has to be a way to pin a specific version for a repeatable deployment.
+
+One way to achieve this is by creating an operator catalog snapshot and using the snapshot instead of the online catalog.
+
+There are 4 catalogs in OpenShift (as of July 2020):
+
+* Red Hat Operators
+* Certified Operators
+* Community Operators
+* Marketplace Operators
+
+An operator catalog snapshot is created by building a container image containing the YAML definitions of a catalog at that particular state in time. Once the catalog image has been built it needs to be hosted in a (public) container registry.
+
+This image should no longer change - even if the online catalogs get updated with newer releases of any given operator. This is achieved by tagging the image with a unique tag. 
+
+Once the catalog snapshot image is available a catalog source can be created in OpenShift that points to this particular catalog image thus freezing the available operator versions.
+
+The full process for creating an operator catalog snapshot image is:
+
+. Create a repository in a container registry - for example https://quay.io.
+. Create a service (or robot) account in the container registry with push/write permission in order to create the snapshot container image.
+. Create an operator catalog snapshot image and push it to the (public) registry.
+. Create an OpenShift project and *OperatorGroup* (optional: only for operators that can be installed in projects other than `openshift-operators`).
+. Create a *CatalogSource* in the project you want to install the operator. This catalog source points to the snapshot operator catalog image. This catalog source will be served by a pod in the project.
+. Create a *Subscription* in the project you want to install the operator into. This subscription points to the catalog source you just created.
+.. Because there may be newer operator versions than the one you want in the catalog snapshot make sure to set the *installPlanApproval* field to *Manual* to prevent automatic updates.
+.. Note that creating one subscription with manual approval in a project converts every other subscription in the project to manual approval.
+. Approve the install plan.
+. Wait for the operator to be running.
+. Optional: Create the custom resources for the operator to "do its magic".
+
+== Preparing to create an operator catalog snapshot image
+
+* Determine the catalogs for which you want to create a catalog snapshot image.
+** On a bastion VM for an OpenShift cluster find the currently available catalog sources
++
+[source]
+----
+$ oc get catalogsource -n openshift-marketplace
+
+NAME                  DISPLAY               TYPE   PUBLISHER   AGE
+certified-operators   Certified Operators   grpc   Red Hat     76d
+community-operators   Community Operators   grpc   Red Hat     76d
+redhat-marketplace    Red Hat Marketplace   grpc   Red Hat     76d
+redhat-operators      Red Hat Operators     grpc   Red Hat     76d
+----
+
+* In Quay.io (or any other container registry) create a new public repository for every catalog that you want to create a snapshot for. It is recommended to use the type of catalog in the name.
++
+Examples:
+
+** olm_snapshot_redhat_catalog
+** olm_snapshot_community_catalog
+** olm_snapshot_certified_catalog
+
+* Create a service account (robot account in Quay) for your organization (e.g. `gpte-devops-automation+catalogsnapshot`).
+* Grant *Write* permissions to the service account for all newly created repositories.
+* Authenticate with the container registry (Quay in the example below) and create a JSON auth file containing the authentication information.
++
+[source]
+----
+$ podman login quay.io --authfile=quay_catalog.json --username gpte-devops-automation+catalogsnapshot --password <token>
+
+Login Succeeded!
+----
+
+* Make sure you have your OpenShift pull secret available in a file  `ocp_pullsecret.json`. You need this secret to pull the base image for the catalog snapshot from the protected Red Hat registry. You can get the secret from https://try.openshift.com.
+* Create a combined pull secret to include both Red Hat and your registry's tokens:
++
+[source]
+----
+$ jq -c --argjson var "$(jq .auths ./quay_catalog.json)" '.auths += $var' ./ocp_pullsecret.json > ./merged_pullsecret.json
+
+# Validate the merged Pull Secret
+$ jq . merged_pullsecret.json
+----
++
+[WARNING]
+The OpenShift pull secret already has credentials for the Quay container registry. If you host your catalog snapshot images in Quay then the command above will replace the credentials for Quay in the merged pull secret with the credentials for your robot account. Therefore do not use this merged pull secret for OpenShift installations or other tasks where you may need the OpenShift pull secret to access the Quay registry for OpenShift images.
+
+== Creating an operator catalog snapshot image for OpenShift 4.4/4.5
+
+The following process works for both OpenShift 4.4 and OpenShift 4.5. It should still work with OpenShift 4.6 - although this process will be deprecated.
+
+[NOTE]
+====
+* Docs for 4.4: https://docs.openshift.com/container-platform/4.4/operators/olm-restricted-networks.html
+* Docs for 4.5: https://docs.openshift.com/container-platform/4.5/operators/olm-managing-custom-catalogs.html
+====
+
+* Create catalog images for redhat-operators, community-operators and certified-operators catalogs using the version of the base image matching the version of your OpenShift cluster and the current date the tag (e.g. `v4.5_2020_07_23`).
++
+You need to build the catalog snapshot images for all OpenShift versions that you need to deploy the operator to. For example you can not use an image built from the OpenShift 4.4 image on an OpenShift 4.5 cluster.
++
+[source]
+----
+# Set OpenShift Version
+OCP_VERSION=v4.4
+# OCP_VERSION=v4.5
+IMAGE_TAG=${OCP_VERSION}_$(date +"%Y_%m_%d")
+
+# Red Hat Operators Catalog
+oc adm catalog build \
+  --appregistry-org redhat-operators \
+  --from=registry.redhat.io/openshift4/ose-operator-registry:${OCP_VERSION} \
+  --filter-by-os="linux/amd64" \
+  --to=quay.io/gpte-devops-automation/olm_snapshot_redhat_catalog:${IMAGE_TAG} \
+  -a merged_pullsecret.json
+
+# Community Operators Catalog
+oc adm catalog build \
+  --appregistry-org community-operators \
+  --from=registry.redhat.io/openshift4/ose-operator-registry:${OCP_VERSION} \
+  --filter-by-os="linux/amd64" \
+  --to=quay.io/gpte-devops-automation/olm_snapshot_community_catalog:${IMAGE_TAG} \
+  -a merged_pullsecret.json
+
+# Certified Operators Catalog
+oc adm catalog build \
+  --appregistry-org certified-operators \
+  --from=registry.redhat.io/openshift4/ose-operator-registry:${OCP_VERSION} \
+  --filter-by-os="linux/amd64" \
+  --to=quay.io/gpte-devops-automation/olm_snapshot_certified_catalog:${IMAGE_TAG} \
+  -a merged_pullsecret.json
+----
+
+== Installing an operator from a catalog snapshot
+
+In order to install an operator from a catalog snapshot you need to create a new catalog source pointing to the snapshot image. You will need to know which project to install the operator into. Most cluster scoped operators get installed into the `openshift-operators project.
+
+If your operator does _not_ get installed into the `openshift-operators` project you will first need to create the project and then create an operator group for the project.
+
+=== Example for OpenShift Pipelines
+
+OpenShift Pipelines is probably the simplest operator to illustrate this with. It gets installed into the `openshift-operators` namespace - and when the operator is running it automatically creates the `openshift-pipelines` namespace with all required pods. There is nothing else to do than create the catalog source, subscription, and approve the install plan.
+
+. Create a *CatalogSource* in the `openshift-operators` project pointing to your snapshot image. Make sure to give the catalog source a *unique* name - because the `openshift-operators` is a frequently used project there could be multiple catalog sources in this project:
++
+.CatalogSource
+[source,yaml]
+----
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: redhat-operators-snapshot-pipelines
+  namespace: openshift-operators
+spec:
+  sourceType: grpc
+  image: quay.io/gpte-devops-automation/olm_snapshot_redhat_catalog:v4.4_2020_07_23
+  displayName: "Red Hat Operators Snapshot (2020/07/23)"
+  publisher: "GPTE"
+----
+
+. Create a *Subscription* in the `openshift-operators` project pointing to the catalog source you just created. Make sure to set the `channel` and `startingCSV` to the specific operator version you want to install. Finally set the `installPlanApproval` flag to `Manual` to prevent automatic upgrades to a version that you may not have tested yet.
++
+[WARNING]
+Setting one subscription to `Manual` converts all current and future subscriptions in that project `Manual`.
++
+.Subscription
+[source,yaml]
+----
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: openshift-pipelines-operator-rh
+  namespace: openshift-operators
+spec:
+  channel: "ocp-4.4"
+  installPlanApproval: Manual
+  name: openshift-pipelines-operator-rh
+  source: redhat-operators-snapshot-pipelines
+  sourceNamespace: openshift-operators
+  startingCSV: "openshift-pipelines-operator.v1.0.1"
+----
+
+. Approve the *InstallPlan*.
+
+=== Example for Code Ready Workspaces
+
+This operator goes into its own project. Therefore you need to create the project as well as an operator group managing the project before you can create the subscription.
+
+. Create the *Project* for the operator to be installed into.
++
+.Project
+[source,yaml]
+----
+apiVersion: project.openshift.io/v1
+kind: Project
+metadata:
+  name: codeready-workspaces
+----
+
+. Create the *OperatorGroup* that will be responsible for the operator. Make sure to specify the project to be managed under `targetNamespaces` (this is usually the same project as the project you just created).
++
+.OperatorGroup
+[source,yaml]
+----
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: crw-operatorgroup
+  namespace: codeready-workspaces
+spec:
+  targetNamespaces:
+  - codeready-workspaces
+----
+
+. Now create the *CatalogSource* in _your_ project pointing to your catalog snapshot image. Make sure to give the catalog source a unique name if you install more than one operator into a project.
++
+.CatalogSource
+[source,yaml]
+----
+apiVersion: operators.coreos.com/v1alpha1
+kind: CatalogSource
+metadata:
+  name: redhat-operators-snapshot
+  namespace: codeready-workspaces
+spec:
+  sourceType: grpc
+  image: quay.io/gpte-devops-automation/olm_snapshot_redhat_catalog:v4.5_2020_07_23
+  displayName: "Red Hat Operators Snapshot (2020/07/23)"
+  publisher: "GPTE"
+----
+
+. Create a *Subscription* in _your_ project pointing to the catalog source you just created. Make sure to set the `channel` and `startingCSV` to the specific operator version you want to install. Also set the `installPlanApproval` flag to `Manual` to prevent automatic upgrades to versions you may not have tested .
++
+.Subscription
+[source,yaml]
+----
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: codeready-workspaces
+  namespace: codeready-workspaces
+spec:
+  channel: latest
+  installPlanApproval: Manual
+  name: codeready-workspaces
+  source: redhat-operators-snapshot
+  sourceNamespace: codeready-workspaces
+  startingCSV: crwoperator.v2.2.0
+----
+
+. Approve the *InstallPlan*.
+
+=== Example OpenShift workload roles
+
+A few roles already support the optional use of snapshots. These may be helpful when developing your own workload roles.
+
+* link:../ansible/roles_ocp_workloads/ocp4_workload_codeready_workspaces[Code Ready Workspaces]
+* link:../ansible/roles_ocp_workloads/ocp4_workload_pipelines[OpenShift Pipelines]
+* link:../ansible/roles_ocp_workloads/ocp4_workload_serverless[OpenShift Serverless]
+
+Examine the variables for these roles in `defaults/main.yaml` and then how these variables are being used in `workload.yaml` and the associated Jinja templates.
+
+These roles also illustrate how to manually approve an install plan, wait for the cluster service version to appear and validate rollout of operators and managed applications.

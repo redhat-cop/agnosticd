@@ -1,0 +1,274 @@
+apiVersion: v1
+items:
+  - apiVersion: image.openshift.io/v1
+    kind: ImageStream
+    metadata:
+      labels:
+        app: openshift-rbac
+        build: openshift-rbac
+      name: openshift-rbac
+    spec:
+      lookupPolicy:
+        local: false
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      labels:
+        app: openshift-rbacs
+      name: openshift-rbac
+    spec:
+      ports:
+        - port: 8080
+          protocol: TCP
+          targetPort: 8080
+      selector:
+        deploymentconfig: openshift-rbac
+      sessionAffinity: None
+      type: ClusterIP
+  - apiVersion: route.openshift.io/v1
+    kind: Route
+    metadata:
+      labels:
+        app: openshift-rbac
+      name: openshift-rbac
+    spec:
+      port:
+        targetPort: 8080
+      tls:
+        termination: edge
+        insecureEdgeTerminationPolicy: Redirect
+      to:
+        kind: Service
+        name: openshift-rbac
+        weight: 100
+      wildcardPolicy: None
+  - apiVersion: v1
+    data:
+      openshift-rbac.go: |
+        package main
+
+        import (
+          "crypto/tls"
+          "crypto/x509"
+          "encoding/json"
+          "fmt"
+          "io/ioutil"
+          "log"
+          "net/http"
+          "os"
+        )
+
+        const (
+          defaultKubernetesAPI = "https://kubernetes.default.svc"
+          defaultNamespace = "rbac-lab"
+
+          kubernetesCaFile    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+          kubernetesTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        )
+
+        type KubernetesItem struct {
+        }
+
+        type KubernetesResponse struct {
+          Items []KubernetesItem `json:"items"`
+        }
+
+        func simpleHandler(w http.ResponseWriter, r *http.Request) {
+
+          k8sAPI := os.Getenv("KUBERNETES_API")
+
+          if len(k8sAPI) == 0 {
+            k8sAPI = defaultKubernetesAPI
+          }
+
+          k8sToken := os.Getenv("KUBERNETES_TOKEN")
+
+          if len(k8sToken) == 0 {
+            tokenFile, err := ioutil.ReadFile(kubernetesTokenFile)
+            _, err = os.Stat(kubernetesTokenFile)
+
+            if os.IsNotExist(err) {
+              fmt.Fprintln(w, "Error: Unable to determine API Token")
+              return
+            }
+
+            k8sToken = string(tokenFile)
+          }
+
+          var tlsConfig tls.Config
+
+          _, err := os.Stat(kubernetesCaFile)
+          if os.IsNotExist(err) {
+            tlsConfig = tls.Config{InsecureSkipVerify: true}
+          } else {
+            caCert, err := ioutil.ReadFile(kubernetesCaFile)
+            if err != nil {
+              log.Fatal(err)
+            }
+            caCertPool := x509.NewCertPool()
+            caCertPool.AppendCertsFromPEM(caCert)
+
+            tlsConfig = tls.Config{
+              RootCAs: caCertPool,
+            }
+          }
+
+          client := &http.Client{
+            Transport: &http.Transport{
+              TLSClientConfig: &tlsConfig,
+            },
+          }
+
+          namespace := os.Getenv("KUBERNETES_NAMESPACE")
+
+          if len(namespace) == 0 {
+            namespace = defaultNamespace
+          }
+
+          _ = executeQuery(w, client, fmt.Sprintf("%s/api/v1/namespaces/%s/pods", k8sAPI, namespace), k8sToken, fmt.Sprintf("Pods in Namespace '%s'", namespace))
+
+          _ = executeQuery(w, client, fmt.Sprintf("%s/api/v1/namespaces", k8sAPI), k8sToken, "Namespaces")
+
+          _ = executeQuery(w, client, fmt.Sprintf("%s/apis/user.openshift.io/v1/users", k8sAPI), k8sToken, "Users")
+
+        }
+
+        func listenAndServe(port string) {
+          fmt.Printf("serving on %s\n", port)
+          err := http.ListenAndServe(":"+port, nil)
+          if err != nil {
+            panic("ListenAndServe: " + err.Error())
+          }
+        }
+
+        func executeQuery(w http.ResponseWriter, client *http.Client, url string, k8sToken string, queryType string) error {
+          req, err := http.NewRequest("GET", url, nil)
+
+          req.Header.Add("Authorization", "Bearer "+k8sToken)
+          req.Header.Add("Accept", "application/json")
+
+          kubernetesResponse, err := client.Do(req)
+
+          if err != nil {
+            fmt.Println(err)
+            fmt.Fprintln(w, "Error occurred")
+            return fmt.Errorf(fmt.Sprintf("Error retrieving %s", queryType))
+          }
+
+          if kubernetesResponse.StatusCode != 200 {
+            fmt.Fprintln(w, fmt.Sprintf("Error occurred retrieving response for %s: %s", queryType, kubernetesResponse.Status))
+            return fmt.Errorf(fmt.Sprintf("Error occurred retrieving response for %s: %s", queryType, kubernetesResponse.Status))
+          }
+
+          defer kubernetesResponse.Body.Close()
+
+          var kubernetesResp KubernetesResponse
+
+          json.NewDecoder(kubernetesResponse.Body).Decode(&kubernetesResp)
+
+          fmt.Fprintln(w, fmt.Sprintf("Number of %s: %d", queryType, len(kubernetesResp.Items)))
+
+          return nil
+        }
+
+        func main() {
+          http.HandleFunc("/", simpleHandler)
+          port := os.Getenv("PORT")
+          if len(port) == 0 {
+            port = "8080"
+          }
+          go listenAndServe(port)
+
+          select {}
+        }
+    kind: ConfigMap
+    metadata:
+      labels:
+        app: openshift-rbac
+      name: openshift-rbac-source
+  - apiVersion: build.openshift.io/v1
+    kind: BuildConfig
+    metadata:
+      labels:
+        app: openshift-rbac
+        build: openshift-rbac
+      name: openshift-rbac
+    spec:
+      failedBuildsHistoryLimit: 5
+      output:
+        to:
+          kind: ImageStreamTag
+          name: openshift-rbac:latest
+      postCommit: {}
+      resources: {}
+      runPolicy: Serial
+      source:
+        configMaps:
+          - configMap:
+              name: openshift-rbac-source
+            destinationDir: /tmp/src
+        type: None
+      strategy:
+        sourceStrategy:
+          from:
+            kind: ImageStreamTag
+            name: golang:1.11.5
+            namespace: openshift
+        type: Source
+      triggers:
+        - type: ConfigChange
+  - apiVersion: apps.openshift.io/v1
+    kind: DeploymentConfig
+    metadata:
+      labels:
+        app: openshift-rbac
+      name: openshift-rbac
+    spec:
+      replicas: 1
+      revisionHistoryLimit: 10
+      selector:
+        deploymentconfig: openshift-rbac
+      strategy:
+        activeDeadlineSeconds: 21600
+        resources:
+          limits:
+            memory: 128Mi
+            cpu: 200m
+          requests:
+            memory: 128Mi
+            cpu: 200m
+        rollingParams:
+          intervalSeconds: 1
+          maxSurge: 25%
+          maxUnavailable: 25%
+          timeoutSeconds: 600
+          updatePeriodSeconds: 1
+        type: Rolling
+      template:
+        metadata:
+          labels:
+            deploymentconfig: openshift-rbac
+            app: openshift-rbac
+        spec:
+          containers:
+            - image: ""
+              imagePullPolicy: Always
+              name: openshift-rbac
+              resources: {}
+              terminationMessagePath: /dev/termination-log
+              terminationMessagePolicy: File
+          dnsPolicy: ClusterFirst
+          restartPolicy: Always
+          terminationGracePeriodSeconds: 30
+      test: false
+      triggers:
+        - type: ConfigChange
+        - imageChangeParams:
+            automatic: true
+            containerNames:
+              - openshift-rbac
+            from:
+              kind: ImageStreamTag
+              name: openshift-rbac:latest
+          type: ImageChange
+kind: List

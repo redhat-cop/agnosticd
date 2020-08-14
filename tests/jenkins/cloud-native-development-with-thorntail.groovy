@@ -120,7 +120,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,expiration=7,runtime=8,quotacheck=t,region=${region},nodes=${nodes},environment=${environment},se_version=${se_version}'
+                          -d 'status=t,check=t,expiration=7,runtime=8,quotacheck=t,region=${region},nodes=${nodes},environment=${environment},se_version=${se_version}'
                         """
                     ).trim()
 
