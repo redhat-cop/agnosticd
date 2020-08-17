@@ -23,15 +23,12 @@ def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops (High-Cost Workloads) / OpenShift 4.4 Workshop (Large)',
-    'DevOps Team Development Catalog / DEV - OpenShift 4.4 Workshop (Large)',
+    'Red Hat Summit 2020 / Practical Intro to Container Security',
+    'DevOps Team Development Catalog / DEV - Practical Intro Container Security',
 ].join("\n")
 
 def region_choice = [
-    'na_gpte',
-	'na2_gpte',
-    'apac_gpte',
-    'emea_gpte',
+    'global_gpte',
 ].join("\n")
 
 pipeline {
@@ -77,15 +74,11 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
-                        'quotacheck=t',
                         'check=t',
-                        'city=jenkins',
+                        'expiration=14',
+                        'runtime=10',
                         "region=${region}",
-                        'salesforce=gptejen',
-                        'users=15',
-                        'use_letsencrypt=f',
-                        'expiration=2',
-                        'runtime=24',
+                        'quotacheck=t',
                     ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
@@ -136,14 +129,14 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
+                          --timeout 120 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
-                        openshift_location = m[0][1]
+                        def m = email =~ /The ssh command to use is ssh (.*)/
+                        openshift_location = m[0]
                         echo "openshift_location = '${openshift_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
