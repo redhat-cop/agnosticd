@@ -82,7 +82,7 @@ pipeline {
                         'city=jenkins',
                         "region=${region}",
                         'salesforce=gptejen',
-                        'users=15',
+                        'users=5',
                         'use_letsencrypt=f',
                         'expiration=2',
                         'runtime=24',
