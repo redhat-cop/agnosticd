@@ -1,4 +1,5 @@
-- name: Check for running Heat stacks
+---
+- name: Wait for less than {{ osp_max_create_in_progress }} Heat stacks in CREATE_IN_PROGRESS
   command: >-
     openstack stack list --property stack_status=CREATE_IN_PROGRESS --format json
   environment:
@@ -10,27 +11,13 @@
     OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
   register: r_stack_list
   until: 
-  - r_stack_list.stdout | from_json | json_query(create_stacks) | length <= osp_max_create_in_progress
+  - r_stack_list.stdout | from_json | count <= osp_max_create_in_progress
   retries: 10
-  delay: "{{ 300 | random(start=120) }}"
-  vars:
-    create_stacks: >-
-      [?"Stack Status"=='CREATE_IN_PROGRESS']
+  delay: "{{ osp_max_create_in_progress_base_delay | random(start=osp_max_create_in_progress_random_delay) }}"
 
-- name: Get the number of creating stacks
+- name: Show the number of creating stacks
   debug:
-    msg: The number of creating stacks is {{ r_stack_list.stdout | from_json | json_query(query) | count | default(0) }}
-  vars:
-    query: >
-      [?"Stack Status"=='CREATE_IN_PROGRESS']
-
-- name: Verify stack does not already exist
-  assert:
-    that: r_stack_list.stdout | from_json | json_query(stack_name) | count > 0
-    fail_msg: "The stack base-stack-{{ guid }} already exists."
-  vars:
-    stack_name: >-
-      [?"Stack Name"=='base-stack-{{ guid }}']
+    msg: The number of creating stacks is {{ r_stack_list.stdout | from_json | count }}
 
 - environment:
     OS_AUTH_URL: "{{ osp_auth_url }}"
@@ -40,22 +27,31 @@
     OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
     OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
   block:
-  - name: Do a dry run of stack creation
+  - name: Check if heat stack already exists
     command: >-
-      openstack stack create --dry-run -vvv
-      -t {{ heat_master_template }} -f json base-stack-{{ guid }}
+      openstack stack show -f json base-stack-{{ guid }}
+    register: r_check_stack_exists
     changed_when: false
-    register: heat_validation
-    until: heat_validation is succeeded
-    retries: "{{ heat_retries }}"
-    delay: 20
+    failed_when: false
+    tags: heat
 
-  - name: Create Heat stack from generated template
-    command: >-
-      openstack stack create -f json --wait
-      -t {{ heat_master_template }}
-      base-stack-{{ guid }}
-    register: r_hot_out_create
+  - when: r_check_stack_exists.rc != 0
+    block:
+    - name: Do a dry run of stack creation
+      command: >-
+        openstack stack create --dry-run -vvv
+        -t {{ heat_master_template }} -f json base-stack-{{ guid }}
+      changed_when: false
+      register: r_heat_validation
+      until: r_heat_validation is succeeded
+      retries: "{{ heat_retries }}"
+      delay: 20
+
+    - name: Create Heat stack from generated template
+      command: >-
+        openstack stack create -f json --wait
+        -t {{ heat_master_template }}
+        base-stack-{{ guid }}
 
   - name: Grab outputs
     command: >-
@@ -72,23 +68,20 @@
     set_fact:
       hot_outputs: "{{ (r_hot_outputs.stdout | from_json) }}"
   
-  - name: show hot_outputs fact
+  - name: show hot_outputs
     debug:
       var: hot_outputs
       verbosity: 3
 
-  - name: Save infra_key content
-    set_fact:
-      infra_private_key_content: "{{ hot_outputs | json_query(query) }}"
-    vars:
-      query: "outputs[?@.output_key=='{{ guid }}-infra_key'].output_value|[0]"
-
-  - name: Set infra_ssh_key path
+  - name: Set infra_ssh_key
     set_fact:
       infra_ssh_key: "{{ output_dir }}/{{ guid }}_infra_ssh_key.pem"
 
   - name: Copy infra_key content to output_dir
     copy:
       dest: "{{ infra_ssh_key }}"
-      content: "{{ infra_private_key_content }}"
-      mode: 0600
+      content: "{{ __infra_key_content }}"
+      mode: u=rw,g=,o=
+    vars:
+      __infra_key_content: "{{ hot_outputs | json_query(__infra_key_query) }}"
+      __infra_key_query: "outputs[?@.output_key=='{{ guid }}-infra_key'].output_value|[0]"
