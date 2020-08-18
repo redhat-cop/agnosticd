@@ -19,19 +19,25 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def openshift_location = ''
+def ssh_location = ''
+
 
 // Catalog items
 def choices = [
-    'Workshops (High-Cost Workloads) / OpenShift 4.4 Workshop (Large)',
-    'DevOps Team Development Catalog / DEV - OpenShift 4.4 Workshop (Large)',
+    'Workshops / SAP Smart Management',
+    'Pre-Prod Catalog Items / SAP Smart Management',
 ].join("\n")
 
 def region_choice = [
-    'na_gpte',
-	'na2_gpte',
-    'apac_gpte',
-    'emea_gpte',
+    'na_osp',
+    'emea_osp',
+    'apac_osp',
+].join("\n")
+
+def environment_choice = [
+    'PROD',
+    'TEST',
+    'DEV',
 ].join("\n")
 
 pipeline {
@@ -51,6 +57,11 @@ pipeline {
             choices: choices,
             description: 'Catalog item',
             name: 'catalog_item',
+        )
+        choice(
+            choices: environment_choice,
+            description: 'Environment',
+            name: 'environment',
         )
         choice(
             choices: region_choice,
@@ -74,19 +85,18 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
+                    def environment = params.environment.trim()
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
-                        'quotacheck=t',
                         'check=t',
-                        'city=jenkins',
-                        "region=${region}",
-                        'salesforce=gptejen',
-                        'users=15',
-                        'use_letsencrypt=f',
                         'expiration=2',
-                        'runtime=24',
+                        'runtime=10',
+                        'quotacheck=t',
+                        "environment=${environment}",
+                        "region=${region}",
                     ].join(',').trim()
+
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -103,30 +113,14 @@ pipeline {
                 }
             }
         }
-        // Skip this step because sometimes the completed email arrives
-        // before the 'has started' email
-        stage('Wait for first email') {
+
+		// This kind of CI send only one mail
+        stage('Wait to receive and parse email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
-                    branch: 'development'
-
-                sh """./tests/jenkins/downstream/poll_email.py \
-                    --server '${imap_server}' \
-                    --guid ${guid} \
-                    --timeout 30 \
-                    --filter 'has started'"""
-            }
-        }
-
-        stage('Wait for last email and parse OpenShift and App location') {
-            environment {
-                credentials=credentials("${imap_creds}")
-            }
-            steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
                 script {
@@ -136,15 +130,15 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
-                          --filter 'has completed'
+                          --timeout 90 \
+                          --filter 'is building'
                         """
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
-                        openshift_location = m[0][1]
-                        echo "openshift_location = '${openshift_location}'"
+                    	def m = email =~ /SSH Access: (.*)/
+						ssh_location = m[0][1]
+						echo "SSH Access: ${ssh_location}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -154,6 +148,13 @@ pipeline {
                 }
             }
         }
+        
+        stage ('Wait to complete provision') {
+        	steps {
+				echo "Wait for 30 minutes for deployment to complete"
+				sleep 1800 // seconds
+			}
+		}
 
         stage('Confirm before retiring') {
             when {
