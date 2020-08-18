@@ -24,7 +24,7 @@ def rhdemo_location = ''
 
 // Catalog items
 def choices = [
-    'Pre-Prod Catalog Items / Ansible Linux Automation Workshop (T)',
+    'Workshops (High-Cost Workloads) / Ansible Linux Automation Workshop (T)',
 ].join("\n")
 
 def student_workloads_choice = [
