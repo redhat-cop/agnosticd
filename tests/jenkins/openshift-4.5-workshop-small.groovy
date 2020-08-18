@@ -23,8 +23,8 @@ def openshift_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops (High-Cost Workloads) / OpenShift 4.4 Workshop (Large)',
-    'DevOps Team Development Catalog / DEV - OpenShift 4.4 Workshop (Large)',
+    'Workshops (High-Cost Workloads) / OpenShift 4.5 Workshop (Small)',
+    'DevOps Team Development Catalog / DEV - OpenShift 4.5 Workshop (Small)',
 ].join("\n")
 
 def region_choice = [
@@ -79,10 +79,9 @@ pipeline {
                         'status=t',
                         'quotacheck=t',
                         'check=t',
-                        'city=jenkins',
                         "region=${region}",
                         'salesforce=gptejen',
-                        'users=15',
+                        'users=5',
                         'use_letsencrypt=f',
                         'expiration=2',
                         'runtime=24',
@@ -136,13 +135,13 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
+                          --timeout 120 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
+                        def m = email =~ /Openshift Master Console: (https:\/\/[^ \n]+)/
                         openshift_location = m[0][1]
                         echo "openshift_location = '${openshift_location}'"
                     } catch(Exception ex) {

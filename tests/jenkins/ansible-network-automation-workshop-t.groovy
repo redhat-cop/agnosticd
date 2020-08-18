@@ -19,19 +19,23 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def openshift_location = ''
+def rhdemo_location = ''
+
 
 // Catalog items
 def choices = [
-    'Workshops (High-Cost Workloads) / OpenShift 4.4 Workshop (Large)',
-    'DevOps Team Development Catalog / DEV - OpenShift 4.4 Workshop (Large)',
+    'Workshops (High-Cost Workloads) / Ansible Network Automation Workshop (T)',
+].join("\n")
+
+def student_workloads_choice = [
+    'f5_tower_workshop',
 ].join("\n")
 
 def region_choice = [
-    'na_gpte',
-	'na2_gpte',
-    'apac_gpte',
-    'emea_gpte',
+    'na_ansiblebu',
+    'apac_ansiblebu',
+    'emea_ansiblebu',
+    'japan_ansiblebu',
 ].join("\n")
 
 pipeline {
@@ -51,6 +55,11 @@ pipeline {
             choices: choices,
             description: 'Catalog item',
             name: 'catalog_item',
+        )
+        choice(
+            choices: student_workloads_choice,
+            description: 'Catalog item',
+            name: 'student_workloads',
         )
         choice(
             choices: region_choice,
@@ -74,19 +83,21 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
+                    def student_workloads = params.student_workloads.trim()
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
-                        'quotacheck=t',
                         'check=t',
-                        'city=jenkins',
-                        "region=${region}",
+                        'check2=t',
                         'salesforce=gptejen',
-                        'users=15',
-                        'use_letsencrypt=f',
+                        'users=1',
                         'expiration=2',
-                        'runtime=24',
+                        'runtime=8',
+                        'quotacheck=t',
+                        "region=${region}",
+                        "student_workloads=${student_workloads}",
                     ].join(',').trim()
+
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -103,8 +114,7 @@ pipeline {
                 }
             }
         }
-        // Skip this step because sometimes the completed email arrives
-        // before the 'has started' email
+
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -113,10 +123,11 @@ pipeline {
                 git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
+
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
                     --guid ${guid} \
-                    --timeout 30 \
+                    --timeout 20 \
                     --filter 'has started'"""
             }
         }
@@ -136,15 +147,15 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
+                          --timeout 60 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
-                        openshift_location = m[0][1]
-                        echo "openshift_location = '${openshift_location}'"
+                        def m = email =~ /The list of VMs for this workshop is available at: (http:\/\/[^ \n]+)/
+                        rhdemo_location = m[0][1]
+                        echo "rhdemo_location = '${rhdemo_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
