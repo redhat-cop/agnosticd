@@ -19,12 +19,12 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ssh_location = ''
+def external_host = ''
 
 
 // Catalog items
 def choices = [
-    'OPENTLC Datacenter Infrastructure Labs / RHEL 7 Implementation Lab',		
+    'OPENTLC Cloud Infrastructure Labs / Openstack 16 Foundations',
 ].join("\n")
 
 def region_choice = [
@@ -113,7 +113,7 @@ pipeline {
                 }
             }
         }
-        
+
         stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -221,7 +221,7 @@ pipeline {
         }
         stage('Wait for deletion email') {
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
@@ -262,7 +262,7 @@ pipeline {
             ]) {
                 sh("""
                     ssh -o StrictHostKeyChecking=no -i ${ssh_key} ${ssh_admin} \
-                    "find deployer_logs -name '*${guid}*log' | xargs cat"
+                    "bin/logs.sh ${guid}" || true
                 """.trim()
                 )
             }
