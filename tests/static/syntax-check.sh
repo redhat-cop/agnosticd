@@ -45,7 +45,7 @@ for i in \
     if [ "${env_type}" = linklight ] || [ "${env_type}" = ansible-workshops ]; then
         if [ ! -d ${ansible_path}/workdir/${env_type} ]; then
             set +e
-            git clone https://github.com/ansible/workshops.git ${ansible_path}/workdir/${env_type} &> $output
+            git clone --branch master https://github.com/ansible/workshops.git ${ansible_path}/workdir/${env_type} &> $output
             if [ $? = 0 ]; then
                 commit=$(cd ${ansible_path}/workdir/${env_type}; PAGER=cat git show --no-patch --format=oneline --no-color)
                 echo "OK .......... ${item} / Download ansible-workshop -- $commit"
