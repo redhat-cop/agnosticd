@@ -163,8 +163,8 @@ pipeline {
         
         stage ('Wait to complete provision') {
         	steps {
-				echo "Wait for 30 minutes for deployment to complete"
-				sleep 1800 // seconds
+				echo "Wait for 5 minutes for deployment to complete"
+				sleep 300 // seconds
 			}
 		}
 
