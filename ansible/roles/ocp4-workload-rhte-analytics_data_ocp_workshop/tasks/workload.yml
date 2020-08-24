@@ -1,7 +1,6 @@
 # vim: set ft=ansible
 ---
 # Implement your Workload deployment tasks here
-
 - name: Create spark-notebook ImageStreamTag in openshift project
   k8s:
     namespace: "openshift"
@@ -74,10 +73,11 @@
     api_version: operators.coreos.com/v1alpha1
     kind: ClusterServiceVersion
     namespace: "opendatahub-user{{ item }}"
-    name: opendatahub-operator.v0.5.1
+    name: opendatahub-operator.v0.5.2
   register: odh_csv
   until: 
     - odh_csv.resources is defined
+    - odh_csv.resources[0] is defined
     - odh_csv.resources[0].status is defined
     - odh_csv.resources[0].status.phase is defined
     - odh_csv.resources[0].status.phase == 'Succeeded'
@@ -94,6 +94,7 @@
   register: odh_operator
   until: 
     - odh_operator.resources is defined
+    - odh_operator.resources[0] is defined
     - odh_operator.resources[0].status is defined
     - odh_operator.resources[0].status.readyReplicas is defined
     - odh_operator.resources[0].status.readyReplicas | int >= 1
@@ -102,7 +103,7 @@
   loop: "{{ range(1, num_users | int + 1, 1) | list }}"
 
 - include_tasks: per_user_post_operator_workload.yml
-  loop: "{{ range(user_count_start|int, user_count_end|int)|list }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
   loop_control:
     loop_var: user_num
 
@@ -117,6 +118,7 @@
   until:
     - deployment_out is defined
     - deployment_out.resources is defined
+    - deployment_out.resources[0] is defined
     - deployment_out.resources[0].status is defined
     - deployment_out.resources[0].status.readyReplicas is defined
     - deployment_out.resources[0].status.readyReplicas | int >= 1
@@ -134,6 +136,7 @@
   until:
     - deployment_out is defined
     - deployment_out.resources is defined
+    - deployment_out.resources[0] is defined
     - deployment_out.resources[0].status is defined
     - deployment_out.resources[0].status.readyReplicas is defined
     - deployment_out.resources[0].status.readyReplicas | int >= 1
@@ -151,6 +154,7 @@
   until:
     - deployment_out is defined
     - deployment_out.resources is defined
+    - deployment_out.resources[0] is defined
     - deployment_out.resources[0].status is defined
     - deployment_out.resources[0].status.readyReplicas is defined
     - deployment_out.resources[0].status.readyReplicas | int >= 1
@@ -168,12 +172,111 @@
   until:
     - deployment_out is defined
     - deployment_out.resources is defined
+    - deployment_out.resources[0] is defined
     - deployment_out.resources[0].status is defined
     - deployment_out.resources[0].status.readyReplicas is defined
     - deployment_out.resources[0].status.readyReplicas | int >= 3
   loop: "{{ (range(1, num_users | int + 1, 1) | list) | product(validation_3statefulsets) | list }}"
   retries: 18
   delay: 10
+
+- name: Get the cluster apps domain
+  k8s_facts:
+    api_version: config.openshift.io/v1
+    name: cluster
+    kind: Ingress
+  register: cluster_apps_domain_out
+
+- name: register cluster apps domain as a fact
+  set_fact:
+    cluster_apps_domain: "{{ cluster_apps_domain_out.resources[0].spec.domain}}"
+    notebook_suffix: "/notebooks/data-engineering-and-machine-learning-workshop.git/source/notebooks/hybrid-data-engineering.ipynb"
+
+- name: make sure the guides project exists
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: guides
+
+- name: search for username distribution tool
+  k8s_facts:
+    kind: DeploymentConfig
+    name: get-a-username
+    namespace: guides
+  register: r_gau_dc
+
+- name: deploy redis
+  when: r_gau_dc.resources | list | length == 0
+  shell: >
+    oc process -f -
+    -p DATABASE_SERVICE_NAME=redis
+    -p REDIS_PASSWORD=redis
+    -p VOLUME_CAPACITY=1Gi
+    -p MEMORY_LIMIT=1Gi
+    -p REDIS_VERSION=latest
+    | oc create -n guides  -f -
+  args:
+    stdin: "{{ lookup('file', 'redis-template.yaml') }}"
+
+- name: wait for redis to be ready
+  when: r_gau_dc.resources | list | length == 0
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: guides
+    label_selectors:
+      - name = redis
+      - deploymentconfig = redis
+    field_selectors:
+      - status.phase=Running
+  register: r_redis_pod
+  retries: 120
+  delay: 10
+  until: r_redis_pod.resources | list | length == 1
+  
+- name: deploy username distribution tool
+  when: r_gau_dc.resources | list | length == 0
+  shell: >
+    oc -n guides new-app quay.io/openshiftlabs/username-distribution:1.2 --name=get-a-username
+    -e LAB_REDIS_HOST=redis
+    -e LAB_REDIS_PASS=redis
+    -e LAB_TITLE={{ 'Data Engineering Workshop' | quote }}
+    -e LAB_DURATION_HOURS=8h
+    -e LAB_USER_COUNT={{ num_users }}
+    -e LAB_USER_ACCESS_TOKEN={{ 'openshift' | quote }}
+    -e LAB_USER_PASS={{ 'openshift' | quote }}
+    -e LAB_USER_PREFIX=user
+    -e LAB_USER_PAD_ZERO=false
+    -e LAB_ADMIN_PASS={{ 'openshift' | quote }}
+    -e LAB_MODULE_URLS={{ ( 'http://jupyterhub-opendatahub-%USERNAME%.' + cluster_apps_domain + '/user/%USERNAME%' + notebook_suffix + ';Workshop Jupyter Notebook') | quote }}
+
+- name: expose username distribution tool
+  k8s:
+    api_version: route.openshift.io/v1
+    namespace: guides
+    state: present
+    kind: Route
+    definition:
+      metadata:
+        name: get-a-username
+        labels:
+          app: get-a-username
+      spec:
+        host: ''
+        to:
+          kind: Service
+          name: get-a-username
+          weight: 100
+        port:
+          targetPort: 8080-tcp
+  register: r_route
+
+- debug:
+    msg:
+    - "user.info: Credentials URL for students: http://{{ r_route.result.spec.host }}"
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete

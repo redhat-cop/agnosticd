@@ -1,0 +1,135 @@
+---
+
+- assert:
+    that:
+      - ocp4_dso_nexus_image_version is version('3.0','>=')
+      - ocp4_dso_nexus_image_version is version('4.0','<')
+    msg: "This role only supports nexus 3 images. Change 'ocp4_dso_nexus_image_version' parameter"
+
+- name: check if nexus project {{ ocp4_dso_nexus_project_name }} exists
+  shell: "{{ ocp4_dso_openshift_cli }} get project {{ ocp4_dso_nexus_project_name }}"
+  register: nexus_project_result
+  ignore_errors: true
+  changed_when: false
+
+- name: create nexus project {{ ocp4_dso_nexus_project_name }}
+  shell: "{{ ocp4_dso_openshift_cli }} new-project {{ ocp4_dso_nexus_project_name }} --display-name='Nexus' --description='Nexus Repository Manager'"
+  when: nexus_project_result is failed
+
+- name: assign user as project admin
+  shell: "{{ ocp4_dso_openshift_cli }} adm policy add-role-to-user admin {{ project_admin }} -n {{ ocp4_dso_nexus_project_name }}"
+  ignore_errors: true
+  when:
+    - nexus_project_result is failed
+    - project_admin is defined
+    - project_admin is not none
+    - project_admin|trim() != ""
+
+- name: annotate project project {{ ocp4_dso_nexus_project_name }}
+  shell: "{{ ocp4_dso_openshift_cli }} annotate --overwrite namespace {{ ocp4_dso_nexus_project_name }} {{ project_annotations }}"
+  ignore_errors: true
+  when:
+    - nexus_project_result is failed
+    - project_annotations is defined
+    - project_annotations is not none
+    - project_annotations|trim() != ""
+
+- name: check if nexus exists
+  shell: "{{ ocp4_dso_openshift_cli }} get service {{ ocp4_dso_nexus_service_name }} -n {{ ocp4_dso_nexus_project_name }}"
+  register: nexus_result
+  ignore_errors: true
+  changed_when: false
+
+- name: deploy nexus template (persistent)
+  shell: |
+    {{ ocp4_dso_openshift_cli }} new-app -f https://raw.githubusercontent.com/OpenShiftDemos/nexus/master/nexus3-persistent-template.yaml \
+        --param=VOLUME_CAPACITY=10Gi \
+        --param=SERVICE_NAME={{ ocp4_dso_nexus_service_name }} \
+        --param=MAX_MEMORY={{ ocp4_dso_nexus_max_memory }} \
+        --param=NEXUS_VERSION={{ ocp4_dso_nexus_image_version }} \
+        -n {{ ocp4_dso_nexus_project_name }}
+  when: nexus_result is failed and not ocp4_dso_ephemeral
+
+- name: deploy nexus template (ephemeral)
+  shell: |
+    {{ ocp4_dso_openshift_cli }} new-app -f https://raw.githubusercontent.com/OpenShiftDemos/nexus/master/nexus3-template.yaml \
+        --param=MAX_MEMORY={{ ocp4_dso_nexus_max_memory }} \
+        --param=SERVICE_NAME={{ ocp4_dso_nexus_service_name }} \
+        --param=NEXUS_VERSION={{ ocp4_dso_nexus_image_version }} \
+        -n {{ ocp4_dso_nexus_project_name }}
+  when: nexus_result is failed and ocp4_dso_ephemeral
+
+- name: set nexus resources
+  shell: "{{ ocp4_dso_openshift_cli }} set resources dc/{{ ocp4_dso_nexus_service_name }} --limits=cpu=1,memory={{ ocp4_dso_nexus_max_memory }} --requests=cpu=200m,memory=512Mi -n {{ ocp4_dso_nexus_project_name }}"
+  ignore_errors: true
+
+- name: set an exec action as a liveness probe to run 'cat /nexus-data/admin.password'
+  shell: "{{ ocp4_dso_openshift_cli }} set probe dc/{{ ocp4_dso_nexus_service_name }} --liveness -- cat /nexus-data/admin.password"
+
+- name: set an HTTP readiness probe for port 8081 and path / over HTTP on the pod IP
+  shell: "{{ ocp4_dso_openshift_cli }} set probe dc/{{ ocp4_dso_nexus_service_name }} --readiness --get-url=http://:8081/ --initial-delay-seconds=30"
+
+- name: get nexus route
+  shell: "{{ ocp4_dso_openshift_cli }} get route {{ ocp4_dso_nexus_service_name }} -o jsonpath='{ .spec.host }' -n {{ ocp4_dso_nexus_project_name }}"
+  register: nexus_route_output
+  changed_when: false
+
+- set_fact:
+    nexus_route: "{{ nexus_route_output.stdout }}"
+
+- set_fact:
+    nexus_rest_endpoint: "http://{{ ocp4_dso_nexus_urlprefix }}.{{ route_subdomain }}/service/siesta/rest"
+  when: ocp4_dso_nexus_image_version is version('3.8','<')
+
+- set_fact:
+    nexus_rest_endpoint: "http://{{ ocp4_dso_nexus_urlprefix }}.{{ route_subdomain }}/service/rest"
+  when: ocp4_dso_nexus_image_version is version('3.8','>=')
+
+- name: wait for nexus to be running
+  uri:
+    url: http://{{ ocp4_dso_nexus_urlprefix }}.{{ route_subdomain }}
+    status_code: 200
+  register: result
+  until: result.status == 200
+  retries: 30
+  delay: 30
+
+- name: get nexus pod name
+  shell: "{{ ocp4_dso_openshift_cli }} get pods --field-selector=status.phase=Running --no-headers -o custom-columns=\":metadata.name\" -n {{ ocp4_dso_nexus_project_name }} | grep nexus | grep -v 'deploy'"
+  register: pnresult
+
+- name: get nexus admin password
+  shell: "{{ ocp4_dso_openshift_cli }} exec {{ pnresult.stdout_lines[0] }} cat /nexus-data/admin.password -n {{ ocp4_dso_nexus_project_name }}"
+  register: pwresult
+
+- name: set nexus facts
+  set_fact:
+    ocp4_dso_nexus_admin_password_current: "{{ pwresult.stdout_lines[0] }}"
+
+- name: upload groovy scripts to configure nexus
+  include_tasks: ./upload_script.yml
+  with_items:
+    - update_password
+    - setup_user
+
+- name: create additional admin user
+  import_tasks: ./call_script.yml
+  vars:
+    script_name: setup_user
+    args: # this structure will be parsed by the groovy JsonSlurper
+      username: "{{ ocp4_dso_nexus_admin_user }}"
+      first_name: "Admin"
+      last_name: "User"
+      email: "admin@none.com"
+      roles: '["nx-admin"]'
+      password: "{{ ocp4_dso_nexus_admin_password }}"
+  when: ocp4_dso_nexus_admin_user != "admin"
+
+- name: update admin password for base user admin
+  import_tasks: ./call_script.yml
+  vars:
+    script_name: update_password
+    args:
+      username: "admin"
+      new_password: "{{ ocp4_dso_nexus_admin_password }}"
+  when: ocp4_dso_nexus_admin_password_current != ocp4_dso_nexus_admin_password

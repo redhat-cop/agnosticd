@@ -76,6 +76,7 @@ pipeline {
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
                     def cfparams = [
+                        'status=t',
                         'expiration=7',
                         'runtime=8',
                         "region=${region}",

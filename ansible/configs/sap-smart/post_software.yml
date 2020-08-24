@@ -1,0 +1,225 @@
+- name: Make Ansible Tower License file available
+  hosts: localhost
+  gather_facts: False
+  become: false
+  tasks:
+
+    - debug:
+        msg: "Post-Software tasks Started"
+
+    - name: Dump Ansible Tower License to a file
+      copy:
+        content: "{{ tower_license }}"
+        dest: /tmp/license.json
+      when: tower_instance_count > 0
+
+- name: Configure Ansible Tower
+  hosts: towers
+  gather_facts: False
+  become: yes
+  tasks:
+
+    - block:
+
+      - name: Ensure dependencies for tower-cli are installed
+        yum:
+          name: python3-pip
+          state: latest
+
+      - name: Ensure tower-cli is installed
+        pip:
+          name: ansible-tower-cli
+          state: latest
+          executable: pip3
+
+      - name: Dump tower-cli config
+        copy:
+          content: "{{ tower_cli_config }}"
+          dest: /etc/tower/tower_cli.cfg
+
+      - name: Dump Ansible Tower Workflow Schema to a file
+        copy:
+          content: "{{ workflow_schema }}"
+          dest: /tmp/schema.yml
+
+      - name: Ensure Tower License is configured
+        include_role:
+          name: infra-ansible/roles/ansible/tower/config-ansible-tower-license
+
+      - name: Ensure required Credentials are added to Tower
+        include_role:
+          name: infra-ansible/roles/ansible/tower/manage-credentials
+
+      - name: Ensure required inventories are added to Tower
+        include_role:
+          name: infra-ansible/roles/ansible/tower/manage-inventories
+
+      - name: Ensure required Projects are added to Tower
+        include_role:
+          name: infra-ansible/roles/ansible/tower/manage-projects
+
+      - name: Ensure required Job Templates are added to Tower
+        include_role:
+          name: infra-ansible/roles/ansible/tower/manage-job-templates
+
+      - name: Ensure required WorkFlow Templates are added to Tower
+        shell: /usr/local/bin/tower-cli workflow create --name="SAP HANA and S/4HANA E2E deployment"
+
+      - name: Populate new WorkFlow with specified schema
+        shell: /usr/local/bin/tower-cli workflow schema "SAP HANA and S/4HANA E2E deployment" @/tmp/schema.yml
+
+      when: tower_instance_count > 0
+
+- name: Register HANA and S4HANA hosts into Satellite and install katello agent
+  hosts: hanas:s4hanas
+  serial: 1
+  become: True
+  gather_facts: True
+  tasks:
+
+    - include_role:
+        name: redhat_sap.sap_rhsm
+
+    - name: Enable required repository for Katello Agent
+      rhsm_repository:
+        name: satellite-tools-6.7-for-rhel-8-x86_64-e4s-rpms
+        state: enabled
+
+    - name: Reboot instances
+      reboot:
+
+    - name: Install katello-agent and compliance packages
+      yum:
+        name: 
+          - katello-agent
+          # Leaving these 3 commented for future testing in case I finally
+          # add the compliance piece to the workshop
+          # - scap-security-guide-0.1.42-11.el8
+          # - openscap-scanner
+          # - openscap
+        state: present
+        update_cache: yes
+      retries: 30
+      delay: 30
+      register: result
+      until: result.rc == 0
+      # We have seen deployments in PROD taking a very long time to get 
+      # Satellite repos to sync. Adding instructions to the lab to check if this
+      # package has been installed, otherwise install it manually
+      ignore_errors: yes
+
+- name: Enable Satellite for remote execution over registered Hosts - pull
+  hosts: sats
+  become: yes
+  tasks:
+
+    - name: Pull SSH public KEY from Satellite Host
+      fetch:
+        src: /usr/share/foreman-proxy/.ssh/id_rsa_foreman_proxy.pub
+        dest: "{{ output_dir }}/"
+        flat: yes
+
+- name: Enable Satellite for remote execution over registered Hosts - push
+  hosts: hanas:s4hanas
+  become: yes
+  tasks:
+
+    - name: Push SSH public KEY to registered SAP Hosts
+      copy:
+        src: "{{ output_dir }}/id_rsa_foreman_proxy.pub"
+        dest: "/root/.ssh/authorized_keys"
+        owner: "root"
+        group: root
+        mode: '0600'
+        force: yes
+
+- name: Deploy SAP HANA and SAP S/4HANA
+  hosts: towers
+  gather_facts: False
+  become: yes
+  tasks:
+
+    - name: Run the end to end pipeline for HANA and S/4HANA
+      shell: /usr/local/bin/tower-cli workflow_job launch -W "SAP HANA and S/4HANA E2E deployment"
+
+ 
+- name: Print out information for the user to consume the lab
+  hosts: localhost
+  gather_facts: False
+  become: false
+  tasks:
+
+    - name: Set agnosticd user info messages
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop: >-
+        {{
+          [
+            "You can access your Satellite instance via HTTPS:",
+            "",
+            "https://sat-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}",
+            "",
+            "",
+            "Make sure you are using the following credentials:",
+            "",
+            "Username: admin",
+            "Password: {{ satellite_password }}",
+            "",
+            "",
+            "You can access your bastion via SSH:",
+            "",
+            "ssh cloud-user@bastion-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}",
+            "",
+            "",
+            "Make sure you use the following RSA key while connecting to the Bastion Host:",
+            ""
+          ]
+          + lookup('file', '{{ output_dir }}/{{ guid }}_infra_ssh_key.pem').splitlines()
+          + (
+          [
+            "",
+            "",
+            "You can access your Ansible Tower instance via HTTPS:",
+            "",
+            "https://tower-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}",
+            "",
+            "",
+            "Make sure you are using the following credentials:",
+            "",
+            "Username: admin",
+            "Password: {{ tower_password }}"
+          ] if tower_instance_count > 0 else []
+          )
+        }}
+        
+    - name: Set agnosticd user info data for bastion
+      agnosticd_user_info:
+        data:
+          bastion_ssh_command: "ssh cloud-user@bastion-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}"
+          bastion_ssh_key: "{{ lookup('file', '{{ output_dir }}/{{ guid }}_infra_ssh_key.pem') }}"
+
+    - name: Set agnosticd user info data for tower
+      when: tower_instance_count > 0
+      agnosticd_user_info:
+        data:
+          tower_url: "https://tower-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}"
+          tower_username: "admin"
+          tower_password: "{{ tower_password }}"
+
+    - name: Set agnosticd user info data for Satellite
+      agnosticd_user_info:
+        data:
+          sat_url: "https://sat-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}"
+          sat_username: "admin"
+          sat_password: "{{ satellite_password }}"
+
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Post-Software checks completed successfully"

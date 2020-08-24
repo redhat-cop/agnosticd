@@ -1,0 +1,110 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+# Implement your workload deployment tasks here
+# -------------------------------------------------------------------------
+
+- name: Add user {{ ocp_username}} to groups "{{ ocp4_workload_quarkus_experienced_elt_user_groups }}"
+  when: ocp4_workload_quarkus_experienced_elt_user_groups | default([]) | length > 0
+  command: "oc adm groups add-users {{ item }} {{ ocp_username }}"
+  register: r_groupadd_register
+  with_items: "{{ ocp4_workload_quarkus_experienced_elt_user_groups }}"
+
+- name: Print Debug information
+  debug:
+    var: r_groupadd_register
+    verbosity: 2
+
+- name: Debug Limitrange
+  debug:
+    msg: "{{ lookup('template', item ) | from_yaml }}"
+    verbosity: 2
+  loop:
+  - ./templates/limitrange.j2
+
+- name: Create k8s Resources
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/project.j2
+  - ./templates/role_binding.j2
+  - ./templates/limitrange.j2
+  - ./templates/cluster_resource_quota.j2
+  - ./templates/operator_group.j2
+  - ./templates/subscription_prometheus.j2
+  - ./templates/subscription_grafana.j2
+
+- name: Get Installed Prometheus CSV
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: prometheus
+    namespace: "{{ ocp4_workload_quarkus_experienced_elt_project }}"
+  register: r_subscription_prometheus
+  retries: 30
+  delay: 5
+  until:
+  - r_subscription_prometheus.resources[0].status.currentCSV is defined
+  - r_subscription_prometheus.resources[0].status.currentCSV | length > 0
+
+- name: Wait until Prometheus CSV is installed
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription_prometheus.resources[0].status.currentCSV }}"
+    namespace: "{{ ocp4_workload_quarkus_experienced_elt_project }}"
+  register: r_csv_prometheus
+  retries: 15
+  delay: 5
+  until:
+  - r_csv_prometheus.resources[0].status.phase is defined
+  - r_csv_prometheus.resources[0].status.phase | length > 0
+  - r_csv_prometheus.resources[0].status.phase == "Succeeded"
+
+- name: Get Installed Grafana CSV
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: grafana-operator
+    namespace: "{{ ocp4_workload_quarkus_experienced_elt_project }}"
+  register: r_subscription_grafana
+  retries: 30
+  delay: 5
+  until:
+  - r_subscription_grafana.resources[0].status.currentCSV is defined
+  - r_subscription_grafana.resources[0].status.currentCSV | length > 0
+
+- name: Wait until Grafana CSV is installed
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription_grafana.resources[0].status.currentCSV }}"
+    namespace: "{{ ocp4_workload_quarkus_experienced_elt_project }}"
+  register: r_csv_grafana
+  retries: 15
+  delay: 5
+  until:
+  - r_csv_grafana.resources[0].status.phase is defined
+  - r_csv_grafana.resources[0].status.phase | length > 0
+  - r_csv_grafana.resources[0].status.phase == "Succeeded"
+
+# Do this last, otherwise Grafana Operator won't start because it doesn't set
+# Requests and limits
+# Might be worthwhile to add a 1 pod quota for BestEffort
+# - name: Create ClusterResourceQuota
+#   when: ocp4_workload_quarkus_experienced_elt_create_quota | bool
+#   k8s:
+#     state: present
+#     definition: "{{ lookup('template', item ) | from_yaml }}"
+#   loop:
+#   - ./templates/cluster_resource_quota.j2
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

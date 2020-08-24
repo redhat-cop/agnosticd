@@ -1,0 +1,352 @@
+#jinja2: lstrip_blocks: True
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Mappings:
+  RegionMapping: {{ aws_ami_region_mapping | to_json }}
+  DNSMapping: {{ aws_dns_mapping | to_json }}
+
+Resources:
+  Vpc:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: "192.168.0.0/16"
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: "{{vpcid_name_tag}}"
+        - Key: Hostlication
+          Value:
+            Ref: "AWS::StackId"
+
+  VpcInternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+
+  VpcGA:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      InternetGatewayId:
+        Ref: VpcInternetGateway
+      VpcId:
+        Ref: Vpc
+
+  VpcRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId:
+        Ref: Vpc
+
+  VPCRouteInternetGateway:
+    DependsOn: VpcGA
+    Type: "AWS::EC2::Route"
+    Properties:
+      GatewayId:
+        Ref: VpcInternetGateway
+      DestinationCidrBlock: "0.0.0.0/0"
+      RouteTableId:
+        Ref: VpcRouteTable
+
+  PublicSubnet:
+    Type: "AWS::EC2::Subnet"
+    DependsOn:
+      - Vpc
+    Properties:
+      CidrBlock: "192.168.0.0/24"
+      Tags:
+        - Key: Name
+          Value: "{{project_tag}}"
+        - Key: Hostlication
+          Value:
+            Ref: "AWS::StackId"
+      MapPublicIpOnLaunch: true
+      VpcId:
+        Ref: Vpc
+
+  PublicSubnetRTA:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      RouteTableId:
+        Ref: VpcRouteTable
+      SubnetId:
+        Ref: PublicSubnet
+
+  HostSG:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Host
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value: host_sg
+
+  HostUDPPorts:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId:
+        Fn::GetAtt:
+          - HostSG
+          - GroupId
+      IpProtocol: udp
+      FromPort: 60000
+      ToPort: 60003
+      CidrIp: "0.0.0.0/0"
+
+  HostTCPPortsSSH:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId:
+        Fn::GetAtt:
+          - HostSG
+          - GroupId
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: "0.0.0.0/0"
+  HostTCPPortsHTTP:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId:
+        Fn::GetAtt:
+          - HostSG
+          - GroupId
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: "0.0.0.0/0"
+  HostTCPPortsHTTPS:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId:
+        Fn::GetAtt:
+          - HostSG
+          - GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: "0.0.0.0/0"
+
+  zoneinternalidns:
+    Type: "AWS::Route53::HostedZone"
+    Properties:
+      Name: "{{ zone_internal_dns }}"
+      VPCs:
+        - VPCId:
+            Ref: Vpc
+          VPCRegion:
+            Ref: "AWS::Region"
+      HostedZoneConfig:
+        Comment: "Created By ansible agnostic deployer"
+
+{# if deploying many clientvms #}
+{% if num_users|d(1)|int > 1 %}
+{% for c in range(1,num_users|int+1) %}
+
+  clientvm{{loop.index}}:
+    Type: "AWS::EC2::Instance"
+    Properties:
+{% if custom_image is defined %}
+      ImageId: {{ custom_image.image_id }}
+{% else %}
+      ImageId:
+        Fn::FindInMap:
+        - RegionMapping
+        - Ref: AWS::Region
+{% if 'image_id' in instances[0] %}
+        - {{ instances[0].image_id }}
+{% else %}
+        - 'RHEL81'
+{% endif %}
+{% endif %}
+      InstanceType: "{{instances[0]['flavor'][cloud_provider]}}"
+      KeyName: "{{instances[0]['key_name'] | default(key_name)}}"
+      SecurityGroupIds:
+        - "Fn::GetAtt":
+          - HostSG
+          - GroupId
+      SubnetId:
+        Ref: PublicSubnet
+      Tags:
+        - Key: Name
+          Value: clientvm{{loop.index}}
+        - Key: internaldns
+          Value: clientvm{{loop.index}}.{{chomped_zone_internal_dns}}
+        - Key: "owner"
+          Value: "{{ email | default('unknownuser') }}"
+        - Key: "Project"
+          Value: "{{project_tag}}"
+        - Key: "{{project_tag}}"
+          Value: "{{ instances[0]['name'] }}"
+{% for tag in instances[0]['tags'] %}
+        - Key: {{tag['key']}}
+          Value: {{tag['value']}}
+{% endfor %}
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: {{ instances[0]['rootfs_size'] | default('50') }}
+{% for vol in instances[0]['volumes']|default([]) %}
+        - DeviceName: "{{ vol['device_name'] }}"
+          Ebs:
+            VolumeType: "{{ vol['volume_type'] | d('gp2') }}"
+            VolumeSize: "{{ vol['volume_size'] | d('20') }}"
+{% endfor %}
+
+  clientvm{{loop.index}}InternalDNS:
+    Type: "AWS::Route53::RecordSetGroup"
+    Properties:
+      HostedZoneId:
+        Ref: zoneinternalidns
+      RecordSets:
+      - Name: "clientvm{{loop.index}}.{{zone_internal_dns}}"
+        Type: A
+        TTL: 10
+        ResourceRecords:
+          - "Fn::GetAtt":
+            - clientvm{{loop.index}}
+            - PrivateIp
+      - Name: "bastion{{loop.index}}.{{zone_internal_dns}}"
+        Type: A
+        TTL: 10
+        ResourceRecords:
+          - "Fn::GetAtt":
+            - clientvm{{loop.index}}
+            - PrivateIp
+
+  clientvm{{loop.index}}EIP:
+    Type: "AWS::EC2::EIP"
+    DependsOn:
+    - VpcGA
+    Properties:
+      InstanceId:
+        Ref: clientvm{{loop.index}}
+
+  clientvm{{loop.index}}PublicDNS:
+    Type: "AWS::Route53::RecordSetGroup"
+    DependsOn:
+      - clientvm{{loop.index}}EIP
+    Properties:
+      HostedZoneId: {{HostedZoneId}}
+      RecordSets:
+          - Name: "clientvm{{loop.index}}.{{subdomain_base}}."
+            Type: A
+            TTL: 10
+            ResourceRecords:
+            - "Fn::GetAtt":
+              - clientvm{{loop.index}}
+              - PublicIp
+          - Name: "bastion{{loop.index}}.{{subdomain_base}}."
+            Type: A
+            TTL: 10
+            ResourceRecords:
+            - "Fn::GetAtt":
+              - clientvm{{loop.index}}
+              - PublicIp
+{% endfor %}
+
+
+{# deploying just one clientvm #}
+{% else %}
+  clientvm:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId:
+        Fn::FindInMap:
+        - RegionMapping
+        - Ref: AWS::Region
+{% if 'image' in instances[0] %}
+        - {{ instances[0].image }}
+{% else %}
+        - 'RHEL81'
+{% endif %}
+      InstanceType: "{{instances[0]['flavor'][cloud_provider]}}"
+      KeyName: "{{instances[0]['key_name'] | default(key_name)}}"
+      SecurityGroupIds:
+        - "Fn::GetAtt":
+          - HostSG
+          - GroupId
+      SubnetId:
+        Ref: PublicSubnet
+      Tags:
+        - Key: Name
+          Value: clientvm
+        - Key: internaldns
+          Value: clientvm.{{chomped_zone_internal_dns}}
+        - Key: "owner"
+          Value: "{{ email | default('unknownuser') }}"
+        - Key: "Project"
+          Value: "{{project_tag}}"
+        - Key: "{{project_tag}}"
+          Value: "{{ instances[0]['name'] }}"
+{% for tag in instances[0]['tags'] %}
+        - Key: {{tag['key']}}
+          Value: {{tag['value']}}
+{% endfor %}
+      BlockDeviceMappings:
+        - DeviceName: "/dev/sda1"
+          Ebs:
+            VolumeSize: {{ instances[0]['rootfs_size'] | default('50') }}
+{% for vol in instances[0]['volumes']|default([]) %}
+        - DeviceName: "{{ vol['device_name'] }}"
+          Ebs:
+            VolumeType: "{{ vol['volume_type'] | d('gp2') }}"
+            VolumeSize: "{{ vol['volume_size'] | d('20') }}"
+{% endfor %}
+
+  clientvmInternalDNS:
+    Type: "AWS::Route53::RecordSetGroup"
+    Properties:
+      HostedZoneId:
+        Ref: zoneinternalidns
+      RecordSets:
+      - Name: "clientvm.{{zone_internal_dns}}"
+        Type: A
+        TTL: 10
+        ResourceRecords:
+          - "Fn::GetAtt":
+            - clientvm
+            - PrivateIp
+      - Name: "bastion.{{zone_internal_dns}}"
+        Type: A
+        TTL: 10
+        ResourceRecords:
+          - "Fn::GetAtt":
+            - clientvm
+            - PrivateIp
+
+  clientvmEIP:
+    Type: "AWS::EC2::EIP"
+    DependsOn:
+    - VpcGA
+    Properties:
+      InstanceId:
+        Ref: clientvm
+
+  clientvmPublicDNS:
+    Type: "AWS::Route53::RecordSetGroup"
+    DependsOn:
+      - clientvmEIP
+    Properties:
+      HostedZoneId: {{HostedZoneId}}
+      RecordSets:
+          - Name: "clientvm.{{subdomain_base}}."
+            Type: A
+            TTL: 10
+            ResourceRecords:
+            - "Fn::GetAtt":
+              - clientvm
+              - PublicIp
+          - Name: "bastion.{{subdomain_base}}."
+            Type: A
+            TTL: 10
+            ResourceRecords:
+            - "Fn::GetAtt":
+              - clientvm
+              - PublicIp
+{% endif %}
+
+Outputs:
+  Route53internalzoneOutput:
+    Description: The ID of the internal route 53 zone
+    Value:
+      Ref: zoneinternalidns

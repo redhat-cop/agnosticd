@@ -1,0 +1,99 @@
+---
+
+- name: check if gogs project {{ ocp4_dso_gogs_project_name }} exists
+  shell: "{{ ocp4_dso_openshift_cli }} get project {{ ocp4_dso_gogs_project_name }}"
+  register: gogs_project_result
+  ignore_errors: true
+  changed_when: false
+
+- name: create gogs project {{ ocp4_dso_gogs_project_name }}
+  shell: "{{ ocp4_dso_openshift_cli }} new-project {{ ocp4_dso_gogs_project_name }} --display-name='Gogs' --description='Gogs Git Server'"
+  when: gogs_project_result is failed
+
+- name: assign user as project admin
+  shell: "{{ ocp4_dso_openshift_cli }} adm policy add-role-to-user admin {{ project_admin }} -n {{ ocp4_dso_gogs_project_name }}"
+  ignore_errors: true
+  when:
+    - gogs_project_result is failed
+    - project_admin is defined
+    - project_admin is not none
+    - project_admin|trim() != ""
+
+- name: annotate gogs project {{ ocp4_dso_gogs_project_name }}
+  shell: "{{ ocp4_dso_openshift_cli }} annotate --overwrite namespace {{ ocp4_dso_gogs_project_name }} {{ project_annotations }}"
+  ignore_errors: true
+  when:
+    - gogs_project_result is failed
+    - project_annotations is defined
+    - project_annotations is not none
+    - project_annotations|trim() != ""
+
+- name: check if gogs exists
+  shell: "{{ ocp4_dso_openshift_cli }} get service {{ ocp4_dso_gogs_service_name }} -n {{ ocp4_dso_gogs_project_name }}"
+  register: install_gogs
+  ignore_errors: true
+  changed_when: false
+
+- name: remove existing gogs if clean deploy requested
+  shell: |
+    {{ ocp4_dso_openshift_cli }} delete all,cm,pvc -l app={{ ocp4_dso_gogs_service_name }} -n {{ gogs_ocp4_dso_gogs_project_name }}
+    {{ ocp4_dso_openshift_cli }} delete sa {{ ocp4_dso_gogs_service_name }} -n {{ gogs_ocp4_dso_gogs_project_name }}
+  when:
+    - install_gogs is succeeded
+    - ocp4_dso_gogs_clean_deploy|bool
+
+- import_tasks: deploy_gogs.yml
+  when: ocp4_dso_gogs_clean_deploy|bool or install_gogs is failed
+
+- name: wait for gogs sign_up to be ready
+  uri:
+    url: http://{{ ocp4_dso_gogs_urlprefix }}.{{ route_subdomain }}/user/sign_up
+    status_code: 200
+  register: result
+  until: result.status == 200
+  retries: 10
+  delay: 30
+
+- name: create gogs admin user
+  uri:
+    url: http://{{ ocp4_dso_gogs_urlprefix }}.{{ route_subdomain }}/user/sign_up
+    method: POST
+    body: "user_name={{ ocp4_dso_gogs_admin_user }}&password={{ ocp4_dso_gogs_admin_password }}&&retype={{ ocp4_dso_gogs_admin_password }}&&email={{ ocp4_dso_gogs_admin_user }}@gogs.com"
+    headers:
+      Content-Type: "application/x-www-form-urlencoded"
+    status_code: 302,200
+
+- name: check if user exists
+  uri:
+    url: http://{{ ocp4_dso_gogs_urlprefix }}.{{ route_subdomain }}/api/v1/users/{{ ocp4_dso_gogs_user }}
+    user: "{{ ocp4_dso_gogs_admin_user }}"
+    password: "{{ ocp4_dso_gogs_admin_password }}"
+    force_basic_auth: true
+    status_code: 200,404
+  register: user_result
+
+- name: create gogs user
+  uri:
+    url: http://{{ ocp4_dso_gogs_urlprefix }}.{{ route_subdomain }}/api/v1/admin/users
+    method: POST
+    body: "{'login_name': '{{ ocp4_dso_gogs_user }}', 'username': '{{ ocp4_dso_gogs_user }}', 'email': '{{ ocp4_dso_gogs_user }}@gogs.com', 'password': '{{ ocp4_dso_gogs_user_password }}'}"
+    body_format: json
+    user: "{{ ocp4_dso_gogs_admin_user }}"
+    password: "{{ ocp4_dso_gogs_admin_password }}"
+    status_code: 200,201
+    force_basic_auth: true
+  when: user_result.status != 200
+
+- name: generate gogs users
+  uri:
+    url: http://{{ ocp4_dso_gogs_urlprefix }}.{{ route_subdomain }}/api/v1/admin/users
+    method: POST
+    body: "{'login_name': '{{ item }}', 'username': '{{ item }}', 'email': '{{ item }}@gogs.com', 'password': '{{ ocp4_dso_gogs_user_password }}'}"
+    body_format: json
+    user: "{{ ocp4_dso_gogs_admin_user }}"
+    password: "{{ ocp4_dso_gogs_admin_password }}"
+    status_code: 200,201
+    force_basic_auth: true
+  ignore_errors: true
+  with_sequence: start=0 end={{ ocp4_dso_gogs_generate_user_count }} format="{{ ocp4_dso_user_format }}"
+  when: ocp4_dso_gogs_generate_user_count|int >= 0
