@@ -19,8 +19,8 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def external_host = ''
-
+def ssh_location = ''
+def tower_location = ''
 
 // Catalog items
 def choices = [
@@ -154,9 +154,12 @@ pipeline {
                     ).trim()
 
                     try {
-                    	def m = email =~ /SSH Access: (.*)/
+                    	def m = email =~ /ssh (.*)/
 						ssh_location = m[0][1]
-						echo "SSH Access: ${ssh_location}"
+						echo "SSH: ${ssh_location}"
+						def mm = email =~ /https:(.*)/
+                        tower_location = mm[0][1]
+                        echo "tower_location = '${tower_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email

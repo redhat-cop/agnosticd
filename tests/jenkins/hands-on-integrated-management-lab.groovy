@@ -19,8 +19,8 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def external_host = ''
-
+def ssh_location = ''
+def ocp_location = ''
 
 // Catalog items
 def choices = [
@@ -161,6 +161,9 @@ pipeline {
                     	def m = email =~ /SSH Access: (.*)/
 						ssh_location = m[0][1]
 						echo "SSH Access: ${ssh_location}"
+						def mm = email =~ /URL: (.*)/
+						ocp_location = mm[0][1]
+						echo "OCP Console: ${ocp_location}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
