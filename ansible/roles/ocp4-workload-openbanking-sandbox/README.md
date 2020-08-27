@@ -1,4 +1,4 @@
-= ocp4-workload-mercury - Description goes here
+= ocp4-workload-openbanking-sandbox - Open Banking Sandbox demo workload
 
 == Role overview
 
@@ -9,7 +9,7 @@
 
 ----
 TARGET_HOST="bastion.na311.openshift.opentlc.com"
-OCP_USERNAME="shacharb-redhat.com"
+OCP_USERNAME="rmarins-redhat.com"
 WORKLOAD="ocp4-workload-sleep"
 GUID=1001
 
