@@ -114,13 +114,28 @@ pipeline {
             }
         }
 
-		// This kind of CI send only one mail
-        stage('Wait to receive and parse email') {
+		stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                    branch: 'development'
+
+                sh """./tests/jenkins/downstream/poll_email.py \
+                    --server '${imap_server}' \
+                    --guid ${guid} \
+                    --timeout 30 \
+                    --filter 'has started'"""
+            }
+        }
+
+        stage('Wait for last email and parse OpenShift and App location') {
+            environment {
+                credentials=credentials("${imap_creds}")
+            }
+            steps {
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 script {
@@ -130,8 +145,8 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 90 \
-                          --filter 'is building'
+                          --timeout 120 \
+                          --filter 'has completed'
                         """
                     ).trim()
 
