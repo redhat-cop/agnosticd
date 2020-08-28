@@ -136,9 +136,9 @@ pipeline {
                     ).trim()
 
                     try {
-                    	def m = email =~ /SSH Access: (.*)/
+                    	def m = email =~ /ssh (.*)/
 						ssh_location = m[0][1]
-						echo "SSH Access: ${ssh_location}"
+						echo "SSH: ssh ${ssh_location}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -151,8 +151,8 @@ pipeline {
         
         stage ('Wait to complete provision') {
         	steps {
-				echo "Wait for 30 minutes for deployment to complete"
-				sleep 1800 // seconds
+				echo "Wait for 5 minutes for deployment to complete"
+				sleep 300 // seconds
 			}
 		}
 
