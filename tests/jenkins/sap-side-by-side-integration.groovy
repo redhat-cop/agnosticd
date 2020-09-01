@@ -24,8 +24,7 @@ def ssh_location = ''
 
 // Catalog items
 def choices = [
-    'Workshops / SAP Smart Management',
-    'Pre-Prod Catalog Items / SAP Smart Management for SAP workloads',
+    'Workshops / SAP side-by-side Integration',
 ].join("\n")
 
 def region_choice = [
