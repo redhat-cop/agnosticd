@@ -90,7 +90,7 @@ pipeline {
                         'status=t',
                         'check=t',
                         'check2=t',
-                        'salesforce=gptejen',
+                        'notes=devops_automation_jenkins',
                         'expiration=2',
                         'runtime=10',
                         'quotacheck=t',
