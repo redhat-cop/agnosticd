@@ -85,6 +85,7 @@ pipeline {
                     def region = params.region.trim()
                     def course_module_list = params.course_module_list.trim()
                     def cfparams = [
+                        'status=t',
                         'check=t',
                         'salesforce=gptejen',
                         'city=jenkins',

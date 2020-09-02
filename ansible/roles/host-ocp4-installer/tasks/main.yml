@@ -4,12 +4,94 @@
 - name: Generate install_config.yaml
   import_tasks: generate_install_config.yml
 
-- name: Run the installer
-  become: no
-  tags:
-  - run_installer
-  command: openshift-install create cluster --dir=/home/{{ ansible_user }}/{{ cluster_name }}
-  async: "{{ 2 * 60 * 60 }}"
+# For OVN it is necessary to generate manifests and then change the manifests
+# For SDN this is not necessary. Regardless the installation will either generate
+# manifests if there aren't any (default) or use the updated ones (OVN)
+- name: Generate and patch Manifests for OVN
+  when: ocp4_network_type | default("OpenshiftSDN") is match("OVNKubernetes")
+  block:
+  - name: Run Installer to generate manifests
+    become: no
+    tags:
+    - run_installer
+    command: openshift-install create manifests --dir=/home/{{ ansible_user }}/{{ cluster_name }}
+
+  - name: Create manifests/cluster-network-03-config.yml for OVN
+    copy:
+      src: ./files/cluster-network-03-config.yml
+      dest: "/home/{{ ansible_user }}/{{ cluster_name }}/manifests/cluster-network-03-config.yml"
+      owner: "{{ ansible_user }}"
+      mode: 0660
+
+- name: Installation and getting the logs
+  block:
+  - name: Run the installer
+    become: no
+    tags:
+      - run_installer
+    command: openshift-install create cluster --dir=/home/{{ ansible_user }}/{{ cluster_name }}
+    async: "{{ 2 * 60 * 60 }}"
+    ignore_errors: yes
+  - name: Retry OpenShift installation (wait-for install-complete)
+    command: openshift-install --dir=/home/{{ ansible_user }}/{{ cluster_name }} wait-for install-complete
+
+  rescue:
+    - name: Restarting OpenStack nodes
+      when: cloud_provider == "osp"
+      shell: openstack server reboot --hard {{ item }}
+      with_lines: openstack server list | awk '/{{ cluster_name }}/ { print $2 };'
+      ignore_errors: yes
+    - pause:
+        minutes: 10
+        prompt: "Pausing whilst OpenStack nodes recover..."
+      when: cloud_provider == "osp"
+    - name: Retry OpenShift installation (wait-for bootstrap-complete)
+      command: openshift-install --dir=/home/{{ ansible_user }}/{{ cluster_name }} wait-for bootstrap-complete
+    - name: Retry OpenShift installation (wait-for install-complete)
+      command: openshift-install --dir=/home/{{ ansible_user }}/{{ cluster_name }} wait-for install-complete
+
+  always:
+  - name: Gzip Install log
+    archive:
+      path: /home/{{ ansible_user }}/{{ cluster_name }}/.openshift_install.log
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/.openshift_install.log.gz
+      format: gz
+
+  - name: Get Install log
+    fetch:
+      src: /home/{{ ansible_user }}/{{ cluster_name }}/.openshift_install.log.gz
+      dest: "{{ output_dir }}/{{ env_type }}_{{ guid }}_log/"
+      flat: yes
+
+# OpenStack does not have a way to add userTags via the install-config.yaml
+# https://bugzilla.redhat.com/show_bug.cgi?id=1868517
+# Find all created active instances (name contains the GUID)
+# and add the tags manually
+# Tags are necessary for lifecycle (stop / start environments)
+- name: Add tags to OpenStack instance metadata
+  when: cloud_provider == "osp"
+  block:
+  - name: Get all instances for GUID
+    os_server_info:
+      server: "*{{ guid }}*"
+      filters:
+        vm_state: active
+    register: r_servers
+
+  - name: Add GUID and env-type metadata to instances
+    os_server_metadata:
+      server: "{{ item.name }}"
+      meta:
+        guid: "{{ guid }}"
+        env_type: "{{ env_type }}"
+    loop: "{{ r_servers.openstack_servers }}"
+
+  - name: Add additional metadata to instances
+    when: hostvars.localhost.cf_tags_final | default({}) | length > 0
+    os_server_metadata:
+      server: "{{ item.name }}"
+      meta: "{{ hostvars.localhost.cf_tags_final | default({}) | to_json }}"
+    loop: "{{ r_servers.openstack_servers }}"
 
 - name: Fetch kube config
   fetch:

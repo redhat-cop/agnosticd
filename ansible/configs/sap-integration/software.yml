@@ -1,0 +1,218 @@
+---
+- name: Step 004 - Software
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Debug ocp4-cluster software playbook
+      debug:
+        msg: "ocp4-cluster Software playbook"
+
+- name: Ensure NFS Server is installed, SAP Software Device Mounted and Ansible Installed
+  hosts: bastions
+  become: True
+  gather_facts: True
+  tasks:
+
+    - name: Ensure NFS directory exists
+      file:
+        path: "/nfs"
+        state: directory
+
+    - name: Mount up device by UUID
+      mount:
+        path: /nfs
+        src: /dev/vdb
+        fstype: xfs
+        state: present
+
+    - name: 'Ensure required packages are installed'
+      package:
+        name: '{{ item }}'
+        state: installed
+      with_items:
+      - nfs-utils
+      - firewalld
+
+    - name: 'Ensure firewalld is running'
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+
+    - name: 'Open Firewall for NFS use'
+      firewalld:
+        port: "{{ item }}"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      with_items:
+      - 111/tcp
+      - 111/udp
+      - 2049/tcp
+      - 2049/udp
+
+    - name: "Ensure export file contains the directory to be shared"
+      lineinfile:
+        path: /etc/exports
+        state: present
+        regexp: "^/nfs"
+        line: "/nfs *(insecure,rw,no_root_squash,no_wdelay,sync)"
+
+    - name: 'Ensure nfs-server is restarted and running'
+      service:
+        name: nfs-server
+        state: restarted
+        enabled: yes
+
+    - name: 'Ensure SFLIGHT export information can be read by anyone'
+      file:
+        path: /nfs/SFLIGHT/index
+        state: directory
+        recurse: yes
+        owner: root
+        group: root
+        mode: 0755
+
+    - name: Ensure /nfs directory is owned by 'cloud-user'
+      file:
+        path: /nfs
+        state: directory
+        owner: cloud-user
+
+    - name: Ensure SAP software is not present for external (non Red Hatters) requesters
+      file:
+        state: absent
+        path: "{{ item }}"
+      loop:
+        - '/nfs/HANA_installation/'
+        - '/nfs/S4HANA_installation/'
+        - '/nfs/SAPCAR/'
+        - '/nfs/SAPHOSTAGENT/'
+      when: not rh_internal
+
+- name: Ensure NFS share is mounted in HANA and S/4HANA Hosts. Ensure required repos for SAP are enabled
+  hosts: hanas:s4hanas
+  become: True
+  gather_facts: True
+  tasks:
+
+    - name: Ensure Software directory exists
+      file:
+        path: "/software"
+        state: directory
+
+    - name: Ensure NFS share is mounted
+      mount:
+        path: "/software"
+        src: "bastion-{{ guid }}:/nfs"
+        fstype: nfs4
+        opts: "rw,bg,hard,_netdev"
+        state: mounted
+
+    - include_role:
+        name: redhat_sap.sap_rhsm
+
+- name: Configure required mount points for HANA
+  hosts: hanas
+  vars:
+    storage_pools:
+      - name: sap
+        disks:
+          - vdb
+        volumes:
+          - name: data
+            size: "128 GiB"
+            mount_point: "/hana/data"
+            state: present
+          - name: log
+            size: "64 GiB"
+            mount_point: "/hana/log"
+            state: present
+          - name: shared
+            size: "256 GiB"
+            mount_point: "/hana/shared"
+            state: present
+          - name: sap
+            size: "50 GiB"
+            mount_point: "/usr/sap"
+            state: present
+  become: yes
+  tasks:
+    - include_role:
+        name: storage
+
+- name: Configure required mount points for S4HANA
+  hosts: s4hanas
+  vars:
+    storage_pools:
+      - name: sap
+        disks:
+          - vdb
+        volumes:
+          - name: sap
+            size: "50 GiB"
+            mount_point: "/usr/sap"
+            state: present
+          - name: sapmnt
+            size: "20 GiB"
+            mount_point: "/usr/sapmnt"
+            state: present
+          - name: swap
+            size: "20 GiB"
+            state: present
+  become: yes
+  tasks:
+    - include_role:
+        name: storage
+
+- name: Common preconfigurtion for SAP
+  hosts: hanas:s4hanas
+  become: yes
+  tasks:
+    - include_role:
+        name: "{{ item }}"
+      loop:
+        - redhat_sap.sap_hostagent
+        - sap-preconfigure
+
+# Workaround to solve ansible lint deprecation warnings from external repository
+- name: Pull external role from GitHub
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Manually pull sap-hana-preconfigure role
+      git:
+        repo: 'https://github.com/linux-system-roles/sap-hana-preconfigure.git'
+        dest: ./roles/sap-hana-preconfigure
+        version: v1.0
+
+- name: Specific preconfigurtion for SAP HANA
+  hosts: hanas
+  become: yes
+  tasks:
+    - include_role:
+        name: sap-hana-preconfigure
+
+- name: Specific preconfigurtion for SAP S/4HANA
+  hosts: s4hanas
+  become: yes
+  tasks:
+    - include_role:
+        name: sap-netweaver-preconfigure
+
+- name: SAP HANA Deployment
+  hosts: hanas
+  become: yes
+  tasks:
+    - include_role:
+        name: redhat_sap.sap_hana_deployment
+  
+- name: SAP S/4HANA Deployment
+  hosts: s4hanas
+  become: yes
+  tasks:
+    - include_role:
+        name: redhat_sap.sap_s4hana_deployment

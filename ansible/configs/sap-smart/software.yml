@@ -1,0 +1,145 @@
+---
+- name: Step 00xxxxx software
+  hosts: localhost
+  gather_facts: False
+  become: false
+  tasks:
+    - debug:
+        msg: "Software tasks Started"
+
+- name: Ensure NFS Server is installed, SAP Software Device Mounted and Ansible Installed
+  hosts: bastions
+  become: True
+  gather_facts: True
+  tasks:
+
+    - name: Ensure NFS directory exists
+      file:
+        path: "/nfs"
+        state: directory
+
+    - name: Mount up device by UUID
+      mount:
+        path: /nfs
+        src: /dev/vdb
+        fstype: xfs
+        state: present
+
+    - name: 'Ensure required packages are installed'
+      package:
+        name: '{{ item }}'
+        state: installed
+      with_items:
+      - nfs-utils
+      - firewalld
+
+    - name: 'Ensure firewalld is running'
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+
+    - name: 'Open Firewall for NFS use'
+      firewalld:
+        port: "{{ item }}"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      with_items:
+      - 111/tcp
+      - 111/udp
+      - 2049/tcp
+      - 2049/udp
+
+    - name: "Ensure export file contains the directory to be shared"
+      lineinfile:
+        path: /etc/exports
+        state: present
+        regexp: "^/nfs"
+        line: "/nfs *(insecure,rw,no_root_squash,no_wdelay,sync)"
+
+    - name: 'Ensure nfs-server is restarted and running'
+      service:
+        name: nfs-server
+        state: restarted
+        enabled: yes
+
+    - name: Ensure additional packages are installed
+      yum:
+        name: "{{ item }}"
+        state: latest
+      with_items:
+        - ansible
+        # - java-1.8.0-openjdk
+        # - rhel-system-roles-sap
+
+    - name: Ensure /nfs directory is owned by 'cloud-user'
+      file:
+        path: /nfs
+        state: directory
+        owner: cloud-user
+
+    - name: Ensure SAP software is not present for external (non Red Hatters) requesters
+      file:
+        state: absent
+        path: "{{ item }}"
+      loop:
+        - '/nfs/HANA_installation/'
+        - '/nfs/S4HANA_installation/'
+        - '/nfs/SAPCAR/'
+        - '/nfs/SAPHOSTAGENT/'
+      when: not rh_internal
+
+- name: Ensure NFS share is mounted in HANA and S/4HANA Hosts
+  hosts: hanas:s4hanas
+  become: True
+  gather_facts: True
+  tasks:
+
+    - name: Ensure Software directory exists
+      file:
+        path: "/software"
+        state: directory
+
+    - name: Ensure NFS share is mounted
+      mount:
+        path: "/software"
+        src: "bastion-{{ guid }}:/nfs"
+        fstype: nfs4
+        opts: "rw,bg,hard,_netdev"
+        state: mounted
+
+- name: Deploy Satellite
+  hosts: sats
+  become: yes
+  tasks:
+
+    - name: Install Satellite Server
+      include_tasks: sat_workload.yml
+
+- name: Deploy Ansible Tower
+  hosts: towers
+  gather_facts: False
+  become: yes
+  tasks:
+    # This is a bit hacky but we are facing some issues with Ansible, RHEL8 and python for some
+    # modules and this workaround solved this particular issue
+    - name: Ensure Python3 package is installed and alternatives for python updated
+      shell: >
+        yum install -y python3 && alternatives --set python /usr/bin/python3
+
+    - name: Install Anisble Tower
+      include_role:
+        name: infra-ansible/roles/ansible/tower/config-ansible-tower
+
+- name: Software flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Software checks completed successfully"
+
