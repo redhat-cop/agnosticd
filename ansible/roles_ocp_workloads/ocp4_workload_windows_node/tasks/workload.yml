@@ -1,0 +1,123 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+# Get the OpenShift cluster ID
+- name: Get the OpenShift cluster ID
+  shell: oc get -o jsonpath='{.status.infrastructureName}' infrastructure cluster
+  register: cluster_id
+
+# Get the region for the cluster
+- name: Get the region for the cluster
+  shell: oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.placement.region}'
+  register: cluster_region
+
+# Get the first availability zone for the cluster
+- name: Get the first availability zone for the cluster
+  shell: oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.placement.availabilityZone}'
+  register: cluster_az
+
+# Get the latest Windows Server 2019 with Containers AMI
+- name: Get the latest Windows Server 2019 with Containers AMI
+  shell: >
+    aws ec2 describe-images --region={{ cluster_region.stdout }} --filters 'Name=name,Values=Windows_Server-2019*English*Full*Containers*' 'Name=is-public,Values=true' --query 'reverse(sort_by(Images, &CreationDate))[*].{name: Name, id: ImageId}' | jq -r '.[0].id'
+  register: windows_ami
+
+# Slurp SSH key to use for secret
+- name: Slurp SSH key to use for secret
+  slurp:
+    src: "{{ ocp4_workload_windows_node_defaults.cloud_private_key }}"
+  register: ssh_key
+
+# Create the Namespace for the Operator
+- name: Create the Namespace for the Operator
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'namespace.j2' ) }}"
+
+# Create Secret with the contents of the ssh key
+- name: Create Secret with the contents of the ssh key
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'sshsecrets.j2' ) }}"
+
+# Create catalog source
+- name: Create catalog source
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'catalogsource.j2' ) }}"
+
+# Wait for the catalog item to be ready
+- name: Wait for the catalog item to be ready
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: CatalogSource
+    name: wmco
+    namespace: openshift-marketplace
+  register: wmcocs
+  retries: 25
+  delay: 5
+  until: wmcocs.resources[0].status.connectionState.lastObservedState == "READY"
+
+# Create the Operator group
+- name: Create the Operator group
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'operatorgroup.j2' ) }}"
+
+# Create the Subscription
+- name: Create the Subscription
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'subscription.j2' ) }}"
+
+# Wait for the deployment to appear
+- name: Wait for the deployment to appear
+  shell: >
+    oc get deployment -n windows-machine-config-operator windows-machine-config-operator  -o name | wc -l
+  register: wcodeployment
+  retries: 25
+  delay: 5
+  until: wcodeployment.stdout | int == 1
+
+# Wait for the operator to come up
+- name: Wait for the operator to come up
+  k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: windows-machine-config-operator
+    namespace: "{{ ocp4_workload_windows_node_defaults.namespace }}"
+  register: wcoperator
+  retries: 25
+  delay: 5
+  until: wcoperator.resources[0].status.readyReplicas == 1
+
+# Create the Windows Node MachineSet
+- name: Create the Windows Node MachineSet
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'windows-ms.j2' ) }}"
+
+# Wait for the Window machine to come up
+- name: Wait for the Window machine to come up
+  k8s_info:
+    api_version: machine.openshift.io/v1beta1
+    kind: Machine
+    label_selectors:
+      - machine.openshift.io/os-id = Windows
+    namespace: openshift-machine-api
+  register: wnmstatus
+  retries: 25
+  delay: 5
+  until: wnmstatus.resources[0].status.phase == "Running"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
+
+##
+##
