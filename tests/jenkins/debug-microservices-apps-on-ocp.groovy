@@ -148,7 +148,7 @@ pipeline {
                     	def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
                         ocp_master = m[0][1]
                         echo "Openshift Master Console = '${ocp_master}'"
-                        def mm = email =~ /SSH Access: (https:\/\/[^ \n]+)/
+                        def mm = email =~ /SSH Access: (.*)/
                         ssh_location = mm[0][1]
                         echo "SSH Access = '${ssh_location}'"
                         def mmm = email =~ /OpenShift Console: (https:\/\/[^ \n]+)/
