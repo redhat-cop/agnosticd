@@ -7,40 +7,66 @@
 # Download SSH proxy container creator script
 - name: Download SSH proxy container creator script
   get_url:
-    url: https://raw.githubusercontent.com/eparis/ssh-bastion/master/deploy/deploy.sh
-    dest: /home/ec2-user/windows_node_scripts/deploy-sshproxy.sh
-    owner: ec2-user
-    group: ec2-user
-    mode: '0555'
+    url: https://raw.githubusercontent.com/eparis/ssh-bastion/3b0e2565534424e216f995254b0b048c632c4edc/deploy/deploy.sh
+    dest: "/home/{{ ansible_user }}/windows_node_scripts/deploy-sshproxy.sh"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
 
 # Copy over ssh command script
 - name: Download SSH proxy container creator script
   copy:
     src: sshcmd.sh
-    dest: /home/ec2-user/windows_node_scripts/sshcmd.sh
-    owner: ec2-user
-    group: ec2-user
-    mode: '0555'
+    dest: "/home/{{ ansible_user }}/windows_node_scripts/sshcmd.sh"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
 
-# Get the OpenShift cluster ID
+# Extract the AWS secret key from OpenShift
 - name: Get the OpenShift cluster ID
-  shell: oc get -o jsonpath='{.status.infrastructureName}' infrastructure cluster
-  register: cluster_id
+  k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+    namespace: default
+  register: cluster_id_fact
+  retries: 25
+  delay: 5
+  until:
+    - cluster_id_fact.resources[0].status.infrastructureName is defined
+
+# Set the Openshift ID as a fact for later use
+- name: Set the Openshift ID as a fact for later use
+  set_fact:
+    cluster_id: "{{ cluster_id_fact.resources[0].status.infrastructureName }}"
+
+# Extract OpenShift machineSet region and first availablity zone
+- name: Extract OpenShift machineSet region and first availablity zone
+  k8s_info:
+    api_version: machine.openshift.io/v1beta1
+    kind: MachineSet
+    namespace: openshift-machine-api
+  register: machineset_list
+  retries: 25
+  delay: 5
+  until:
+    - machineset_list.resources[0].spec.template.spec.providerSpec.value.placement.region is defined
+    - machineset_list.resources[0].spec.template.spec.providerSpec.value.placement.availabilityZone is defined
 
 # Get the region for the cluster
-- name: Get the region for the cluster
-  shell: oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.placement.region}'
-  register: cluster_region
+- name: Get the region for the cluster and set it as a fact for later use
+  set_fact:
+    cluster_region: "{{ machineset_list.resources[0].spec.template.spec.providerSpec.value.placement.region }}"
 
 # Get the first availability zone for the cluster
-- name: Get the first availability zone for the cluster
-  shell: oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.placement.availabilityZone}'
-  register: cluster_az
+- name: Get the first availability zone for the cluster and set it as a fact for later use
+  set_fact:
+    cluster_az: "{{ machineset_list.resources[0].spec.template.spec.providerSpec.value.placement.availabilityZone }}"
 
 # Get the latest Windows Server 2019 with Containers AMI
 - name: Get the latest Windows Server 2019 with Containers AMI
   shell: >
-    aws ec2 describe-images --region={{ cluster_region.stdout }} --filters 'Name=name,Values=Windows_Server-2019*English*Full*Containers*' 'Name=is-public,Values=true' --query 'reverse(sort_by(Images, &CreationDate))[*].{name: Name, id: ImageId}' | jq -r '.[0].id'
+    aws ec2 describe-images --region={{ cluster_region }} --filters 'Name=name,Values=Windows_Server-2019*English*Full*Containers*' 'Name=is-public,Values=true' --query 'reverse(sort_by(Images, &CreationDate))[*].{name: Name, id: ImageId}' | jq -r '.[0].id'
   register: windows_ami
 
 # Slurp SSH key to use for secret
@@ -92,15 +118,6 @@
   k8s:
     state: present
     definition: "{{ lookup('template', 'subscription.j2' ) }}"
-
-# Wait for the deployment to appear
-- name: Wait for the deployment to appear
-  shell: >
-    oc get deployment -n windows-machine-config-operator windows-machine-config-operator  -o name | wc -l
-  register: wcodeployment
-  retries: 25
-  delay: 5
-  until: wcodeployment.stdout | int == 1
 
 # Wait for the operator to come up
 - name: Wait for the operator to come up
