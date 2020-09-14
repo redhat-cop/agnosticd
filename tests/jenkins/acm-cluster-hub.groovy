@@ -151,13 +151,13 @@ pipeline {
                     try {
 						def m = email =~ /Openshift Master Console: (https:\/\/[^ \n]+)/
                         ocp_console = m[0][1]
-                        echo "Openshift Master Console = '${ocp_console}'"
+                        echo "Openshift Master Console = ${ocp_console}"
                         def mm = email =~ /(https:\/\/[^ \n]+)/
                         acm_console = mm[0][1]
-                        echo "ACM console = '${acm_console}'"
+                        echo "ACM console = ${acm_console}"
                         def mmm = email =~ /ssh (.*)/
                         ssh_location = mmm[0][1]
-                        echo "SSH = ssh '${ssh_location}'"
+                        echo "SSH = ssh ${ssh_location}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
