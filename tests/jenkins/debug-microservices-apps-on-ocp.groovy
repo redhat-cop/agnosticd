@@ -26,8 +26,8 @@ def crd_console = ''
 
 // Catalog items
 def choices = [
-    'Workshops / Debug Microservices Apps on OCP',
-    'DevOps Shared Cluster Development / DEV Debug Microservices Apps on OCP',
+    'Workshops / OCP4 Workshop - Debug Microservices',
+    'DevOps Shared Cluster Development / DEV OCP4 Workshop - Debug Microservices',
 ].join("\n")
 
 def region_choice = [
