@@ -1,0 +1,84 @@
+---
+- name: Setting up Synopsys Black Duck workload for user
+  debug:
+    msg: "Setting up Synopsys Black Duck workload for user ocp_username = {{ ocp_username }}"
+
+# Synopsys Black Duck workload tasks
+# -------------------------------------------------------------------------
+
+- name: Install synopsysctl CLI
+  become: true
+  unarchive:
+    src: "{{ ocp4_workload_synopsys_blackduck_ctl_url }}"
+    remote_src: yes
+    dest: /usr/bin
+    mode: 0775
+    owner: root
+    group: root
+  args:
+    creates: /usr/bin/synopsysctl
+
+- name: set the current project to the demo project to use in the j2 template
+  set_fact:
+    ocp4_workload_current_project: "{{ ocp4_workload_synopsys_blackduck_demo_project }}"
+
+- name: create {{ ocp4_workload_synopsys_blackduck_demo_project }} project for user by using a jinja2 template in the role
+  k8s:
+    state: present
+    definition: "{{ lookup('template', role_path ~ '/templates/project.j2' ) | from_yaml }}"
+
+- name: give {{ ocp4_workload_synopsys_blackduck_demo_project }} project view access to all training users
+  command: "oc adm policy add-role-to-user edit user{{ item }} -n {{ ocp4_workload_synopsys_blackduck_demo_project }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Deploy insecure bank
+  k8s:
+    state: present
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+    namespace: "{{ ocp4_workload_synopsys_blackduck_demo_project }}"
+  loop:
+    - ./files/insecure-bank-deployment.yml
+    - ./files/insecure-bank-service.yml
+    - ./files/insecure-bank-route.yml
+
+- name: set the current project to the blackduck project to use in the j2 template
+  set_fact:
+    ocp4_workload_current_project: "{{ ocp4_workload_synopsys_blackduck_project }}"
+
+- name: create {{ ocp4_workload_synopsys_blackduck_project }} project for user by using a jinja2 template in the role
+  k8s:
+    state: present
+    definition: "{{ lookup('template', role_path ~ '/templates/project.j2' ) | from_yaml }}"
+
+- name: give {{ ocp4_workload_synopsys_blackduck_project }} project view access to all training users
+  command: "oc adm policy add-role-to-user view user{{ item }} -n {{ ocp4_workload_synopsys_blackduck_project }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Copy blackuck-hosts file
+  copy:
+    src: "./files/blackduck-hosts.json"
+    dest: "/home/{{ansible_user}}/blackduck-hosts.json"
+
+- name: Create Black Duck for OpenShift (opssight)
+  command: "synopsysctl create opssight ops -n {{ ocp4_workload_synopsys_blackduck_project }} --version {{ ocp4_workload_synopsys_blackduck_for_openshift_version }} --blackduck-external-hosts-file-path blackduck-hosts.json --pod-processor-namespace-filter={{ ocp4_workload_synopsys_blackduck_demo_project }}"
+
+- name: await Black Duck for OpenShift availability by querying the OpenShift API
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: "{{ ocp4_workload_synopsys_blackduck_project }}"
+    name: "ops-opssight-core"
+  register: r_ops_opssight_core_deployment
+  retries: 30
+  delay: 30
+  until:
+    - r_ops_opssight_core_deployment.resources | length | int > 0
+    - r_ops_opssight_core_deployment.resources[0].status.readyReplicas is defined
+    - r_ops_opssight_core_deployment.resources[0].status.readyReplicas | int == r_ops_opssight_core_deployment.resources[0].spec.replicas | int
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
