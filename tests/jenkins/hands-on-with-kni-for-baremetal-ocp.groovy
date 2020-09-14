@@ -19,14 +19,13 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def github_url=''
-def ansible_tower_url=''
-def vscode_url=''
+def ocp_console=''
+def cnv_workbooks=''
 def ssh_location=''
 
 // Catalog items
 def choices = [
-    'RHTR 2020 / GitOps with Ansible Tower',
+    'RHTR 2020 / Hands-on with KNI for Baremetal OCP',
 ].join("\n")
 
 def region_choice = [
@@ -150,17 +149,14 @@ pipeline {
                     ).trim()
 
                     try {
-						def m = email =~ /Gitlab URL: (http:\/\/[^ \n]+)/
-                        github_url = m[0][1]
-                        echo "Gitlab URL = '${github_url}'"
-                        def mm = email =~ /Ansible Tower URL: (https:\/\/[^ \n]+)/
-                        ansible_tower_url = mm[0][1]
-                        echo "Ansible Tower URL = '${ansible_tower_url}'"
-                        def mmm = email =~ /VScode UI URL: (https:\/\/[^ \n]+)/
-                        vscode_url = mmm[0][1]
-                        echo "VScode UI URL = '${vscode_url}'"
-                        def mmmm = email =~ /ssh (.*)/
-                        ssh_location = mmmm[0][1]
+						def m = email =~ /Openshift Master Console: (https:\/\/[^ \n]+)/
+                        ocp_console = m[0][1]
+                        echo "Openshift Master Console = '${ocp_console}'"
+                        def mm = email =~ /CNV Lab Workbook: (https:\/\/[^ \n]+)/
+                        cnv_workbook = mm[0][1]
+                        echo "CNV Lab Workbook = '${cnv_workbook}'"
+                        def mmm = email =~ /ssh (.*)/
+                        ssh_location = mmm[0][1]
                         echo "SSH = ssh '${ssh_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
