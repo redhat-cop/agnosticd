@@ -19,8 +19,11 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ocp_console=''
+def ocp_master=''
 def ssh_location=''
+def ocp_console=''
+def crd_console=''
+def sso_console=''
 
 // Catalog items
 def choices = [
@@ -148,12 +151,21 @@ pipeline {
                     ).trim()
 
                     try {
-                        def m = email =~ /OpenShift Console: (https:\/\/[^ \n]+)/
-                        ocp_console = m[0][1]
-                        echo "OpenShift Console = '${ocp_console}'"
-                        def mm = email =~ /CodeReady Console: (http:\/\/[^ \n]+)/
-                        crd_console = mm[0][1]
-                        echo "CodeReady Console = '${crd_console}'"
+                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
+                        ocp_master = m[0][1]
+                        echo "Openshift Master Console = ${ocp_master}"
+                        def mm = email =~ /SSH Access: (.*)/
+                        ssh_location = mm[0][1]
+                        echo "SSH Access = ssh ${ssh_location}"
+                        def mmm = email =~ /OpenShift Console: (https:\/\/[^ \n]+)/
+                        ocp_console = mmm[0][1]
+                        echo "OpenShift Console = ${ocp_console}"
+                        def mmmm = email =~ /CodeReady Console: (https:\/\/[^ \n]+)/
+                        crd_console = mmmm[0][1]
+                        echo "CodeReady Console = ${crd_console}"
+                        def mmmmm = email =~ /Red Hat SSO Console: (https:\/\/[^ \n]+)/
+                        sso_console = mmmmm[0][1]
+                        echo "Red Hat SSO Consoles = ${sso_console}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
