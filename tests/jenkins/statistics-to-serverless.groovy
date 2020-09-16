@@ -142,7 +142,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
+                          --timeout 180 \
                           --filter 'has completed'
                         """
                     ).trim()

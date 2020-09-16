@@ -19,11 +19,12 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
+def vscode_url=''
 def ssh_location=''
 
 // Catalog items
 def choices = [
-    'RHTR 2020 / Jenkins to Tekton',
+    'RHTR 2020 / Collections Lab',
 ].join("\n")
 
 def region_choice = [
@@ -147,9 +148,12 @@ pipeline {
                     ).trim()
 
                     try {
+                        def mmm = email =~ /VScode UI URL: (https:\/\/[^ \n]+)/
+                        vscode_url = mmm[0][1]
+                        echo "VScode UI URL = '${vscode_url}'"
                         def mmmm = email =~ /ssh (.*)/
                         ssh_location = mmmm[0][1]
-                        echo "SSH = '${ssh_location}'"
+                        echo "SSH = ssh '${ssh_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
