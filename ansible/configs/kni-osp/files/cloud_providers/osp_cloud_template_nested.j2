@@ -1,0 +1,208 @@
+heat_template_version: 2018-03-02
+
+description: Nested HOT for creating instances, ports, & floating IPs. This template relies is called by a top level template that is resposible for common resources such as network, router, etc.
+
+parameters:
+
+  network_private:
+    type: string
+    description: The name of the network created by the top level HOT.
+
+  security_groups:
+    type: json
+    description: The list of security groups created by the top level HOT. Passed as a list or string?
+
+  provider_network:
+    type: string
+    description: The provider network where floating IPs will be provisioned from.
+
+  instance_name:
+    type: string
+    description: The instance name is passed from the top level HOT. It should be appended with an index value if there will be more than one of this type of instance deployed.
+
+  instance_image:
+    type: string
+
+  instance_flavor:
+    type: string
+
+  instance_metadata:
+    type: json
+    description: Metadata in OpenStack is the equivilent to tags in a cloud provider such as AWS
+
+  instance_fip:
+    type: boolean
+    description: When passed from top level HOT, this will determine whether the FIP and FIP association resources are created based on condition.
+
+  instance_app_ip:
+    type: string
+    description: fixed ip to give to the instance on the app network
+
+  instance_pxe_ip:
+    type: string
+    description: fixed ip for the pxe network
+
+  instance_app_mac:
+    type: string
+    description: fixed mac address
+
+  instance_pxe_mac:
+    type: string
+    description: fixed mac address
+
+  volume_size:
+    type: number
+    description: The size in GB of the volume being created from an image.
+
+  key_name:
+    type: string
+    description: The SSH key that will be added to the instance.
+
+  network_pxe:
+    type: string
+    description: bmc network provided from top level
+
+  instance_bmc:
+    type: boolean
+    description: will determine presence of a second port
+
+  src_img:
+    type: boolean
+    description: will determine presence of cinder source image to clone from
+
+  mkvol:
+    type: boolean
+    description: will determine creation of cinder volume
+
+  volumes_attach:
+    type: boolean
+    description: Will determine if created volume need to be attached
+
+  volume_name:
+    type: string
+    description: name of the volume to create if any
+
+  ocp_api_vip:
+    type: string
+    description: VIP for *.apps ocp address
+
+  ocp_app_vip:
+    type: string
+    description: VIP for api ocp address
+
+  port_security:
+    type: boolean
+    description: port security enablement
+
+  port_insecure:
+    type: boolean
+    description: unsecure port creation
+
+conditions:
+
+  create_fip:
+    get_param: instance_fip
+
+  create_bmc:
+    get_param: instance_bmc
+
+  use_img:
+    get_param: src_img
+
+  create_volume:
+    get_param: mkvol
+
+  create_secure_port:
+    get_param: port_security
+
+  create_unsecure_port:
+    get_param: port_insecure
+
+  attach_volume:
+    get_param: volumes_attach
+
+resources:
+
+  port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_param: network_private }
+      port_security_enabled: { get_param: port_security }
+      mac_address: { get_param: instance_app_mac }
+      fixed_ips:
+        - ip_address: { get_param: instance_app_ip }
+      allowed_address_pairs:
+        if:
+        - create_secure_port
+        - - ip_address: { get_param: ocp_api_vip }
+          - ip_address: { get_param: ocp_app_vip }
+        - []
+      security_groups:
+        if:
+        - create_secure_port
+        - { get_param: security_groups }
+        - []
+
+  pxe_port:
+    type: OS::Neutron::Port
+    condition: create_bmc
+    properties:
+      network: { get_param: network_pxe }
+      port_security_enabled: false
+      mac_address: { get_param: instance_pxe_mac }
+      fixed_ips:
+        - ip_address: { get_param: instance_pxe_ip }
+
+  volume:
+    type: OS::Cinder::Volume
+    condition: create_volume
+    properties:
+      name: { get_param: volume_name }
+      size: { get_param: volume_size }
+
+  fip:
+    type: OS::Neutron::FloatingIP
+    condition: create_fip
+    properties:
+      floating_network: { get_param: provider_network }
+
+  fip_association:
+    type: OS::Neutron::FloatingIPAssociation
+    condition: create_fip
+    properties:
+      floatingip_id: { get_resource: fip }
+      port_id: { get_resource: port }
+
+  instance:
+    type: OS::Nova::Server
+    properties:
+      name: { get_param: instance_name }
+      flavor: { get_param: instance_flavor }
+      key_name: { get_param: key_name }
+      image: { get_param: instance_image }
+      user_data: |
+        #cloud-config
+        ssh_authorized_keys: {{ all_ssh_authorized_keys | to_json }}
+      user_data_format: RAW
+      networks:
+        if:
+          - create_bmc
+          - - port: { get_resource: pxe_port }
+            - port: { get_resource: port }
+          - - port: { get_resource: port }
+      metadata:
+        get_param: instance_metadata
+
+  volume_attachment:
+    type: OS::Cinder::VolumeAttachment
+    condition: attach_volume
+    properties:
+      volume_id: { get_resource: volume }
+      instance_uuid: { get_resource: instance }
+
+{#
+outputs:
+
+  fip:
+    value: { get_attr: [instance, fip ] }
+#}

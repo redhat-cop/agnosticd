@@ -1,69 +1,72 @@
-- environment:
-    OS_AUTH_URL: "{{ osp_auth_url }}"
-    OS_USERNAME: "{{ osp_auth_username_member }}"
-    OS_PASSWORD: "{{ osp_auth_password_member }}"
-    OS_PROJECT_NAME: "{{ osp_project_name }}"
-    OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
-    OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+---
+- name: Wait for less than {{ osp_max_create_in_progress }} Heat stacks in CREATE_IN_PROGRESS
+  command: >-
+    openstack stack list --property stack_status=CREATE_IN_PROGRESS --format json
+  environment: "{{ __infra_osp_template_create_environment }}"
+  register: r_stack_list
+  until:
+  - r_stack_list.stdout | from_json | count <= osp_max_create_in_progress
+  retries: 10
+  delay: "{{ osp_max_create_in_progress_base_delay | random(start=osp_max_create_in_progress_random_delay) }}"
+  changed_when: false
 
+- name: Show the number of creating stacks
+  debug:
+    msg: The number of creating stacks is {{ r_stack_list.stdout | from_json | count }}
+
+- name: Check if heat stack already exists
+  command: >-
+    openstack stack show -f json base-stack-{{ guid }}
+  environment: "{{ __infra_osp_template_create_member_environment }}"
+  register: r_stack_show
+  changed_when: false
+  failed_when: false
+  tags: heat
+
+- when: >-
+    __stack_status in ['CREATE_FAILED', 'NONE']
+  vars:
+    __stack: "{{ r_stack_show.stdout | from_json if r_stack_show.rc == 0 else {} }}"
+    __stack_status: "{{ __stack.stack_status | default('NONE') }}"
+  environment: "{{ __infra_osp_template_create_member_environment }}"
   block:
-    - name: Check if Heat stack already exists
+  - name: Delete failed stack base-stack-{{ guid }}
+    when: __stack_status == 'CREATE_FAILED'
+    command: >-
+      openstack stack delete --wait base-stack-{{ guid }}
+
+  - name: Do a dry run of stack creation
+    command: >-
+      openstack stack create --dry-run -vvv
+      -t {{ heat_master_template }} -f json base-stack-{{ guid }}
+    changed_when: false
+    register: r_heat_validation
+    until: r_heat_validation is succeeded
+    retries: "{{ heat_retries }}"
+    delay: 20
+
+  - block:
+    - name: Create Heat stack from generated template
       command: >-
-        openstack stack show -f json base-stack-{{ guid }}
-      register: r_show
-      failed_when: false
-      changed_when: false
-      tags: heat
+        openstack stack create -f json --wait
+        -t {{ heat_master_template }}
+        base-stack-{{ guid }}
 
-    - when: r_show.rc == 0
-      block:
-
-        - name: Update Heat stack from generated template
-          command: >-
-            openstack stack update -f json --wait
-            -t {{ heat_master_template }}
-            base-stack-{{ guid }}
-          register: r_hot_out_update
-
-    - when: r_show.rc != 0
-      block:
-
-        - name: Create Heat stack from generated template
-          command: >-
-            openstack stack create -f json --wait
-            -t {{ heat_master_template }}
-            base-stack-{{ guid }}
-          register: r_hot_out_create
-
-    - name: Grab outputs
-      command: >-
-        openstack stack show -f json base-stack-{{ guid }}
-      changed_when: false
-      register: r_hot_outputs
-
-    - debug:
-        var: r_hot_outputs
-        verbosity: 3
-
-    - set_fact:
-        hot_outputs: "{{ (r_hot_outputs.stdout | from_json) }}"
-    
-    - debug:
-        var: hot_outputs
-        verbosity: 3
-
-    - name: Save infra_key content
+    rescue:
+    - name: Set __infra_osp_template_create_retry_count
       set_fact:
-        infra_private_key_content: "{{ hot_outputs | json_query(query) }}"
-      vars:
-        query: "outputs[?@.output_key=='{{ guid }}-infra_key'].output_value|[0]"
+        __infra_osp_template_create_retry_count: >-
+          {{ 1 + __infra_osp_template_create_retry_count | default(0) | int }}
 
-    - name: Set infra_ssh_key path
-      set_fact:
-        infra_ssh_key: "{{ output_dir }}/{{ guid }}_infra_ssh_key.pem"
+    - name: Fail if out of retries
+      when: osp_stack_create_retries | int < __infra_osp_template_create_retry_count | int
+      fail:
+        msg: Failed on openstack stack create
 
-    - name: Copy infra_key content to output_dir
-      copy:
-        dest: "{{ infra_ssh_key }}"
-        content: "{{ infra_private_key_content }}"
-        mode: 0600
+    - name: Pause before retry
+      pause:
+        seconds: "{{ osp_stack_create_retry_pause }}"
+
+    - name: Retry stack creation
+      include_tasks:
+        file: create_osp_template.yml

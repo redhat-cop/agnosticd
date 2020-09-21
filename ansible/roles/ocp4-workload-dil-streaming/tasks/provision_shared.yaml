@@ -19,39 +19,44 @@
     name: '{{ db_earth_namespace }}'
     state: present
 
-- name: Enable anyuid on Earth Database Namespace
-  shell: "oc adm policy add-scc-to-user anyuid -z default -n {{ db_earth_namespace }}"
+- name: Enable anyuid on Database Namespace
+  k8s:
+    state: present
+    namespace: '{{ db_earth_namespace }}'
+    resource_definition: "{{ lookup('template', 'scc-anyuid.yaml.j2') }}"
+  vars:
+    scc_namespace: '{{ db_earth_namespace }}'
 
-- name: Check if DB has been deployed
+- name: Create Data SQL ConfigMap
+  k8s:
+    state: present
+    namespace: '{{ db_earth_namespace }}'
+    resource_definition: "{{ lookup('template', 'configmap-data-sql.yaml.j2') }}"
+
+- name: Deploy MS SQL Server Database 
+  k8s:
+    state: present
+    namespace: '{{ db_earth_namespace }}'
+    resource_definition: "{{ lookup('template', 'mssql-server-linux.yaml.j2') }}"
+
+- name: Wait for Database to Start 
   k8s_facts:
-    kind: DeploymentConfig
+    kind: Deployment
     name: mssql-server-linux
     namespace: '{{ db_earth_namespace }}'
-    api_version: v1
-  register: db_exists
+    api_version: apps/v1
+  register: mssql_resource
+  until: >-
+    (mssql_resource.resources is defined)
+    and (mssql_resource.resources|length>0)
+    and (mssql_resource.resources[0].status is defined)
+    and (mssql_resource.resources[0].status.readyReplicas is defined)
+    and (mssql_resource.resources[0].status.readyReplicas > 0)
+  retries: 30
+  delay: 10
 
-- name: Deploy DB
-  block:
-  - name: Deploy Earth Database
-    shell: "oc new-app {{ mssqlserver_image }}:{{ mssqlserver_version }} \
-            -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=Password!' \
-            -e 'MSSQL_PID=Standard' -e 'MSSQL_AGENT_ENABLED=true' \
-            --name mssql-server-linux -n {{ db_earth_namespace }}"
-  - name: Create Earth Data SQL ConfigMap
-    k8s:
-      state: present
-      namespace: '{{ db_earth_namespace }}'
-      resource_definition: "{{ lookup('template', 'configmap-data-sql.yaml.j2') }}"
-  - name: Mount ConfigMap Volume
-    shell: "oc set volume dc/mssql-server-linux --add --name=earth-data \
-            --type=configmap --mount-path=/opt/workshop \
-            --configmap-name=earth-data-sql -n {{ db_earth_namespace }}"
-  - name: Add Post Hook
-    shell: "oc set deployment-hook dc/mssql-server-linux -n {{ db_earth_namespace }} --post \
-            -c mssql-server-linux --failure-policy=retry --volumes earth-data \
-            -- /opt/mssql-tools/bin/sqlcmd -S mssql-server-linux.{{ db_earth_namespace }}.svc \
-            -U sa -P Password! -i /opt/workshop/earth-data.sql"
-  when: (db_exists.resources is undefined) or (db_exists.resources | length == 0)
+- name: Configure CDC in Database
+  shell: "oc -n {{ db_earth_namespace }} exec deployment/mssql-server-linux -- /opt/mssql-tools/bin/sqlcmd -S mssql-server-linux -U sa -P 'Password!' -i /opt/workshop/data.sql"
 
 - name: Create Earth Application Namespace
   k8s:
@@ -60,10 +65,10 @@
     name: '{{ app_earth_namespace }}'
     state: present
 
-- name: Enable anyuid on Earth Database Namespace
+- name: Enable anyuid on Earth Application Namespace
   shell: "oc adm policy add-scc-to-user anyuid -z default -n {{ app_earth_namespace }}"
 
-- name: Check if DB has been deployed
+- name: Check if App has been deployed
   k8s_facts:
     kind: DeploymentConfig
     name: my-apache-php-app
