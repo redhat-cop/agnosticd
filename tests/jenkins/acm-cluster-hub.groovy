@@ -116,7 +116,7 @@ pipeline {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
 
@@ -210,21 +210,12 @@ pipeline {
                             from: credentials.split(':')[0]
                         )
                     }
-                    withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
-                        sh(
-                            """
-                            curl -H 'Content-Type: application/json' \
-                            -X POST '${HOOK_URL}' \
-                            -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :rage: ${env.JOB_NAME} (${env.BUILD_NUMBER}) failed retiring ${guid}.\"}'\
-                            """.trim()
-                        )
-                    }
                 }
             }
         }
         stage('Wait for deletion email') {
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
                 withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
@@ -278,26 +269,6 @@ pipeline {
                     replyTo: "${notification_email}",
                     from: credentials.split(':')[0]
               )
-            }
-            withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
-                sh(
-                    """
-                      curl -H 'Content-Type: application/json' \
-                      -X POST '${HOOK_URL}' \
-                      -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :rage: ${env.JOB_NAME} (${env.BUILD_NUMBER}) failed GUID=${guid}. It appears that ${env.BUILD_URL}/console is failing, somebody should do something about that.\"}'\
-                    """.trim()
-                )
-            }
-        }
-        fixed {
-            withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
-                sh(
-                    """
-                      curl -H 'Content-Type: application/json' \
-                      -X POST '${HOOK_URL}' \
-                      -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :smile: ${env.JOB_NAME} is now FIXED, see ${env.BUILD_URL}/console\"}'\
-                    """.trim()
-                )
             }
         }
     }

@@ -2,13 +2,14 @@
 // CloudForms
 def opentlc_creds = 'b93d2da4-c2b7-45b5-bf3b-ee2c08c6368e'
 def opentlc_admin_creds = '73b84287-8feb-478a-b1f2-345fd0a1af47'
-def cf_uri = 'https://portal.opentlc.com'
-def cf_group = 'opentlc-access-cicd'
+def cf_uri = 'https://rhpds.redhat.com'
+def cf_group = 'rhpds-access-cicd'
 // IMAP
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
 def notification_email = 'gpteinfrasev3@redhat.com'
+def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
 def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
@@ -18,21 +19,25 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def vscode_url=''
-def ssh_location=''
+def openshift_location = ''
+def ssh_location = ''
 
 // Catalog items
 def choices = [
-    'RHTR 2020 / Collections Lab',
+    'Workshops / Hands-On with OpenShift Virtualization',
 ].join("\n")
 
 def region_choice = [
-    'events_openstack',
+    'na_gpte',
+	'na2_gpte',
+    'apac_gpte',
+    'emea_gpte',
 ].join("\n")
 
 def environment_choice = [
-    'TEST',
     'PROD',
+    'TEST',
+    'DEV',
 ].join("\n")
 
 pipeline {
@@ -84,14 +89,17 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
+                        'check=t',
                         'check2=t',
-                        'expiration=1',
-                        'runtime=2',
+                        'salesforce=gptejen',
+                        'notes=devops_automation_jenkins',
+                        'expiration=2',
+                        'runtime=10',
                         'quotacheck=t',
+                        'use_letsencrypt=f',
                         "environment=${environment}",
                         "region=${region}",
                     ].join(',').trim()
-
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -108,30 +116,30 @@ pipeline {
                 }
             }
         }
-		
-		stage('Wait for first email') {
+        // Skip this step because sometimes the completed email arrives
+        // before the 'has started' email
+        stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
-
 
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
                     --guid ${guid} \
-                    --timeout 20 \
+                    --timeout 30 \
                     --filter 'has started'"""
             }
         }
 
-        stage('Wait to receive and parse email') {
+        stage('Wait for last email and parse OpenShift and App location') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 script {
@@ -141,18 +149,18 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 180 \
+                          --timeout 90 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                        def mmm = email =~ /VScode UI URL: (https:\/\/[^ \n]+)/
-                        vscode_url = mmm[0][1]
-                        echo "VScode UI URL = '${vscode_url}'"
-                        def mmmm = email =~ /ssh (.*)/
-                        ssh_location = mmmm[0][1]
-                        echo "SSH = ssh '${ssh_location}'"
+                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
+                        openshift_location = m[0][1]
+                        echo "Openshift Master Console: '${openshift_location}'"
+                        def mm = email =~ /SSH Access: (.*)/
+                        ssh_location = mm[0][1]
+                        echo "SSH Access: ssh '${ssh_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -162,13 +170,6 @@ pipeline {
                 }
             }
         }
-        
-        stage ('Wait to complete provision') {
-        	steps {
-				echo "Wait for 2 minutes for deployment to complete"
-				sleep 120 // seconds
-			}
-		}
 
         stage('Confirm before retiring') {
             when {
@@ -203,6 +204,15 @@ pipeline {
                             to: "${notification_email}",
                             replyTo: "${notification_email}",
                             from: credentials.split(':')[0]
+                        )
+                    }
+                    withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
+                        sh(
+                            """
+                            curl -H 'Content-Type: application/json' \
+                            -X POST '${HOOK_URL}' \
+                            -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :rage: ${env.JOB_NAME} (${env.BUILD_NUMBER}) failed retiring ${guid}.\"}'\
+                            """.trim()
                         )
                     }
                 }
@@ -264,6 +274,26 @@ pipeline {
                     replyTo: "${notification_email}",
                     from: credentials.split(':')[0]
               )
+            }
+            withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
+                sh(
+                    """
+                      curl -H 'Content-Type: application/json' \
+                      -X POST '${HOOK_URL}' \
+                      -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :rage: ${env.JOB_NAME} (${env.BUILD_NUMBER}) failed GUID=${guid}. It appears that ${env.BUILD_URL}/console is failing, somebody should do something about that.\"}'\
+                    """.trim()
+                )
+            }
+        }
+        fixed {
+            withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
+                sh(
+                    """
+                      curl -H 'Content-Type: application/json' \
+                      -X POST '${HOOK_URL}' \
+                      -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :smile: ${env.JOB_NAME} is now FIXED, see ${env.BUILD_URL}/console\"}'\
+                    """.trim()
+                )
             }
         }
     }
