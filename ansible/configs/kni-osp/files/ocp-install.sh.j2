@@ -79,6 +79,14 @@ setup_firewalld() {
 }
 
 build_installer() {
+  cd $HOME/scripts
+  # We're not using >=4.5.9 so lets see if we have a prebuilt binary that we can use to speed this up
+  if [[ $(curl -s -o openshift-baremetal-install https://gpte-public.s3.amazonaws.com/openshift-baremetal-install-$VERSION  --write-out '%{http_code}') == 200 ]]
+  then
+    chmod a+x openshift-baremetal-install
+    # skip building the binary if we got a 200 and the file was downloaded
+    return 0
+  fi
   echo "Building $SUBVER openshift-baremetal-install with OpenStack hardware profile..."
   cd $HOME
   sudo dnf -y install libvirt-devel go
@@ -91,12 +99,15 @@ build_installer() {
   cd $HOME/go/src/github.com/openshift
   git clone --single-branch --branch release-$SUBVER https://github.com/openshift/installer.git
   cd installer/
-  cp -f go.mod go.bak
-  sed -i 's/library-go.*/library-go v0.0.0-20200917093739-70fa806b210a/g' go.mod
-  if [[ $(grep library-go go.mod | wc -l) = 1 ]]
-  then
-    sed -zEi 's|(\n[^\n]*){2}$|\n\tgithub.com/openshift/library-go => github.com/openshift/library-go v0.0.0-20200917093739-70fa806b210a&|' go.mod
-  fi
+  # These are now commented as this should land soon - YMMV, you may need to pull these in, depending on the version
+  # https://github.com/openshift/installer/pull/4198/commits/077cc86cafd75bb95023434deb93b110ea2ae106
+  #cp -f go.mod go.bak
+  #sed -i 's/library-go.*/library-go v0.0.0-20200917093739-70fa806b210a/g' go.mod
+  #if [[ $(grep library-go go.mod | wc -l) = 1 ]]
+  #then
+  #  sed -zEi 's|(\n[^\n]*){2}$|\n\tgithub.com/openshift/library-go => github.com/openshift/library-go v0.0.0-20200917093739-70fa806b210a&|' go.mod
+  #fi
+  # Copy the patched OpenStack profile.go into the pre-4.5.9 repo code
   cp $HOME/scripts/profile/profile.go vendor/github.com/metal3-io/baremetal-operator/pkg/hardware/profile.go
   sed -i 's|IRONIC_IMAGE=.*|IRONIC_IMAGE=quay.io/roxenham/ironic-image:latest|g' ./data/data/bootstrap/baremetal/files/usr/local/bin/startironic.sh.template
   #vi vendor/github.com/metal3-io/baremetal-operator/pkg/hardware/profile.go
@@ -172,6 +183,7 @@ EOF
 
   oc adm release mirror -a $PULLSECRET --from=$UPSTREAM_REPO --to-release-image=$LOCAL_REG/$LOCAL_REPO:$VERSION --to=$LOCAL_REG/$LOCAL_REPO
 
+  cd $HOME/scripts
   sed -i -e 's/^/  /' $(pwd)/domain.crt
   echo "additionalTrustBundle: |" >> $(pwd)/install-config.yaml
   cat $(pwd)/domain.crt >> $(pwd)/install-config.yaml
@@ -260,9 +272,17 @@ prepare_node() {
     *nightly*) export RELEASE_IMAGE=$(curl -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp-dev-preview/$VERSION/release.txt| grep 'Pull From: quay.io' | awk -F ' ' '{print $3}' | xargs) ;;
     *) export RELEASE_IMAGE=$(curl -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$VERSION/release.txt| grep 'Pull From: quay.io' | awk -F ' ' '{print $3}' | xargs) ;;
   esac
+  export REVISION=`echo $VERSION | cut -d. -f3`
   case $VERSION in
     4.6*) oc adm release extract --registry-config "${PULLSECRET}" --command=$CMD --to "${EXTRACT_DIR}" ${RELEASE_IMAGE} ;;
-    4.5*) build_installer ;;
+    4.5*)
+      if [[ $REVISION -ge 9 ]]
+      then
+        echo "Release is greater than 4.5.9, we can extract the prebuilt binary"
+        oc adm release extract --registry-config "${PULLSECRET}" --command=$CMD --to "${EXTRACT_DIR}" ${RELEASE_IMAGE}
+      else
+        build_installer
+      fi;;
     *nightly*) build_installer ;;
     *) oc adm release extract --registry-config "${PULLSECRET}" --command=$CMD --to "${EXTRACT_DIR}" ${RELEASE_IMAGE} ;;
   esac
