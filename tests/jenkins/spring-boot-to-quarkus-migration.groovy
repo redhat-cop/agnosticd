@@ -2,8 +2,8 @@
 // CloudForms
 def opentlc_creds = 'b93d2da4-c2b7-45b5-bf3b-ee2c08c6368e'
 def opentlc_admin_creds = '73b84287-8feb-478a-b1f2-345fd0a1af47'
-def cf_uri = 'https://rhpds.redhat.com'
-def cf_group = 'rhpds-access-cicd'
+def cf_uri = 'https://labs.opentlc.com'
+def cf_group = 'opentlc-access-cicd'
 // IMAP
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
@@ -19,25 +19,24 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ssh_location = ''
-
+def ocp_master=''
+def ssh_location=''
+def ocp_console=''
+def crd_console=''
+def sso_console=''
 
 // Catalog items
 def choices = [
-    'Workshops / SAP Smart Management',
-    'Pre-Prod Catalog Items / SAP Smart Management for SAP workloads',
+    'RHTR 2020 / Spring Boot to Quarkus Migration',
 ].join("\n")
 
 def region_choice = [
-    'na_osp',
-    'emea_osp',
-    'apac_osp',
+    'events_sandbox',
 ].join("\n")
 
 def environment_choice = [
-    'PROD',
     'TEST',
-    'DEV',
+    'PROD',
 ].join("\n")
 
 pipeline {
@@ -89,11 +88,9 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
-                        'check=t',
                         'check2=t',
-                        'salesforce=gptejen',
-                        'expiration=2',
-                        'runtime=10',
+                        'expiration=1',
+                        'runtime=2',
                         'quotacheck=t',
                         "environment=${environment}",
                         "region=${region}",
@@ -115,7 +112,7 @@ pipeline {
                 }
             }
         }
-
+		
 		stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -124,20 +121,21 @@ pipeline {
                 git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
+
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
                     --guid ${guid} \
-                    --timeout 30 \
+                    --timeout 20 \
                     --filter 'has started'"""
             }
         }
 
-        stage('Wait for last email and parse OpenShift and App location') {
+        stage('Wait to receive and parse email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
                 script {
@@ -147,15 +145,27 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 120 \
+                          --timeout 150 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                    	def m = email =~ /ssh (.*)/
-						ssh_location = m[0][1]
-						echo "SSH: ssh ${ssh_location}"
+                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
+                        ocp_master = m[0][1]
+                        echo "Openshift Master Console = ${ocp_master}"
+                        def mm = email =~ /SSH Access: (.*)/
+                        ssh_location = mm[0][1]
+                        echo "SSH Access = ssh ${ssh_location}"
+                        def mmm = email =~ /OpenShift Console: (https:\/\/[^ \n]+)/
+                        ocp_console = mmm[0][1]
+                        echo "OpenShift Console = ${ocp_console}"
+                        def mmmm = email =~ /CodeReady Console: (https:\/\/[^ \n]+)/
+                        crd_console = mmmm[0][1]
+                        echo "CodeReady Console = ${crd_console}"
+                        def mmmmm = email =~ /Red Hat SSO Console: (https:\/\/[^ \n]+)/
+                        sso_console = mmmmm[0][1]
+                        echo "Red Hat SSO Consoles = ${sso_console}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email

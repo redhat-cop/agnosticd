@@ -19,25 +19,21 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
+def ocp_master = ''
 def ssh_location = ''
-
+def ocp_console = ''
+def crd_console = ''
 
 // Catalog items
 def choices = [
-    'Workshops / SAP Smart Management',
-    'Pre-Prod Catalog Items / SAP Smart Management for SAP workloads',
+    'Workshops / OCP4 Workshop - Debug Microservices',
+    'DevOps Shared Cluster Development / DEV OCP4 Workshop - Debug Microservices',
 ].join("\n")
 
 def region_choice = [
-    'na_osp',
-    'emea_osp',
-    'apac_osp',
-].join("\n")
-
-def environment_choice = [
-    'PROD',
-    'TEST',
-    'DEV',
+    'na_sandbox_gpte',
+    'apac_sandbox_gpte',
+    'emea_sandbox_gpte',
 ].join("\n")
 
 pipeline {
@@ -57,11 +53,6 @@ pipeline {
             choices: choices,
             description: 'Catalog item',
             name: 'catalog_item',
-        )
-        choice(
-            choices: environment_choice,
-            description: 'Environment',
-            name: 'environment',
         )
         choice(
             choices: region_choice,
@@ -85,20 +76,20 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
-                    def environment = params.environment.trim()
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
                         'check=t',
                         'check2=t',
                         'salesforce=gptejen',
+                        'city=jenkins',
+                        'notes=devops_automation_jenkins',
                         'expiration=2',
                         'runtime=10',
                         'quotacheck=t',
-                        "environment=${environment}",
+                        'users=1',
                         "region=${region}",
                     ].join(',').trim()
-
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -115,8 +106,9 @@ pipeline {
                 }
             }
         }
-
-		stage('Wait for first email') {
+        // Skip this step because sometimes the completed email arrives
+        // before the 'has started' email
+        stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
@@ -147,15 +139,24 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 120 \
+                          --timeout 180 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                    	def m = email =~ /ssh (.*)/
-						ssh_location = m[0][1]
-						echo "SSH: ssh ${ssh_location}"
+                    	def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
+                        ocp_master = m[0][1]
+                        echo "Openshift Master Console = '${ocp_master}'"
+                        def mm = email =~ /SSH Access: (.*)/
+                        ssh_location = mm[0][1]
+                        echo "SSH Access = '${ssh_location}'"
+                        def mmm = email =~ /OpenShift Console: (https:\/\/[^ \n]+)/
+                        ocp_console = mmm[0][1]
+                        echo "OpenShift Console = '${ocp_console}'"
+                        def mmmm = email =~ /CodeReady Console: (http:\/\/[^ \n]+)/
+                        crd_console = mmmm[0][1]
+                        echo "CodeReady Console = '${crd_console}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -165,13 +166,6 @@ pipeline {
                 }
             }
         }
-        
-        stage ('Wait to complete provision') {
-        	steps {
-				echo "Wait for 5 minutes for deployment to complete"
-				sleep 300 // seconds
-			}
-		}
 
         stage('Confirm before retiring') {
             when {
