@@ -1,0 +1,73 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Generate Admin Password if it is not defined
+  set_fact:
+    admin_password: "{{ lookup('password', '/dev/null length=12 chars=ascii_letters') }}"
+  when:
+  - admin_password is not defined or admin_password|length == 0
+
+- name: Print out Admin Password to user.info
+  debug:
+    msg: "user.info: OpenShift Terminal is configured for users {{ _terminal_admin_users }} with password {{ admin_password }}"
+
+- name: Generate an OAuthClient digest
+  set_fact:
+    _oauth_client_secret: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+
+- name: Print out OAuthClient digest
+  debug:
+    msg: "user.info: OpenShift OAuthClient digest set to {{ _oauth_client_secret }}"
+
+- name: Create Project {{ _terminal_project }}
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/project.j2
+  register: r_createproject
+  until: r_createproject is succeeded
+  retries: 5
+
+- name: Create OpenShift objects for Terminal workload
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/service.j2
+  - ./templates/route.j2
+  - ./templates/service_account_hub.j2
+  - ./templates/service_account_user.j2
+  - ./templates/role_binding.j2
+  - ./templates/config_map_cfg.j2
+  - ./templates/config_map_env.j2
+  - ./templates/persistent_volume_claim.j2
+  - ./templates/deployment.j2
+  - ./templates/route.j2
+
+- name: Retrieve created route
+  k8s_facts:
+    api_version: "route.openshift.io/v1"
+    kind: Route
+    name: "{{ _terminal_name }}"
+    namespace: "{{ _terminal_project }}"
+  register: r_route
+
+- name: Determine apps_hostname_suffix for oauth client
+  set_fact:
+    apps_hostname_suffix: "{{ r_route.resources[0].spec.host|regex_replace('^' + _terminal_name + '-' + _terminal_project + '\\.(.*)$', '\\1') }}"
+
+- name: Create oauth client
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/oauth_client.j2' ) | from_yaml }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

@@ -1,0 +1,151 @@
+---
+- import_playbook: ../../setup_runtime.yml
+
+- name: Destroy environment on AWS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  tasks:
+  - name: Create infra key
+    include_role:
+      name: infra-ec2-ssh-key
+    when:
+    - install_infra_ssh_key | default(false) | bool
+
+  - name: Get fact for cloudformation stack
+    cloudformation_facts:
+      stack_name: "{{ project_tag }}"
+    register: stack_facts
+  
+  - name: Grab and set stack creation_time
+    when: project_tag in stack_facts.ansible_facts.cloudformation
+    set_fact:
+      stack_creation_time: >-
+        {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_description.creation_time }}
+      stack_status: >-
+        {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_description.stack_status }}
+
+  - name: Run infra-ec2-create-inventory role
+    include_role:
+      name: infra-ec2-create-inventory
+
+  - name: SSH config setup
+    when:
+    - groups["bastions"] is defined
+    - groups["bastions"] | length > 0
+    include_role:
+      name: infra-common-ssh-config-generate
+
+- name: Set ssh extra args for all hosts, use ssh_config just created
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  tasks:
+  - name: add -F option ansible_ssh_extra_args
+    set_fact:
+      ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|d() }} -F {{ hostvars['localhost'].ansible_ssh_config }}"
+
+- name: Start all EC2 instances if they are stopped
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  tasks:
+  - name: Get all EC2 instances
+    ec2_instance_info:
+      filters:
+        "tag:guid": "{{ guid }}"
+        "tag:env_type": "{{ env_type }}"
+        instance-state-name: stopped
+    register: r_stopped_instances
+
+  # Wk: Don't wait for instances to be running. Otherwise this is
+  #     a very sequential task. Just start the instances.
+  #     The next task will wait until all instances are running - but
+  #     this happens now in parallel instead of sequentially.
+  - name: Ensure EC2 instances are running
+    when: r_stopped_instances.instances | length > 0
+    ec2_instance:
+      instance_ids: "{{ item.instance_id }}"
+      state: started
+      wait: false
+    loop: "{{ r_stopped_instances.instances }}"
+
+  - name: Wait until all EC2 instances are running
+    when: r_stopped_instances.instances | length > 0
+    ec2_instance_info:
+      filters:
+        "tag:guid": "{{ guid }}"
+        "tag:env_type": "{{ env_type }}"
+        instance-state-name: running
+    register: r_running_instances
+    until: r_running_instances.instances | length | int >= r_stopped_instances.instances | length | int
+    delay: 10
+    retries: 60
+
+- name: Have the OpenShift installer cleanup what it did
+  hosts: bastions
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Wait for the bastion host to be available
+    wait_for_connection:
+      timeout: 60
+    register: bwait
+    ignore_errors: true
+
+  - name: Ensure old AWS credentials are absent
+    file:
+      state: absent
+      path: "/home/{{ ansible_user }}/.aws/credentials"
+
+  - name: Add AWS credentials for sandboxes
+    when:
+    - hostvars.localhost.student_access_key_id | default("") | length > 0
+    - hostvars.localhost.student_access_secret_key | default("") | length > 0
+    become: false
+    blockinfile:
+      path: "/home/{{ ansible_user }}/.aws/credentials"
+      create: true
+      insertbefore: BOF
+      marker: "# {mark} ANSIBLE MANAGED BLOCK Student Credentials"
+      block: |-
+        [default]
+        aws_access_key_id = {{ hostvars.localhost.student_access_key_id }}
+        aws_secret_access_key = {{ hostvars.localhost.student_secret_access_key }}
+
+  # Use shared account when no sandbox account has been configured
+  - name: Add AWS credentials for shared account
+    when:
+    - hostvars.localhost.student_access_key_id | default("") | length == 0
+    - aws_access_key_id | default("") | length > 0
+    - aws_secret_access_key | default("") | length > 0
+    become: false
+    blockinfile:
+      state: present
+      path: "/home/{{ ansible_user }}/.aws/credentials"
+      create: true
+      insertbefore: BOF
+      marker: "# {mark} ANSIBLE MANAGED BLOCK Default Credentials"
+      block: |-
+        [default]
+        aws_access_key_id = {{ aws_access_key_id }}
+        aws_secret_access_key = {{ aws_secret_access_key }}
+
+  - name: Call role to destroy the OpenShift cluster
+    when: bwait is successful
+    include_role:
+      name: host-ocp4-destroy
+
+- name: Import default cloud provider destroy playbook
+  import_playbook: "../../cloud_providers/{{ cloud_provider }}_destroy_env.yml"

@@ -1,0 +1,210 @@
+# vim: set ft=ansible
+---
+
+# Implement your Workload deployment tasks here
+
+- name: set default number of users to 15
+  set_fact:
+    user_count: 15
+- name: create usernames
+  set_fact:
+    users: "{{ users | default([]) + ['user'+item | string] }}"
+  loop: "{{ range(1,((user_count | int) + 1)) | list }}"
+
+- name: "remove ODH custom resource object"
+  k8s:
+    state: absent
+    name: example-opendatahub
+    namespace: "open-data-hub-{{ item }}"
+    api_version: opendatahub.io/v1alpha1
+    kind: OpenDataHub
+  with_list: "{{ users }}"
+- name: "remove operator.yaml"
+  k8s:
+    state: absent
+    name: opendatahub-operator
+    namespace: "open-data-hub-{{ item }}"
+    api_version: apps/v1
+    kind: Deployment
+  with_list: "{{ users }}"
+- name: "remove role_binding.yaml"
+  k8s:
+    state: absent
+    name: opendatahub-operator
+    namespace: "open-data-hub-{{ item }}"
+    api_version: rbac.authorization.k8s.io/v1
+    kind: Role
+  with_list: "{{ users }}"
+- name: "remove role.yaml"
+  k8s:
+    state: absent
+    name: opendatahub-operator
+    namespace: "open-data-hub-{{ item }}"
+    api_version: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+  with_list: "{{ users }}"
+- name: "remove service_account.yaml"
+  k8s:
+    state: absent
+    name: opendatahub-operator
+    namespace: "open-data-hub-{{ item }}"
+    kind: ServiceAccount
+  with_list: "{{ users }}"
+
+- name: remove Project finalizers
+  k8s:
+    state: present
+    name: "open-data-hub-{{ item }}"
+    kind: Namespace
+    definition:
+      metadata:
+        finalizers: null
+    merge_type: merge
+  ignore_errors: yes
+  with_list: "{{ users }}"
+
+- name: remove the Projects
+  k8s:
+    state: absent
+    name: "open-data-hub-{{ item }}"
+    kind: Project
+    api_version: project.openshift.io/v1
+    definition:
+      metadata:
+        labels:
+          user: "{{ item }}"
+  with_list: "{{ users }}"
+
+- name: remove the CRD
+  k8s:
+    state: absent
+    api_version: apiextensions.k8s.io/v1beta1
+    kind: CustomResourceDefinition
+    name: opendatahubs.opendatahub.io
+
+- name: "remove modify and apply rook object-user.yaml for {{ item }}"
+  k8s:
+    state: absent
+    definition:
+      apiVersion: ceph.rook.io/v1
+      kind: CephObjectStoreUser
+      metadata:
+        labels:
+          user: "{{ item }}"
+        name: "{{ item }}"
+        namespace: rook-ceph
+      spec:
+        store: my-store
+        displayName: "my display name"
+    merge_type: merge
+  with_list: "{{ users }}"
+
+- name: remove rook-ceph cluster finalizers
+  k8s:
+    state: present
+    name: rook-ceph
+    namespace: rook-ceph
+    api_version: ceph.rook.io/v1
+    kind: CephCluster
+    definition:
+      metadata:
+        finalizers: null
+    merge_type: merge
+  ignore_errors: yes
+
+- name: remove rook-ceph cluster
+  k8s:
+    state: absent
+    name: rook-ceph
+    namespace: rook-ceph
+    api_version: ceph.rook.io/v1
+    kind: CephCluster
+  ignore_errors: yes
+
+- name: Ensure rook-ceph cluster is done removing if it was being terminated
+  k8s_facts:
+    api_version: ceph.rook.io/v1
+    kind: CephCluster
+    name: rook-ceph
+    namespace: rook-ceph
+  register: result
+  failed_when: result.resources | length > 0
+  delay: 15
+  retries: 60
+  until: result.resources | length == 0
+
+- name: remove rook operator
+  k8s:
+    state: absent
+    name: rook-ceph-operator
+    namespace: rook-ceph
+    kind: Deployment
+  ignore_errors: yes
+
+- name: remove daemonsets discover, agent
+  k8s:
+    state: absent
+    name: "{{ item }}"
+    namespace: rook-ceph
+    kind: daemonset
+    api_version: apps/v1
+  ignore_errors: yes
+  loop:
+  - rook-ceph-agent
+  - rook-discover
+
+- name: remove the open-data-hub rook-ceph rook-ceph-system project 
+  ignore_errors: yes
+  k8s:
+    state: absent
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: "{{ item }}"
+  loop:
+    - open-data-hub
+    - rook-ceph
+    - rook-ceph-system
+
+- name: remove SCC.yaml
+  ignore_errors: yes
+  k8s:
+    state: absent
+    definition:
+      kind: SecurityContextConstraints
+      apiVersion: security.openshift.io/v1
+      metadata:
+        name: rook-ceph
+
+- name: Ensure project is done terminating if it was being terminated
+  k8s_facts:
+    api_version: project.openshift.io/v1
+    kind: Project
+    name: "{{ item }}"
+  register: result
+  failed_when: result.resources | length > 0
+  delay: 15
+  retries: 60
+  until: result.resources | length == 0
+  loop:
+    - rook-ceph
+    - rook-ceph-system
+
+- name: Ensure project is done terminating if it was being terminated
+  k8s_facts:
+    api_version: project.openshift.io/v1
+    kind: Project
+    name: "open-data-hub-{{ item }}"
+  register: result
+  failed_when: result.resources | length > 0
+  delay: 15
+  retries: 60
+  until: result.resources | length == 0
+  with_list: "{{ users }}"
+
+# Leave this as the last task in the playbook.
+- name: remove_workload tasks complete
+  debug:
+    msg: "Remove Workload tasks completed successfully."
+  when: not silent|bool

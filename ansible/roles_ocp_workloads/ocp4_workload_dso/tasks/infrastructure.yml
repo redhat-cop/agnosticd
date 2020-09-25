@@ -1,0 +1,189 @@
+---
+
+# Workaround for Python3 incompatibility
+- name: install oscap tools
+  raw: yum install -y docker openscap-utils openscap-scanner scap-security-guide atomic
+  become: true
+
+- name: ensure docker group exists
+  group:
+    name: docker
+    state: present
+  become: true
+
+- name: enable ssh password
+  replace:
+    regexp: "PasswordAuthentication no"
+    path: /etc/ssh/sshd_config
+    replace: "PasswordAuthentication yes"
+  become: true
+
+- name: restart sshd service
+  service:
+    name: sshd
+    state: restarted
+  become: true
+
+- name: retrieve registry route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: route
+    name: default-route
+    namespace: openshift-image-registry
+  register: image_route
+
+- set_fact:
+    ocp4_dso_ocp_registry_route:  "{{ image_route | json_query('resources[*].spec.host') | first }}"
+
+- name: add exposed registry as insecure
+  template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+    backup: yes
+  become: true
+  register: reg_result
+
+- name: enable docker service
+  service:
+    name: docker
+    enabled: true
+  become: true
+
+- name: restart docker service
+  service:
+    name: docker
+    state: restarted
+  become: true
+  when: reg_result.changed
+
+- name: allow group to use oscap-docker without sudo password
+  lineinfile:
+    dest: /etc/sudoers
+    line: "%docker ALL=NOPASSWD: /usr/bin/oscap-docker"
+    validate: '/usr/sbin/visudo -cf %s'
+  become: true
+
+- name: Add quay route to insecure registries
+  command: "{{ ocp4_dso_openshift_cli }} patch image.config.openshift.io/cluster -p '{ \"spec\" : { \"registrySources\" : { \"insecureRegistries\" : [\"quayecosystem-quay-quay-enterprise.{{ route_subdomain }}\"] }}}' --type=merge"
+
+- name: create custom jenkins image
+  shell: |
+    {{ ocp4_dso_openshift_cli }} new-build -D $'FROM jenkins:2\nUSER 0\nRUN curl -kL https://updates.jenkins-ci.org/download/plugins/ssh-steps/1.2.1/ssh-steps.hpi -o /usr/lib/jenkins/ssh-steps.hpi && chmod 665 /usr/lib/jenkins/ssh-steps.hpi && sed -i '\''s/{ print $1; }/ {a=$1} END{print a}/'\'' /usr/libexec/s2i/run' --to=custom-jenkins -n openshift
+  ignore_errors: true
+
+- name: wait for custom jenkins build to finish
+  shell: "{{ ocp4_dso_openshift_cli }} get builds -n openshift | grep custom-jenkins | grep Complete"
+  register: result_jenkins
+  until: result_jenkins.rc == 0
+  retries: 60
+  delay: 20
+  ignore_errors: true
+
+- name: create owasp zap image
+  command: "{{ ocp4_dso_openshift_cli }} new-build --name owasp-zap -l 'role=jenkins-slave' https://github.com/RedHatDemos/SecurityDemos.git --context-dir=2019Labs/ProactiveSecurityCompliance/OpenShiftSecurityPipeline/jenkins-slave-zap -n openshift"
+  ignore_errors: true
+
+- name: wait for owasp zap build to finish
+  shell: "{{ ocp4_dso_openshift_cli }} get builds -n openshift | grep owasp-zap | grep Complete"
+  register: result_owasp
+  until: result_owasp.rc == 0
+  retries: 60
+  delay: 20
+  ignore_errors: true
+
+- name: create image management image
+  command: "{{ ocp4_dso_openshift_cli }} new-build --name image-management -l 'role=jenkins-slave' https://github.com/siamaksade/jenkins-slave-skopeo.git -n openshift"
+  ignore_errors: true
+
+- name: wait for image mgmt build to finish
+  shell: "{{ ocp4_dso_openshift_cli }} get builds -n openshift | grep image-management | grep Complete"
+  register: result_mgmt
+  until: result_mgmt.rc == 0
+  retries: 60
+  delay: 20
+  ignore_errors: true
+
+- name: check if project {{ ocp4_admin_project }} exists
+  command: "{{ ocp4_dso_openshift_cli }} get project {{ ocp4_admin_project }}"
+  register: shared_project_result
+  ignore_errors: true
+  changed_when: false
+  tags: always
+
+- name: expose registry
+  command: "{{ ocp4_dso_openshift_cli }} create route passthrough --service=image-registry -n openshift-image-registry"
+  tags: always
+  ignore_errors: true
+
+- name: create project {{ ocp4_admin_project }}
+  command: "{{ ocp4_dso_openshift_cli }} new-project {{ ocp4_admin_project }}"
+  when: shared_project_result is failed
+  tags: always
+
+- name: remove limitrange in {{ ocp4_admin_project }}
+  command: "{{ ocp4_dso_openshift_cli }} delete limitrange --all -n {{ ocp4_admin_project }}"
+  ignore_errors: true
+
+- name: check if project quay project exists
+  command: "{{ ocp4_dso_openshift_cli }} get project {{ ocp4_dso_quay_project_name }}"
+  register: quay_project_result
+  ignore_errors: true
+  changed_when: false
+  tags: always
+
+- name: deploy quay
+  import_tasks: ./quay.yml
+  become: true
+  when: quay_project_result is failed
+  tags: quay
+
+- name: deploy gogs
+  import_tasks: ./gogs.yml
+  become: true
+  tags: gogs
+
+- name: deploy nexus
+  import_tasks: ./nexus.yml
+  become: true
+  tags: nexus
+
+- name: deploy sonarqube
+  import_tasks: ./sonarqube.yml
+  become: true
+  tags: sonarqube
+
+# Install CodeReady Workspaces
+- name: see if codeready is installed
+  k8s_facts:
+    api_version: org.eclipse.che/v1
+    kind: CheCluster
+    name: codeready-workspaces
+    namespace: ocp-workshop
+  register: r_codeready_cr
+
+- name: show codeready cr
+  debug:
+    msg: "existing codeready project: {{ r_codeready_cr }}"
+
+- name: install codeready
+  when: r_codeready_cr.resources | list | length == 0
+  include_tasks: install-codeready.yaml
+
+# Install RBAC Lab
+- name: check if rbac project exists
+  command: "{{ ocp4_dso_openshift_cli }} get project {{ ocp4_dso_rbac_project_name }}"
+  register: rbac_project_result
+  ignore_errors: true
+  changed_when: false
+  tags: always
+
+- name: deploy openshift rbac
+  import_tasks: ./openshift_rbac.yml
+  become: true
+  when: rbac_project_result is failed
+  tags: openshift_rbac
+
+- name: infrastructure tasks complete
+  debug:
+    msg: "Infrastructure Tasks completed successfully."

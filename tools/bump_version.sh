@@ -23,11 +23,8 @@ prompt_continue() {
     if [ -z "${response}" ]; then
         true
     else
-        # to lower
-        response=${response,,}
-
         case "${response}" in
-            yes|y) true ;;
+            yes|y|Y|Yes|YES) true ;;
             *) false ;;
         esac
     fi
@@ -46,7 +43,7 @@ echo "About to tag this commit."
 prompt_continue || exit 0
 
 for config in ${configs}; do
-    last=$(git tag -l|grep ${config}-${stage} |sort -V|tail -n 1|egrep -o '[0-9]+\.[0-9]+$')
+    last=$(git tag -l|grep ^${config}-${stage} |sort -V|tail -n 1|egrep -o '[0-9]+\.[0-9]+$')
     if [ -z "${last}" ]; then
         echo "INFO: no version found for ${config}, skipping"
         echo "Do you want to create it ?"

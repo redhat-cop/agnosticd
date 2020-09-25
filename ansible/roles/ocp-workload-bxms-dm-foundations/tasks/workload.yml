@@ -1,0 +1,116 @@
+---
+- name: define ocp_project
+  set_fact:
+    ocp_project: "bxms-dm-{{guid}}"
+
+- name: "Create project for workload {{ocp_project}}"
+  shell: "oc new-project {{ocp_project}}"
+
+- name: "Label namespace"
+  command: "oc label namespace {{ocp_project}} AAD='{{guid}}'"
+
+- name: Annotate the empty project as requested by user
+  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
+
+- name: Make sure we go back to default project
+  shell: "oc project default"
+
+- name: add decision manager image streams
+  block:
+    - command: "oc import-image {{kieserver_image}} -n {{ kieserver_image_namespace }} --confirm"
+    - command: "oc import-image {{decisioncentral_image}} -n {{ decisioncentral_image_namespace }} --confirm"
+    - command: "oc import-image {{angular_image}} -n {{ angular_image_namespace }} --confirm"
+
+# Note; depending on the environment, OCP projects may or may not have default limit ranges
+- name: Delete default limitrange
+  shell: |
+    oc delete limitrange {{ocp_project}}-core-resource-limits -n {{ocp_project}}
+  ignore_errors: true
+
+- name: Create a new limitrange
+  template:
+    src: templates/limitrange.yaml.j2
+    dest: /tmp/{{guid}}/{{ocp_project}}_limitrange.yaml
+- shell: |
+    oc create -f /tmp/{{guid}}/{{ocp_project}}_limitrange.yaml -n {{ocp_project}}
+
+- name: Create the Angular Application Template
+  template:
+    src: "templates/ng-dmf-template.yaml"
+    dest: "/tmp/{{ guid }}/ng-dmf-template.yaml"
+  changed_when: false
+
+- name: Fire and forget to install Angular application container
+  async: 3600
+  poll: 0
+  shell: |
+      oc new-app -f /tmp/{{ guid }}/ng-dmf-template.yaml -n {{ ocp_project }} -p APPLICATION_NAME=angular-dmf
+
+- name: Initialize secrets template
+  shell: "oc create -f {{SECRETS_TEMPLATE_URL}} -n {{ocp_project}}"
+
+- name: Create Decision Central Secret
+  shell: "oc new-app --template=example-app-secret -n {{ocp_project}} -p SECRET_NAME=decisioncentral-app-secret"
+
+- name: Create Kie Server Secret
+  shell: "oc new-app --template=example-app-secret -n {{ocp_project}} -p SECRET_NAME=kieserver-app-secret"
+
+- name: Create service account
+  shell: "oc create sa dm-foundations-rhdmsvc -n {{ocp_project}}"
+
+- name: Use Decision Central Secret for pull
+  shell: "oc secrets link --for=pull dm-foundations-rhdmsvc decisioncentral-app-secret -n {{ocp_project}}"
+
+- name: Use Decision Central Secret for mount
+  shell: "oc secrets link --for=mount dm-foundations-rhdmsvc decisioncentral-app-secret -n {{ocp_project}}"
+
+- name: Grant view access to service account
+  shell: "oc policy add-role-to-user view system:serviceaccount:{{ocp_project}}:dm-foundations-rhdmsvc -n {{ocp_project}}"
+
+- name: Prepare Decision Manager Authoring template
+  template:
+    src: "templates/rhdm7-authoring.yaml"
+    dest: "/tmp/{{ guid }}/rhdm7-authoring.yaml"
+  changed_when: false
+
+- name: Create the Decision Manager assets based on template
+  command: >-
+    oc new-app -f /tmp/{{ guid }}/rhdm7-authoring.yaml
+    -n {{ ocp_project }}
+
+- name: resume dm-foundations-rhdmcentr
+  shell: oc rollout resume dc/dm-foundations-rhdmcentr -n {{ocp_project}}
+- include_tasks: ./wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - dm-foundations-rhdmcentr
+
+- name: resume dm-foundations-kieserver
+  shell: oc rollout resume dc/dm-foundations-kieserver -n {{ocp_project}}
+
+- include_tasks: ./wait_for_build.yml
+  vars:
+    build_to_wait:
+      - dm-foundations-custom-kieserver
+
+- include_tasks: ./wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - dm-foundations-kieserver
+
+- include_tasks: ./wait_for_build.yml
+  vars:
+    build_to_wait:
+      - angular-dmf-ng-dmf
+
+- include_tasks: ./wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - angular-dmf-ng-dmfundertow
+
+- name: Give ocp_username access to ocp_project; user = {{ocp_username}}
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete

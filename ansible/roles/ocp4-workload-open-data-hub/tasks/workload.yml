@@ -1,0 +1,94 @@
+# vim: set ft=ansible
+---
+
+# Implement your Workload deployment tasks here
+### all following based on files at https://github.com/kaovilai/rook/blob/0.9.3/cluster/examples/kubernetes/ceph/
+
+
+- name: apply scc.yaml, operator.yaml
+  k8s:
+    state: present
+    src: "/tmp/open-data-hub/rook/{{ item }}"
+  loop:
+    - scc.yaml
+    - operator.yaml
+
+- name: wait for deploy
+  command: "oc rollout status {{ item }} -n rook-ceph-system -w"
+  register: result
+  until: result.stderr.find("Error from server (NotFound)") != 0
+  retries: 60
+  loop:
+    - daemonset rook-ceph-agent
+    - daemonset rook-discover
+    - deployment rook-ceph-operator
+
+- debug:
+    var: result.stderr.find("Error from server (NotFound)") != 0
+
+- name: Applying cluster.yaml
+  k8s:
+    state: present
+    src: "/tmp/open-data-hub/rook/cluster.yaml"
+  register: result
+  retries: 30
+
+- debug:
+    var: result
+
+- name: wait for rook-ceph-mon/osd a to get to status of running
+  shell: |
+    for i in $(oc get deployment -l app={{ item }} --no-headers | cut -d\  -f1); \
+    do \
+        oc rollout status deployment "$i" -n rook-ceph -w
+    done
+  loop:
+    - rook-ceph-mon
+    - rook-ceph-osd
+
+- name: apply toolbox.yaml object.yaml
+  k8s:
+    state: present
+    src: "/tmp/open-data-hub/rook/{{ item }}"
+  loop:
+    - toolbox.yaml
+    - object.yaml
+
+- name: wait for deploy rook-ceph-rgw-my-store
+  command: "oc rollout status deployment rook-ceph-rgw-my-store -n rook-ceph -w"
+  register: result
+  until: result.stderr.find("Error from server (NotFound)") != 0
+  retries: 120
+
+- name: obtain rook-ceph-rgw ip address
+  shell: "oc get svc rook-ceph-rgw-my-store -o json -n rook-ceph | jq -r '.spec.clusterIP'"
+  register: rookcephrgwip
+  until: rookcephrgwip.stderr.find("Error from server (NotFound)") != 0
+  retries: 30
+
+- name: obtain rook-ceph-rgw port
+  shell: "oc get svc rook-ceph-rgw-my-store -o json -n rook-ceph | jq -r '.spec.ports[0].port'"
+  register: rookcephrgwport
+  until: rookcephrgwport.stderr.find("Error from server (NotFound)") != 0
+  retries: 30
+
+- debug:
+    msg:
+    - "user.info: "
+    - "user.info: S3 URL http://{{ rookcephrgwip.stdout }}:{{ rookcephrgwport.stdout }}"
+
+- name: Apply opendatahub_v1alpha1_opendatahub_crd.yaml
+  command: oc apply -f https://gitlab.com/opendatahub/opendatahub-operator/raw/v0.3.0/deploy/crds/opendatahub_v1alpha1_opendatahub_crd.yaml
+
+- name: include per user workload
+  include_tasks: 
+    file: ./per_user_workload.yml
+    apply:
+      become: "{{ become_override | bool }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
+

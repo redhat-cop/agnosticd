@@ -1,0 +1,178 @@
+---
+- tags: vpcpeering
+  block:
+    - name: Gather subnet of VPC 1
+      ec2_vpc_subnet_facts:
+        filters:
+          "tag:aws:cloudformation:stack-name": "{{ project_tag }}"
+        region: "{{ vpc_region }}"
+      register: vpc1facts
+
+    - fail:
+        msg: "No subnet found in VPC in region {{ vpc_region }}"
+      when: vpc1facts.subnets | length == 0
+
+    - set_fact:
+        vpc_id: "{{ vpc1facts.subnets[0].vpc_id }}"
+        cidr: "{{ vpc1facts.subnets[0].cidr_block }}"
+        subnet_id: "{{ vpc1facts.subnets[0].subnet_id }}"
+
+    - name: Gather subnet of VPC 2
+      ec2_vpc_subnet_facts:
+        filters:
+          "tag:aws:cloudformation:stack-name": "{{ project_tag }}"
+        region: "{{ peer_region }}"
+      register: vpc2facts
+
+    - fail:
+        msg: "No subnet found in VPC {{ peer_region }}"
+      when: vpc2facts.subnets | length == 0
+
+    - set_fact:
+        peer_vpc_id: "{{ vpc2facts.subnets[0].vpc_id }}"
+        peer_cidr: "{{ vpc2facts.subnets[0].cidr_block }}"
+        peer_subnet_id: "{{ vpc2facts.subnets[0].subnet_id }}"
+
+    - name: Gather route table of VPC 1
+      ec2_vpc_route_table_facts:
+        filters:
+          vpc-id: "{{ vpc_id }}"
+          association.subnet-id: "{{ subnet_id }}"
+        region: "{{ vpc_region }}"
+      register: vpc1facts
+
+    - fail:
+        msg: >-
+          no route table found for VPC {{ vpc_id }}
+          and subnet {{ subnet_id }} in {{ vpc_region }}
+      when: vpc1facts.route_tables | length == 0
+
+    - set_fact:
+        rt_id: "{{ vpc1facts.route_tables[0].id }}"
+
+    - name: Gather route table of VPC 2
+      ec2_vpc_route_table_facts:
+        filters:
+          vpc-id: "{{ peer_vpc_id }}"
+          association.subnet-id: "{{ peer_subnet_id }}"
+        region: "{{ peer_region }}"
+      register: vpc2facts
+
+    - fail:
+        msg: >-
+          no route table found for VPC {{ peer_vpc_id }}
+          and subnet {{ peer_subnet_id }} in {{ peer_region }}
+      when: vpc2facts.route_tables | length == 0
+
+    - set_fact:
+        peer_rt_id: "{{ vpc2facts.route_tables[0].id }}"
+
+    - name: Create extra-region VPC peering Connection
+      ec2_vpc_peer:
+        region: "{{ vpc_region }}"
+        vpc_id: "{{ vpc_id }}"
+        peer_vpc_id: "{{ peer_vpc_id }}"
+        peer_region: "{{ peer_region }}"
+        state: present
+        tags:
+          Name: Peering connection for {{ vpc_region }} VPC to {{ peer_region }} VPC
+          Comment: Created by AgnosticD
+          stack: "{{ project_tag }}"
+      register: vpc_peer_reg
+
+    - pause:
+        seconds: 5
+
+    - name: Accept peering connection from peer region
+      ec2_vpc_peer:
+        region: "{{ peer_region }}"
+        peering_id: "{{ vpc_peer_reg.peering_id }}"
+        state: accept
+      register: vpc_peer_reg
+      until: vpc_peer_reg is succeeded
+      retries: 5
+      delay: 10
+
+    - name: Set up subnet route table VPC 1
+      ec2_vpc_route_table:
+        lookup: id
+        route_table_id: "{{ rt_id }}"
+        purge_routes: no
+        tags:
+          stack: "{{ project_tag }}"
+          Comment: Created by AgnosticD
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ vpc_region }}"
+        routes:
+          - dest: "{{ peer_cidr }}"
+            vpc_peering_connection_id: "{{ vpc_peer_reg.peering_id }}"
+
+    - name: Set up subnet route table VPC 2
+      ec2_vpc_route_table:
+        lookup: id
+        route_table_id: "{{ peer_rt_id }}"
+        purge_routes: no
+        tags:
+          stack: "{{ project_tag }}"
+          Comment: Created by AgnosticD
+        vpc_id: "{{ peer_vpc_id }}"
+        region: "{{ peer_region }}"
+        routes:
+          - dest: "{{ cidr }}"
+            vpc_peering_connection_id: "{{ vpc_peer_reg.peering_id }}"
+
+    - when: peer_private_zone is defined
+      block:
+        - name: Find HostedZoneId for Private zone 2
+          command: >-
+            aws route53 list-hosted-zones-by-name
+            --dns-name {{ peer_private_zone }}
+            --max-items 2
+          register: awsroute53zone
+          changed_when: false
+
+        - name: Associate VPC with Private Zone 2
+          command: >-
+            aws route53 associate-vpc-with-hosted-zone
+            --hosted-zone-id {{ _zone.Id | regex_replace('/hostedzone/', '') }}
+            --vpc VPCRegion={{ vpc_region }},VPCId={{ vpc_id }}
+          register: associate_reg
+          failed_when:
+            - associate_reg.rc != 0
+            - not 'is already associated' in associate_reg.stderr
+          changed_when:
+            - not 'is already associated' in associate_reg.stderr
+          when:
+            - _zone.Name == peer_private_zone
+            - _zone.Config.PrivateZone
+          loop: "{{ awsroute53zone.stdout|from_json|json_query('HostedZones') }}"
+          loop_control:
+            loop_var: _zone
+
+    - when: vpc_private_zone is defined
+      block:
+        - name: Find HostedZoneId for Private zone 1
+          command: >-
+            aws route53 list-hosted-zones-by-name
+            --dns-name {{ vpc_private_zone }}
+            --max-items 2
+          register: awsroute53zone
+          changed_when: false
+
+        - name: Associate VPC with remove Private Zone 1
+          command: >-
+            aws route53 associate-vpc-with-hosted-zone
+            --hosted-zone-id {{ _zone.Id | regex_replace('/hostedzone/', '') }}
+            --vpc VPCRegion={{ peer_region }},VPCId={{ peer_vpc_id }}
+          register: associate_reg
+          failed_when:
+            - associate_reg.rc != 0
+            - not 'is already associated' in associate_reg.stderr
+          changed_when:
+            - not 'is already associated' in associate_reg.stderr
+          when:
+            - _zone.Name == vpc_private_zone
+            - _zone.Config.PrivateZone
+          loop: "{{ awsroute53zone.stdout|from_json|json_query('HostedZones') }}"
+          loop_control:
+            loop_var: _zone

@@ -1,0 +1,112 @@
+---
+
+- name: "create the quay project"
+  k8s:
+    state: present
+    name: "{{ ocp4_dso_quay_project_name }}"
+    kind: Project
+    api_version: project.openshift.io/v1
+
+- name: Create Quay Operator OperatorGroup
+  k8s:
+    state: present
+    namespace: "{{ ocp4_dso_quay_project_name }}"
+    definition: "{{ lookup('template', 'quay-SubscriptionGroup.yaml.j2') }}"
+
+- name: Retrieve Quay PackageManifest
+  k8s_info:
+    api_version: packages.operators.coreos.com/v1
+    kind: PackageManifest
+    name: quay-operator
+    namespace: "{{ ocp4_dso_quay_project_name }}" 
+  register: ocp4_dso_quay_manifest
+
+- set_fact:
+    ocp4_dso_quay_channel: "{{ ocp4_dso_quay_manifest | json_query('resources[*].status.defaultChannel') | first }}"
+
+- set_fact:
+    ocp4_dso_quay_csv: "{{ ocp4_dso_quay_manifest | json_query('resources[*].status.channels[*].currentCSV') | first | first}}"
+
+- name: Create Quay Operator Subscription
+  k8s:
+    state: present
+    namespace: "{{ ocp4_dso_quay_project_name }}"
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: quay-operator
+        namespace: "{{ ocp4_dso_quay_project_name }}"
+      spec:
+        channel: "{{ ocp4_dso_quay_channel }}"
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+        name: quay-operator
+        startingCSV: "{{ ocp4_dso_quay_csv }}"
+        installPlanApproval: Manual
+
+- name: wait for the status of the Quay subscription to not be empty
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: quay-operator
+    namespace: "{{ ocp4_dso_quay_project_name }}"
+  register: operator_subscription_out
+  until:
+    - operator_subscription_out is defined
+    - operator_subscription_out.resources is defined
+    - operator_subscription_out.resources[0] is defined
+    - operator_subscription_out.resources[0].status is defined
+    - operator_subscription_out.resources[0].status.installplan is defined
+  retries: 30
+  delay: 20
+
+- name: patch the installplan to approve it
+  k8s:
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: InstallPlan
+      metadata:
+        namespace: "{{ ocp4_dso_quay_project_name }}"
+        name: "{{ operator_subscription_out.resources[0].status.installplan.name }}"
+      spec:
+        approved: true
+
+- name: Get an existing LimitRanges
+  k8s_info:
+    api_version: v1
+    kind: LimitRange
+    namespace: "{{ ocp4_dso_quay_project_name }}"
+  register: quay_limit_ranges
+
+- name: Remove LimitRanges
+  k8s:
+    state: absent
+    api_version: v1
+    kind: LimitRange
+    namespace: "{{ item.metadata.namespace }}"
+    name: "{{ item.metadata.name }}"
+  loop: "{{ quay_limit_ranges.resources }}"
+
+- name: create redhat pull secret
+  command: "{{ ocp4_dso_openshift_cli }} -n {{ ocp4_dso_quay_project_name }} create secret docker-registry redhat-pull-secret --docker-server=quay.io  --docker-username='{{ ocp4_dso_quay_pull_user }}' --docker-password='{{ ocp4_dso_quay_pull_password }}'"
+
+- name: create quay admin password secret
+  command: "{{ ocp4_dso_openshift_cli }} -n {{ ocp4_dso_quay_project_name }} create secret generic quay-admin-password --from-literal=superuser-username={{ ocp4_dso_quay_admin_user }} --from-literal=superuser-password={{ ocp4_dso_quay_admin_password }} --from-literal=superuser-email=quay@example.com"
+
+- name: Deploy Quay Operator
+  k8s:
+    state: present
+    namespace: "{{ ocp4_dso_quay_project_name }}"
+    definition: "{{ lookup('file', 'quay_cr.yml') }}"
+
+- name: wait for quay to be running
+  uri:
+    url: https://{{ ocp4_dso_quay_urlprefix }}.{{ route_subdomain }}
+    status_code: 200
+    validate_certs: false
+  register: result
+  until: result.status == 200
+  retries: 30
+  delay: 30
+  ignore_errors: true

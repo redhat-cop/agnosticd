@@ -1,0 +1,201 @@
+---
+- name: Generate user password if not defined
+  when:
+  - studentvm_user_use_password | bool
+  - studentvm_user_password | default("") | length == 0
+  set_fact:
+    studentvm_user_student_password: "{{ lookup('password', '/dev/null length={{ studentvm_user_password_length }} chars=ascii_letters,digits') }}"
+
+- name: Use provided password
+  when:
+  - studentvm_user_use_password | bool
+  - studentvm_user_password | default("") | length > 0
+  set_fact:
+    studentvm_user_student_password: "{{ studentvm_user_password }}"
+
+- name: Add GUID to /etc/skel/.bashrc
+  lineinfile:
+    path: "/etc/skel/.bashrc"
+    regexp: "^export GUID"
+    line: "export GUID={{ guid }}"
+
+# If we don't delete the user the next task fails if the user already exists
+- name: Ensure User does not exist
+  become: true
+  user:
+    state: absent
+    name: "{{ studentvm_user_name }}"
+- name: Remove user home directory if it exists
+  become: true
+  file:
+    state: absent
+    path: "/home/{{ studentvm_user_name }} "
+
+- name: User with Password
+  when: studentvm_user_use_password | bool
+  block:
+  - name: Create user with password
+    become: true
+    user:
+      state: present
+      name: "{{ studentvm_user_name }}"
+      password: "{{ studentvm_user_student_password | password_hash( 'sha512' ) }}"
+      password_lock: yes
+      comment: GTPE Student
+      group: users
+      groups: "{{ 'wheel' if studentvm_user_enable_sudo | bool else '' }}"
+      shell: /bin/bash
+
+  - name: Enable password authentication
+    become: true
+    lineinfile:
+      line: PasswordAuthentication yes
+      regexp: '^ *PasswordAuthentication'
+      path: /etc/ssh/sshd_config
+
+- name: Create user without password
+  when: not studentvm_user_use_password
+  become: true
+  block:
+  - name: Create user
+    user:
+      state: present
+      name: "{{ studentvm_user_name }}"
+      comment: GTPE Student
+      group: users
+      groups: "{{ 'wheel' if studentvm_user_enable_sudo | bool else '' }}"
+      shell: /bin/bash
+
+  - name: Generate student SSH Key if no public key specified
+    when: studentvm_user_public_key | default("") | length == 0
+    become: true
+    block:
+    - name: Ensure .ssh directory exists
+      file:
+        state: directory
+        path: "/home/{{ studentvm_user_name }}/.ssh"
+        owner: "{{ studentvm_user_name }}"
+        mode: 0700
+
+    - name: Generate student SSH Key
+      openssh_keypair:
+        state: present
+        comment: GPTE Student User
+        path: "/home/{{ studentvm_user_name }}/.ssh/student"
+        owner: "{{ studentvm_user_name }}"
+        mode: 0600
+      register: r_student_key
+
+    - name: Read student Private SSH Key
+      slurp:
+        src: "/home/{{ studentvm_user_name }}/.ssh/student"
+      register: r_student_private_key
+      
+    - name: Set Public and Private Key
+      set_fact:
+        studentvm_user_public_key: "{{ r_student_key.public_key }}"
+        studentvm_user_private_key: "{{ r_student_private_key['content'] | b64decode }}"
+
+  - name: Set student key
+    when: studentvm_user_public_key | default("") | length > 0
+    set_fact:
+      studentvm_user_public_key: "{{ studentvm_user_public_key }}"
+
+  - name: Add student public key to student vm
+    authorized_key:
+      user: "{{ studentvm_user_name }}"
+      key: "{{ studentvm_user_public_key }}"
+
+- name: Set up root user
+  when: studentvm_user_enable_sudo | bool
+  become: true
+  block:
+  - name: Disable root password authentication
+    lineinfile:
+      line: PermitRootLogin without-password
+      regexp: '^ *PermitRootLogin'
+      path: /etc/ssh/sshd_config
+
+  - name: Allow passwordless sudo
+    become: true
+    lineinfile:
+      path: '/etc/sudoers'
+      state: present
+      line: "{{ studentvm_user_name }}         ALL=(ALL)       NOPASSWD: ALL"
+      insertafter: "'^{{ remote_user }}"
+
+- name: Restart sshd
+  become: true
+  service:
+    name: sshd
+    state: restarted
+
+- name: Ensure output_dir exists
+  delegate_to: localhost
+  become: no
+  file:
+    path: "{{ output_dir | default('/tmp')}}"
+    state: directory
+
+- name: Ensure output_dir/user_data.yaml file exists
+  delegate_to: localhost 
+  become: no
+  copy:
+    content: ""
+    dest: "{{ output_dir | default('/tmp') }}/user_data.yaml"
+    force: no
+    mode: 0664
+
+- name: Print User Info for Password authentication
+  when: studentvm_user_use_password | bool
+  block:
+  - name: Print User Info for Password authentication to stdout
+    debug:
+      msg: "{{ item }}"
+    loop:
+    - "user.info: user: {{ studentvm_user_name }}"
+    - "user.info: ssh_command: ssh {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"
+    - "user.info: password: {{ studentvm_user_student_password }}"
+    - "user.info: workstation: studentvm.{{ subdomain_base }}"
+  - name: Add User Info for Password authentication to user_data.yaml
+    agnosticd_user_info:
+      user: "{{ studentvm_user_name }}"
+      data:
+        ssh_command: "ssh {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"
+        password: "{{ studentvm_user_student_password }}"
+
+- name: Print User Info for Public Key authentication (Generated Key)
+  when:
+  - not studentvm_user_use_password | bool
+  - studentvm_user_private_key | default("") | length > 0
+  block:
+  - name: Print User Info for Public Key authentication (Generated Key) to stdout
+    debug:
+      msg: "{{ item }}"
+    loop:
+    - "user.info: user: {{ studentvm_user_name }}"
+    - "user.info: ssh_command: ssh -i 'your private key' {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"
+    - "user.info: private_key: {{ studentvm_user_private_key }}"
+  - name: Print User Info for Public Key authentication (Generated Key) to user_data.yaml
+    agnosticd_user_info:
+      user: "{{ studentvm_user_name }}"
+      data:
+        ssh_command: "ssh -i 'your private key' {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"
+        private_key: "{{ studentvm_user_private_key }}"
+
+- name: Print User Info for Public Key authentication (Provided Public Key)
+  when:
+  - not studentvm_user_use_password | bool
+  - studentvm_user_public_key | default("") | length > 0
+  block:
+  - name: Print User Info for Public Key authentication (Provided Public Key) to stdout
+    debug:
+      msg: "{{ item }}"
+    loop:
+    - "user.info: user: {{ studentvm_user_name }}"
+    - "user.info: ssh_command: ssh -i 'your private key' {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"
+  - name: Print User Info for Public Key authentication (Provided Public Key) to user_data.yaml
+    agnosticd_user_info:
+      user: "{{ studentvm_user_name }}"
+      data:
+        ssh_command: "ssh -i 'your private key' {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"

@@ -75,7 +75,6 @@ function executeAnsibleViaLocalhost() {
 
                     -e"ocp_username=${OCP_USERNAME}" \
                     -e"ocp_workload=${WORKLOAD}" \
-                    -e"guid=${GUID}" \
                     -e"ocp_user_needs_quota=true" \
                     -e"ACTION=create" >> $LOG_FILE
 

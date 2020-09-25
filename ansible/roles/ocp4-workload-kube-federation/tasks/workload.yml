@@ -1,0 +1,93 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Install kubefedctl
+  become: yes
+  unarchive:
+    src: "{{ _kubefed_kubefedctl_url }}"
+    remote_src: yes
+    dest: /usr/bin
+    mode: 0775
+    owner: root
+    group: root
+
+- name: Create OpenShift Objects for Kube Federation
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/project.j2
+  - ./templates/catalog_source_config.j2
+  - ./templates/operator_group.j2
+  - ./templates/subscription.j2
+
+- name: Wait until InstallPlan is Created
+  shell: oc get installplan -o name -n "{{ _kubefed_project }}" | awk -F "/" '{print $2}'
+  register: install_plan
+  retries: 30
+  delay: 10
+  until: install_plan.stdout != ""
+
+- name: Ensure InstallPlan is Approved
+  command: oc patch installplan "{{ install_plan.stdout }}" --type merge -p '{"spec":{"approved":true}}' -n "{{ _kubefed_project }}"
+
+- name: Wait until CSV is Installed
+  command: oc get csv "{{ _kubefed_subscription_csv }}" -o jsonpath='{.status.phase}' -n "{{ _kubefed_project }}"
+  register: csv
+  retries: 30
+  delay: 10
+  until: csv.stdout == "Succeeded"
+
+- name: Create KubeFed Admission Webhook objects
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/kubefedwebhook.j2
+
+- name: Wait until KubeFed Admission WebHook Deployment is ready
+  command: oc get deployment kubefed-admission-webhook -o jsonpath='{.status.availableReplicas}' -n "{{ _kubefed_project }}"
+  register: csv
+  retries: 30
+  delay: 10
+  until: csv.stdout == "1"
+
+- name: Create KubeFed (Config) objects
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/kubefedconfig.j2
+  - ./templates/kubefed.j2
+
+- name: Wait until KubeFed Controller Manager Deployment is ready
+  command: oc get deployment kubefed-controller-manager -o jsonpath='{.status.availableReplicas}' -n "{{ _kubefed_project }}"
+  register: csv
+  retries: 30
+  delay: 10
+  until: csv.stdout == "2"
+
+- name: Register API Types to be federated
+  when:
+  - _kubefed_federated_api_types | d("") | length > 0
+  shell: "kubefedctl enable {{ item }}"
+  loop: "{{ _kubefed_federated_api_types }}"
+  
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

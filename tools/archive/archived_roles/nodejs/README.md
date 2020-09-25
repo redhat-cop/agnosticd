@@ -16,7 +16,7 @@ Available variables are listed below, along with default values (see `defaults/m
 
 The Node.js version to install. "6.x" is the default and works on most supported OSes. Other versions such as "0.12", "4.x", "5.x", "6.x", etc. should work on the latest versions of Debian/Ubuntu and RHEL/CentOS.
 
-    nodejs_install_npm_user: "{{ ansible_ssh_user }}"
+    nodejs_install_npm_user: "{{ ansible_user }}"
 
 The user for whom the npm packages will be installed can be set here, this defaults to `ansible_user`.
 

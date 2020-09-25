@@ -1,0 +1,198 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user1"
+
+- name: Create a directory if it does not exist
+  file:
+    path: /opt/apb/
+    state: directory
+    mode: '0755'
+  become: true
+
+#- name: Generate a brand new SSH key on MASTER that will be used also by APB container (provision.yml)
+#  openssh_keypair:
+#    path: /opt/apb/id_ssh_rsa
+#    force: yes
+#  become: true
+
+- name: Generate a brand new SSH key on MASTER that will be used also by APB container (provision.yml)
+  shell: "ssh-keygen -N '' -f /opt/apb/id_rsa"
+  become: true
+
+- name: add new ssh-key as authorized on BASTION host
+  shell: "cat /opt/apb/id_rsa.pub | ssh -o StrictHostKeyChecking=no -i /root/.ssh/{{guid}}key.pem ec2-user@bastion 'cat >> .ssh/authorized_keys'"
+  become: true
+  
+- name: copy id_rsa.pub and id_rsa to BASTION host on /tmp/{{guid}} 
+  shell: scp -o StrictHostKeyChecking=no -i /root/.ssh/{{guid}}key.pem /opt/apb/id_rsa* ec2-user@bastion:/tmp/{{guid}}/deploy-containers-apb
+  become: true
+  
+- name: Create project for IoT Development
+  shell: "oc new-project iot-development"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Create resources for IoT Development
+  shell: "oc process -f /tmp/{{guid}}/project-iot-development.yaml | oc create -f -"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Create project for IoT Testing
+  shell: "oc new-project iot-testing"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Create resources for IoT Testing
+  shell: "oc process -f /tmp/{{guid}}/project-iot-testing.yaml | oc create -f -"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Create project for IoT Hub
+  shell: "oc new-project iot-hub"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Create resources for IoT Hub
+  shell: "oc process -f /tmp/{{guid}}/project-iot-hub.yaml | oc create -f -"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Create policy for letting Jenkins ServiceAccount Access to iot-testing Project
+  shell: "oc policy add-role-to-user edit system:serviceaccount:iot-development:jenkins -n iot-testing"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Get the Builder Token for injecting it in the Ansible Playbook Bundle (APB) configuration
+  shell: "oc get $(oc get secret -n iot-testing -o name | grep builder-token | head -1) -n iot-testing -o yaml | grep token: | awk '{print $2;}' | base64 -d"
+  register: tokenresult
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Setting the just acquired Builder Token in the APB configuration
+  shell: "sed -i 's/YOUR_TOKEN_HERE/{{ tokenresult.stdout }}/g' /tmp/{{guid}}/deploy-containers-apb/playbooks/provision.yml"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Setting the OCP Registry Address in the APB configuration
+  shell: "sed -i 's/YOUR_OCP_ADDRESS_HERE/docker-registry-default.{{ ocp_apps_domain }}/g' /tmp/{{guid}}/deploy-containers-apb/playbooks/provision.yml"
+  delegate_to: bastion.{{ guid }}.internal  
+  
+- name: Setting the Endpoint for AMQ connections (supposing a Single Node Installation) in the APB configuration
+  shell: "sed -i 's/YOUR_INFRA_ADDR/node1.{{guid}}.internal/g' /tmp/{{guid}}/deploy-containers-apb/playbooks/provision.yml"
+  delegate_to: bastion.{{ guid }}.internal  
+  
+#- name: Generate a brand new SSH key for connecting to the remote machine
+#  shell: "cd /tmp/{{guid}}/deploy-containers-apb; ssh-keygen -N '' -f ./id_rsa"
+#  delegate_to: bastion.{{ guid }}.internal
+
+- name: Ensure that APB binary is installed
+  become: true
+  yum:
+    name: apb
+    state: present
+  delegate_to: bastion.{{ guid }}.internal
+
+- name: Ready to prepare the APB build
+  shell: "cd /tmp/{{guid}}/deploy-containers-apb; apb prepare"
+  delegate_to: bastion.{{ guid }}.internal
+
+- name: Create the APB build
+  shell: "cd /tmp/{{guid}}/deploy-containers-apb; oc new-build --name deploy-containers-apb --allow-missing-images -n openshift ."
+  delegate_to: bastion.{{ guid }}.internal
+
+- name: Start the APB build and push process
+  shell: "cd /tmp/{{guid}}/deploy-containers-apb; oc start-build -n openshift --follow --from-dir . deploy-containers-apb"
+  delegate_to: bastion.{{ guid }}.internal
+
+- name: Annotate the completed iot-development project as requested by user
+  shell: "oc annotate namespace iot-development openshift.io/requester=user1 --overwrite"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Annotate the completed iot-testing project as requested by user
+  shell: "oc annotate namespace iot-testing openshift.io/requester=user1 --overwrite"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Annotate the completed iot-hub project as requested by user
+  shell: "oc annotate namespace iot-hub openshift.io/requester=user1 --overwrite"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Give user access to the completed iot-development project
+  shell: "oc policy add-role-to-user admin user1 -n iot-development"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Give user access to the completed iot-testing project
+  shell: "oc policy add-role-to-user admin user1 -n iot-testing"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Give user access to the completed iot-hub project
+  shell: "oc policy add-role-to-user admin user1 -n iot-hub"
+  delegate_to: bastion.{{ guid }}.internal  
+
+# Fixing fis-karaf issue with registry.redhat.io
+- name: Backing up the fis-karaf ImageStream
+  shell: "oc get --export -n openshift is fis-karaf-openshift -o yaml | sed 's/registry.redhat.io/registry.access.redhat.com/g' > /tmp/{{guid}}/fis-karaf-openshift-is-registry.yaml"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Deleting the fis-karaf ImageStream
+  shell: "oc delete -n openshift is fis-karaf-openshift"
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Creating the fis-karaf ImageStream
+  shell: "oc create -n openshift -f /tmp/{{guid}}/fis-karaf-openshift-is-registry.yaml"
+  delegate_to: bastion.{{ guid }}.internal  
+
+# Starting the configuration for the External Machine. We suppose that the External machine is the bastion where we're launching this ansible playbook.
+#- name: Getting the generated public-key into this playbook
+#  slurp:
+#    src: /tmp/{{guid}}/deploy-containers-apb/id_rsa.pub
+#  register: publickey
+#  delegate_to: bastion.{{ guid }}.internal
+
+#- name: Adding SSH public key to the authorized host for the machine
+#  become: true
+#  authorized_key:
+#    user: root
+#    state: present
+#    key: "{{ publickey['content'] | b64decode }}"
+#  #shell: "cat /tmp/{{guid}}/deploy-containers-apb/id_rsa.pub >> /root/.ssh/authorized_keys; chmod 700 /root/.ssh/authorized_keys"
+#  delegate_to: bastion.{{ guid }}.internal
+
+- name: Installing Cockpit and Docker (it will be replaced by Podman as soon as Cockpit-Podman will become stable)
+  become: true
+  yum:
+    name: ['docker', 'cockpit', 'cockpit-docker']
+    state: present
+  delegate_to: bastion.{{ guid }}.internal  
+
+#!!! We need an admin user that will be able to login in cockpit (w/ password) for monitoring containers deployment !!!
+
+- name: Backing up /etc/containers/registries.conf
+  become: true
+  shell: cp -rf /etc/containers/registries.conf /etc/containers/registries.conf.bak
+  delegate_to: bastion.{{ guid }}.internal
+
+# Is it right the default route for external registry?
+- name: Inserting the insecure registry
+  become: true
+  replace:
+    path: /etc/containers/registries.conf
+    regexp: 'registries = \[\]'
+    replace: 'registries = ["docker-registry-default.apps.{{ guid }}.open.redhat.com"]'
+    before: '[registries.block]'
+    backup: yes
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: Starting docker and cockpit service
+  become: true
+  service:
+    name: "{{ item }}"
+    enabled: yes
+    state: started
+  with_items:
+    - docker
+    - cockpit
+  delegate_to: bastion.{{ guid }}.internal  
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

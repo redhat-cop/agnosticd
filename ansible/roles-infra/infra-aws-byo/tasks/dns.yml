@@ -1,0 +1,83 @@
+---
+- when: operation == 'CREATE'
+  block:
+    - name: Create route53 DNS zone (customer)
+      route53_zone:
+        aws_access_key: "{{ aws_access_key_id }}"
+        aws_secret_key: "{{ aws_secret_access_key }}"
+        zone: "{{ subdomain_base }}"
+        state: present
+        comment: Created by Red Hat
+      register: r_zonecreate
+
+    - name: Gather facts about the zone
+      route53:
+        aws_access_key: "{{ aws_access_key_id }}"
+        aws_secret_key: "{{ aws_secret_access_key }}"
+        state: get
+        hosted_zone_id: "{{ r_zonecreate.result.zone_id }}"
+        record: "{{ subdomain_base }}"
+        zone: "{{ subdomain_base_suffix | regex_replace('^\\.', '') }}"
+        type: NS
+      register: r_zonefacts
+
+    - name: Update NS records in Top route53 zone (provider)
+      route53:
+        aws_access_key: "{{ provider_aws_access_key_id }}"
+        aws_secret_key: "{{ provider_aws_secret_access_key }}"
+        zone: "{{ provider_zone }}"
+        hosted_zone_id: "{{ provider_hosted_zone_id }}"
+        type: NS
+        state: create
+        record: "{{ subdomain_base }}."
+        value: "{{ r_zonefacts.nameservers }}"
+        overwrite: yes
+
+    - name: Write Zone information into provided YAML file
+      lineinfile:
+        line: "HostedZoneId: {{ r_zonecreate.result.zone_id }}"
+        regexp: '^HostedZoneId: '
+        path: "{{ yml_output_file }}"
+      when: yml_output_file is defined
+
+- when: operation == 'DELETE'
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ provider_aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ provider_aws_secret_access_key }}"
+  block:
+    - name: Get all records
+      command: >-
+        aws route53 list-resource-record-sets --hosted-zone-id {{ provider_hosted_zone_id }}
+      register: records
+
+    - set_fact:
+        change_batch_dest: "{{ output_dir }}/{{ guid }}_{{ provider_hosted_zone_id }}_delete_records.json"
+        records_to_delete: >-
+          {{ records.stdout |from_json
+          | json_query('ResourceRecordSets')
+          | selectattr('Name', 'equalto', subdomain_base + '.')
+          | list
+          }}
+
+    - when: records_to_delete|length > 0
+      block:
+        - name: Create route53 change batch  (JSON)
+          copy:
+            dest: "{{ change_batch_dest }}"
+            content: |
+              {
+                "Comment": "Delete all records for {{ provider_hosted_zone_id }}",
+                "Changes": [
+                {% for record in records_to_delete %}
+                {   "Action": "DELETE",
+                    "ResourceRecordSet": {{ record | to_json }}
+                }{{ "," if not loop.last else "" }}
+                {% endfor %}
+                ]
+              }
+
+        - name: Delete all NS records from the zone for that guid
+          command: >-
+            aws route53 change-resource-record-sets
+            --hosted-zone-id={{ provider_hosted_zone_id }}
+            --change-batch=file://{{ change_batch_dest }}

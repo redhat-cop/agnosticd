@@ -1,0 +1,114 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Create OpenShift Objects for Service Broker
+  ignore_errors: yes
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/service_catalog_api_server.yaml
+  - ./files/service_catalog_controller_manager.yaml
+
+- name: Create OpenShift Objects for Template Service Broker
+  ignore_errors: yes
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/broker_project.j2
+  - ./templates/operator_group.j2
+  - ./templates/catalog_source.j2
+  - ./templates/subscription.j2
+  - ./templates/cluster_role_binding.j2
+
+- name: Wait until CSV is Installed
+  command: oc get csv -o jsonpath --template='{$.items[:1].status.phase}' -n "{{ _tsb_broker_project }}"
+  register: csv
+  retries: 25
+  delay: 10
+  ignore_errors: yes
+  until: csv.stdout == "Succeeded"
+
+- name: Notify user if Template Service Broker operator deployment failed
+  when: not csv.stdout == "Succeeded"
+  debug:
+    msg: "user.info: *** Template Service Broker could not be installed ***"
+
+- name: Set up Template Service Broker
+  when: csv.stdout == "Succeeded"
+  block:
+  - name: Create Template Service Broker
+    ignore_errors: yes
+    k8s:
+      state: present
+      merge_type:
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - ./templates/template_service_broker.j2
+
+  - name: Wait for Template Service Broker DeploymentConfig to appear
+    ignore_errors: yes
+    k8s_facts:
+      api_version: apps.openshift.io/v1
+      kind: DeploymentConfig
+      namespace: "{{ _tsb_broker_project }}"
+      name: apiserver
+    register: r_tsb_dc
+    retries: 25
+    delay: 10
+    until: r_tsb_dc.resources | list | length >= 1
+
+  - name: Wait for Template Service Broker to be running
+    ignore_errors: yes
+    k8s_facts:
+      api_version: apps.openshift.io/v1
+      kind: DeploymentConfig
+      namespace: "{{ _tsb_broker_project }}"
+      name: apiserver
+    register: r_tsb
+    retries: 25
+    delay: 10
+    until: r_tsb.resources[0].status.availableReplicas | int == 1
+
+  # Workaround to make Operator Pod pick up permissions from the service
+  # account. Without this the TSB will be running but not
+  # displaying any Templates in the Developer Catalog.
+  # Somehow killing the pod (and have it recreated via the Deployment)
+  # fixes the issue.
+  - name: Workaround - Get Operator Pod
+    ignore_errors: yes
+    k8s_facts:
+      api_version: v1
+      kind: Pod
+      namespace: "{{ _tsb_broker_project }}"
+      label_selectors:
+      - name = openshift-template-service-broker-operator-alm-owned
+    register: r_operator_pod
+
+  - name: Workaround - Kill Operator Pod
+    ignore_errors: yes
+    k8s:
+      state: absent
+      api_version: v1
+      kind: Pod
+      namespace: "{{ _tsb_broker_project }}"
+      name: "{{ r_operator_pod.resources[0].metadata.name }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

@@ -1,0 +1,111 @@
+---
+- name: Check if account exists in the DB
+  vars:
+    _data:
+      name:
+        S: "{{ account_name }}"
+  command: >-
+    aws --profile {{ aws_master_profile }}
+    --region {{ dynamodb_region }}
+    dynamodb get-item
+    --table-name {{ dynamodb_table }}
+    --key '{{ _data | to_json }}'
+    --query 'Item.account_id' --output text
+  register: _getaccountid
+
+- when:
+    - _getaccountid.stdout != 'None'
+    - _getaccountid.stdout != ''
+  set_fact:
+    account_id: "{{ _getaccountid.stdout }}"
+    account_already_exists: yes
+
+- when:
+    - all_accounts is not defined
+    - operation == 'CREATE' or account_id is not defined
+  block:
+    - name: List all accounts in the organization.
+      command: >-
+        aws --profile {{ aws_master_profile }}
+        organizations list-accounts
+        --query 'Accounts[].{Name: Name, Id: Id}'
+      register: _listaccounts
+      changed_when: false
+
+    - set_fact:
+        all_accounts: "{{_listaccounts.stdout|from_json}}"
+
+- when:
+    - operation == 'CREATE' or account_id is not defined
+    - account_name not in all_accounts|json_query('[].Name')
+  name: Create New account.
+  command: >-
+    aws --profile {{ aws_master_profile }}
+    organizations create-account
+    --email {{ account_email }}
+    --account-name "{{ account_name }}"
+    --role-name "{{ aws_role_name }}"
+    --query 'CreateAccountStatus.[Id]'
+    --output text
+  register: _createaccount
+
+- when:
+    - operation == 'CREATE' or account_id is not defined
+    - account_name in all_accounts|json_query('[].Name')
+  block:
+    - name: Find and set the account_id (existing account)
+      set_fact:
+        account_id: >-
+          {{
+          (
+          all_accounts
+          |selectattr('Name', 'equalto', account_name)
+          |first
+          )['Id']
+          }}
+
+    - debug:
+        var: account_id
+
+- when:
+    - _createaccount is not skipped
+    - _createaccount.stdout != ''
+  block:
+    - name: Wait for account to be created.
+      command: >-
+        aws --profile {{ aws_master_profile }}
+        organizations describe-create-account-status
+        --create-account-request-id {{ _createaccount.stdout }}
+        --query 'CreateAccountStatus.[State]'
+        --output text
+      register: _describestatus
+      until: _describestatus.stdout in ['SUCCEEDED', 'FAILED']
+      delay: 5
+      retries: 40
+
+    - fail:
+        msg: The creation of the account failed.
+      when: _describestatus.stdout == 'FAILED'
+
+    - name: Get the account ID
+      command: >-
+        aws --profile {{ aws_master_profile }}
+        organizations describe-create-account-status
+        --create-account-request-id {{ _createaccount.stdout }}
+        --query 'CreateAccountStatus.[AccountId]'
+        --output text
+      register: _describestatusid
+
+    - name: Save account id in variable 'account_id'
+      set_fact:
+        account_id: "{{ _describestatusid.stdout }}"
+
+- when: account_id is not defined
+  fail:
+    msg: Account Id not defined
+
+- name: Add Account Id to the report
+  lineinfile:
+    path: "{{ output_dir }}/{{ account_name }}_report.txt"
+    line: "account_id: {{ account_id }}"
+    create: yes
