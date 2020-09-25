@@ -8,8 +8,7 @@ def cf_group = 'opentlc-access-cicd'
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
-def notification_email = 'gpteinfrasev3@redhat.com'
-def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
+def notification_email = 'djana@redhat.com'
 
 // SSH key
 def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
@@ -20,21 +19,18 @@ def ssh_admin_host = 'admin-host-na'
 // state variables
 def guid=''
 def ocp_console=''
-def acm_console=''
-def ssh_location=''
 
 // Catalog items
 def choices = [
-    'RHTR 2020 / ACM Cluster Hub',
+    'Shared Cluster Development / DEV Decision Manager 7 Foundations OCP4',
 ].join("\n")
 
 def region_choice = [
-    'events_openstack',
+    'dev_opentlc',
 ].join("\n")
 
 def environment_choice = [
-    'TEST',
-    'PROD',
+    'DEV',
 ].join("\n")
 
 pipeline {
@@ -48,7 +44,7 @@ pipeline {
         booleanParam(
             defaultValue: false,
             description: 'wait for user input before deleting the environment',
-                name: 'confirm_before_delete'
+            name: 'confirm_before_delete'
         )
         choice(
             choices: choices,
@@ -86,9 +82,9 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
-                        'check2=t',
-                        'expiration=1',
-                        'runtime=2',
+                        'check=t',
+                        'expiration=7',
+                        'runtime=8',
                         'quotacheck=t',
                         "environment=${environment}",
                         "region=${region}",
@@ -143,21 +139,15 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
+                          --timeout 180 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-						def m = email =~ /Openshift Master Console: (https:\/\/[^ \n]+)/
+                        def m = email =~ /Openshift Master Console: (https:\/\/[^ \n]+)/
                         ocp_console = m[0][1]
                         echo "Openshift Master Console = ${ocp_console}"
-                        def mm = email =~ /(https:\/\/[^ \n]+)/
-                        acm_console = mm[0][1]
-                        echo "ACM console = ${acm_console}"
-                        def mmm = email =~ /ssh (.*)/
-                        ssh_location = mmm[0][1]
-                        echo "SSH = ssh ${ssh_location}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -170,8 +160,8 @@ pipeline {
         
         stage ('Wait to complete provision') {
         	steps {
-				echo "Wait for 5 minutes for deployment to complete"
-				sleep 300 // seconds
+				echo "Wait for 2 minutes for deployment to complete"
+				sleep 120 // seconds
 			}
 		}
 

@@ -9,7 +9,6 @@ def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
 // Notifications
 def notification_email = 'gpteinfrasev3@redhat.com'
-def rocketchat_hook = '5d28935e-f7ca-4b11-8b8e-d7a7161a013a'
 
 // SSH key
 def ssh_creds = '15e1788b-ed3c-4b18-8115-574045f32ce4'
@@ -115,7 +114,7 @@ pipeline {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
 
@@ -206,21 +205,12 @@ pipeline {
                             from: credentials.split(':')[0]
                         )
                     }
-                    withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
-                        sh(
-                            """
-                            curl -H 'Content-Type: application/json' \
-                            -X POST '${HOOK_URL}' \
-                            -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :rage: ${env.JOB_NAME} (${env.BUILD_NUMBER}) failed retiring ${guid}.\"}'\
-                            """.trim()
-                        )
-                    }
                 }
             }
         }
         stage('Wait for deletion email') {
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
                 withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
@@ -274,26 +264,6 @@ pipeline {
                     replyTo: "${notification_email}",
                     from: credentials.split(':')[0]
               )
-            }
-            withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
-                sh(
-                    """
-                      curl -H 'Content-Type: application/json' \
-                      -X POST '${HOOK_URL}' \
-                      -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :rage: ${env.JOB_NAME} (${env.BUILD_NUMBER}) failed GUID=${guid}. It appears that ${env.BUILD_URL}/console is failing, somebody should do something about that.\"}'\
-                    """.trim()
-                )
-            }
-        }
-        fixed {
-            withCredentials([string(credentialsId: rocketchat_hook, variable: 'HOOK_URL')]) {
-                sh(
-                    """
-                      curl -H 'Content-Type: application/json' \
-                      -X POST '${HOOK_URL}' \
-                      -d '{\"username\": \"jenkins\", \"icon_url\": \"https://dev-sfo01.opentlc.com/static/81c91982/images/headshot.png\", \"text\": \"@here :smile: ${env.JOB_NAME} is now FIXED, see ${env.BUILD_URL}/console\"}'\
-                    """.trim()
-                )
             }
         }
     }
