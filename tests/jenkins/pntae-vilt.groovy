@@ -2,7 +2,7 @@
 // CloudForms
 def opentlc_creds = 'b93d2da4-c2b7-45b5-bf3b-ee2c08c6368e'
 def opentlc_admin_creds = '73b84287-8feb-478a-b1f2-345fd0a1af47'
-def cf_uri = 'https://portal.opentlc.com'
+def cf_uri = 'https://labs.opentlc.com'
 def cf_group = 'opentlc-access-cicd'
 // IMAP
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
@@ -18,16 +18,17 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def vscode_url=''
 def ssh_location=''
 
 // Catalog items
 def choices = [
-    'RHTR 2020 / Collections Lab',
+    'Support Labs / PNTAE VILT',
 ].join("\n")
 
 def region_choice = [
-    'events_openstack',
+    'na_osp',
+    'emea_osp',
+    'apac_osp',
 ].join("\n")
 
 def environment_choice = [
@@ -84,9 +85,9 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
-                        'check2=t',
-                        'expiration=1',
-                        'runtime=2',
+                        'check=t',
+                        'expiration=7',
+                        'runtime=10',
                         'quotacheck=t',
                         "environment=${environment}",
                         "region=${region}",
@@ -147,11 +148,8 @@ pipeline {
                     ).trim()
 
                     try {
-                        def mmm = email =~ /VScode UI URL: (https:\/\/[^ \n]+)/
-                        vscode_url = mmm[0][1]
-                        echo "VScode UI URL = '${vscode_url}'"
-                        def mmmm = email =~ /ssh (.*)/
-                        ssh_location = mmmm[0][1]
+                        def m = email =~ /ssh (.*)/
+                        ssh_location = m[0][1]
                         echo "SSH = ssh '${ssh_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
