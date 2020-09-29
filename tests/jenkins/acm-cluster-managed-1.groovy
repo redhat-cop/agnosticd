@@ -82,7 +82,7 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'expiration=1',
-                        'runtime=2,
+                        'runtime=2',
                         'quotacheck=f',
                         "environment=${environment}",
                         "region=${region}",
