@@ -1,0 +1,84 @@
+---  
+- name: "Create CI Organization"
+  organization:
+    username: "{{ satellite_admin }}"
+    password: "{{ satellite_admin_password }}"
+    server_url: "https://{{ publicname }}"
+    name: "{{ org }}"
+    label: "{{ satellite_org_set_default | d(true) | ternary(omit, org_label) }}"
+    description: "{{ org_description }}"
+    state: present
+
+- name: Set manifest_basename fact
+  set_fact:
+    manifest_basename: "{{ satellite_manifest.path | basename }}"
+  when: satellite_manifest.type == 'file'
+
+- name: Copy manifest
+  copy:
+    src: "{{ satellite_manifest.path }}"
+    dest: /tmp
+  when: satellite_manifest.type == 'file'
+
+- name: "Upload the manifest"
+  subscription_manifest:
+    username: "{{ satellite_admin }}"
+    password: "{{ satellite_admin_password }}"
+    server_url: "https://{{ publicname }}"
+    organization: "{{ org }}"
+    manifest_path: "/tmp/{{ manifest_basename }}"
+    repository_url: "{{ cdn_repository_url | d(omit) }}"
+    state: present
+  tags:
+    - configure_satellite
+    - configure_satellite_manifest
+
+- name: Enable Satellite repositories
+  repository_set:
+    username: "{{ satellite_admin }}"
+    password: "{{ satellite_admin_password }}"
+    server_url: "https://{{ publicname }}"
+    organization: "{{ org }}"
+    label: "{{ __repo_list.label }}"
+    repositories:
+      - releasever: "{{ __repo_list.release | default(omit) }}"
+        basearch: "{{ __repo_list.basearch | default('x86_64') }}"
+  loop: "{{ satellite_repos_sync }}"
+  loop_control:
+    loop_var: __repo_list
+  tags:
+    - configure_satellite
+    - configure_satellite_sync
+     
+- name: Sync enabled repositories by product
+  repository_sync:
+    username: "{{ satellite_admin }}"
+    password: "{{ satellite_admin_password }}"
+    server_url: "https://{{ publicname }}"
+    organization: "{{ org }}"
+    repository: "{{ __repo_sync.name | default(omit) }}"
+    product: "{{ __repo_sync.product }}"
+  loop: "{{ satellite_products }}"
+  loop_control:
+    loop_var: __repo_sync
+  async: 999999
+  poll: 0
+  register: repo_sync_sleeper
+  tags:
+    - configure_satellite
+    - configure_satellite_sync
+     
+- name: Wait until all Syncs have finished
+  async_status:
+    jid: "{{ repo_sync_sleeper_item.ansible_job_id }}"
+  loop: "{{ repo_sync_sleeper.results }}"
+  loop_control:
+    loop_var: repo_sync_sleeper_item
+  when: repo_sync_sleeper_item.ansible_job_id is defined  # Skip items that were skipped in the previous task
+  register: async_job_result
+  until: async_job_result.finished
+  retries: 999
+  delay: 20
+  tags:
+    - configure_satellite
+    - configure_satellite_sync
