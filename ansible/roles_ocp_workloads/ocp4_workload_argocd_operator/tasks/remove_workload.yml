@@ -1,0 +1,97 @@
+---
+- name: Remove ArgoCD Installation
+  k8s:
+    state: absent
+    api_version: argoproj.io/v1alpha1
+    kind: ArgoCD
+    name: "{{ ocp4_workload_argocd_operator_argocd_name }}"
+  ignore_errors: true
+
+- name: Get Installed CSV
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: argocd-operator
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+  register: r_subscription
+
+- name: Remove CSV
+  when:
+  - r_subscription.resources | length > 0
+  - r_subscription.resources[0].status.currentCSV is defined
+  - r_subscription.resources[0].status.currentCSV | length > 0
+  k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+
+- name: Remove Subscription
+  k8s:
+    state: absent
+    definition: "{{ lookup('template', './templates/subscription.j2' ) | from_yaml }}"
+
+- name: Find InstallPlans
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+  register: r_install_plans
+
+- name: Set InstallPlan Name
+  when: r_install_plans.resources | length > 0
+  set_fact:
+    ocp4_workload_argocd_operator_install_plan_name: >-
+      {{ r_install_plans.resources | to_json | from_json | json_query(query) }}
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'argocd-operator')].metadata.name|[0]
+
+- name: Remove InstallPlan
+  when:
+  - ocp4_workload_argocd_operator_install_plan_name is defined
+  - ocp4_workload_argocd_operator_install_plan_name |default("") | length > 0
+  k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ ocp4_workload_argocd_operator_install_plan_name }}"
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+
+- name: Remove CatalogSource for catalog snapshot
+  k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: CatalogSource
+    name: "{{ ocp4_workload_argocd_operator_catalogsource_name }}"
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+
+- name: Delete ArgoCD namespace and cluster role binding
+  k8s:
+    state: absent
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/project.j2
+  - ./templates/clusterrolebinding.j2
+
+# Unfortunately the argo operator doesn't properly "own" its CRDs
+- name: Delete ArgoCD-created CRDs
+  k8s:
+    state: absent
+    definition:
+      apiVersion: apiextensions.k8s.io/v1
+      kind: CustomResourceDefinition
+      metadata:
+        name: "{{ item }}"
+  loop:
+  - "applications.argoproj.io"
+  - "appprojects.argoproj.io"
+  - "argocdexports.argoproj.io"
+  - "argocds.argoproj.io"
+
+# Leave this as the last task in the playbook.
+- name: remove_workload tasks complete
+  debug:
+    msg: "Remove Workload tasks completed successfully."
+  when: not silent|bool

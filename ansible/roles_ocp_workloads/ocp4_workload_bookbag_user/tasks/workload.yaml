@@ -1,0 +1,107 @@
+---
+- name: Get User Data
+  set_fact:
+    _user_data: >-
+      {{ lookup('file', hostvars.localhost.output_dir ~ '/user-data.yaml', errors='ignore')
+      | from_yaml }}
+
+- name: Fallback for User Data
+  when: _user_data | default({}) | length == 0
+  set_fact:
+    _user_data: []
+
+- name: Get User Info
+  set_fact:
+    _user_info_messages: >-
+      {{ lookup('file', hostvars.localhost.output_dir ~ '/user-info.yaml', errors='ignore')
+      | from_yaml }}
+
+- name: Fallback for User Info
+  when: _user_info_messages | default({}) | length == 0
+  set_fact:
+    _user_info_messages: []
+
+- name: Set workshop default vars
+  set_fact:
+    _workshop_default_vars:
+      guid: "{{ guid }}"
+      ocp_username: "{{ ocp_username }}"
+      user_info_messages: "{{ _user_info_messages | join('\n') }}"
+
+- name: Set Workshop vars
+  set_fact:
+    _workshop_vars: >-
+      {{ _user_data | combine(_workshop_default_vars) }}
+
+- name: Determine OpenShift Console Image
+  when: ocp4_workload_bookbag_user_console_image_override | default("") | length == 0
+  block:
+  - name: Get OpenShift Console Deployment
+    k8s_info:
+      api_version: apps/v1
+      kind: Deployment
+      name: console
+      namespace: openshift-console
+    register: r_console_deployment
+  - name: Set Console Image variable
+    set_fact:
+      ocp4_workload_bookbag_user_console_image: >-
+        {{ r_console_deployment.resources[0].spec.template.spec.containers[0].image }}
+- name: Set Console Image to override image
+  when: ocp4_workload_bookbag_user_console_image_override | default("") | length > 0
+  set_fact:
+    ocp4_workload_bookbag_user_console_image: "{{ ocp4_workload_bookbag_user_console_image_override }}"
+
+- name: Create Bookbag prerequisite resources
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/project.yaml.j2
+  - ./templates/service_account.yaml.j2
+  - ./templates/rolebinding.yaml.j2
+  - ./templates/rolebinding_user.yaml.j2
+  - ./templates/rolebinding_image_puller.yaml.j2
+  - ./templates/service.yaml.j2
+  - ./templates/route.yaml.j2
+
+- name: Create Bookbag PVC
+  when: ocp4_workload_bookbag_user_create_pvc | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/pvc.yaml.j2' ) | from_yaml }}"
+
+- name: Create Bookbag deployment
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/deployment.yaml.j2' ) | from_yaml }}"
+
+- name: Get Bookbag route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: "{{ ocp4_workload_bookbag_user_deployment_name }}"
+    namespace: "{{ ocp4_workload_bookbag_user_project }}"
+  register: r_route
+  failed_when: r_route.resources | length != 1
+
+- name: Set agnosticd_user_info for Bookbag
+  agnosticd_user_info:
+    msg: "Your lab instructions are at: {{ _ocp4_workload_bookbag_user_url }}"
+    data:
+      ocp4_workload_bookbag_user_url: "{{ _ocp4_workload_bookbag_user_url }}"
+  vars:
+    _route: "{{ r_route.resources[0] }}"
+    _ocp4_workload_bookbag_user_url: >-
+      {{ 'https' if 'tls' in _route.spec else 'http' }}://{{ _route.spec.host }}
+
+- name: Set agnosticd_user_info for Bookbag (authentication enabled)
+  when: ocp4_workload_bookbag_user_auth_username | default("") | length == 0
+  agnosticd_user_info:
+    msg: "User your OpenTLC User ID ({{ ocp_username }}) and password when prompted to log in."
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

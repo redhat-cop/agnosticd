@@ -1,0 +1,268 @@
+---
+- name: Step 001 software
+  hosts: utility
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Update packages
+      yum:
+        name: '*'
+        state: latest
+      async: 2400
+      poll: 10
+    - name: Install required packages
+      package:
+        name:
+          - gcc
+          - wget
+          - python3
+          - python3-devel
+          - ipmitool
+          - libvirt
+          - libguestfs-tools
+          - qemu-kvm
+          - qemu-img
+          - jq
+          - libguestfs
+          - bind-utils
+          - bind
+          - dhcp-server
+          - python3-openstackclient
+          - nfs-utils
+          - firewalld
+
+    - name: Add /usr/local/bin to PATH
+      copy:
+        dest: /etc/profile.d/custom-path.sh
+        content: 'PATH=$PATH:/usr/local/bin'
+
+- name: Step 002 Utility VM config
+  hosts: utility
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Create .config directory
+      file:
+        path: /home/cloud-user/.config/openstack
+        state: directory
+        owner: "cloud-user"
+        group: users
+        mode: 0744
+
+    - name: Create directory for nfs share
+      file:
+        path: /nfs
+        state: directory
+        owner: "root"
+        group: root
+        mode: 0777
+
+    - name: Create partition for NFS volume
+      parted:
+        device: /dev/vdb
+        number: 1
+        state: present
+
+    - name: Create volume for NFS share on vdb
+      filesystem:
+        fstype: ext4
+        dev: /dev/vdb1
+        resizefs: yes
+
+    - name: mount NFS backend volume
+      mount:
+        path: /nfs
+        src: /dev/vdb1
+        fstype: ext4
+        state: present
+
+    - name: create NFS export file
+      template:
+        src: "./files/exports.j2"
+        dest: "/etc/exports"
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: start and enable NFS service
+      service:
+        name: nfs-server
+        state: started
+        enabled: yes
+
+    - name: Create clouds.yaml file
+      template:
+        src: "./files/clouds.yaml.j2"
+        dest: "/home/cloud-user/.config/openstack/clouds.yaml"
+        owner: "cloud-user"
+        mode: 0700
+
+    - name: Create scripts directory
+      file:
+        path: /home/cloud-user/scripts
+        state: directory
+        owner: "cloud-user"
+        group: "cloud-user"
+        mode: 0777
+
+    - name: Create dhcp directory
+      file:
+        path: /home/cloud-user/scripts/dhcp
+        state: directory
+        owner: "cloud-user"
+        group: "cloud-user"
+        mode: 0777
+
+    - name: Create named directory
+      file:
+        path: /home/cloud-user/scripts/named
+        state: directory
+        owner: "cloud-user"
+        group: "cloud-user"
+        mode: 0777
+
+    - name: Create profile directory
+      file:
+        path: /home/cloud-user/scripts/profile
+        state: directory
+        owner: "cloud-user"
+        group: "cloud-user"
+        mode: 0777
+
+    - name: sending profile for ocp-installer
+      copy:
+        src: ./files/profile.go
+        dest: /home/cloud-user/scripts/profile/profile.go
+
+    - name: sending metal3 config for ocp-installer
+      copy:
+        src: ./files/metal3-config.yaml
+        dest: /home/cloud-user/scripts/metal3-config.yaml
+
+    - name: sending fix-overlay.sh script if CoreOS breaks
+      copy:
+        src: ./files/fix-overlay.sh
+        dest: /home/cloud-user/scripts/fix-overlay.sh
+        owner: "cloud-user"
+        group: "cloud-user"
+        mode: 0777
+
+    - name: Resolving install-config
+      template:
+        src: "./files/install-config.yaml.j2"
+        dest: "/home/cloud-user/scripts/install-config.yaml"
+        owner: "cloud-user"
+        mode: 0744
+        force: yes
+
+    - name: Creating vol attach scripts
+      template:
+        src: "./files/10_volume-attach.sh.j2"
+        dest: "/home/cloud-user/scripts/10_volume-attach.sh"
+        owner: "cloud-user"
+        mode: 0744
+        force: yes
+
+    - name: Templating dhcp
+      template:
+        src: "./files/dhcpd.conf.j2"
+        dest: "/home/cloud-user/scripts/dhcp/dhcpd.conf"
+        owner: "cloud-user"
+        mode: 0744
+        force: yes
+
+    - name: Templating DNS 1/3
+      template:
+        src: "./files/0.20.10.in-addr.arpa.j2"
+        dest: "/home/cloud-user/scripts/named/0.20.10.in-addr.arpa"
+        owner: "cloud-user"
+        mode: 0744
+        force: yes
+
+    - name: Templating DNS 2/3
+      template:
+        src: "./files/named.conf.j2"
+        dest: "/home/cloud-user/scripts/named/named.conf"
+        owner: "cloud-user"
+        mode: 0744
+        force: yes
+
+    - name: Templating DNS 3/3
+      template:
+        src: "./files/myzone.com.zone.j2"
+        dest: "/home/cloud-user/scripts/named/{{ kni_ocp_domain }}.zone"
+        owner: "cloud-user"
+        mode: 0744
+        force: yes
+
+    - name: Setting pull-secret
+      template:
+        src: "./files/pull-secret.json.j2"
+        dest: "/home/cloud-user/pull-secret.json"
+        owner: "cloud-user"
+        mode: 0744
+
+    - name: Sending wrapper script
+      template:
+        src: "./files/ocp-install.sh.j2"
+        dest: "/home/cloud-user/scripts/ocp-install.sh"
+        owner: "cloud-user"
+        mode: 0744
+
+- name: Step 003 Prepare the node for OpenShift KNI installation
+  hosts: utility
+  gather_facts: false
+  become: False
+  tasks:
+    - name: Preparing KNI install if kni_prepare enabled
+      when: kni_prepare
+      shell: /home/cloud-user/scripts/ocp-install.sh prepare 2>&1 | tee -a /tmp/ocp-install.log
+      args:
+        chdir: /home/cloud-user/scripts/
+      async: 900
+      poll: 5
+
+- name: Step 004 Time to get Schwifty in here !
+  hosts: utility
+  gather_facts: false
+  become: False
+  tasks:
+    - name: Installing KNI if kni_auto_install enabled, this may take a while ...
+      when: kni_auto_install
+      shell: /home/cloud-user/scripts/ocp-install.sh 2>&1 | tee -a /tmp/ocp-install.log
+      args:
+        chdir: /home/cloud-user/scripts/
+      async: 9000
+      poll: 10
+      ignore_errors: yes
+
+    - name: Ensuring all of the nodes came up successfully and verifying overlayfs success
+      when: kni_auto_install
+      shell: /home/cloud-user/scripts/fix-overlay.sh 2>&1 | tee -a /tmp/ocp-install.log
+      args:
+        chdir: /home/cloud-user/scripts/
+      ignore_errors: yes
+
+    - name: Checking OpenShift installation (wait-for bootstrap-complete)
+      shell: /home/cloud-user/scripts/openshift-baremetal-install --dir=/home/cloud-user/scripts/ocp --log-level debug wait-for bootstrap-complete 2>&1 | tee -a /tmp/ocp-install.log
+      when: kni_auto_install
+
+    - name: Checking OpenShift installation (wait-for install-complete)
+      when: kni_auto_install
+      shell: /home/cloud-user/scripts/openshift-baremetal-install --dir=/home/cloud-user/scripts/ocp --log-level debug wait-for install-complete 2>&1 | tee -a /tmp/ocp-install.log
+
+- name: Step 005 Make sure workers are up and running
+  hosts: utility
+  gather_facts: false
+  become: False
+  tasks:
+    - name: Ensuring all of the nodes came up successfully and verifying overlayfs success
+      when: kni_auto_install
+      shell: /home/cloud-user/scripts/fix-overlay.sh 2>&1 | tee -a /tmp/ocp-install.log
+      args:
+        chdir: /home/cloud-user/scripts/
+      ignore_errors: yes
+
+    - name: Checking OpenShift installation (wait-for install-complete)
+      when: kni_auto_install
+      shell: /home/cloud-user/scripts/openshift-baremetal-install --dir=/home/cloud-user/scripts/ocp --log-level debug wait-for install-complete 2>&1 | tee -a /tmp/ocp-install.log

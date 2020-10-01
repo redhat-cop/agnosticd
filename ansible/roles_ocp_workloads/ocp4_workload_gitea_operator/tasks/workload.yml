@@ -1,0 +1,133 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Create OpenShift Objects for Gitea Operator
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/project.j2
+  - ./templates/crd.j2
+  - ./templates/service_account.j2
+  - ./templates/cluster_role.j2
+  - ./templates/cluster_role_binding.j2
+  - ./templates/operator.j2
+
+- name: Wait for Gitea operator Pod to be ready
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: "{{ ocp4_workload_gitea_operator_project }}"
+    name: "gitea-operator"
+  register: r_gitea_operator_deployment
+  retries: 20
+  delay: 10
+  until:
+  - r_gitea_operator_deployment.resources is defined
+  - r_gitea_operator_deployment.resources | length | int > 0
+  - r_gitea_operator_deployment.resources[0].status.readyReplicas is defined
+  - r_gitea_operator_deployment.resources[0].status.readyReplicas | int == r_gitea_operator_deployment.resources[0].spec.replicas | int
+
+- name: Deploy default Gitea instance
+  when: ocp4_workload_gitea_operator_deploy_gitea_instance | bool
+  block:
+  - name: Create OpenShift Custom Resource for Gitea Instance
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './templates/gitea.j2' ) | from_yaml }}"
+
+  - name: Wait for Gitea Pod to be ready
+    k8s_info:
+      api_version: v1
+      kind: Deployment
+      namespace: "{{ ocp4_workload_gitea_operator_project }}"
+      name: "{{ ocp4_workload_gitea_operator_name }}"
+    register: r_gitea_deployment
+    retries: 20
+    delay: 10
+    until:
+    - r_gitea_deployment.resources | length | int > 0
+    - r_gitea_deployment.resources[0].status.readyReplicas is defined
+    - r_gitea_deployment.resources[0].status.readyReplicas | int == r_gitea_deployment.resources[0].spec.replicas | int
+
+- name: Search for Gitea pod
+  k8s_info:
+    kind: Pod
+    namespace: "{{ ocp4_workload_gitea_operator_project }}"
+    label_selectors:
+      - app = gitea
+  register: r_gitea_pod
+
+- name: Search for Gitea route
+  k8s_info:
+    kind: Route
+    api_version: route.openshift.io/v1
+    namespace: "{{ ocp4_workload_gitea_operator_project }}"
+    label_selectors:
+      - app = gitea
+  register: r_gitea_route
+
+- name: Configure a Gitea admin user
+  when: ocp4_workload_gitea_operator_create_admin | bool
+  block:
+  - name: Check if Gitea admin user already exists
+    uri:
+      url: "https://{{ r_gitea_route.resources[0].spec.host }}/api/v1/users/{{ ocp4_workload_gitea_operator_admin_user }}"
+      method: GET
+      validate_certs: false
+      status_code: 200, 404
+    register: r_giteaadmin_user
+    failed_when: r_giteaadmin_user.status != 200 and r_giteaadmin_user.status != 404
+  
+  - name: Create Gitea admin user
+    when: r_giteaadmin_user.status == 404
+    command: >
+      oc exec {{ r_gitea_pod.resources[0].metadata.name }}
+      -n {{ ocp4_workload_gitea_operator_project }}
+      -- /home/gitea/gitea admin create-user --username {{ ocp4_workload_gitea_operator_admin_user }}
+      --password {{ ocp4_workload_gitea_operator_admin_password }}
+      --email {{ ocp4_workload_gitea_operator_admin_user }}@workshop.com
+      --must-change-password=false --admin -c /home/gitea/conf/app.ini
+
+- name: Create the users in Gitea
+  when: ocp4_workload_gitea_operator_create_users | bool
+  include_tasks: create_user.yml
+  loop: "{{ range(1, ocp4_workload_gitea_operator_user_number | int + 1, 1) | list }}"
+
+- name: Migrate the repositories for the Gitea users
+  when: ocp4_workload_gitea_operator_create_users | bool
+  include_tasks: migrate_repos.yml
+  loop: "{{ (range(1, ocp4_workload_gitea_operator_user_number | int + 1, 1) | list) | product(ocp4_workload_gitea_repositories_list) | list }}"
+
+- name: Print the Gitea route
+  agnosticd_user_info:
+    msg: "You can access Gitea via the URL https://{{ r_gitea_route.resources[0].spec.host }}"
+
+- name: Print admin credentials when an admin was created
+  when: ocp4_workload_gitea_operator_create_admin | bool
+  agnosticd_user_info:
+    msg: "The Gitea admin username is '{{ ocp4_workload_gitea_operator_admin_user }}' and the password is '{{ ocp4_workload_gitea_operator_admin_password }}'"
+
+- name: Print the user details if users are created
+  when: ocp4_workload_gitea_operator_create_users | bool
+  agnosticd_user_info:
+    msg: >-
+      Gitea users were created, from {{ ocp4_workload_gitea_operator_generate_user_format | format(1) }} to
+      {{ ocp4_workload_gitea_operator_generate_user_format | format(ocp4_workload_gitea_operator_user_number | int) }} with the password
+      '{{ ocp4_workload_gitea_operator_user_password }}'
+
+- name: Print the repositories that were migrated if any were migrated
+  when: ocp4_workload_gitea_migrate_repositories | bool
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - "The following repositories were migrated for the created users:"
+  - "{{ ocp4_workload_gitea_repositories_list | join(', ', attribute='repo') }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
