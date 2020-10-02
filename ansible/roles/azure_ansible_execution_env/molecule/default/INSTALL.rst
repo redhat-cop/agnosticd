@@ -1,11 +1,11 @@
 *******
-Podman driver installation guide
+Docker driver installation guide
 *******
 
 Requirements
 ============
 
-* Podman Engine
+* Docker Engine
 
 Install
 =======
@@ -19,4 +19,4 @@ widely recommended `'--user' flag`_ when invoking ``pip``.
 
 .. code-block:: bash
 
-    $ python3 -m pip install 'molecule[podman]'
+    $ python3 -m pip install 'molecule[docker]'

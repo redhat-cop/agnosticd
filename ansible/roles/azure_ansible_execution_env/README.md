@@ -1,19 +1,12 @@
 Role Name
 =========
 
-`azure_ansible_execution_env` creates the necessary environment for ansible to run locally and execute azure based playbooks.
-It assumes, in its current, incarnation that it will used either with a system wide installation of ansible or via a virtualenv.
-
-It does not itself use a virtualenv for the az cli (Azure CLI) but installs system wide via an rpm.
-This is due to reported issues with the cli and Azure python dependencies co-existing in a virtualenv.
-
-Role draws on the flow outline here: https://docs.microsoft.com/en-us/cli/azure/install-azure-cli-yum
-
+A brief description of the role goes here.
 
 Requirements
 ------------
 
-None
+Any pre-requisites that may not be covered by Ansible itself or the role should be mentioned here. For instance, if the role uses the EC2 module, it may be a good idea to mention in this section that the boto package is required.
 
 Role Variables
 --------------
