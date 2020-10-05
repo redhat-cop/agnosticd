@@ -22,6 +22,7 @@ def cguid=''
 
 // Catalog items
 def choices = [
+    'DevOps Team Testing Catalog / TEST - SAP End to End Automation - AWS',
     'Workshops / SAP End to End Automation - AWS',
     'DevOps Team Development Catalog / DEV - SAP End to End Automation - AWS',
 ].join("\n")
