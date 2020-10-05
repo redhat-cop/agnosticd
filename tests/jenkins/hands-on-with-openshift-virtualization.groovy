@@ -2,8 +2,8 @@
 // CloudForms
 def opentlc_creds = 'b93d2da4-c2b7-45b5-bf3b-ee2c08c6368e'
 def opentlc_admin_creds = '73b84287-8feb-478a-b1f2-345fd0a1af47'
-def cf_uri = 'https://labs.opentlc.com'
-def cf_group = 'opentlc-access-cicd'
+def cf_uri = 'https://rhpds.redhat.com'
+def cf_group = 'rhpds-access-cicd'
 // IMAP
 def imap_creds = 'd8762f05-ca66-4364-adf2-bc3ce1dca16c'
 def imap_server = 'imap.gmail.com'
@@ -19,22 +19,25 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def ocp_console=''
-def acm_console=''
-def ssh_location=''
+def openshift_location = ''
+def ssh_location = ''
 
 // Catalog items
 def choices = [
-    'RHTR 2020 / ACM Cluster Hub',
+    'Workshops / Hands-On with OpenShift Virtualization',
 ].join("\n")
 
 def region_choice = [
-    'events_openstack',
+    'na_gpte',
+	'na2_gpte',
+    'apac_gpte',
+    'emea_gpte',
 ].join("\n")
 
 def environment_choice = [
-    'TEST',
     'PROD',
+    'TEST',
+    'DEV',
 ].join("\n")
 
 pipeline {
@@ -86,14 +89,17 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
+                        'check=t',
                         'check2=t',
-                        'expiration=1',
-                        'runtime=2',
+                        'salesforce=gptejen',
+                        'notes=devops_automation_jenkins',
+                        'expiration=2',
+                        'runtime=10',
                         'quotacheck=t',
+                        'use_letsencrypt=f',
                         "environment=${environment}",
                         "region=${region}",
                     ].join(',').trim()
-
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -110,8 +116,9 @@ pipeline {
                 }
             }
         }
-		
-		stage('Wait for first email') {
+        // Skip this step because sometimes the completed email arrives
+        // before the 'has started' email
+        stage('Wait for first email') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
@@ -119,21 +126,20 @@ pipeline {
                 git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
-
                 sh """./tests/jenkins/downstream/poll_email.py \
                     --server '${imap_server}' \
                     --guid ${guid} \
-                    --timeout 20 \
+                    --timeout 30 \
                     --filter 'has started'"""
             }
         }
 
-        stage('Wait to receive and parse email') {
+        stage('Wait for last email and parse OpenShift and App location') {
             environment {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/redhat-cop/agnosticd',
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
                     branch: 'development'
 
                 script {
@@ -143,21 +149,18 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
+                          --timeout 90 \
                           --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-						def m = email =~ /Openshift Master Console: (https:\/\/[^ \n]+)/
-                        ocp_console = m[0][1]
-                        echo "Openshift Master Console = ${ocp_console}"
-                        def mm = email =~ /(https:\/\/[^ \n]+)/
-                        acm_console = mm[0][1]
-                        echo "ACM console = ${acm_console}"
-                        def mmm = email =~ /ssh (.*)/
-                        ssh_location = mmm[0][1]
-                        echo "SSH = ssh ${ssh_location}"
+                        def m = email =~ /Openshift Master Console: (http:\/\/[^ \n]+)/
+                        openshift_location = m[0][1]
+                        echo "Openshift Master Console: '${openshift_location}'"
+                        def mm = email =~ /SSH Access: (.*)/
+                        ssh_location = mm[0][1]
+                        echo "SSH Access: ssh '${ssh_location}'"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -167,13 +170,6 @@ pipeline {
                 }
             }
         }
-        
-        stage ('Wait to complete provision') {
-        	steps {
-				echo "Wait for 5 minutes for deployment to complete"
-				sleep 300 // seconds
-			}
-		}
 
         stage('Confirm before retiring') {
             when {
