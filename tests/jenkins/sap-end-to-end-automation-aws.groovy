@@ -155,7 +155,7 @@ pipeline {
                     ).trim()
 
                     try {
-                    	def m = email =~ /The following activation key has been automatically generated:[\r\n]+([^\r\n]+)
+                    	def m = email =~ /The following activation key has been automatically generated:[\r\n]+([^\r\n]+)/
 						cguid = m[0][1]
 						echo "Child GUID: ${cguid}"
                     } catch(Exception ex) {
