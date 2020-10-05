@@ -75,8 +75,7 @@ pipeline {
                 credentials = credentials("${opentlc_creds}")
                 DEBUG = 'true'
             }
-            /* This step use the order_svc_guid.sh script to order
-             a service from CloudForms */
+            // This step use the order_svc_guid.sh script to order a service from CloudForms
             steps {
                 git url: 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
@@ -186,8 +185,7 @@ pipeline {
                 admin_credentials = credentials("${opentlc_admin_creds}")
                 DEBUG = 'true'
             }
-            /* This step uses the delete_svc_guid.sh script to retire
-             the service from CloudForms */
+            // This step uses the delete_svc_guid.sh script to retire the service from CloudForms 
             steps {
                 git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
@@ -226,7 +224,7 @@ pipeline {
     post {
         failure {
             git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
-            /* retire in case of failure */
+            // retire in case of failure
             withCredentials(
                 [
                     usernameColonPassword(credentialsId: opentlc_creds, variable: 'credentials'),
@@ -240,7 +238,7 @@ pipeline {
                 """
             }
 
-            /* Print ansible logs */
+            // Print ansible logs
             withCredentials([
                 string(credentialsId: ssh_admin_host, variable: 'ssh_admin'),
                 sshUserPrivateKey(
