@@ -95,8 +95,8 @@ pipeline {
                         'runtime=8',
                         'quotacheck=t',
                         'cluster_type=Dedicated',
-                        'configure_gg=t'
-                        'users=1'
+                        'configure_gg=t',
+                        'users=1',
                         "environment=${environment}",
                         "region=${region}",
                     ].join(',').trim()
@@ -150,7 +150,7 @@ pipeline {
                           ./tests/jenkins/downstream/poll_email.py \
                           --server '${imap_server}' \
                           --guid ${guid} \
-                          --timeout 150 \
+                          --timeout 180 \
                           --filter 'has completed'
                         """
                     ).trim()
