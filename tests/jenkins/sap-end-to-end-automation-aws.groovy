@@ -18,7 +18,7 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def cguid=''
+def ssh_location=''
 
 // Catalog items
 def choices = [
@@ -156,9 +156,9 @@ pipeline {
                     ).trim()
 
                     try {
-                    	def m = email =~ /The following activation key has been automatically generated:[\r\n]+([^\r\n]+)/
-						cguid = m[0][1]
-						echo "Child GUID: ${cguid}"
+                    	def m = email =~ /ssh (.*)/
+						ssh_location = m[0][1]
+						echo "SSH: ${ssh_location}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
