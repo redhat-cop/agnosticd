@@ -23,6 +23,7 @@ def cguid=''
 // Catalog items
 def choices = [
     'Workshops / SAP End to End Automation - AWS',
+    'DevOps Team Development Catalog / DEV - SAP End to End Automation - AWS',
 ].join("\n")
 
 def region_choice = [
