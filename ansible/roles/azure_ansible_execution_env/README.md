@@ -4,7 +4,7 @@ azure_ansible_execution_env
 Installs the azure cli as an rpm instead of a pip package.
 Avoids python dependency issues with system, user, or venv type deployments.
 
-Can be extended to other azure realted assets and resources.
+Can be extended to other azure related assets and resources.
 Designed with Ansible Tower nodes and isolated nodes as the goal, but will work with standard control node.
 
 Requirements
