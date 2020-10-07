@@ -22,8 +22,8 @@ def ocp_console=''
 
 // Catalog items
 def choices = [
-    'Shared Cluster Development / DEV Decision Manager 7 Foundations OCP4',
     'Middleware Preprod / TEST Decision Manager 7 Foundations',
+    'Shared Cluster Development / DEV Decision Manager 7 Foundations OCP4',
     'OPENTLC Middleware Solutions Labs / Decision Manager 7 Foundations',
 ].join("\n")
 
