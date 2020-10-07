@@ -23,13 +23,18 @@ def ocp_console=''
 // Catalog items
 def choices = [
     'Shared Cluster Development / DEV Decision Manager 7 Foundations OCP4',
+    'Middleware Preprod / TEST Decision Manager 7 Foundations',
+    'OPENTLC Middleware Solutions Labs / Decision Manager 7 Foundations',
 ].join("\n")
 
 def region_choice = [
+    'na_opentlc',
     'dev_opentlc',
 ].join("\n")
 
 def environment_choice = [
+    'TEST',
+    'PROD',
     'DEV',
 ].join("\n")
 
