@@ -1,0 +1,123 @@
+---
+- name: Create Catalogsource for use with catalog snapshot
+  when: ocp4_workload_odh_use_catalog_snapshot | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'open-data-hub/catalogsource.yml.j2' ) | from_yaml }}"
+  vars:
+    namespace: "{{ user_project }}"
+
+- name: "Make '{{ user_name }}' an Open Data Hub administrator "
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: "opendatahub-admin-{{ user_name }}"
+        namespace: "{{ user_project }}"
+      subjects:
+        - kind: User
+          name: "{{ user_name }}"
+      roleRef:
+        kind: ClusterRole
+        name: opendatahub-admin
+        apiGroup: rbac.authorization.k8s.io
+
+- name: "Create Open Data Hub operatorgroup {{ user_project }}"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'open-data-hub/operatorgroup.yml.j2') }}"
+  vars:
+    namespace: "{{ user_project }}"
+
+- name: "Create Open Data Hub subscription in project {{ user_project }}"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'open-data-hub/subscription.yml.j2') }}"
+  vars:
+    namespace: "{{ user_project }}"
+
+- name: Wait until InstallPlan is created
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ user_project }}"
+  register: r_install_plans
+  vars:
+    _query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'opendatahub-operator')]
+  retries: 30
+  delay: 5
+  until:
+  - r_install_plans.resources | length > 0
+  - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+- name: Set InstallPlan Name
+  set_fact:
+    ocp4_workload_odh_install_plan_name: >-
+      {{ r_install_plans.resources | to_json | from_json | json_query(query) }}
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'opendatahub-operator')].metadata.name|[0]
+
+- name: Get InstallPlan
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ ocp4_workload_odh_install_plan_name }}"
+    namespace: "{{ user_project }}"
+  register: r_install_plan
+
+- name: Approve InstallPlan if necessary
+  when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+  k8s:
+    state: present
+    definition: "{{ lookup( 'template', 'open-data-hub/installplan.yml.j2' ) }}"
+
+
+- name: "Create ODH Config Map configuration in {{ user_project }}"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'open-data-hub/odh-configmap.yml.j2') }}"
+  vars:
+    namespace: "{{ user_project }}"
+
+- name: "Create Jupyter Single User Profile Config Map for Student User {{ user_name }} in project {{ user_project }}"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'open-data-hub/jupyterhub-single-user-profile-user.configmap.yml.j2') }}"
+  vars:
+    namespace: "{{ user_project }}"
+    suffix: "{{ user_name }}"
+
+- name: "Wait for Open Data Hub CRD's to exist"
+  k8s_facts:
+    api_version: "apiextensions.k8s.io/v1beta1"
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop: "{{ och_expected_crds }}"
+  register: crds
+  until: crds.resources|length > 0
+  retries: 30
+  delay: 10
+
+
+- name: "Create the ImageStream for the notebook used in this workshop"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'open-data-hub/workshop-notebook.imagestream.yml.j2') }}"
+  vars:
+    namespace: "{{ user_project }}"
+
+- name: "Create Open Data Hub"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'open-data-hub/opendatahub.yml.j2') }}"
+  vars:
+    namespace: "{{ user_project }}"
+
+- name: Open Data Hub tasks complete
+  debug:
+    msg: "Open Data Hub Tasks completed successfully."
+  when: not silent|bool
