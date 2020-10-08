@@ -85,7 +85,10 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
+<<<<<<< HEAD:tests/jenkins/pntae-vilt.groovy
                         'notes=Development - Catalog item creation / maintenance',
+=======
+>>>>>>> 1e67893ba4c0d7cfb40cb04b31b97a9d8ac9e90e:tests/jenkins/pntae-vilt.groovy
                         'check=t',
                         'expiration=7',
                         'runtime=10',
