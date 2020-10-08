@@ -49,7 +49,7 @@ pipeline {
                           ./opentlc/order_svc_guid.sh \
                           -c "OpenShift Demos" \
                           -i "OpenShift 3.11 Shared Environment" \
-                          -d "status=t,check=t,quotacheck=t,runtime=8,expiration=7,nodes=1,region=global_gpte"
+                          -d "status=t,notes=Development - Catalog item creation / maintenance,check=t,quotacheck=t,runtime=8,expiration=7,nodes=1,region=global_gpte"
                         '''
                     ).trim()
 

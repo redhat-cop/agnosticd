@@ -82,6 +82,7 @@ pipeline {
                     def users = params.users.trim()
                     def cfparams = [
                         'status=t',
+                        'notes=Development - Catalog item creation / maintenance',
                         'check=t',
                         'expiration=1',
                         'runtime=8',
