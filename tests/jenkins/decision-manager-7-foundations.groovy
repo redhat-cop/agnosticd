@@ -22,14 +22,19 @@ def ocp_console=''
 
 // Catalog items
 def choices = [
+    'Middleware Preprod / TEST Decision Manager 7 Foundations',
     'Shared Cluster Development / DEV Decision Manager 7 Foundations OCP4',
+    'OPENTLC Middleware Solutions Labs / Decision Manager 7 Foundations',
 ].join("\n")
 
 def region_choice = [
+    'na_opentlc',
     'dev_opentlc',
 ].join("\n")
 
 def environment_choice = [
+    'TEST',
+    'PROD',
     'DEV',
 ].join("\n")
 
@@ -82,6 +87,7 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
+                        'notes=Development - Catalog item creation / maintenance',
                         'check=t',
                         'expiration=7',
                         'runtime=8',
@@ -157,13 +163,6 @@ pipeline {
                 }
             }
         }
-        
-        stage ('Wait to complete provision') {
-        	steps {
-				echo "Wait for 2 minutes for deployment to complete"
-				sleep 120 // seconds
-			}
-		}
 
         stage('Confirm before retiring') {
             when {

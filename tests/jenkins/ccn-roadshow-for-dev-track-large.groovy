@@ -85,6 +85,7 @@ pipeline {
                     def course_module_list = params.course_module_list.trim()
                     def cfparams = [
                         'status=t',
+                        'notes=Development - Catalog item creation / maintenance',
                         'quotacheck=t',
                         'check=t',
                         'city=jenkins',
