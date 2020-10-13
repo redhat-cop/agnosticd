@@ -76,6 +76,7 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
+                        'notes=Development - Catalog item creation / maintenance',
                         'expiration=3',
                         'runtime=72',
                         "region=${region}",
