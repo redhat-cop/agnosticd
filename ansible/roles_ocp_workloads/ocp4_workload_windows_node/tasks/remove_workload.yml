@@ -1,0 +1,124 @@
+---
+# Implement your Workload removal tasks here
+
+# Extract the AWS secret key from OpenShift
+- name: Get the OpenShift cluster ID
+  k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+    namespace: default
+  register: cluster_id_fact
+  retries: 25
+  delay: 5
+  until:
+    - cluster_id_fact.resources[0].status.infrastructureName is defined
+
+# Set the Openshift ID as a fact for later use
+- name: Set the Openshift ID as a fact for later use
+  set_fact:
+    cluster_id: "{{ cluster_id_fact.resources[0].status.infrastructureName }}"
+
+# Extract OpenShift machineSet region and first availablity zone
+- name: Extract OpenShift machineSet region and first availablity zone
+  k8s_info:
+    api_version: machine.openshift.io/v1beta1
+    kind: MachineSet
+    namespace: openshift-machine-api
+  register: machineset_list
+  retries: 25
+  delay: 5
+  until:
+    - machineset_list.resources[0].spec.template.spec.providerSpec.value.placement.region is defined
+    - machineset_list.resources[0].spec.template.spec.providerSpec.value.placement.availabilityZone is defined
+
+# Get the region for the cluster
+- name: Get the region for the cluster and set it as a fact for later use
+  set_fact:
+    cluster_region: "{{ machineset_list.resources[0].spec.template.spec.providerSpec.value.placement.region }}"
+
+# Get the first availability zone for the cluster
+- name: Get the first availability zone for the cluster and set it as a fact for later use
+  set_fact:
+    cluster_az: "{{ machineset_list.resources[0].spec.template.spec.providerSpec.value.placement.availabilityZone }}"
+
+# Extract the AWS keys from OpenShift
+- name: Extract the AWS keys from OpenShift
+  k8s_info:
+    api_version: v1
+    kind: Secret
+    name: aws-cloud-credentials
+    namespace: openshift-machine-api
+  register: ocp_aws_keys
+  retries: 25
+  delay: 5
+  until:
+    - ocp_aws_keys.resources[0].data.aws_access_key_id is defined
+    - ocp_aws_keys.resources[0].data.aws_secret_access_key is defined
+
+# Convert extraced AWS access key into a decoded fact for later use
+- name: Convert extraced AWS access key into a decoded fact for later use
+  set_fact:
+    ocp_access_key: "{{ ocp_aws_keys.resources[0].data.aws_access_key_id | b64decode }}"
+
+# Convert extraced AWS secret key into a decoded fact for later use
+- name: Convert extraced AWS secret key into a decoded fact for later use
+  set_fact:
+    ocp_secret_key: "{{ ocp_aws_keys.resources[0].data.aws_secret_access_key | b64decode }}"
+
+# Get the latest Windows Server 2019 with Containers 
+- name: Extract the latest Windows Server 2019 with Containers Image
+  ec2_ami_info:
+    region: "{{ cluster_region }}"
+    aws_access_key: "{{ ocp_access_key }}"
+    aws_secret_key: "{{ ocp_secret_key }}"
+    filters:
+      name: 'Windows_Server-2019*English*Full*Containers*'
+  register: wami_fact
+
+# Get the latest Windows Server 2019 with Containers AMI
+- name: Set the latest Windows Server 2019 with Containers AMI as a fact for later use
+  set_fact:
+    windows_ami: "{{ (wami_fact.images | sort(attribute='creation_date') | last).image_id }}"
+
+# Remove documentation namespace
+- name: Deploy documentation namespace
+  k8s:
+    state: absent
+    definition: "{{ lookup('template', 'doc-namespace.j2' ) }}"
+
+# Remove the Windows Node MachineSet
+- name: Remove the Windows Node MachineSet
+  k8s:
+    state: absent 
+    definition: "{{ lookup('template', 'windows-ms.j2' ) }}"
+
+# Delete the Namespace for the Operator
+- name: Delete the Namespace for the Operator
+  k8s:
+    state: absent
+    definition: "{{ lookup('template', 'namespace.j2' ) }}"
+
+# Remove catalog source
+- name: Remove catalog source
+  k8s:
+    state: absent
+    definition: "{{ lookup('template', 'catalogsource.j2' ) }}"
+
+# Remove the Operator group
+- name: Remove the Operator group
+  k8s:
+    state: absent
+    definition: "{{ lookup('template', 'operatorgroup.j2' ) }}"
+
+# Remove the Subscription
+- name: Remove the Subscription
+  k8s:
+    state: absent
+    definition: "{{ lookup('template', 'subscription.j2' ) }}"
+
+# Leave this as the last task in the playbook.
+- name: remove_workload tasks complete
+  debug:
+    msg: "Remove Workload tasks completed successfully."
+  when: not silent|bool

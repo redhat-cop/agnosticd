@@ -1,0 +1,178 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+# Implement your workload deployment tasks here
+# -------------------------------------------------------------------------
+
+- name: Add user {{ ocp_username}} to groups "{{ ocp4_workload_rhtr_pipelines_user_groups }}"
+  when: ocp4_workload_rhtr_pipelines_user_groups | default([]) | length > 0
+  command: "oc adm groups add-users {{ item }} {{ ocp_username }}"
+  loop: "{{ ocp4_workload_rhtr_pipelines_user_groups }}"
+
+- name: Create ClusterResourceQuota
+  when: ocp4_workload_rhtr_pipelines_user_create_quota | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/cluster_resource_quota.yaml.j2' ) | from_yaml }}"
+
+- name: Set up user permissions to view common projects
+  when: ocp4_workload_rhtr_pipelines_user_project_permissions | default([]) | length > 0
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/rolebinding.yaml.j2') | from_yaml }}"
+  vars:
+    _ocp4_workload_rhtr_pipelines_user_project: "{{ item.project }}"
+    _ocp4_workload_rhtr_pipelines_user_role: "{{ item.role }}"
+    _ocp4_workload_rhtr_pipelines_user_name: "{{ ocp_username }}"
+  loop: "{{ ocp4_workload_rhtr_pipelines_user_project_permissions }}"
+  loop_control:
+    label: "{{ item.project }} - {{ item.role }}"    
+
+- name: Set up user projects
+  when: ocp4_workload_rhtr_pipelines_user_projects | length > 0
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/user-project.yaml.j2') | from_yaml }}"
+  loop: "{{ ocp4_workload_rhtr_pipelines_user_projects }}"
+
+- name: Set up user permissions to user projects
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/rolebinding.yaml.j2') | from_yaml }}"
+  vars:
+    _ocp4_workload_rhtr_pipelines_user_project: "{{ item }}"
+    _ocp4_workload_rhtr_pipelines_user_role: admin
+    _ocp4_workload_rhtr_pipelines_user_name: "{{ ocp_username }}"
+  loop: "{{ ocp4_workload_rhtr_pipelines_user_projects }}"
+
+- name: Create Limit Ranges for user projects
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/limitrange.yaml.j2') | from_yaml }}"
+  loop: "{{ ocp4_workload_rhtr_pipelines_user_projects }}"
+
+- name: Create Limit Range for Jenkins project
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: LimitRange
+      metadata:
+        name: core-resource-limits
+        namespace: "{{ ocp4_workload_rhtr_pipelines_user_jenkins_project_name }}"
+      spec:
+        limits:
+        - type: Container
+          default:
+            cpu: 1
+            memory: 1.5Gi
+          defaultRequest:
+            cpu: 1
+            memory: 1.5Gi
+
+- name: Update Limit Range for pipelines project
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: LimitRange
+      metadata:
+        name: core-resource-limits
+        namespace: "pipeline-{{ guid }}"
+      spec:
+        limits:
+        - type: Container
+          default:
+            cpu: 2
+            memory: 2Gi
+          defaultRequest:
+            cpu: 1
+            memory: 1Gi
+
+- name: Set up permissions and create Jenkins resources
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/rolebinding-dev.yaml.j2
+  - ./templates/rolebinding-prod.yaml.j2
+  - ./templates/rolebinding-prod-imagepuller.yaml.j2
+  - ./templates/buildconfig-jenkins.yaml.j2
+  - ./templates/secret-jenkins.yaml.j2
+
+# Set up Gitea
+- name: Get Gitea route
+  k8s_info:
+    kind: Route
+    api_version: route.openshift.io/v1
+    namespace: gitea
+    label_selectors:
+    - app = gitea
+  register: r_gitea_route
+
+- name: Set up Gitea User
+  include_tasks: ./create_gitea_user.yaml
+
+- name: Set up Gitea Repository
+  include_tasks: ./create_gitea_repo.yaml
+
+- name: Get Jenkins route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: jenkins
+    namespace: "{{ ocp4_workload_rhtr_pipelines_user_jenkins_project_name }}"
+  register: r_jenkins_route
+
+- name: Get Nexus route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: nexus
+    namespace: nexus
+  register: r_nexus_route
+
+- name: Get ArgoCD route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: argocd-server
+    namespace: argocd
+  register: r_argocd_route
+
+- name: Get Web Console route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: openshift-console
+    name: console
+  register: r_console_route
+
+- name: Get API server URL
+  k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: r_api_url
+
+- name: Save user data
+  agnosticd_user_info:
+    data:
+      gitea_url: "https://{{ r_gitea_route.resources[0].spec.host }}/{{ ocp_username }}/{{ ocp4_workload_rhtr_pipelines_user_gitea_repo_name }}"
+      gitea_user: "{{ ocp_username }}"
+      gitea_password: "{{ ocp4_workload_rhtr_pipelines_user_gitea_user_password }}"
+      jenkins_url: "https://{{ r_jenkins_route.resources[0].spec.host }}"
+      nexus_url: "https://{{ r_nexus_route.resources[0].spec.host }}"
+      argocd_url: "https://{{ r_argocd_route.resources[0].spec.host }}"
+      web_console_url: "https://{{ r_console_route.resources[0].spec.host }}"
+      api_url: "{{ r_api_url.resources[0].status.apiServerURL }}"
+      login_command: "oc login -u {{ ocp_username }} {{ r_api_url.resources[0].status.apiServerURL }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
