@@ -1,14 +1,6 @@
 ---
-- name: Include Tower Setup Roles
-  include_role:
-    name: "{{ __tower_setup_roles }}"
-  loop:
-    - tower-user-create
-  loop_control:
-    loop_var: __tower_setup_roles
-
-- name: Add tower credentials for Satellite and Insights
-  tower_credential:
+- name: Add tower credentials for Satellite
+  awx.awx.tower_credential:
     name: "{{ __tower_credential.name }}"
     inputs:
       username: "{{ __tower_credential.username }}"
@@ -30,18 +22,205 @@
   tags:
     - tower-credential-create
 
+- name: Create Project for runner
+  awx.awx.tower_project:
+    name: "satellite-runner-project"
+    description: "project for satellite-runner"
+    organization: "gpte"
+    scm_url: "{{ satellite_runner_source }}"
+    scm_type: "git"
+    scm_credential: "Satellite Runner"
+    scm_branch: "main"
+    scm_update_on_launch: "True"
+    state: "present"
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+
+- name: Sleep to allow tower projects to update
+  wait_for:
+    timeout: 60
+
+- name: Create Inventory For Local Environment
+  awx.awx.tower_inventory:
+    name: "Local Environment"
+    description: "Lab environment systems"
+    organization: "gpte"
+    state: "present"
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+
+- name: Add tower inventory source
+  awx.awx.tower_inventory_source:
+    name: "Local Environment"
+    description: "Loacl environment from git"
+    inventory: "Local Environment"
+    credential: "Satellite Runner"
+    source: "scm"
+    source_project: "satellite-runner-project"
+    source_path: "hosts"
+    state: "present"
+    update_on_launch: "yes"
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+
+- name: Create Job Template for Secrets
+  awx.awx.tower_job_template:
+    name: "Secrets Creator"
+    job_type: "run"
+    organization: "gpte"
+    inventory: "Local Environment"
+    project: "satellite-runner-project"
+    playbook: "secrets_creation.yml"
+    credentials:
+      - "SSH Admin Key"
+    state: "present"
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+    ask_variables_on_launch: true
+
+- name: Create random manifest name
+  set_fact:
+    __manifest_guid: "{{ lookup('password', '/dev/null length=5 chars=ascii_letters,digits') }}"
+
+- name: Launch template to create secrets
+  awx.awx.tower_job_launch:
+    name: "Secrets Creator"
+    extra_vars:
+      guid: "{{ guid | default(__manifest_guid) }}"
+      tower_hostname: "{{ tower_hostname }}"
+      tower_admin_username: "{{ tower_admin_username | default('admin') }}"
+      tower_admin_password: "{{ tower_admin_password }}"
+      tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+  register: r_secrets_job
+
+- name: wait for job
+  awx.awx.tower_job_wait:
+    job_id: "{{ r_secrets_job.id }}"
+    timeout: 120
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+
+- name: Create Job Template for Manifest
+  awx.awx.tower_job_template:
+    name: "Manifest Creator"
+    job_type: "run"
+    organization: "gpte"
+    inventory: "Local Environment"
+    project: "satellite-runner-project"
+    playbook: "manifest_creator.yml"
+    credentials:
+      - "SSH Admin Key"
+      - "rhsm_credentials"
+    state: "present"
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+    ask_variables_on_launch: true
+
+- name: Launch Template to Create Manifest
+  awx.awx.tower_job_launch:
+    name: "Manifest Creator"
+    extra_vars:
+      guid: "{{ guid | default(__manifest_guid) }}"
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+  register: r_manifest_job
+
+- name: wait for job
+  awx.awx.tower_job_wait:
+    job_id: "{{ r_manifest_job.id }}"
+    timeout: 240
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+
+- name: Delete Job Templates for Manifest and Secrets
+  vars:
+    __delete_templates:
+      - Manifest Creator
+      - Secrets Creator
+  awx.awx.tower_job_template:
+    name: "{{ __template }}"
+    state: "absent"
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+  loop: "{{ __delete_templates }}"
+  loop_control:
+    loop_var: __template
+
+
+- name: Delete secret credentials
+  vars:
+    __delete_credentials:
+      - name: "rhsm_credentials"
+        type: "rhsm_credentials"
+      - name: "Satellite Runner"
+        type: "Source Control"
+  awx.awx.tower_credential:
+    name: "{{ __credential.name }}"
+    credential_type: "{{ __credential.type }}"
+    state: "absent"
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+  loop: "{{ __delete_credentials }}"
+  loop_control:
+    loop_var: __credential
+
+- name: Delete Satellite Runner Project
+  awx.awx.tower_project:
+    name: "satellite-runner-project"
+    organization: "gpte"
+    scm_type: "git"
+    state: "absent"
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+
+- name: Delete Inventory For Local Environment
+  awx.awx.tower_inventory:
+    name: "Local Environment"
+    organization: "gpte"
+    state: "absent"
+    tower_host: "{{ tower_hostname }}"
+    tower_username: "{{ tower_admin_username | default('admin') }}"
+    tower_password: "{{ tower_admin_password }}"
+    tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
+
 - name: Create tower project(s)
-  tower_project:
+  awx.awx.tower_project:
     name: "{{ __tower_project.name }}"
     description: "{{ __tower_project.description }}"
     organization: "{{ __tower_project.organization | default('Default') }}"
     scm_url: "{{ __tower_project.scm_url | default(omit)}}"
     scm_type: "{{ __tower_project.scm_type | default('git') }}"
     scm_credential: "{{ __tower_project.scm_credential | default(omit)}}"
-    scm_branch:  "{{ __tower_project.scm_branch | default('master') }}"
+    scm_branch: "{{ __tower_project.scm_branch | default('master') }}"
     scm_update_on_launch: "{{ __tower_project.scm_update_on_launch | default('false') }}"
     state: "{{ __tower_project.state | default('present') }}"
-    tower_host: "{{ tower_hostname }}"  
+    tower_host: "{{ tower_hostname }}"
     tower_username: "{{ tower_admin_username | default('admin') }}"
     tower_password: "{{ tower_admin_password }}"
     tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
@@ -51,15 +230,15 @@
 
 - name: Sleep to allow tower projects to update
   wait_for:
-    timeout: 40
+    timeout: 60
 
 - name: Add tower inventory
-  tower_inventory:
+  awx.awx.tower_inventory:
     name: "{{ __tower_inventory.name }}"
     description: "{{ __tower_inventory.description  }}"
     organization: "{{ __tower_inventory.organization | default('gpte') }}"
     state: "{{ __tower_inventory.state | default('present') }}"
-    tower_host: "{{ tower_hostname }}"  
+    tower_host: "{{ tower_hostname }}"
     tower_username: "{{ tower_admin_username | default('admin') }}"
     tower_password: "{{ tower_admin_password }}"
     tower_verify_ssl: "{{ tower_verify_ssl | default(false) }}"
@@ -69,7 +248,7 @@
 
 - when: tower_inventory_source is defined
   name: Add tower inventory source
-  tower_inventory_source:
+  awx.awx.tower_inventory_source:
     name: "{{ __tower_inventory_source.name }}"
     description: "{{ __tower_inventory_source.description }}"
     inventory: "{{ __tower_inventory_source.inventory }}"
@@ -78,7 +257,7 @@
     source_project: "{{ __tower_inventory_source.source_project | default(omit) }}"
     source_path: "{{ __tower_inventory_source.source_path | default(omit) }}"
     state: "{{ __tower_inventory_source.state | default('present') }}"
-    update_on_launch: "{{ __tower_inventory_source.update_on_launch | default(yes) }}"
+    update_on_launch: "{{ __tower_inventory_source.update_on_launch | default(true) }}"
     tower_host: "{{ tower_hostname }}"
     tower_username: "{{ tower_admin_username | default('admin') }}"
     tower_password: "{{ tower_admin_password }}"
@@ -91,7 +270,7 @@
 
 - when: tower_job_templates is defined
   name: Add Ansible Tower Job Template
-  tower_job_template:
+  awx.awx.tower_job_template:
     name: "{{ __tower_job_template.name }}"
     description: "{{ __tower_job_template.description }}"
     job_type: "{{ __tower_job_template.job_type | default('run') }}"
