@@ -41,6 +41,9 @@ options:
     description:
       - This is the message or data to display.
       - It should be a string.
+  body:
+    description:
+      - Content body to accompany messages.
   data:
     description:
       - Dictionary of data to store.
@@ -56,7 +59,7 @@ author:
 
 RETURN = '''
 msg:
-  description: The message displayed.
+  description: 'The message or body, prepended by "user.info" or "user.body"'
   type: str
   returned: always
 error:

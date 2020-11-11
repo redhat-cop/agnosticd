@@ -19,7 +19,7 @@ def ssh_admin_host = 'admin-host-na'
 
 // state variables
 def guid=''
-def external_host = ''
+def ssh_location = ''
 
 
 // Catalog items
@@ -28,7 +28,16 @@ def choices = [
 ].join("\n")
 
 def region_choice = [
-    'global_gpte',
+    'na_osp',
+    'emea_osp',
+    'apac_osp',
+].join("\n")
+
+def environment_choice = [
+    'PROD',
+    'ILT',
+    'TEST',
+    'DEV',
 ].join("\n")
 
 pipeline {
@@ -50,8 +59,13 @@ pipeline {
             name: 'catalog_item',
         )
         choice(
+            choices: environment_choice,
+            description: 'Environment',
+            name: 'environment',
+        )
+        choice(
             choices: region_choice,
-            description: 'Region',
+            description: 'Catalog item',
             name: 'region',
         )
     }
@@ -71,7 +85,19 @@ pipeline {
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
+                    def environment = params.environment.trim()
                     def region = params.region.trim()
+                    def cfparams = [
+                        'status=t',
+                        'notes=Development - Catalog item creation / maintenance',
+                        'check=t',
+                        'expiration=7',
+                        'runtime=10',
+                        'quotacheck=t',
+                        "environment=${environment}",
+                        "region=${region}",
+                    ].join(',').trim()
+
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -80,7 +106,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'status=t,check=t,expiration=7,runtime=4,region=${region},quotacheck=t'
+                          -d '${cfparams}' \
                         """
                     ).trim()
 
@@ -89,7 +115,23 @@ pipeline {
             }
         }
         
-        // This kind of CI send only one mail
+        stage('Wait for first email') {
+            environment {
+                credentials=credentials("${imap_creds}")
+            }
+            steps {
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                    branch: 'development'
+
+
+                sh """./tests/jenkins/downstream/poll_email.py \
+                    --server '${imap_server}' \
+                    --guid ${guid} \
+                    --timeout 20 \
+                    --filter 'has started'"""
+            }
+        }
+
         stage('Wait to receive and parse email') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -106,15 +148,14 @@ pipeline {
                           --server '${imap_server}' \
                           --guid ${guid} \
                           --timeout 30 \
-                          --filter 'is building'
+                          --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                    	def m = email =~ /External Hostname<\/TH><TD>(.*)/
-                    	def mm = email =~ /(.*)<\/TD><\/TR><TR><TH>Internal Hostname/
-                    	external_host = m[0][1].replaceAll("=","") + mm[0][1].replaceAll(" ","")
-                    	echo "External-Host='${external_host}'"
+                    	def m = email =~ /SSH Access: (.*)/
+						ssh_location = m[0][1]
+						echo "SSH Access: ${ssh_location}"
                     } catch(Exception ex) {
                         echo "Could not parse email:"
                         echo email
@@ -127,8 +168,8 @@ pipeline {
         
         stage ('Wait to complete provision') {
         	steps {
-				echo "Wait for 30 minutes for deployment to complete"
-				sleep 1800 // seconds
+				echo "Wait for 5 minutes for deployment to complete"
+				sleep 300 // seconds
 			}
 		}
 

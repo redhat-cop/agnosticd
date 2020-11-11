@@ -106,7 +106,7 @@
     name: "{{ r_subscription.resources[0].status.currentCSV }}"
     namespace: openshift-operators
   register: r_csv
-  retries: 15
+  retries: 30
   delay: 5
   until:
   - r_csv.resources[0].status.phase is defined
@@ -168,33 +168,79 @@
     - r_kn_eventing.resources[0].status.conditions[1].status is defined
     - r_kn_eventing.resources[0].status.conditions[1].status == "True"
 
-- name: Get kn download route
+- name: Get kn ConsoleCLIDownload
   k8s_info:
-    api_version: route.openshift.io/v1
-    kind: Route
-    name: kn-cli-downloads
-    namespace: knative-serving
-  register: r_kn_download
+    api_version: console.openshift.io/v1
+    kind: ConsoleCLIDownload
+    name: kn
+  register: r_kn_cli_download
+  retries: 12
+  delay: 5
+  until:
+  - r_kn_cli_download.resources is defined
+  - r_kn_cli_download.resources | length > 0
 
-- name: Install kn CLI on bastion
-  become: true
-  unarchive:
-    src: "http://{{ r_kn_download.resources[0].status.ingress[0].host }}/amd64/linux/kn-linux-amd64.tar.gz"
-    remote_src: yes
-    dest: /usr/bin
-    mode: 0775
-    owner: root
-    group: root
-  args:
-    creates: /usr/bin/kn
-  retries: 10
-  delay: 10
+- name: Get kn download URL from ConsoleCLIDownload
+  when: r_kn_cli_download.resources | length > 0
+  set_fact:
+    __ocp4_workload_serverless_kn_url: >-
+      {{ r_kn_cli_download.resources[0] | to_json | from_json
+       | json_query("spec.links[?contains(href,'-linux-amd64')].href") | first }}
 
-- name: Create kn bash completion file
-  become: true
-  command: /usr/bin/kn completion bash >/etc/bash_completion.d/kn
-  args: 
-    creates: /etc/bash_completion.d/kn
+- name: No ConsoleCLIDownload for kn - try Route instead
+  when: r_kn_cli_download.resources | length == 0
+  block:
+  - name: Get kn download route
+    k8s_info:
+      api_version: route.openshift.io/v1
+      kind: Route
+      name: kn-cli-downloads
+      namespace: knative-serving
+    register: r_kn_download
+
+  - name: Get kn download URL from Route
+    when:
+    - r_kn_download.resources is defined
+    - r_kn_download.resources | length > 0
+    set_fact:
+      __ocp4_workload_serverless_kn_url: "{{ r_kn_download.resources[0].status.ingress[0].host }}/amd64/linux/kn-linux-amd64.tar.gz"
+
+- name: Install kn cli tool if a download URL was found
+  when: __ocp4_workload_serverless_kn_url is defined
+  block:
+  - name: Download kn cli tool
+    get_url:
+      url: "{{ __ocp4_workload_serverless_kn_url }}"
+      validate_certs: false
+      dest: /tmp/kn-linux-amd64.tar.gz
+      mode: 0660
+    register: r_kn
+    until: r_kn is success
+    retries: 10
+    delay: 10
+
+  - name: Install kn CLI on bastion
+    become: true
+    unarchive:
+      src: /tmp/kn-linux-amd64.tar.gz
+      remote_src: yes
+      dest: /usr/bin
+      mode: 0775
+      owner: root
+      group: root
+    args:
+      creates: /usr/bin/kn
+
+  - name: Remove downloaded file
+    file:
+      state: absent
+      path: /tmp/kn-linux-amd64.tar.gz
+
+  - name: Create kn bash completion file
+    become: true
+    shell: /usr/bin/kn completion bash >/etc/bash_completion.d/kn
+    args: 
+      creates: /etc/bash_completion.d/kn
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete

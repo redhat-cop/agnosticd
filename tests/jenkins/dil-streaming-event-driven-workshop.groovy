@@ -78,6 +78,7 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
+                        'notes=Development - Catalog item creation / maintenance',
                         'quotacheck=t',
                         'salesforce=gptejen',
                         'city=jenkins',

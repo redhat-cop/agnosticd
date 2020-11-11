@@ -19,94 +19,91 @@
     definition: "{{ lookup('template', item ) | from_yaml }}"
   loop:
   - ./templates/operatorgroup.j2
-  - ./templates/operatorsubscription.j2
+  - ./templates/subscription.j2
   - ./templates/clusterrolebinding.j2
 
-- name: wait for the status of the ArgoCD subscription to not be empty
+- name: Wait until InstallPlan is created
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+  register: r_install_plans
+  vars:
+    _query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'argocd-operator')]
+  retries: 30
+  delay: 5
+  until:
+  - r_install_plans.resources | length > 0
+  - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+- name: Set InstallPlan Name
+  set_fact:
+    ocp4_workload_argocd_operator_install_plan_name: >-
+      {{ r_install_plans.resources | to_json | from_json | json_query(query) }}
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'argocd-operator')].metadata.name|[0]
+
+- name: Get InstallPlan
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ ocp4_workload_argocd_operator_install_plan_name }}"
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+  register: r_install_plan
+
+- name: Approve InstallPlan if necessary
+  when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+  k8s:
+    state: present
+    definition: "{{ lookup( 'template', './templates/installplan.j2' ) }}"
+
+- name: Get Installed CSV
   k8s_info:
     api_version: operators.coreos.com/v1alpha1
     kind: Subscription
     name: argocd-operator
     namespace: "{{ ocp4_workload_argocd_operator_project }}"
-  register: r_ocp4_workload_argocd_operator_subscription
-  until: 
-    - r_ocp4_workload_argocd_operator_subscription is defined
-    - r_ocp4_workload_argocd_operator_subscription.resources is defined
-    - r_ocp4_workload_argocd_operator_subscription.resources[0] is defined
-    - r_ocp4_workload_argocd_operator_subscription.resources[0].status is defined
-    - r_ocp4_workload_argocd_operator_subscription.resources[0].status.installplan is defined
+  register: r_subscription
   retries: 30
-  delay: 20
-
-- name: get the specified installplan to check which CSV it points at
-  k8s_info:
-    api_version: operators.coreos.com/v1alpha1
-    kind: InstallPlan
-    namespace: "{{ ocp4_workload_argocd_operator_project }}"
-    name: "{{ r_ocp4_workload_argocd_operator_subscription.resources[0].status.installplan.name }}"
-  register: r_ocp4_workload_argocd_operator_current_installplan
-
-# If there's an update available, multiple install plans exist, and the
-# subscription points at the update's install plan, and not necessarily the
-# desired CSV. For idempotency purposes, only approve an installplan that
-# points at the desired CSV
-- name: patch the installplan to approve it if it points to the right CSV
-  k8s:
-    definition:
-      apiVersion: operators.coreos.com/v1alpha1
-      kind: InstallPlan
-      metadata:
-        namespace: "{{ ocp4_workload_argocd_operator_project }}"
-        name: "{{ r_ocp4_workload_argocd_operator_subscription.resources[0].status.installplan.name }}"
-      spec:
-        approved: true
-  when: ocp4_workload_argocd_operator_starting_csv in r_ocp4_workload_argocd_operator_current_installplan.resources[0].spec.clusterServiceVersionNames 
-
-- name: wait for the CSVs to exist
-  k8s_info:
-    api_version: operators.coreos.com/v1alpha1
-    kind: ClusterServiceVersion
-    name: "{{ ocp4_workload_argocd_operator_starting_csv }}"
-    namespace: "{{ ocp4_workload_argocd_operator_project }}"
-  register: r_csv_exists
-  retries: 35
-  delay: 10
-  until: r_csv_exists.resources | length > 0
-
-- name: wait for the CSVs to be Succeeded
-  k8s_info:
-    api_version: operators.coreos.com/v1alpha1
-    kind: ClusterServiceVersion
-    name: "{{ ocp4_workload_argocd_operator_starting_csv }}"
-    namespace: "{{ ocp4_workload_argocd_operator_project }}"
-  register: r_ocp4_workload_argocd_operator_csv_succeeded
-  retries: 35
-  delay: 10
-  until: 
-    - r_ocp4_workload_argocd_operator_csv_succeeded is defined
-    - r_ocp4_workload_argocd_operator_csv_succeeded.resources is defined
-    - r_ocp4_workload_argocd_operator_csv_succeeded.resources[0] is defined
-    - r_ocp4_workload_argocd_operator_csv_succeeded.resources[0].status is defined
-    - r_ocp4_workload_argocd_operator_csv_succeeded.resources[0].status.phase is defined
-    - r_ocp4_workload_argocd_operator_csv_succeeded.resources[0].status.phase == "Succeeded"
-
-- name: Create ArgoCD CR
-  k8s:
-    state: present
-    definition: "{{ lookup('template', item ) | from_yaml }}"
-  loop:
-  - ./templates/argocr.j2
-
-- name: Wait for ArgoCD to be installed
-  k8s_info:
-    api_version: argoproj.io/v1alpha1
-    kind: ArgoCD
-    name: argocd
-    namespace: "{{ ocp4_workload_argocd_operator_project }}"
-  register: r_ocp4_workload_argocd_operator_install_status
-  retries: 5
-  delay: 70
+  delay: 5
   until:
+  - r_subscription.resources[0].status.currentCSV is defined
+  - r_subscription.resources[0].status.currentCSV | length > 0
+
+- name: Wait until CSV is Installed
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+  register: r_csv
+  retries: 15
+  delay: 5
+  until:
+  - r_csv.resources[0].status.phase is defined
+  - r_csv.resources[0].status.phase | length > 0
+  - r_csv.resources[0].status.phase == "Succeeded"
+
+- name: Deploy ArgoCD
+  when: ocp4_workload_argocd_operator_deploy_argocd | bool
+  block:
+  - name: Create ArgoCD
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './templates/argocd.j2' ) | from_yaml }}"
+
+  - name: Wait for ArgoCD to be installed
+    k8s_info:
+      api_version: argoproj.io/v1alpha1
+      kind: ArgoCD
+      name: "{{ ocp4_workload_argocd_operator_argocd_name }}"
+      namespace: "{{ ocp4_workload_argocd_operator_project }}"
+    register: r_ocp4_workload_argocd_operator_install_status
+    retries: 30
+    delay: 10
+    until:
     - r_ocp4_workload_argocd_operator_install_status is defined
     - r_ocp4_workload_argocd_operator_install_status.resources is defined
     - r_ocp4_workload_argocd_operator_install_status.resources[0] is defined
