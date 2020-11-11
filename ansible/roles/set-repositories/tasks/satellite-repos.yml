@@ -11,6 +11,7 @@
   package:
     name: rh-amazon-rhui-client
     state: absent
+    disablerepo: "*"    ## This option is undocumented but works, Pulls from yum & dnf
   when: cloud_provider == 'ec2'
 
 - name: Copy satellite CA certificate to /etc/pki/ca-trust/source/anchors/{{ set_repositories_satellite_hostname }}.ca.crt
@@ -29,7 +30,8 @@
   package:
     name: katello-ca-consumer-*.noarch
     state: absent
-  ignore_errors: "{{ cloud_provider == 'gcp' }}"
+    disablerepo: "*"
+  ignore_errors: true
 
 - name: Find current repository files
   find:
@@ -55,36 +57,46 @@
     - configure_repos
     - remove_existing_repos
 
-- name: Install satellite CA certificate package
-  package:
+# WK: use `yum` to allow ignore of GPG errors
+#     `package` does not have that options and results in random failures
+- name: Install Satellite CA certificate package
+  yum:
     name: "{{ set_repositories_satellite_ca_rpm_url }}"
     state: present
+    disablerepo: "*"
+    disable_gpg_check: true
   register: r_install_satellite_ca_rpm
   until: not r_install_satellite_ca_rpm.failed
   retries: 10
-  delay: 30
+  delay: 10
 
 - name: Run setup if gather_facts hasn't been run
   setup:
     gather_subset: min
   when: ansible_date_time is not defined
 
-- name: Randomize hostname for Satellite
+- name: Set set_repositories_subscription_hostname with randomization
+  set_fact:
+    set_repositories_subscription_hostname: >-
+      {%- if guid in inventory_hostname -%}
+      {{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic | lower }}
+      {%- else -%}
+      {{ inventory_hostname }}.{{ guid }}.internal-{{ ansible_date_time.iso8601_basic | lower }}
+      {%- endif -%}
+
+- name: Set network.fqdn in /etc/rhsm/facts/katello.facts
   copy:
     dest: /etc/rhsm/facts/katello.facts
-    content: >-
-        {
-          "network.fqdn": {% if guid in inventory_hostname %}
-          "{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic | lower }}"
-          {% else %}
-          "{{ inventory_hostname }}.{{guid}}.internal-{{ ansible_date_time.iso8601_basic | lower }}" 
-          {% endif %}
-        } 
+    content: "{{ __content | to_json }}"
+  vars:
+    __content:
+      network.fqdn: "{{ set_repositories_subscription_hostname }}"
 
 - name: Register with activation-key
   when: set_repositories_satellite_activationkey != ''
   redhat_subscription:
     state: present
+    consumer_name: "{{ set_repositories_subscription_hostname }}"
     server_hostname: "{{ set_repositories_satellite_hostname }}"
     activationkey: "{{ set_repositories_satellite_activationkey }}"
     org_id: "{{ set_repositories_satellite_org | default(satellite_org) }}"

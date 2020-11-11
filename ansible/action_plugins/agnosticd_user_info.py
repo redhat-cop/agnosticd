@@ -51,12 +51,24 @@ class ActionModule(ActionBase):
         del tmp # tmp no longer has any effect
 
         msg = self._task.args.get('msg')
+        body = self._task.args.get('body')
         data = self._task.args.get('data', {})
         user = self._task.args.get('user')
+
+        if msg and body:
+            result['failed'] = True
+            result['error'] = 'msg and body are mutually exclusive'
+            return result
 
         if not user and msg != None:
             # Output msg in result, prepend "user.info: " for cloudforms compatibility
             result['msg'] = 'user.info: ' + msg
+            # Force display of result like debug
+            result['_ansible_verbose_always'] = True
+
+        if not user and body != None:
+            # Output msg in result, prepend "user.info: " for cloudforms compatibility
+            result['msg'] = 'user.body: ' + body
             # Force display of result like debug
             result['_ansible_verbose_always'] = True
 
@@ -77,6 +89,10 @@ class ActionModule(ActionBase):
             )
             if not user and msg != None:
                 fh = open(os.path.join(output_dir, 'user-info.yaml'), 'a')
+                fh.write('- ' + json.dumps(msg) + "\n")
+                fh.close()
+            if not user and body != None:
+                fh = open(os.path.join(output_dir, 'user-body.yaml'), 'a')
                 fh.write('- ' + json.dumps(msg) + "\n")
                 fh.close()
             if data or user:
@@ -105,6 +121,11 @@ class ActionModule(ActionBase):
                             user_data_item['msg'] += "\n" + msg
                         else:
                             user_data_item['msg'] = msg
+                    if body:
+                        if 'body' in user_data_item:
+                            user_data_item['body'] += "\n" + body
+                        else:
+                            user_data_item['body'] = body
                 else:
                     user_data.update(data)
 

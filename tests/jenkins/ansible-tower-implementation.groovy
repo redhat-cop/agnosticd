@@ -27,9 +27,7 @@ def choices = [
 ].join("\n")
 
 def region_choice = [
-    'na_osp',
-    'emea_osp',
-    'apac_osp',
+    'na',
 ].join("\n")
 
 def environment_choice = [
@@ -87,9 +85,10 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
+                        'notes=Development - Catalog item creation / maintenance',
                         'check=t',
                         'expiration=7',
-                        'runtime=10',
+                        'runtime=8',
                         'quotacheck=t',
                         "environment=${environment}",
                         "region=${region}",
@@ -112,7 +111,23 @@ pipeline {
             }
         }
 		
-		// This kind of CI send only one mail
+		stage('Wait for first email') {
+            environment {
+                credentials=credentials("${imap_creds}")
+            }
+            steps {
+                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                    branch: 'development'
+
+
+                sh """./tests/jenkins/downstream/poll_email.py \
+                    --server '${imap_server}' \
+                    --guid ${guid} \
+                    --timeout 20 \
+                    --filter 'has started'"""
+            }
+        }
+
         stage('Wait to receive and parse email') {
             environment {
                 credentials=credentials("${imap_creds}")
@@ -129,12 +144,12 @@ pipeline {
                           --server '${imap_server}' \
                           --guid ${guid} \
                           --timeout 30 \
-                          --filter 'is building'
+                          --filter 'has completed'
                         """
                     ).trim()
 
                     try {
-                    	def m = email =~ /SSH Access: (.*)/
+                    	def m = email =~ /ssh (.*)/
 						ssh_location = m[0][1]
 						echo "SSH Access: ${ssh_location}"
                     } catch(Exception ex) {
@@ -149,8 +164,8 @@ pipeline {
         
         stage ('Wait to complete provision') {
         	steps {
-				echo "Wait for 30 minutes for deployment to complete"
-				sleep 1800 // seconds
+				echo "Wait for 5 minutes for deployment to complete"
+				sleep 300 // seconds
 			}
 		}
 

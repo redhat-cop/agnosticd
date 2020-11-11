@@ -77,12 +77,13 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
+                        'notes=Development - Catalog item creation / maintenance',
                         'quotacheck=t',
                         'check=t',
                         'city=jenkins',
                         "region=${region}",
                         'salesforce=gptejen',
-                        'users=5',
+                        'users=15',
                         'use_letsencrypt=f',
                         'expiration=2',
                         'runtime=24',

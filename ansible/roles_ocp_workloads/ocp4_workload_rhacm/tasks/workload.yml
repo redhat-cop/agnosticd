@@ -23,10 +23,52 @@
     state: present
     definition: "{{ lookup('template', './templates/operatorGroup.j2') }}"
 
+- name: Create Catalogsource for use with catalog snapshot
+  when: ocp4_workload_rhacm_use_catalog_snapshot | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/catalogSource.j2' ) | from_yaml }}"
+
 - name: Ensure RHACM Subscription is present
   k8s:
     state: present
     definition: "{{ lookup('template', './templates/subscription.j2') }}"
+
+- name: Wait until InstallPlan is created
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ ocp4_workload_rhacm_acm_project }}"
+  register: r_install_plans
+  vars:
+    _query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'advanced-cluster-management')]
+  retries: 30
+  delay: 5
+  until:
+  - r_install_plans.resources | length > 0
+  - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+- name: Set InstallPlan Name
+  set_fact:
+    ocp4_workload_rhacm_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'advanced-cluster-management')].metadata.name|[0]
+
+- name: Get InstallPlan
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ ocp4_workload_rhacm_install_plan_name }}"
+    namespace: "{{ ocp4_workload_rhacm_acm_project }}"
+  register: r_install_plan
+
+- name: Approve InstallPlan if necessary
+  when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+  k8s:
+    state: present
+    definition: "{{ lookup( 'template', './templates/installPlan.j2' ) }}"
 
 - name: Wait until some pods are running before checking the sub status
   k8s_info:
@@ -65,7 +107,7 @@
     namespace: "{{ ocp4_workload_rhacm_acm_project }}"
   register: rhacm_multiclusterhub
   retries: 30
-  delay: 20
+  delay: 30
   until: 
   - rhacm_multiclusterhub.resources | length > 0
   - rhacm_multiclusterhub.resources[0].status is defined

@@ -1,0 +1,120 @@
+---
+- name: Generate user password
+  set_fact:
+    heat_user_password_generated: "{{lookup('password', '/dev/null length=12 chars=ascii_letters,digits')}}"
+
+# The `heat_user_password` var will be deprecated and removed in favor of
+# osp_auth_password_member. Any config or role that references it will need to be updated.
+- name: Set heat_user_password
+  set_fact:
+    heat_user_password: "{{ heat_user_password_provided | default(heat_user_password_generated) }}"
+
+- name: Set fact for new user password
+  set_fact:
+    osp_auth_password_member: "{{ heat_user_password_provided | default(heat_user_password_generated) }}"
+
+- name: Set fact for new user
+  set_fact:
+    osp_auth_username_member: "{{ guid }}-user"
+
+- when: >-
+    osp_project_create | bool
+    or osp_project_id is not defined
+    or osp_create_sandbox | bool
+  environment:
+    OS_AUTH_URL: "{{ osp_auth_url }}"
+    OS_USERNAME: "{{ osp_auth_username }}"
+    OS_PASSWORD: "{{ osp_auth_password }}"
+    OS_PROJECT_NAME: "admin"
+    OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+    OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+  block:
+  - name: Create project and quota
+    when: osp_project_create
+    block:
+    - name: Create project for user
+      os_project:
+        name: "{{ osp_project_name }}"
+        state: present
+        description: "{{ env_type }} for user {{ student_name }}"
+        enabled: true
+        domain_id: "Default"
+        endpoint_type: public
+
+    - name: Grant access to admin account on new project
+      os_user_role:
+        state: present
+        user: "{{ admin_user }}"
+        role: "admin"
+        project: "{{ osp_project_name }}"
+
+    - name: Set quotas on new project
+      os_quota:
+        name: "{{ osp_project_name }}"
+        instances: "{{ quota_num_instances }}"
+        cores: "{{ quota_num_cores }}"
+        ram: "{{ quota_memory }}" #in MB
+        volumes: "{{ quota_num_volumes }}"
+        gigabytes: "{{ quota_volumes_gigs }}" #volume storage
+        #loadbalancer: #when Octavia is available
+        #pool: #when Octavia is available
+        network: "{{ quota_networks }}"
+        subnet: "{{ quota_subnets }}"
+        router: "{{ quota_routers }}"
+        floatingip: "{{ quota_fip }}"
+        security_group: "{{ quota_sg }}"
+        security_group_rule: "{{ quota_sg_rules }}"
+
+    - name: Create user in new project
+      os_user:
+        state: present
+        name: "{{ osp_auth_username_member }}"
+        password: "{{ heat_user_password }}"
+        domain: default
+        default_project: "{{ osp_project_name }}"
+
+    - name: Add member role to user
+      os_user_role:
+        user: "{{ osp_auth_username_member }}"
+        role: _member_
+        project: "{{ osp_project_name }}"
+
+    - name: Add Swift role to user
+      os_user_role:
+        user: "{{ osp_auth_username_member }}"
+        role: swiftoperator
+        project: "{{ osp_project_name }}"
+      when: osp_use_swift | default(false) | bool
+
+  - name: Get project info if project already exists
+    when: osp_project_id is not defined
+    block:
+    - name: Get project info
+      # This changes to os_project_info in Ansible 2.9
+      os_project_facts:
+        name: "{{ osp_project_name }}"
+      register: r_osp_project
+
+    - set_fact:
+        osp_project_info: "{{ r_osp_project.ansible_facts.openstack_projects }}"
+
+    - when: osp_project_info | length == 0
+      fail:
+        msg: No project '{{ osp_project_info }}' found
+
+  # - name: Add user if sandbox
+  #   when: osp_create_sandbox
+  #   block:
+  #   - name: Create sandbox user in project
+  #     os_user:
+  #       state: present
+  #       name: sandbox-{{ guid }}-user
+  #       password: "{{ heat_user_password }}"
+  #       domain: default
+  #       default_project: "{{ osp_project_name }}"
+
+  #   - name: Add member role to user
+  #     os_user_role:
+  #       user: sandbox-{{ guid }}-user
+  #       role: _member_
+  #       project: "{{ osp_project_name }}"
