@@ -24,12 +24,13 @@
     - ./files/templates/master-authenticator-policy.template.yaml
     - ./files/templates/master-deployment-manifest.template.yaml
     - ./files/templates/master-secrets-policy.template.yaml
-    - ./files/templates/mysql.template.yaml    
+    - ./files/templates/mysql.template.yaml
+    - ./files/templates/user-namespace-policy.template.yaml    
 
 - name: Copy CyberArk bash files
   copy:
     src: '{{item}}'
-    dest: "/home/{{ansible_user}}/cyberark_setup/"
+    dest: '/home/{{ansible_user}}/cyberark_setup/'
     mode: 0775
   loop:
     - ./files/get_cert_REST.sh
@@ -37,6 +38,12 @@
     - ./files/load_policy.sh
     - ./files/master_deploy.sh
     - ./files/mysqldb_deploy.sh
+    - ./files/conjur_utils.sh
+    - ./files/apply_namespace_policies.sh
+
+- name: Set random password for dap
+  set_fact: 
+    dap_pwd: "{{ lookup('password', '/dev/null length=41 chars=ascii_letters,digits,hexdigits,@,#,$,%,^,*,') }}"
 
 - name: create CyberArk resorces
   k8s:
@@ -48,15 +55,71 @@
   - ./templates/dap_authn_role.j2
   - ./templates/role_binding.j2
   - ./templates/dap_cm_role.j2
+  - ./templates/secrets_cluster_role.j2
 
 - name: Add policy add-scc-to-user dap authn service
   command: "oc adm policy add-scc-to-user anyuid -z dap-authn-service -n {{ ocp4_workload_cyberark_project }}"
 
 - name: Deploy cyberark conjur master
-  command: "/home/{{ansible_user}}/cyberark_setup/master_deploy.sh {{ ocp4_workload_cyberark_project }}"
+  command: "/home/{{ansible_user}}/cyberark_setup/master_deploy.sh {{ ocp4_workload_cyberark_project }} {{ dap_pwd }}"
 
 - name: Deploy mysqldb
   command: "/home/{{ansible_user}}/cyberark_setup/mysqldb_deploy.sh {{ ocp4_workload_cyberark_project }}"
+
+- name: Create lab user demo projects
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: 'user{{ item }}'
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Grant the authentication service access to pods in each user project
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: dap-authn-service
+        namespace: 'user{{ item }}'
+      subjects:
+      - kind: ServiceAccount
+        name: dap-authn-service
+        namespace: '{{ ocp4_workload_cyberark_project }}'
+      roleRef:
+        kind: ClusterRole
+        name: dap-authn-role
+        apiGroup: rbac.authorization.k8s.io
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Give lab users admin access to their projects
+  command: "oc adm policy add-role-to-user admin user{{ item }} -n user{{ item }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Apply Policies to user namespaces
+  command: "/home/{{ansible_user}}/cyberark_setup/apply_namespace_policies.sh {{ ocp4_workload_cyberark_project }} {{ dap_pwd }} {{item}}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Grant users read-only access to the DAP config map
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: 'dap-cm-access-user{{ item }}'
+        namespace: '{{ ocp4_workload_cyberark_project }}'
+      roleRef:
+        kind: ClusterRole
+        name: dap-cm-access-role
+        apiGroup: rbac.authorization.k8s.io
+      subjects:
+      - kind: User
+        name: 'user{{ item }}'
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
 
 # Leave this as the last task in the playbook.
 # --------------------------------------------

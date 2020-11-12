@@ -8,6 +8,7 @@ exec 1>cyberark_setup/master-deploy.log 2>&1
 cd cyberark_setup
 
 export CYBERARK_NAMESPACE_NAME=$1
+export DAP_ADMIN_PASSWORD=$2
 
 source ./dap_service_rhpds.config
 
