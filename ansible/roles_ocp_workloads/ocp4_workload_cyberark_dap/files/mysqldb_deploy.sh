@@ -14,7 +14,7 @@ main() {
 ########################
 deploy_mysql_db() {
   oc adm policy add-scc-to-user anyuid -z mysql-db -n $CYBERARK_NAMESPACE_NAME
-  cat ./templates/mysql.template.yaml                     		\
+  cat ./templates/mysql.template                    		\
   | sed "s#{{ MYSQL_IMAGE_NAME }}#$REGISTRY_MYSQL_IMAGE#g"		\
   | sed "s#{{ CYBERARK_NAMESPACE_NAME }}#$CYBERARK_NAMESPACE_NAME#g"	\
   | sed "s#{{ MYSQL_USERNAME }}#$MYSQL_USERNAME#g"              	\

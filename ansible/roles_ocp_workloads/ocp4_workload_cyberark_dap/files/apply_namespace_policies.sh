@@ -13,7 +13,7 @@ source ./conjur_utils.sh
 
 uname=$(echo user${3})
 
-cat ./templates/user-namespace-policy.template.yaml				\
+cat ./templates/user-namespace-policy.template				\
 | sed -e "s#{{ APP_NAMESPACE_NAME }}#$uname#g"				\
 | sed -e "s#{{ CYBERARK_NAMESPACE_NAME }}#$CYBERARK_NAMESPACE_NAME#g"	\
 > ./$uname-policy.yaml

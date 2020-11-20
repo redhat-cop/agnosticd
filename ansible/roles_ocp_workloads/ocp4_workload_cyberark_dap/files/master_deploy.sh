@@ -43,7 +43,7 @@ start_master() {
   conjur_follower_route=$(oc get routes | grep conjur-follower | awk '{ print $2 }')
   FOLLOWER_ALTNAME="$FOLLOWER_ALTNAMES,$conjur_follower_route"
 
-  cat ./templates/master-deployment-manifest.template.yaml 			\
+  cat ./templates/master-deployment-manifest.template			\
   | sed -e "s#{{ CONJUR_APPLIANCE_IMAGE }}#$REGISTRY_APPLIANCE_IMAGE#g" 	\
   | sed -e "s#{{ DAP_MASTER_NODE_LABEL }}#$DAP_MASTER_NODE_LABEL#g" 		\
   > ./master-deployment-manifest.yaml
@@ -70,7 +70,7 @@ start_master() {
 ########################
 init_cluster_authn() {
   echo "Initializing authentication..."
-  cat ./templates/master-authenticator-policy.template.yaml		\
+  cat ./templates/master-authenticator-policy.template		\
     | sed -e "s#{{ CLUSTER_AUTHN_ID }}#$CLUSTER_AUTHN_ID#g" 		\
     | sed -e "s#{{ CYBERARK_NAMESPACE_NAME }}#$CYBERARK_NAMESPACE_NAME#g" \
     > master-authenticator-policy.yaml
@@ -146,7 +146,7 @@ initialize_verify_k8s_api_secrets() {
 ########################
 create_configmaps() {
   echo "Creating config map..."
-  cat ./templates/dap-config-map-manifest.template.yaml 			\
+  cat ./templates/dap-config-map-manifest.template 			\
     | sed -e "s#{{ CONJUR_ACCOUNT }}#$CONJUR_ACCOUNT#g" 				\
     | sed -e "s#{{ CONJUR_MASTER_HOSTNAME }}#$CONJUR_MASTER_HOSTNAME#g" 	\
     | sed -e "s#{{ CYBERARK_NAMESPACE_NAME }}#$CYBERARK_NAMESPACE_NAME#g"	\
@@ -170,7 +170,7 @@ create_configmaps() {
 ########################
 init_secrets() {
   echo "Initializing secrets..."
-  cat ./templates/master-secrets-policy.template.yaml			\
+  cat ./templates/master-secrets-policy.template			\
     | sed -e "s#{{ VAULT_NAME }}#$VAULT_NAME#g"		 		\
     | sed -e "s#{{ LOB_NAME }}#$LOB_NAME#g" 				\
     | sed -e "s#{{ SAFE_NAME }}#$SAFE_NAME#g" 			\
