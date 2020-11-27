@@ -30,8 +30,12 @@ def choices = [
 
 def region_choice = [
     'na',
-    'apac',
-    'emea',
+].join("\n")
+
+def environment_choice = [
+    'PROD',
+    'TEST',
+    'DEV',
 ].join("\n")
 
 pipeline {
@@ -75,12 +79,13 @@ pipeline {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
                     def region = params.region.trim()
+                    def environment = params.environment.trim()
                     def cfparams = [
-                        'status=t',
                         'notes=Development - Catalog item creation / maintenance',
                         'expiration=7',
                         'runtime=8',
                         "region=${region}",
+                        "environment=${environment}",
                     ].join(',').trim()
 
                     echo "'${catalog}' '${item}'"
