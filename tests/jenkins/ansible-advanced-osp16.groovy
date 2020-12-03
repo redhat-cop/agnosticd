@@ -35,6 +35,7 @@ def region_choice = [
 
 def environment_choice = [
     'PROD',
+    'ILT',
     'TEST',
     'DEV',
 ].join("\n")
@@ -88,10 +89,10 @@ pipeline {
                     def region = params.region.trim()
                     def cfparams = [
                         'status=t',
-                        'notes=Development - Catalog item creation / maintenance',
-                        'check=t',
+			'check=t',
+                        'notes=Development - Catalog item creation / maintenance',                        
                         'expiration=7',
-                        'runtime=10',
+                        'runtime=8',
                         'quotacheck=t',
                         "environment=${environment}",
                         "region=${region}",
