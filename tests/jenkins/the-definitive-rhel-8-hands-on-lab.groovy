@@ -90,6 +90,7 @@ pipeline {
                     def nodes = params.nodes.trim()
                     def cfparams = [
                         'status=t',
+                        'notes=Development - Catalog item creation / maintenance',
                         'check=t',
                         'check2=t',
                         "region=${region}",

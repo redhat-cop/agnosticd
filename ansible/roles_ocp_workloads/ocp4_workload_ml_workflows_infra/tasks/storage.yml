@@ -1,0 +1,139 @@
+---
+
+- name: Discovering worker nodes
+  k8s_info:
+    api_version: v1
+    kind: Node
+    label_selectors:
+    - node-role.kubernetes.io/worker
+  register: worker_nodes
+
+- fail:
+    msg: "Less than 3 worker nodes detected. Cannot install Ceph..."
+  when: worker_nodes.resources | length < 3
+
+- set_fact:
+    ceph_worker_nodes: "{{ worker_nodes | json_query('resources[*].metadata.name') }}"
+
+- name: "Adding Ceph labels to worker nodes"
+  shell: "oc label nodes --overwrite {{ item }} cluster.ocs.openshift.io/openshift-storage=''"
+  loop: "{{ ceph_worker_nodes }}"
+
+- name: Set state
+  set_fact:
+    state: present
+  when: not ocs_operator_workload_destroy|bool
+
+- name: Set state
+  set_fact:
+    state: absent
+  when: ocs_operator_workload_destroy|bool
+
+- name: "Create Namespace"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'general/namespace.yml.j2') }}"
+  vars:
+    namespace: "{{ ocs_namespace }}"
+  
+- name: "Create OperatorGroup"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'general/operator_group.yml.j2') }}"
+  vars:
+    namespace: " {{ ocs_namespace }} "
+
+- name: "Create Subscription"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'storage/subscription.yml.j2') }}"
+  vars:
+    namespace: " {{ ocs_namespace }} "
+    channel: " {{ ocs_channel }}"
+
+- name: "Wait for Storage CRD's to exist"
+  k8s_facts:
+    api_version: "apiextensions.k8s.io/v1beta1"
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop: "{{ ocs_expected_crds }}"
+  register: crds
+  until: crds.resources|length > 0
+  retries: 30
+  delay: 10
+
+- name: "Create OCS Storage cluster"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'storage/storagecluster.yml.j2') }}"
+  
+- name: "Waiting for Noobaa to become ready"
+  k8s_facts:
+    api_version: "noobaa.io/v1alpha1"
+    kind: NooBaa
+    namespace: "{{ ocs_namespace }}"
+  register: noobaa_system_status
+  retries: 60
+  delay: 10
+  until: noobaa_system_status.resources|length > 0 and
+         noobaa_system_status.resources[0].status is defined and 
+         noobaa_system_status.resources[0].status.phase == 'Ready'
+  ignore_errors: true
+
+- when: ocs_install_mcg
+  block:
+  - when: ocs_mcg_pv_pool
+    block:
+    - name: "Create PV Pool BackingStore"
+      k8s:
+        state: "{{ state }}"
+        definition: "{{ lookup('template', 'storage/pv_pool_backingstore.yml.j2') }}"
+
+    - name: "Create PV Pool BucketClass"
+      k8s:
+        state: "{{ state }}"
+        definition: "{{ lookup('template', 'storage/pv_pool_bucketclass.yml.j2') }}"
+
+    - name: "Create PV Pool ObjectBucketClaim"
+      k8s:
+        state: "{{ state }}"
+        definition: "{{ lookup('template', 'storage/pv_pool_objectbucketclaim.yml.j2') }}"
+
+    - name: "Wait for Bucket to exist"
+      k8s_facts:
+        api_version: "objectbucket.io/v1alpha1"
+        kind: ObjectBucketClaim
+        name: "{{ ocs_mcg_pv_pool_bucket_name }}"
+        namespace: "{{ ocs_namespace }}"
+      register: bucket
+      until: (bucket.resources|length) > 0
+      retries: 30
+      delay: 10
+
+    - name: "Wait for Bucket to have status"
+      k8s_facts:
+        api_version: "objectbucket.io/v1alpha1"
+        kind: ObjectBucketClaim
+        name: "{{ ocs_mcg_pv_pool_bucket_name }}"
+        namespace: "{{ ocs_namespace }}"
+      register: bucket
+      until: (bucket.resources|first).status is defined
+      retries: 30
+      delay: 10
+
+    - name: "Wait for Bucket to become bound"
+      k8s_facts:
+        api_version: "objectbucket.io/v1alpha1"
+        kind: ObjectBucketClaim
+        name: "{{ ocs_mcg_pv_pool_bucket_name }}"
+        namespace: "{{ ocs_namespace }}"
+      register: bucket
+      until: (bucket.resources|first).status.phase == "Bound"
+      retries: 75
+      delay: 10
+
+# Leave this as the last task in the playbook.
+- name: Storage tasks complete
+  debug:
+    msg: "Storage kload Tasks completed successfully."
+  when: not silent|bool

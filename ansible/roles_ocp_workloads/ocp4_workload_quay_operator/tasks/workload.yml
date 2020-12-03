@@ -1,5 +1,5 @@
 ---
-- name: Setting up workload for user
+- name: Setting up workload for user {{ ocp_username }}
   debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
@@ -78,12 +78,25 @@
   set_fact:
     _ocp4_workload_quay_operator_quay_route: "quay-{{ guid }}.{{ r_ingress_config.resources[0].spec.domain }}"
 
-- name: Create Quay Operator Resources
+- name: Create Quay Operator Project
   k8s:
     state: present
     definition:  "{{ lookup('template', item ) | from_yaml }}"
   loop:
   - ./templates/project.j2
+  - ./templates/operatorgroup.j2
+
+- name: Create Catalogsource for use with catalog snapshot
+  when: ocp4_workload_quay_operator_use_catalog_snapshot | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/catalogsource.j2' ) | from_yaml }}"
+
+- name: Create Quay Operator Resources
+  k8s:
+    state: present
+    definition:  "{{ lookup('template', item ) | from_yaml }}"
+  loop:
   - ./templates/operatorgroup.j2
   - ./templates/subscription.j2
   - ./templates/pull_secret.j2
@@ -100,44 +113,68 @@
   loop:
   - ./templates/quay_ssl_certificate_secret.j2
 
-- name: Get current CSV from Subscription
+- name: Wait until InstallPlan is created
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ ocp4_workload_quay_operator_project }}"
+  register: r_install_plans
+  vars:
+    _query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'red-hat-quay')]
+  retries: 30
+  delay: 5
+  until:
+  - r_install_plans.resources | length > 0
+  - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+- name: Set InstallPlan Name
+  set_fact:
+    ocp4_workload_quay_operator_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'red-hat-quay')].metadata.name|[0]
+
+- name: Get InstallPlan
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ ocp4_workload_quay_operator_install_plan_name }}"
+    namespace: "{{ ocp4_workload_quay_operator_project }}"
+  register: r_install_plan
+  
+- name: Approve InstallPlan if necessary
+  when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+  k8s:
+    state: present
+    definition: "{{ lookup( 'template', './templates/installplan.j2' ) }}"
+
+- name: Get Installed CSV
   k8s_info:
     api_version: operators.coreos.com/v1alpha1
     kind: Subscription
+    name: quay-operator
     namespace: "{{ ocp4_workload_quay_operator_project }}"
-    name: quay
   register: r_subscription
+  retries: 30
+  delay: 5
+  until:
+  - r_subscription.resources[0].status.currentCSV is defined
+  - r_subscription.resources[0].status.currentCSV | length > 0
 
-- name: Wait for ClusterServiceVersion to appear
+- name: Wait until CSV is Installed
   k8s_info:
     api_version: operators.coreos.com/v1alpha1
     kind: ClusterServiceVersion
-    namespace: "{{ ocp4_workload_quay_operator_project }}"
     name: "{{ r_subscription.resources[0].status.currentCSV }}"
-  register: r_csv
-  ignore_errors: true
-  until: r_csv.resources | length > 0
-  retries: 30
-  delay: 10
-
-- name: Wait for Quay operator pod to be ready
-  k8s_info:
-    api_version: v1
-    kind: Deployment
     namespace: "{{ ocp4_workload_quay_operator_project }}"
-    name: "quay-operator"
-  register: r_qo_deployment
-  retries: 30
-  delay: 10
+  register: r_csv
+  retries: 15
+  delay: 5
   until:
-  - r_qo_deployment.resources | length | int > 0
-  - r_qo_deployment.resources[0].status.availableReplicas is defined
-  - r_qo_deployment.resources[0].status.availableReplicas | int == r_qo_deployment.resources[0].spec.replicas | int
-
-- name: Copy Quay Registry Definition
-  template:
-    src: ./templates/quay.j2
-    dest: "/home/{{ ansible_user }}/quay_template.yaml"
+  - r_csv.resources[0].status.phase is defined
+  - r_csv.resources[0].status.phase | length > 0
+  - r_csv.resources[0].status.phase == "Succeeded"
 
 - name: Create Red Hat Quay Registry
   k8s:
@@ -179,18 +216,6 @@
     retries: 25
     delay: 5
 
-# https://issues.redhat.com/browse/PROJQUAY-725
-# https://issues.redhat.com/browse/PROJQUAY-713
-- name: Patch the Quay Deployment to work around permissions issue
-  when: ocp4_workload_quay_operator_patch_deployment | bool
-  block:
-  - name: Wait 5 minutes for Quay Setup to be complete
-    pause:
-      seconds: 300
-
-  - name: Patch Quay Deployment
-    shell: "oc patch deploy {{ ocp4_workload_quay_operator_name }}-quay -p '{\"spec\": {\"template\": {\"spec\":{\"securityContext\":{\"fsGroup\":1001}}}}}' -n {{ ocp4_workload_quay_operator_project }}"
-
 - name: Get Quay Hostname
   k8s_info:
     api_version: redhatcop.redhat.io/v1alpha1
@@ -204,7 +229,7 @@
     msg: "{{ item }}"
   loop:
   - ""
-  - "Red Hat Quay is available at https://{{r_quay.resources[0].status.hostname }}."
+  - "Red Hat Quay is available at https://{{r_quay.resources[0].status.hostname }}"
   - "The Red Hat Quay Super User is {{ ocp4_workload_quay_operator_superuser_username }} with password {{ _ocp4_workload_quay_operator_superuser_password }}"
 
 # Leave this as the last task in the playbook.
