@@ -14,77 +14,206 @@ tower_lab_setup: false                      # Whether or not to setup tower
 satellite_lab_setup: false                  # Enable or Disable Satellite Lab components
 
 #### Tower variables ############
-tower_version: 3.7.1-1
+tower_version: 3.8.0-1
 tower_hostname: "tower.{{ guid }}.{{ osp_cluster_dns_zone }}"
-software_to_deploy: tower              # tower install playbook from software directory
+tower_username: admin
+tower_password: "{{ tower_admin_password }}"
+tower_validate_certs: no
 
 tower_infra_workloads:
-  - tower-org-create
+  - redhat_cop.tower_configuration.credential_types
+  - redhat_cop.tower_configuration.credentials
+  - redhat_cop.tower_configuration.projects
+  - redhat_cop.tower_configuration.inventories
+  - redhat_cop.tower_configuration.inventory_sources
+  - redhat_cop.tower_configuration.job_templates
+  - redhat_cop.tower_configuration.hosts
 
-tower_organization:
-  - name: gpte
+tower_credential_types:
+  - name: Satellite_Collection
+    description: Credential for redhat.satellite collection
+    kind: cloud
+    inputs:
+        fields:
+          - type: string
+            id: username
+            label: Satellite Username
+          - type: string
+            id: password
+            label: Satellite Password
+            secret: true
+          - type: string
+            id: host
+            label: Satellite Hostname
+        required:
+          - username
+          - password
+          - host
+    injectors:
+      env:
+        FOREMAN_SERVER: "{% raw %}{{ '{{host}}' }}{% endraw %}"
+        FOREMAN_USER: "{% raw %}{{ '{{username}}' }}{% endraw %}"
+        FOREMAN_PASSWORD: "{% raw %}{{ '{{password}}' }}{% endraw %}"
 
-#tower_user_accounts:
-#  - user: devops
-#    password: "{{ devops_password_tower }}"
-##    email: devops@example.com
-##    firstname: Devon
-##    lastname: Operations
-##    superuser: false
-#
-#tower_credentials:
-#  - name: Satellite Credentials
-#    username: admin
-#    password: "{{ hostvars['satellite']['satellite_admin_password'] }}"
-#    description: Satellite administrator credentials
-#    type: "Red Hat Satellite 6"
-#    host: "https://satellite.{{ guid }}.{{ osp_cluster_dns_zone }}"
-#    state: present
-#
-#  - name: Satellite Runner
-#    username: "{{ satellite_runner_user }}"
-#    password: "{{ satellite_runner_pass }}"
-#    decription: Credential for Manifest runner
-#    organization: gpte
-#    type: "Source Control"
-#
-#  - name: SSH Admin Key
-#    username: "{{ ansible_user }}"
-#    description: Private key to connect to satellite connected servers
-#    organization: gpte
-#    type: Machine
-#    become_method: sudo
-#    state: present
-#    ssh_key_data: "{{ lookup('file', '{{ output_dir}}/{{ guid }}key') }}"
-#
-#tower_projects:
-#  - name: Insights Remediations
-#    description: Red Hat Insights Remediations Demo
-#    organization: gpte
-#    scm_type: insights
-#    scm_credential: "Insights Credentials"
-#    state: present
-#    tower_host: "{{ tower_hostname }}"
-#    tower_username: admin
-#    tower_password: "{{ tower_admin_password }}"
-#
-#tower_inventories:
-#  - name: Satellite Inventory
-#    description: Inventory of satellite hosts
-#    organization: gpte
-#
-#tower_inventory_source:
-#  - name: Satellite hosts
-#    description: "Hosts registered to https://satellite.{{ guid }}.{{ osp_cluster_dns_zone }}"
-#    inventory: Satellite Inventory
-#    source: satellite6
-#    update_on_launch: true
-#    credential: "Satellite Credentials"
-#    state: present
+tower_credentials:
+  - name: SSH
+    description: credential for ssh to linux systems
+    organization: Default
+    credential_type: Machine
+    inputs:
+      username: cloud-user
+      ssh_key_data: "{{ lookup('file', '{{output_dir}}/{{guid}}key') }}"
+  - name: Satellite
+    credential_type: Satellite_Collection
+    state: present
+    organization: Default
+    inputs:
+      host: "https://{{ satellite_hostname }}"
+      username: 'admin' #"{{ hostvars['satellite']['satellite_admin'] }}"
+      password: "{{ hostvars['satellite']['satellite_admin_password'] }}"
+
+tower_projects:
+  - name: Automated Management
+    organization: Default
+    scm_update_on_launch: true
+    scm_update_cache_timeout: 3600
+    scm_type: git
+    scm_url: 'https://github.com/willtome/automated-smart-management.git'
+  - name: Fact Scan
+    organization: Default
+    scm_type: git
+    scm_url: 'https://github.com/ansible/awx-facts-playbooks.git'
+
+tower_inventories:
+  - name: Local
+    organization: Default
+  - name: Cloud
+    organization: Default
+  - name: Satellite
+    organization: Default
+
+tower_inventory_sources:
+  - name: satellite_source
+    inventory: Satellite
+    credential: Satellite
+    source: scm
+    source_project: Automated Management
+    source_path: inventory.foreman.yml
+
+tower_templates:
+    - name: SERVER / Register
+      project: Automated Management
+      playbook: server_register.yml
+      inventory: Cloud
+      credentials:
+        - SSH
+      extra_vars:
+        sat_url: "{{ satellite_hostname }}"
+        org_id: Default
+      survey_enabled: true
+      survey_spec:
+        name: ''
+        description: ''
+        spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: HOSTS
+          required: false
+
+    - name: Satellite / Publish Content View
+      project: Automated Management
+      playbook: satellite_publish.yml
+      inventory: Local
+      credentials:
+        - Satellite
+      extra_vars:
+        sat_url: "{{ satellite_hostname }}"
+        organization: Default
+        content_view: RHEL7
+        lifecycle_environment: RHEL7_Dev
+
+    - name: Satellite / Promote Content View
+      project: Automated Management
+      playbook: satellite_promote.yml
+      inventory: Local
+      credentials:
+        - Satellite
+      extra_vars:
+        sat_url: "{{ satellite_hostname }}"
+        organization: Default
+        content_view: RHEL7
+        lifecycle_environment: RHEL7_Dev
+      survey_enabled: true
+      survey_spec:
+        name: ''
+        description: ''
+        spec:
+        - question_name: Current Lifecycle Environment
+          variable: current_lifecycle_environment
+          type: multiplechoice
+          choices:
+            - RHEL7_Dev
+            - RHEL7_QA
+            - RHEL7_Prod
+          required: false
+        - question_name: Next Lifecycle Environment
+          variable: lifecycle_environment
+          type: multiplechoice
+          choices:
+            - RHEL7_Dev
+            - RHEL7_QA
+            - RHEL7_Prod
+          required: false
+
+    - name: Server / Patch
+      project: Automated Management
+      playbook: server_patch.yml
+      inventory: Satellite
+      use_fact_cache: yes
+      credentials:
+        - SSH
+      survey_enabled: true
+      survey_spec:
+        name: ''
+        description: ''
+        spec:
+        - question_name: Select Environment
+          type: multiplechoice
+          variable: server_type
+          choices:
+            - RHEL7_Dev
+            - RHEL7_QA
+            - RHEL7_Prod
+          required: false
+        - question_name: Check 
+          type: multiplechoice
+          variable: check_only
+          choices:
+            - 'yes'
+            - 'no'
+          required: true
+
+    - name: Server / Fact Scan
+      project: Fact Scan
+      playbook: scan_facts.yml
+      inventory: Satellite
+      limit: aws_ec2
+      use_fact_cache: yes
+      credentials:
+        - SSH
+
+tower_hosts:
+  - name: node
+    inventory: Cloud
+    variables:
+      ansible_host: node.example.com
+      tags:
+        Group: RHEL7_DEV
 
 ###### satellite variables ###############
-configure_satellite: true
+#configure_satellite: true
 satellite_version: 6.7
+satellite_hostname: "satellite.{{ guid }}.{{ osp_cluster_dns_zone }}"
 
 satellite_arguments:
   - --foreman-initial-organization "{{ org }}"
@@ -102,10 +231,11 @@ satellite_products:
   - product: "Red Hat Enterprise Linux Server"
 
 satellite_infra_workloads:
-  -  satellite-manage-manifest
-  -  satellite-manage-repositories
-  -  satellite-manage-lifecycle
-  -  satellite-manage-content-view
+  - satellite-manage-organization
+  - satellite-manage-manifest
+  - satellite-manage-repositories
+  - satellite-manage-lifecycle
+  - satellite-manage-content-view
   - satellite-manage-activationkey
 
 satellite_manifest:
