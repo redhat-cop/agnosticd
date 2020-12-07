@@ -87,20 +87,24 @@ class ActionModule(ActionBase):
                     )
                 )
             )
+
+            # Attempt to make output_dir if not exists
+            try:
+                os.makedirs(output_dir)
+            except OSError:
+                pass
+
             if not user and msg != None:
-                os.makedirs(output_dir, exist_ok=True)
                 fh = open(os.path.join(output_dir, 'user-info.yaml'), 'a')
                 fh.write('- ' + json.dumps(msg) + "\n")
                 fh.close()
             if not user and body != None:
-                os.makedirs(output_dir, exist_ok=True)
                 fh = open(os.path.join(output_dir, 'user-body.yaml'), 'a')
                 fh.write('- ' + json.dumps(body) + "\n")
                 fh.close()
             if data or user:
                 user_data = None
                 try:
-                    os.makedirs(output_dir, exist_ok=True)
                     fh = open(os.path.join(output_dir, 'user-data.yaml'), 'r')
                     user_data = yaml.safe_load(fh)
                     fh.close()
@@ -132,7 +136,6 @@ class ActionModule(ActionBase):
                 else:
                     user_data.update(data)
 
-                os.makedirs(os.path.dirname(output_dir), exist_ok=True)
                 fh = open(os.path.join(output_dir, 'user-data.yaml'), 'w')
                 yaml.safe_dump(user_data, stream=fh, explicit_start=True)
                 fh.close()
