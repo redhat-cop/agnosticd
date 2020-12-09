@@ -4,15 +4,18 @@
 
 FROM registry.redhat.io/codeready-workspaces/plugin-java11-rhel8:latest
 
-ENV OC_VERSION=4.4
-ENV GRAALVM_VERSION=19.3.1
-ENV QUARKUS_VERSION=1.3.4.Final-redhat-00001
-ENV GRAALVM_HOME="/usr/local/graalvm-ce-java11-${GRAALVM_VERSION}"
+ENV MANDREL_VERSION=20.1.0.3.Final
+ENV QUARKUS_VERSION=1.7.5.Final-redhat-00007
+ENV KN_VERSION=0.17.3
+ENV OC_VERSION=4.6
+ENV GRAALVM_HOME="/usr/local/mandrel-java11-${MANDREL_VERSION}"
 ENV PATH="/usr/local/maven/apache-maven-${MVN_VERSION}/bin:${PATH}"
 
 USER root
 
 RUN wget -O /tmp/oc.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/oc/${OC_VERSION}/linux/oc.tar.gz && cd /usr/bin && tar -xvzf /tmp/oc.tar.gz && chmod a+x /usr/bin/oc && rm -f /tmp/oc.tar.gz
+
+RUN wget -O /tmp/kn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/serverless/${KN_VERSION}/kn-linux-amd64-${KN_VERSION}.tar.gz && cd /usr/bin && tar -xvzf /tmp/kn.tar.gz ./kn && chmod a+x kn && rm -f /tmp/kn.tar.gz
 
 RUN wget -O /tmp/kn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/serverless/0.11.0/kn-linux-amd64-0.11.0.tar.gz && cd /usr/bin && tar -xvzf /tmp/kn.tar.gz ./kn && chmod a+x kn && rm -f /tmp/kn.tar.gz
 
@@ -20,7 +23,7 @@ RUN wget -O /tmp/tkn.tar.gz https://github.com/tektoncd/cli/releases/download/v0
 
 RUN sudo rpm -Uvh https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && sudo microdnf install -y zlib-devel gcc siege && sudo curl -Lo /usr/bin/jq https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 && sudo chmod a+x /usr/bin/jq
 
-RUN wget -O /tmp/graalvm.tar.gz https://github.com/graalvm/graalvm-ce-builds/releases/download/vm-${GRAALVM_VERSION}/graalvm-ce-java11-linux-amd64-${GRAALVM_VERSION}.tar.gz && cd /usr/local && tar -xvzf /tmp/graalvm.tar.gz && rm -rf /tmp/graalvm.tar.gz && ${GRAALVM_HOME}/bin/gu install native-image
+RUN wget -O /tmp/mandrel.tar.gz https://github.com/graalvm/mandrel/releases/download/mandrel-${MANDREL_VERSION}/mandrel-java11-linux-amd64-${MANDREL_VERSION}.tar.gz && cd /usr/local && tar -xvzf /tmp/mandrel.tar.gz && rm -rf /tmp/mandrel.tar.gz
 
 USER jboss
 
