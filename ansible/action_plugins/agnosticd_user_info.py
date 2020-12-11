@@ -87,6 +87,13 @@ class ActionModule(ActionBase):
                     )
                 )
             )
+
+            # Attempt to make output_dir if not exists
+            try:
+                os.makedirs(output_dir)
+            except OSError:
+                pass
+
             if not user and msg != None:
                 fh = open(os.path.join(output_dir, 'user-info.yaml'), 'a')
                 fh.write('- ' + json.dumps(msg) + "\n")
