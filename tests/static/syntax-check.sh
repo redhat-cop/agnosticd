@@ -52,7 +52,11 @@ do_yamllint() {
         return
     fi
 
-    yamllint "${f}" -c "${conf}" &> $output
+    (
+        f=$(realpath "${f}")
+        cd $(dirname ${conf})
+        yamllint "${f}" &> $output
+    )
 
     if [ $? = 0 ]; then
         echo "OK .......... yamllint ${f}"
