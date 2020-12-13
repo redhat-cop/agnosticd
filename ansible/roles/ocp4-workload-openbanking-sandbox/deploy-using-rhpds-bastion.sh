@@ -10,6 +10,8 @@
 # Execute create with verbose example:
 #   ./deploy-using-rhpds-bastion.sh create -vvvv
 
+RHT_SVC_ACCT_TOKEN="<CHANGE ME!!!>"
+
 ### change placeholders with RHPDS values
 TARGET_HOST="<CHANGE ME!!!>"
 
@@ -32,6 +34,7 @@ ansible-playbook -i ${TARGET_HOST}, ./configs/ocp-workloads/ocp-workload.yml \
     -e @./roles/${WORKLOAD}/defaults/main.yml \
     -e"ocp_username=${OCP_USERNAME}" \
     -e"ocp_workload=${WORKLOAD}" \
+    -e"obsandbox_3scale_registry_token=${RHT_SVC_ACCT_TOKEN}" \
     -e"silent=False" \
     -e"ACTION=${ACTION}" \
     -e"ansible_user=${ANSIBLE_SSH_USER}" \
