@@ -76,26 +76,6 @@ class LookupModule(LookupBase):
             for item in override:
                 self.__add_requirement(item, requirements)
 
-        #for term in terms:
-        #    display.debug("File lookup term: %s" % term)
-
-        #    # Find the file in the expected search path
-        #    lookupfile = self.find_file_in_search_path(variables, 'files', term)
-        #    display.vvvv(u"File lookup using %s as file" % lookupfile)
-        #    try:
-        #        if lookupfile:
-        #            b_contents, show_data = self._loader._get_file_contents(lookupfile)
-        #            contents = to_text(b_contents, errors='surrogate_or_strict')
-        #            if kwargs.get('lstrip', False):
-        #                contents = contents.lstrip()
-        #            if kwargs.get('rstrip', True):
-        #                contents = contents.rstrip()
-        #            ret.append(contents)
-        #        else:
-        #            raise AnsibleParserError()
-        #    except AnsibleParserError:
-        #        raise AnsibleError("could not locate file in lookup: %s" % term)
-
         ret = ''
         for k, v in requirements.items():
             if v:
