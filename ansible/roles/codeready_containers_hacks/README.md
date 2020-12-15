@@ -34,22 +34,22 @@ Role Variables
 
 Type  | Description  | Default Value
 --|---|--
-crc_version  | Target CRC version  | 1.10.0
-crc_url      |  CRC download URL | https://mirror.openshift.com/pub/openshift-v4/clients/crc/
-crc_file_name  | CRC filename  | crc-linux-amd64.tar.xz
-pull_secret_path | default path of pull secret | /tmp/pull-secret.txt
-pull_secret_content: | pull secret content     |  changeme
-use_all_in_one_haproxy | Use current machine as haproxy LB | true
-haproxy_ip             | Set ha proxy ip if above is set to flase **NOT TESTED**| ""
-use_all_in_one_dnsmasq | Use current machine as dnsmasq server | true
-log_level              | Change log level of crc start command | info
-crc_ip_address | Default CRC ip address| 192.168.130.11
-ocp4_release  | OCP release folder for cli | latest
-ocp4_version   | OCP cli version | 4.4.3
-ocp4_release_url | OCP release url | "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp4_release }}/"
-ocp4_client | OCP cli filename | ""openshift-client-linux-{{ ocp4_version }}.tar.gz"
-remove_oc_tool | remove oc cli  | false
-delete_crc_deployment | delete CodeReady Containers deployment  | false
+codeready_containers_hacks_crc_version  | Target CRC version  | 1.10.0
+codeready_containers_hacks_crc_url      |  CRC download URL | https://mirror.openshift.com/pub/openshift-v4/clients/crc/
+codeready_containers_hacks_crc_file_name  | CRC filename  | crc-linux-amd64.tar.xz
+codeready_containers_hacks_pull_secret_path | default path of pull secret | /tmp/pull-secret.txt
+codeready_containers_hacks_pull_secret_content: | pull secret content     |  changeme
+codeready_containers_hacks_use_all_in_one_haproxy | Use current machine as haproxy LB | true
+codeready_containers_hacks_haproxy_ip             | Set ha proxy ip if above is set to flase **NOT TESTED**| ""
+codeready_containers_hacks_use_all_in_one_dnsmasq | Use current machine as dnsmasq server | true
+codeready_containers_hacks_log_level              | Change log level of crc start command | info
+codeready_containers_hacks_crc_ip_address | Default CRC ip address| 192.168.130.11
+codeready_containers_hacks_ocp4_release  | OCP release folder for cli | latest
+codeready_containers_hacks_ocp4_version   | OCP cli version | 4.4.3
+codeready_containers_hacks_ocp4_release_url | OCP release url | "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ codeready_containers_hacks_ocp4_release }}/"
+codeready_containers_hacks_ocp4_client | OCP cli filename | ""openshift-client-linux-{{ codeready_containers_hacks_ocp4_version }}.tar.gz"
+codeready_containers_hacks_remove_oc_tool | remove oc cli  | false
+codeready_containers_hacks_delete_crc_deployment | delete CodeReady Containers deployment  | false
 
 Dependencies
 ------------
@@ -70,18 +70,18 @@ Including an example of how to use your role (for instance, with variables passe
 - hosts: servers
   become: yes
   vars:
-    crc_version: 1.10.0
-    pull_secret_path: /tmp/pull-secret.txt
-    pull_secret_content: |
+    codeready_containers_hacks_crc_version: 1.10.0
+    codeready_containers_hacks_pull_secret_path: /tmp/pull-secret.txt
+    codeready_containers_hacks_pull_secret_content: |
       changeme
-    use_all_in_one_haproxy: true
-    haproxy_ip: ""
-    use_all_in_one_dnsmasq: true 
-    log_level: info
-    ocp4_release: latest
-    ocp4_version: 4.4.3
-    remove_oc_tool: false
-    delete_crc_deployment: false
+    codeready_containers_hacks_use_all_in_one_haproxy: true
+    codeready_containers_hacks_haproxy_ip: ""
+    codeready_containers_hacks_use_all_in_one_dnsmasq: true 
+    codeready_containers_hacks_log_level: info
+    codeready_containers_hacks_ocp4_release: latest
+    codeready_containers_hacks_ocp4_version: 4.4.3
+    codeready_containers_hacks_remove_oc_tool: false
+    codeready_containers_hacks_delete_crc_deployment: false
   roles:
   - codeready-containers-hacks
 ```
@@ -125,7 +125,7 @@ ansible-playbook  -i inventory deploy-crc.yml --tags get_codeready_info
 
 **Delete deployment**
 ```
-ansible-playbook  -i inventory deploy-crc.yml --extra-vars "delete_crc_deployment=true" -K 
+ansible-playbook  -i inventory deploy-crc.yml --extra-vars "codeready_containers_hacks_delete_crc_deployment=true" -K 
 ```
 
 Debug info
