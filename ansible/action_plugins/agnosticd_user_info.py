@@ -39,7 +39,7 @@ class ActionModule(ActionBase):
     '''Print statements during execution and save user info to file'''
 
     TRANSFERS_FILES = False
-    _VALID_ARGS = frozenset(('msg','data','user'))
+    _VALID_ARGS = frozenset(('msg','data','user','body'))
 
     def run(self, tmp=None, task_vars=None):
         self._supports_check_mode = True
@@ -87,13 +87,20 @@ class ActionModule(ActionBase):
                     )
                 )
             )
+
+            # Attempt to make output_dir if not exists
+            try:
+                os.makedirs(output_dir)
+            except OSError:
+                pass
+
             if not user and msg != None:
                 fh = open(os.path.join(output_dir, 'user-info.yaml'), 'a')
                 fh.write('- ' + json.dumps(msg) + "\n")
                 fh.close()
             if not user and body != None:
                 fh = open(os.path.join(output_dir, 'user-body.yaml'), 'a')
-                fh.write('- ' + json.dumps(msg) + "\n")
+                fh.write('- ' + json.dumps(body) + "\n")
                 fh.close()
             if data or user:
                 user_data = None

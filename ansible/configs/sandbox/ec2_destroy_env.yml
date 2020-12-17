@@ -1,0 +1,99 @@
+---
+- import_playbook: ../../setup_runtime.yml
+
+- name: Backup event log of the user
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  tasks:
+    - name: Get fact for stack
+      cloudformation_facts:
+        stack_name: "{{ project_tag }}"
+      register: stack_facts
+
+    - when: project_tag in stack_facts.ansible_facts.cloudformation
+      block:
+        - name: Grab and set stack creation_time
+          set_fact:
+            stack_creation_time: >-
+              {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_description.creation_time }}
+            stack_status: >-
+              {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_description.stack_status }}
+
+        - when: stack_status == "CREATE_COMPLETE"
+          block:
+            - name: Grab student user
+              set_fact:
+                student_stack_user: >-
+                  {{ stack_facts.ansible_facts.cloudformation[project_tag].stack_outputs.StudentUser }}
+
+            - name: Backup event log for user
+              shell: >-
+                aws cloudtrail lookup-events
+                --lookup-attributes AttributeKey=Username,AttributeValue={{ student_stack_user }}
+                --start-time {{ stack_creation_time }}
+                --max-items 10000
+                > {{ output_dir }}/{{ env_type }}_{{ guid }}_cloudtrail_event_log.json
+              when:
+                - email is defined or owner is defined
+                - run_cloudtrail | default(true) | bool
+              failed_when: false
+
+- name: Build inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - when: cloud_provider == 'ec2'
+      block:
+        - name: Run infra-ec2-create-inventory Role
+          include_role:
+            name: infra-ec2-create-inventory
+
+        - name: Run Common SSH Config Generator Role
+          include_role:
+            name: infra-common-ssh-config-generate
+          when: "'bastions' in groups"
+
+- import_playbook: ../../setup_runtime.yml
+
+- name: Delete stack
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  tasks:
+    - set_fact:
+        aws_public_zone: "{{ guid }}.{{ subdomain_base_suffix | regex_replace('^\\.', '') }}."
+
+    - name: Grab zone ID
+      # use CLI here because the route53_zone module is not graceful and asks for all zones
+      # then iterates in python to find the one. This causes Throttling errors.
+      # https://github.com/ansible/ansible/blob/05c6ff79f9860dbd6b43cb4914ee749baf65b9f7/lib/ansible/modules/cloud/amazon/route53_zone.py#L145
+      command: >-
+        aws route53 list-hosted-zones-by-name
+        --dns-name {{ aws_public_zone }}
+        --max-items 4
+      register: awsroute53zone
+      changed_when: false
+
+    - name: delete zones
+      include_tasks: ec2_delete_zone.yml
+      vars:
+        _zone: "{{ loopzone }}"
+        _hostedzoneid: "{{ loopzone.Id | regex_replace('/hostedzone/', '') }}"
+      when:
+        - loopzone.Name == aws_public_zone
+      loop: "{{ awsroute53zone.stdout|from_json|json_query('HostedZones') }}"
+      loop_control:
+        loop_var: loopzone
