@@ -86,7 +86,7 @@ The actual key is generated in file `infra-role/infra-local-create-ssh-keys.yml`
   when: set_env_authorized_key | bool
 ----
 
-There are a number of useful tasks related to the infrastructure already provided to us by Agnostic D, those can be found on /agnosticd/ansible/roles-infra, and are normally called in the pre deploy stage, with the pre_software.yml file, as we just saw.
+There are a number of useful tasks related to the infrastructure already provided to us by Agnostic D via *roles*. Those can be found on `/agnosticd/ansible/roles-infra`, and are normally (but not only) called in the pre deploy stage, with the `pre_software.yml` file, as we just saw.
 
 === Setting the variables
 Now that we have defined how we want ssh keys to be created, we do need to reference it in our variables file (`my_vars.yml` in this case).
@@ -124,4 +124,122 @@ First of all, we need to locate the ssh keys under our output directory:
 /tmp/output_dir/test-01_infra_ssh_key.pem
 /tmp/output_dir/a-base-config_test-01_ssh_conf
 /tmp/output_dir/a-base-config_test-01_ssh_known_hosts
+----
+
+We need to configure our ssh client if we want to be able to log in using the host name instead of the IP or the FQDN. Otherwise, we could simply use the IP of the new machines. In order to see the IPs, we simply need to run this Openstack command `openstack server list`.
+
+[source,bash]
+----
+[agilpipp-redhat.com@bastion ansible]$ ssh cloud-user@control
+^C
+[agilpipp-redhat.com@bastion ansible]$ openstack server list
++--------------------------------------+-----------+--------+-----------------------------------------------------+-------+---------+
+| ID                                   | Name      | Status | Networks                                            | Image | Flavor  |
++--------------------------------------+-----------+--------+-----------------------------------------------------+-------+---------+
+| aa2f36d3-9f16-4fa4-8387-ffb60091d0ee | control   | ACTIVE | test-01-node-network=192.168.47.26, 150.238.131.111 |       | 2c2g30d |
+| 96892ba9-ed27-4f42-8d80-8fa7bdee796a | webserver | ACTIVE | test-01-node-network=192.168.47.18, 150.238.131.129 |       | 2c2g30d |
+| 8938249c-9cc0-403f-9aaa-9ed93a29f2e2 | bastion   | ACTIVE | b1e1-testnet-network=192.168.0.36, 150.238.131.138  |       | 2c2g30d |
++--------------------------------------+-----------+--------+-----------------------------------------------------+-------+---------+
+
+[agilpipp-redhat.com@bastion ansible]$ ssh cloud-user@150.238.131.111 -i /tmp/output_dir/test-01_infra_ssh_key.pem
+
+Last login: Thu Dec 17 06:59:59 2020 from 150.238.131.138
+[cloud-user@control ~]$ 
+----
+
+OpenSSH allows us to set up a per-user configuration file where you can store different SSH options for each remote machine you connect to. The client-side configuration file is named `config`, and it is stored in `.ssh` directory under each user’s home directory (in our case, on the user we've log in our bastion with, that is, our RHPDS user). The `~/.ssh` directory is automatically created when the user runs the ssh command for the first time (that is, when we logged in our bastion machine).
+
+[source,bash]
+----
+[agilpipp-redhat.com@bastion ~]$ ls .ssh/
+authorized_keys  b1e1key.pem  b1e1key.pub  config  known_hosts
+----
+
+We have generated with the tasks explained before, this config file and stored it in our output dir. Let's take a look at it:
+
+[source,bash]
+----
+[agilpipp-redhat.com@bastion ansible]$ cat /tmp/output_dir/a-base-config_test-01_ssh_conf 
+##### BEGIN ADDED BASTION PROXY HOST control a-base-config-test-01 ######
+Host control 
+  Hostname control.test-01.students.osp.opentlc.com
+  IdentityFile /tmp/output_dir/test-01_infra_ssh_key.pem
+  IdentitiesOnly yes
+  User cloud-user
+  ControlMaster auto
+  ControlPath /tmp/test-01-%r-%h-%p
+  ControlPersist 5m
+  StrictHostKeyChecking no
+  ConnectTimeout 60
+  ConnectionAttempts 10
+  UserKnownHostsFile /tmp/output_dir/a-base-config_test-01_ssh_known_hosts
+##### END ADDED BASTION PROXY HOST control a-base-config-test-01 ######
+##### BEGIN ADDED Node Proxy Config  webserver a-base-config-test-01 ######
+Host webserver 150.238.131.129 
+  Hostname 192.168.47.18
+  User cloud-user
+  IdentityFile /tmp/output_dir/test-01_infra_ssh_key.pem
+  ProxyCommand ssh -F /tmp/output_dir/a-base-config_test-01_ssh_conf control -W %h:%p
+  StrictHostKeyChecking no
+  UserKnownHostsFile /tmp/output_dir/a-base-config_test-01_ssh_known_hosts
+  ControlMaster auto
+  ControlPath /tmp/test-01-%r-%h-%p
+  ControlPersist 5m
+##### END ADDED Node Proxy Config  webserver a-base-config-test-01 ######
+----
+The contents of the SSH client config file is organized into stanzas (sections). Each stanza starts with the Host directive and contains specific SSH options that are used when establishing a connection with the remote SSH server. So in our file, you can see two stanzas, one for control and one for webserver machines.
+
+The Host directive can contain one pattern or a whitespace-separated list of patterns. The SSH client reads the configuration file stanza by stanza, and if more than one patterns match, the options from the first matching stanza take precedence. We are not using patterns in this particular file.
+
+As you can see, Identity file is specified in the config file, so when we want to ssh into one of our servers, we won't need to use it.
+
+Now we simply need to append this file to our existing config file, and test we can ssh as cloud-user in both servers without the need of specifying the identity file:
+
+[source,bash]
+----
+[agilpipp-redhat.com@bastion ~]$ cat /tmp/output_dir/a-base-config_test-01_ssh_conf >> ~/.ssh/config
+[agilpipp-redhat.com@bastion ~]$ ssh cloud-user@control
+[cloud-user@control ~]$ logout
+[agilpipp-redhat.com@bastion ~]$ ssh cloud-user@webserver
+[cloud-user@webserver ~]$
+[cloud-user@webserver ~]$ logout
+----
+
+But, what if I want to ssh with my newly created users? Currently, this is not possible, you have to ssh with `cloud-user` and then `sudo` into one of your users, and you may need to change that behaviour to fulfill the needs of your artifact.
+
+In order to do so, we need to create a task, as we did for to create our users. We will use the same file, `setup_lab_user.yml` and we will add the following lines of code:
+
+[source,bash]
+----
+- name: Add env authorized public key to users
+  authorized_key:
+    user: "{{ __ssh_auth }}"
+    state: present
+    key: "{{ lookup('file', '{{ output_dir }}/{{ env_authorized_key }}.pub') }}"
+  loop: "{{ lab_users }}"
+  loop_control:
+    loop_var: __ssh_auth
+----
+
+Once we've done this, we can simply run the playbook again (please do not forget to delete the stack before creating a new one) and test:
+[source,bash]
+----
+[agilpipp-redhat.com@bastion ~]$ cd agnosticd/ansible/
+[agilpipp-redhat.com@bastion ansible]$ ansible-playbook main.yml -e @~/my_vars.yml -e @~/secrets.yaml -e guid=test-01
+[agilpipp-redhat.com@bastion ansible]$ ssh amaya@control -i /tmp/output_dir/test-01key
+[amaya@control ~]$ 
+----
+
+NOTE: To delete previously created stacks simply execute:
+
+[source,bash]
+----
+[agilpipp-redhat.com@bastion ~]$ openstack --os-cloud=b1e1-project stack list
++--------------------------------------+--------------------+-----------------+----------------------+--------------+
+| ID                                   | Stack Name         | Stack Status    | Creation Time        | Updated Time |
++--------------------------------------+--------------------+-----------------+----------------------+--------------+
+| 3ee78ab5-0098-4304-8ca2-4aeceacea91f | base-stack-test-01 | CREATE_COMPLETE | 2020-12-17T11:27:15Z | None         |
+| 66648731-3580-4a11-952a-22643987396d | base-stack-b1e1    | CREATE_COMPLETE | 2020-10-13T15:06:04Z | None         |
++--------------------------------------+--------------------+-----------------+----------------------+--------------+
+[agilpipp-redhat.com@bastion ~]$ openstack --os-cloud=b1e1-project stack delete base-stack-test-01
 ----
