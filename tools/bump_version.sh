@@ -43,17 +43,24 @@ echo "About to tag this commit."
 prompt_continue || exit 0
 
 for config in ${configs}; do
-    last=$(git tag -l|grep ^${config}-${stage} |sort -V|tail -n 1|egrep -o '[0-9]+\.[0-9]+$')
+    tagname="${config}-${stage}"
+    if echo "${tagname}" | grep -q -e '-prod-prod' -e '-test-test'; then
+        echo
+        echo "ERROR: ${tagname} has 'prod' or 'test' twice, please use prod only in the second parameter."
+        echo
+        exit 1
+    fi
+    last=$(git tag -l|grep ^${tagname} |sort -V|tail -n 1|egrep -o '[0-9]+\.[0-9]+$')
     if [ -z "${last}" ]; then
         echo "INFO: no version found for ${config}, skipping"
         echo "Do you want to create it ?"
         prompt_continue || continue
 
-        next_tag=${config}-${stage}-0.1
+        next_tag=${tagname}-0.1
     else
         major=$(echo $last|egrep -o '^[0-9]+')
         minor=$(echo $last|egrep -o '[0-9]+$')
-        next_tag=${config}-${stage}-${major}.$(( minor + 1))
+        next_tag=${tagname}-${major}.$(( minor + 1))
     fi
 
     echo "will now perform 'git tag ${next_tag}'"
