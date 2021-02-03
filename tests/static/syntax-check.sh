@@ -47,7 +47,7 @@ do_yamllint() {
     local f=$1
     local conf
 
-    [[ $f =~ .*.ya?ml$ ]] || return
+    [[ $f =~ \.ya?ml$ ]] || [[ $f =~ \.yamllint$ ]] || return
 
     if ! conf=$(find_yamllint "${f}"); then
         echo "WARNING ........ yamllint:  No conf .yamllint found for ${f}"
