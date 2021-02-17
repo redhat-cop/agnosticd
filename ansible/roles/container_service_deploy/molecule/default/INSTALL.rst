@@ -1,15 +1,22 @@
 *******
-Delegated driver installation guide
+Docker driver installation guide
 *******
 
 Requirements
 ============
 
-This driver is delegated to the developer.  Up to the developer to implement
-requirements.
+* Docker Engine
 
 Install
 =======
 
-This driver is delegated to the developer.  Up to the developer to implement
-requirements.
+Please refer to the `Virtual environment`_ documentation for installation best
+practices. If not using a virtual environment, please consider passing the
+widely recommended `'--user' flag`_ when invoking ``pip``.
+
+.. _Virtual environment: https://virtualenv.pypa.io/en/latest/
+.. _'--user' flag: https://packaging.python.org/tutorials/installing-packages/#installing-to-the-user-site
+
+.. code-block:: bash
+
+    $ python3 -m pip install 'molecule[docker]'
