@@ -1,5 +1,5 @@
 GUID=00
-OSP_CLUSTER=orange
+OSP_CLUSTER=red
 
 help:
 	echo "Basic usage:"
