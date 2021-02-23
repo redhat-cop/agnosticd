@@ -15,7 +15,12 @@ resources:
       name: {{ guid }}-infra_key
       save_private_key: true
 
+  ###############################
+  # Network, Subnet and Routers #
+  ###############################
+
 {% for network in networks %}
+
   {{ network['name'] }}-network:
     type: OS::Neutron::Net
     properties:
@@ -112,48 +117,45 @@ resources:
   ########### {{ iname }} ###########
   {% for network in networks %}
     {% set nname = network.name %}
+    {% if nname in instance['networks'] %}
   port_{{ nname }}_{{ iname }}:
     type: OS::Neutron::Port
     properties:
       network: { get_resource: {{ nname | default('default') }}-network }
-    {% if instance.port_security is defined and not instance.port_security %}
+      {% if instance.port_security is defined and not instance.port_security %}
       port_security_enabled: false
-    {% else %}
+      {% else %}
       security_groups:
+        {% if instance.security_groups is defined %}
+          {% for security_group in instance.security_groups %}
+        - {get_resource: {{ security_group }}}
+          {% endfor %}
+        {% endif %}
+      {% endif %}
+    depends_on:
+      {% if networks[loop.index-1].create_router %}
+      - {{ nname }}-router_private_interface
+      {% endif %}
       {% if instance.security_groups is defined %}
         {% for security_group in instance.security_groups %}
-        - {get_resource: {{ security_group }}}
+      - {{ security_group }}
         {% endfor %}
       {% endif %}
-    {% endif %}
-    depends_on:
-    {% if network.create_router %}
-      - {{ nname }}-router_private_interface
-    {% endif %}
-    {% if instance.security_groups is defined %}
-      {% for security_group in instance.security_groups %}
-      - {{ security_group }}
-      {% endfor %}
-    {% endif %}
 
-
-    {% if instance.floating_ip | default(false) or instance.public_dns | default(false) %}
-    {% if network.create_router %}
+      {% if instance.floating_ip | default(false) or instance.public_dns | default(false) and network.create_router %}
   fip_{{ nname }}_{{ iname }}:
     type: OS::Neutron::FloatingIP
     properties:
       floating_network: {{ provider_network }}
-    {% if network.create_router %}
     depends_on:
       - {{ nname }}-router_private_interface
-    {% endif %}
 
   fip_association_{{ nname }}_{{ iname }}:
     type: OS::Neutron::FloatingIPAssociation
     properties:
       floatingip_id: {get_resource: fip_{{ nname }}_{{ iname }}}
       port_id: {get_resource: port_{{ nname }}_{{ iname }}}
-    {% endif %}
+      {% endif %}
     {% endif %}
   {% endfor %}
 
@@ -164,23 +166,36 @@ resources:
       flavor: {{ instance.flavor.osp }}
       key_name: {get_resource: {{ guid }}-infra_key}
       config_drive: True
-      block_device_mapping_v2:
-        - image: {{ instance.image_id | default(instance.image) }}
-          delete_on_termination: true
-          volume_size: {{ instance['rootfs_size'] | default(osp_default_rootfs_size) }}
-          boot_index: 0
+      image: {{ instance.image_id | default(instance.image) }}
 
-      user_data: |
-        #cloud-config
-        ssh_authorized_keys: {{ all_ssh_authorized_keys | to_json }}
-        {% if networks | length > 1 %}
-        runcmd:
-          {% for network in networks %}
-            {% if network.name in instance['networks'] and not network.create_router and network.gateway_ip is defined %}
-            - ip r d default via {{  network.gateway_ip }}
+      user_data:
+        str_replace:
+          template: |
+            {% if instance['vnios'] is defined and instance['vnios'] %}
+            # infoblox-config
+             remote_console_enabled: y
+             temp_license: {{ nios_temp_license }}
+             default_admin_password: infoblox
+             lan1:
+               v4_addr: lan_addr
+               v4_netmask: lan_netmask
+               v4_gw: lan_gw
+            {% else %}
+            #cloud-config
+            ssh_authorized_keys: {{ all_ssh_authorized_keys | to_json }}
+              {% if networks | length > 1 %}
+            runcmd:
+                {% for network in networks %}
+                  {% if network.name in instance['networks'] and not network.create_router and network.gateway_ip is defined %}
+                - ip r d default via {{  network.gateway_ip }}
+                  {% endif %}
+                {% endfor %}
+              {% endif %}
             {% endif %}
-          {% endfor %}
-        {% endif %}
+          params:
+            lan_addr: { get_attr: [ port_LAN-1_nios-1, fixed_ips, 0,  ip_address ] }
+            lan_netmask: { get_attr: [ port_LAN-1_nios-1, fixed_ips, 0,  netmask ] }
+            lan_gw: { get_attr: [ port_LAN-1_nios-1, fixed_ips, 0,  gateway ] }
       user_data_format: RAW
       networks:
       {% for network in instance['networks'] %}
@@ -203,7 +218,6 @@ resources:
     {% endif %}
 
     depends_on:
-    # TODO: Create dependency on router interface
     {% if 'security_groups' in instance %}
       {% for security_group in instance.security_groups %}
       - {{ security_group }}
