@@ -6,8 +6,8 @@ FROM registry.redhat.io/codeready-workspaces/plugin-java11-rhel8:latest
 
 ENV MANDREL_VERSION=20.1.0.2.Final
 ENV QUARKUS_VERSION=1.7.6.Final-redhat-00014
-ENV TKN_VERSION=0.13.1
-ENV KN_VERSION=0.17.3
+ENV TKN_VERSION=0.15.0
+ENV KN_VERSION=0.19.1
 ENV OC_VERSION=4.7
 ENV GRAALVM_HOME="/usr/local/mandrel-java11-${MANDREL_VERSION}"
 
