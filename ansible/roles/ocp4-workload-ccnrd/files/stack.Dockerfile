@@ -5,15 +5,15 @@
 FROM registry.redhat.io/codeready-workspaces/plugin-java11-rhel8:latest
 
 ENV MANDREL_VERSION=20.1.0.2.Final
-ENV QUARKUS_VERSION=1.7.5.Final-redhat-00007
-ENV TKN_VERSION=0.13.1
-ENV KN_VERSION=0.17.3
-ENV OC_VERSION=4.6
+ENV QUARKUS_VERSION=1.7.6.Final-redhat-00014
+ENV TKN_VERSION=0.15.0
+ENV KN_VERSION=0.19.1
+ENV OC_VERSION=4.7
 ENV GRAALVM_HOME="/usr/local/mandrel-java11-${MANDREL_VERSION}"
 
 USER root
 
-RUN wget -O /tmp/oc.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/oc/${OC_VERSION}/linux/oc.tar.gz && cd /usr/bin && tar -xvzf /tmp/oc.tar.gz && chmod a+x /usr/bin/oc && rm -f /tmp/oc.tar.gz
+RUN wget -O /tmp/oc.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/linux/oc.tar.gz && cd /usr/bin && tar -xvzf /tmp/oc.tar.gz && chmod a+x /usr/bin/oc && rm -f /tmp/oc.tar.gz
 
 RUN wget -O /tmp/kn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/serverless/${KN_VERSION}/kn-linux-amd64-${KN_VERSION}.tar.gz && cd /usr/bin && tar -xvzf /tmp/kn.tar.gz ./kn && chmod a+x kn && rm -f /tmp/kn.tar.gz
 
