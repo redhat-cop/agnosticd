@@ -1,0 +1,223 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Setting up num_users for workshop
+  debug:
+    msg: "Setting up num_users for workshop num_users = {{ num_users }}"
+
+- name: Setting up module_type for workshop
+  debug:
+    msg: "Setting up module_type for workshop module_type = {{ module_type }}"
+
+- name: Give access to opentlc-mgr
+  shell: |
+         oc adm policy add-cluster-role-to-user cluster-admin {{ ocp_username }}
+
+- name: create module list
+  set_fact:
+    modules: "{{ module_type.split(';') | map('trim') | list }}"
+
+- name: Selected Modules
+  debug:
+    msg: "selected modules list: {{ modules }}"
+
+- name: Create CCN CatalogSource
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/redhat-operators-index.yaml
+  # - ./files/community-operators-index.yaml
+
+- name: create labs-infra project
+  k8s:
+    state: present
+    kind: Project
+    api_version: project.openshift.io/v1
+    definition:
+      metadata:
+        name: "labs-infra"
+        annotations:
+          openshift.io/description: ""
+          openshift.io/display-name: "Lab Infrastructure"
+
+- name: deploy templates to openshift namespace
+  command: oc replace --force -n openshift -f -
+  args:
+    stdin: "{{ lookup('file', item) }}"
+  loop:
+    - ./files/coolstore-monolith-binary-build-template.yaml
+    - ./files/coolstore-monolith-pipeline-build-template.yaml
+    - ./files/jaeger-all-in-one-template.yml
+    - ./files/ccn-sso74-template.yaml
+
+- name: import sso74-image-stream to openshift namespace
+  k8s:
+    state: present
+    namespace: openshift
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/sso74-image-stream.yaml
+
+- name: create inventory and catalog user projects
+  when: ("m1" in modules or "m2" in modules or "m3" in modules)
+  include_tasks: create_project.yaml
+  vars:
+    name: "{{ item[0] }}-{{ item[1] }}"
+    user: "{{ item[0] }}"
+  loop: "{{ users|product(['inventory', 'catalog'])|list }}"
+
+- name: create bookinfo user projects
+  when: ("m3" in modules)
+  include_tasks: create_project.yaml
+  vars:
+    name: "{{ item[0] }}-{{ item[1] }}"
+    user: "{{ item[0] }}"
+  loop: "{{ users|product(['bookinfo'])|list }}"
+
+- name: create cloudnativeapps user projects
+  when: ("m4" in modules)
+  include_tasks: create_project.yaml
+  vars:
+    name: "{{ item[0] }}-{{ item[1] }}"
+    user: "{{ item[0] }}"
+  loop: "{{ users|product(['cloudnativeapps'])|list }}"
+
+- name: create pipelines user projects
+  when: ("m4" in modules)
+  include_tasks: create_project.yaml
+  vars:
+    name: "{{ item[0] }}-{{ item[1] }}"
+    user: "{{ item[0] }}"
+  loop: "{{ users|product(['cloudnative-pipeline'])|list }}"
+
+- name: Look for jaeger subscription
+  when: ("m2" in modules or "m3" in modules)
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: jaeger-product
+    namespace: openshift-operators
+  register: r_jaeger_sub
+
+- name: Create Jaeger
+  when: ("m2" in modules or "m3" in modules) and (r_jaeger_sub.resources | list | length == 0)
+  include_tasks: install-jaeger.yaml
+
+- name: Look for service mesh subscription
+  when: ("m3" in modules)
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: servicemeshoperator
+    namespace: openshift-operators
+  register: r_sm_sub
+
+- name: show existing service mesh cr
+  when: ("m3" in modules )
+  debug:
+    msg: "existing service mesh sub: {{ r_sm_sub }}"
+
+# Setup OpenShift Service Mesh via operator
+- name: Create OpenShift Objects for Service Mesh
+  when: ("m3" in modules) and (r_sm_sub.resources | list | length == 0)
+  include_tasks: install-servicemesh.yaml
+
+# Setup OpenShift Serverless via operator
+- name: Look for serverless subscription
+  when: ("m4" in modules)
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: serverless-operator
+    namespace: openshift-operators
+  register: r_serverless_sub
+
+- name: show existing serverless sub
+  when: ("m4" in modules)
+  debug:
+    msg: "existing serverless sub: {{ r_serverless_sub }}"
+
+- name: Create OpenShift Objects for Serverless (knative)
+  when: ("m4" in modules) and (r_serverless_sub.resources | list | length == 0)
+  include_tasks: install-serverless.yaml
+
+# Setup AMQ via operator
+- name: Look for amq subscription
+  when: ("m4" in modules)
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: amq-streams
+    namespace: openshift-operators
+  register: r_amq_sub
+
+- name: show existing amq sub
+  when: ("m4" in modules)
+  debug:
+    msg: "existing amq sub: {{ r_amq_sub }}"
+
+- name: Create OpenShift Objects for Kafka (amq streams)
+  when: ("m4" in modules) and (r_amq_sub.resources | list | length == 0)
+  include_tasks: install-amqstreams.yaml
+
+# setup pipelines
+- name: Look for pipelines subscription
+  when: ("m4" in modules)
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: openshift-pipelines-operator
+    namespace: openshift-operators
+  register: r_pipelines_sub
+
+- name: show existing pipelines sub
+  when: ("m4" in modules)
+  debug:
+    msg: "existing pipelines sub: {{ r_pipelines_sub }}"
+
+- name: Create OpenShift Objects for OpenShift Pipelines (tekton)
+  when: ("m4" in modules) and (r_pipelines_sub.resources | list | length == 0)
+  include_tasks: install-pipelines.yaml
+
+- name: install guides
+  include_tasks: install-guides.yaml
+  vars:
+    guide: "{{ item }}"
+  loop: "{{ modules }}"
+
+- name: install username distribution
+  include_tasks: install-username-distribution.yaml
+
+# Install CodeReady Workspaces
+- name: see if codeready is installed
+  k8s_facts:
+    api_version: org.eclipse.che/v1
+    kind: CheCluster
+    name: codeready-workspaces
+    namespace: labs-infra
+  register: r_codeready_cr
+
+- name: show codeready cr
+  debug:
+    msg: "existing codeready project: {{ r_codeready_cr }}"
+
+- name: install codeready
+  when: r_codeready_cr.resources | list | length == 0
+  include_tasks: install-codeready.yaml
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
