@@ -1,0 +1,380 @@
+= Understanding the main.yml
+
+You may wonder what is the magic behind the actual call to the agnosticD playbook with the command: 
+[source,bash]
+----
+[agilpipp-redhat.com@bastion ansible]$ ansible-playbook main.yml -e @~/my_vars.yml -e @~/secrets.yaml -e guid=test-01
+----
+
+Well, you are in luck, as this is what we want to cover in this part of the agnosticD training.
+
+If you remember, on the Foundational training, we explained about the 6 phases in which playbooks are executed to deploy a workload on AgnosticD, these phases are:
+
+*0. Pre_infra*, where infrastructure is configured prior to launching a cloud deployment.
+
+*1. Cloud provider* deployment.
+
+*2. Post_infra*, where all post infrastructure configurations tasks are to be performed (like a smoke test for validation).
+
+*3. Pre_software*, where tasks to be performed prior to deploying software are run (tests, ssh config, prepare bastion, licenses, etc).
+
+*4. Software*, where desired software is to be installed.
+
+*5. Post_software*, where wrap up tasks are to be performed (such as cleaning, final tests or user notification).
+
+The `main.yml` file does call all those phases in an orderly fashion, but it does more than that. Let’s take a look at it.
+
+The `main.yml` file is located in the `agnosticd/ansible` directory, along with another set of important yaml files that do the magic behind every agnosticD deployment:
+
+[source,bash]
+----                                                                                                                                            
+[agilpipp-redhat.com@bastion ansible]$ ls
+
+action_plugins            completion_callback.yml   include_vars.yml          library                   lifecycle_entry_point.yml main.yml                  roles_ocp_workloads       software_playbooks
+ansible.cfg               configs                   install_galaxy_roles.yml  lifecycle.yml             lifecycle_hook.yml        roles                     roles_studentvm
+cloud_providers           destroy.yml
+----
+
+The `main.yml` file looks as follows:
+[source,bash]
+----
+---
+# vim: set ft=ansible:
+
+################################################################################
+################################################################################
+############ Step 0000 Setup Runtime
+################################################################################
+################################################################################
+
+- import_playbook: setup_runtime.yml
+ tags:
+   - must
+   - step0000
+   - setup_runtime
+
+################################################################################
+################################################################################
+############ Step 000 Pre Infrastructure Deploy Tasks
+################################################################################
+################################################################################
+
+- import_playbook: "./configs/{{ env_type }}/pre_infra.yml"
+ tags:
+   - step000
+   - pre_infra_tasks
+
+#################################################################################
+#################################################################################
+############ Step 001 Deploy Infrastructure
+#################################################################################
+#################################################################################
+
+# Use first found:
+# - infra.yml in config directory
+# - common cloud_provider
+- vars:
+   findme:
+     - configs/{{ env_type }}/infra.yml
+     - cloud_providers/{{ cloud_provider }}_infrastructure_deployment.yml
+ import_playbook: "{{ lookup('first_found', findme) }}"
+ tags:
+   - step001
+   - deploy_infrastructure
+
+################################################################################
+################################################################################
+########### Step 002 Post Infrastructure Deploy Tasks
+################################################################################
+################################################################################
+
+- import_playbook: "./configs/{{ env_type }}/post_infra.yml"
+ tags:
+   - step002
+   - post_infra
+   - post_infra_tasks
+
+################################################################################
+################################################################################
+########### Step 003 Pre Software Deploy Tasks
+################################################################################
+################################################################################
+
+- name: Pre Software
+ import_playbook: "./configs/{{ env_type }}/pre_software.yml"
+ tags:
+   - step003
+   - pre_software
+   - pre_software_tasks
+
+##################################################################################
+##################################################################################
+############ Step 004 Software Deploy Tasks
+##################################################################################
+##################################################################################
+
+- name: Environment '{{ env_type }}' specific software playbook
+ import_playbook: "./configs/{{ env_type }}/software.yml"
+ tags:
+   - step004
+   - deploy_software
+
+- name: Software Playbook '{{ software_to_deploy | d('none') }}'
+ import_playbook: "./software_playbooks/{{ software_to_deploy | d('none') }}.yml"
+ tags:
+   - step004
+   - deploy_software
+
+################################################################################
+################################################################################
+############ Step 005 Post Software Deploy Tasks
+################################################################################
+################################################################################
+
+- import_playbook: "./configs/{{ env_type }}/post_software.yml"
+ tags:
+   - step005
+   - post_software
+   - post_software_tasks
+
+- import_playbook: completion_callback.yml
+----
+
+If you look at it, all the steps are numbered according to the *6 existing deployment phase*s, that is why all of your artifacts do need to have the same structure.
+
+Taking a closer look, we can see that the first thing it does, is importing the `*setup_runtime*` playbook.
+
+That playbook is located in the same `agnosticd/ansible` directory and it’s in charge of creating some bits of the infrastructure we will need to find in every deployment (like the output directory) but it also includes the global vars for the config as well as the galaxy roles to be imported, if any.
+
+After that, it loads your config’s own pre_infra.yml file, in this case, `agnosticd/ansible/configs/a-base-config`, which looks like this:
+
+[source,bash]
+----
+- name: Step 000 Pre Infrastructure
+ hosts: localhost
+ gather_facts: false
+ become: false
+ tags:
+   - step001
+   - pre_infrastructure
+   - generate_env_keys
+ tasks:
+   - debug:
+       msg: "Step 000 Pre Infrastructure"
+----
+
+Here, we basically generate environment keys.
+
+The pre-infra stage of deployment is used to prepare anything that may be used during deployment. This could include adding `ssh` users into the cloud environment, setting up keys for these users, or any other tasks that would need to be completed before systems are provisioned.
+
+Next, Step 001 Deploy Infrastructure, basically configures the infrastructure and the cloud provider of your choice:
+
+[source,bash]
+----
+- vars:
+    findme:
+      - configs/{{ env_type }}/infra.yml
+      - cloud_providers/{{ cloud_provider }}_infrastructure_deployment.yml
+  import_playbook: "{{ lookup('first_found', findme) }}"
+----
+ 
+This is where your `*default_vars_<cloud_provider>.yml*` file gets to be pulled (in our case, we have copied rhel8_server_on_osp.yml file to create our variables files).
+
+Next, Step 002 Post Infrastructure Deploy Tasks, is where your post infrastructure tasks are to take place:
+
+[source,bash]
+----
+- import_playbook: "./configs/{{ env_type }}/post_infra.yml"
+----
+
+Taking a look at it, basically in this particular case, we do nothing, just printing a debug message.
+
+Next, Step 003 Pre Software Deploy Tasks, is where the needed tasks prior to deploying any software take place.
+[source,bash]
+----
+import_playbook: "./configs/{{ env_type }}/pre_software.yml"
+----
+
+Let’s look at our particular example:
+
+[source,bash]
+----
+---
+- name: Step 003 Pre Software
+ hosts: localhost
+ gather_facts: false
+ become: false
+ tasks:
+   - debug:
+       msg: "Step 003 Pre Software"
+
+   - import_role:
+       name: infra-local-create-ssh_key
+     when: set_env_authorized_key | bool
+
+
+- name: Configure all hosts with Repositories, Common Files and Set environment key
+ hosts:
+   - all:!windows
+ become: true
+ gather_facts: false
+ tags:
+   - common_tasks
+ roles:
+   - role: set-repositories
+     when: repo_method is defined
+
+   - role: common
+     when: install_common | bool
+
+   - role: set_env_authorized_key
+     when: set_env_authorized_key | bool
+
+- name: Configuring Bastion Hosts
+ hosts: bastions
+ become: true
+ gather_facts: false
+ roles:
+   - role: bastion
+     when: install_bastion | bool
+ tags:
+   - bastion_tasks
+
+- name: PreSoftware flight-check
+ hosts: localhost
+ connection: local
+ gather_facts: false
+ become: false
+ tags:
+   - presoftware_flight_check
+ tasks:
+   - debug:
+       msg: "Pre-Software checks completed successfully"
+----
+
+First, we create ssh keys, then we make sure we are not iterating through any Windows host, Configure all hosts with Repositories, Common Files and Set environment key and finally we configure the bastion host.
+
+Next, Step 004 Software Deploy Tasks, is where software is deployed:
+
+[source,bash]
+----
+- name: Environment '{{ env_type }}' specific software playbook
+ import_playbook: "./configs/{{ env_type }}/software.yml"
+ tags:
+   - step004
+   - deploy_software
+
+- name: Software Playbook '{{ software_to_deploy | d('none') }}'
+ import_playbook: "./software_playbooks/{{ software_to_deploy | d('none') }}.yml"
+ tags:
+   - step004
+   - deploy_software
+----
+
+In our particular case, we do not have a `*software_playbooks*` directory, so we only import `ansible/configs/a-base-config/software.yml` file, which looks like this:
+
+[source,bash]
+----
+
+---
+- name: Step 004 Environment specific Software
+ hosts: localhost
+ gather_facts: false
+ become: false
+ tasks:
+   - debug:
+       msg: "Software tasks Started"
+
+- name: Deploy Roles if infra_workloads defined
+ hosts:
+   - webservers
+ gather_facts: false
+ run_once: false
+ become: true
+ tags:
+   - infra_workloads
+ tasks:
+   - name: apply infra workloads roles on nodes
+     when:
+       - infra_workloads | default("") | length > 0
+     block:
+       - name: Apply role "{{ workload_loop_var }}" on webservers
+         include_role:
+           name: "{{ workload_loop_var }}"
+         vars:
+           ACTION: "provision"
+         loop: "{{ infra_workloads }}"
+         loop_control:
+           loop_var: workload_loop_var
+
+- name: Software flight-check
+ hosts: localhost
+ connection: local
+ gather_facts: false
+ become: false
+ tags:
+   - post_flight_check
+ tasks:
+   - debug:
+       msg: "Software checks completed successfully"
+----
+
+Basically, it will just iterate through the webservers hosts and will include all the workloads defined on the vars file and provision them. 
+
+In this file we are defining which roles we will be using or setting up tasks that will occur during this stage of deployment. This example shows an ansible loop that is iterating over workloads that can be defined as a variable. These workloads are pre-defined within the agnosticD repository and can be explored within the main directory structure under ocp-workloads.
+
+And the last one, is Step 005 Post Software Deploy Tasks, where wrapping up tasks are to be performed.
+
+[source,bash]
+----
+- import_playbook: completion_callback.yml
+----
+
+Which is a file also on `agnosticd/ansible directory`, not on our own config directory.
+
+[source,bash]
+----
+- name: Completion Callback
+ gather_facts: false
+ hosts: localhost
+ vars:
+   # default __meta__ to prevent errors on older ansible versions
+   __meta__:
+     callback: {}
+   agnosticd_callback_url: >-
+     {{ __meta__.callback.url | default('') if __meta__ is defined and __meta__.callback is defined else '' }}
+   agnosticd_callback_token: >-
+     {{ __meta__.callback.token | default('') if __meta__ is defined and __meta__.callback is defined else '' }}
+ tasks:
+   - name: Attempt completion callback
+     when:
+     - agnosticd_callback_url != ''
+     - agnosticd_callback_token != ''
+     vars:
+       user_data_yaml: "{{ output_dir ~ '/user-data.yaml' }}"
+       user_info_yaml: "{{ output_dir ~ '/user-info.yaml' }}"
+     uri:
+       url: "{{ agnosticd_callback_url }}"
+       method: POST
+       body_format: json
+       body:
+         event: complete
+         messages: >-
+           {%- if user_info_yaml is file -%}
+           {{ lookup('file', user_info_yaml) | from_yaml | default([], true) }}
+           {%- else -%}
+           []
+           {%- endif -%}
+         data: >-
+           {%- if user_data_yaml is file -%}
+           {{ lookup('file', user_data_yaml) | from_yaml | default({}, true) }}
+           {%- else -%}
+           {}
+           {%- endif -%}
+       headers:
+         Authorization: Bearer {{ agnosticd_callback_token }}
+     # Best effort
+     ignore_errors: true
+----
+
+This ansible segment is printing out userdata and userinfo defined by the userinfo module available on agnosticD. Essentially it is posting tasks messaging out any information that students may need to see in the lab environment.
