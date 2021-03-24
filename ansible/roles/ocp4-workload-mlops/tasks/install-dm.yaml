@@ -1,0 +1,144 @@
+---
+- block:
+  - name: Set the retry count
+    set_fact:
+      retry_count: "{{ 0 if retry_count is undefined else retry_count|int + 1 }}"
+
+  # Deploy Business Automation (DM) Operator
+  - name: Create operator subscription for Decision Manager
+    k8s:
+      state: present
+      merge_type:
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('file', item ) | from_yaml }}"
+    loop:
+    - dm_operatorgroup.yaml
+    - dm_subscription.yaml
+
+  # Wait for CRD
+  - name: Wait for Decision Manager CRD to be ready
+    k8s_facts:
+      api_version: apiextensions.k8s.io/v1beta1
+      kind: CustomResourceDefinition
+      name: kieapps.app.kiegroup.org
+    register: r_dm_crd
+    retries: 100
+    delay: 10
+    until: r_dm_crd.resources | list | length == 1
+
+  - name: Get global pull secrets from openshift-config
+    k8s_facts:
+      api_version: v1
+      kind: Secret
+      namespace: openshift-config
+      name: pull-secret
+    register: pull_secret
+
+  - name: Create pull secret in labs-dm
+    k8s:
+      definition:
+        apiVersion: v1
+        kind: Secret      
+        data: "{{pull_secret.resources[0].data}}"              
+        metadata:
+          name: pull-secret
+          namespace: labs-dm
+        type: kubernetes.io/dockerconfigjson
+
+  - name: Use the secrets for builder SA
+    command: oc secrets link builder pull-secret -n labs-dm
+
+  - name: Delete DM CR
+    k8s:
+      api_version: app.kiegroup.org/v2
+      kind: KieApp
+      name: dm
+      namespace: labs-dm
+      state: absent
+
+  - name: Delete dm-kieserver DC
+    k8s:
+      kind: DeploymentConfig
+      api_version: apps.openshift.io/v1
+      name: dm-kieserver
+      namespace: labs-dm
+      state: absent
+
+  - name: Get existing rhdm-kieserver-rhel8
+    k8s_facts:
+      api_version: image.openshift.io/v1
+      kind: ImageStream
+      name: rhdm-kieserver-rhel8
+      namespace: labs-dm
+    register: kieserver_is
+
+  - name: Clean up rhdm_rhelserver IS
+    block:
+    - name: Set fact rhdm_rhelserver_tag name
+      set_fact: 
+        rhdm_rhelserver_tag: "{{kieserver_is.resources[0].spec.tags[0].name}}"
+    
+    - name: Delete existing rhdm-kieserver-rhel8
+      k8s:
+        api_version: image.openshift.io/v1
+        kind: ImageStream
+        name: rhdm-kieserver-rhel8
+        namespace: labs-dm
+        state: absent
+
+    - name: Import rhdm-kieserver-rhel8
+      command: >
+        oc import-image rhdm-7/rhdm-kieserver-rhel8:{{rhdm_rhelserver_tag}}
+        --from=registry.redhat.io/rhdm-7/rhdm-kieserver-rhel8:{{rhdm_rhelserver_tag}}
+        --reference-policy=local --confirm -n labs-dm
+    when: kieserver_is.resources | list | length > 0
+
+  # Install DM CR
+  - name: Create CR for DM
+    k8s:
+      state: present
+      merge_type:
+      - strategic-merge
+      - merge
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - dm_cr.yaml.j2
+
+  - name: "Wait for DM kieserver pod to be in Ready state"
+    k8s_info:
+      kind: Pod
+      label_selectors:
+        - 'service = dm-kieserver'
+      namespace: labs-dm
+    register: pod_status
+    until: (pod_status | json_query("resources[0].status.containerStatuses[0].ready") | bool) == true
+    retries: 200
+    delay: 10
+    
+  - name: Create kie secrets for users
+    k8s:
+      definition:
+        kind: Secret
+        apiVersion: v1
+        metadata:
+          name: kie-admin
+          namespace: "{{ns}}"
+        data:
+          password: "{{workshop_kie_user_password | b64encode }}"
+          user: "{{workshop_kie_user_name | b64encode}}"
+        type: Opaque
+    vars:
+      user: "{{ item[0] }}"
+      ns: "{{ item[0] }}-{{ item[1] }}"    
+    loop: "{{ users|product(['prod'])|list }}"
+
+  rescue:
+    - fail:
+        msg: Ended after 3 retries
+      when: retry_count|int == 2
+
+    - debug:
+        msg: "Failed to create DM - Retrying..."
+
+    - include_tasks: install-dm.yaml
