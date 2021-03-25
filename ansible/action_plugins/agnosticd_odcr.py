@@ -1,11 +1,9 @@
-"""agnosticd_aws_create_capcity_reservations Lookup plugin"""
-
 from __future__ import (absolute_import, division, print_function)
 import datetime
 import re
 import pprint
 from ansible.errors import AnsibleError
-from ansible.plugins.lookup import LookupBase
+from ansible.plugins.action import ActionBase
 from ansible.utils.display import Display
 
 import boto3
@@ -15,7 +13,7 @@ __metaclass__ = type
 #pylint: enable=invalid-name
 
 DOCUMENTATION = """
-        lookup: agnosticd_aws_create_capacity_reservations
+        action: agnosticd_odcr
         author: Guillaume Core <gucore@redhat.com>
         version_added: "2.9"
         short_description: Create AWS on-demand Capacity Reservations
@@ -33,28 +31,13 @@ DOCUMENTATION = """
 """
 
 EXAMPLES = """
-- name: Create reservations and save result
-  vars:
-    odcr:
-      regions:
-      - us-east-1
-      - us-east-2
-      reservations:
-        az1:
-          - instance_count: 3
-            instance_platform: Linux/UNIX
-            instance_type: "m5.xlarge"
-  set_fact:
-    _capacity_reservations: >-
-      {{
-      lookup(
-      'agnosticd_aws_create_capacity_reservations',
-      odcr,
-      ttl='1h'
-      )
-      }}
-
-
+- name: Create on-demand capacity reservations and save result
+  agnosticd_odcr:
+    data: "{{ agnosticd_aws_capacity_reservation }}"
+    aws_access_key_id: "{{ aws_access_key_id }}"
+    aws_secret_access_key: "{{ aws_secret_access_key }}"
+    ttl: 1h
+  register: r_odcr
 """
 
 RETURN = """
@@ -121,10 +104,9 @@ def check_response(response):
         display.error(pp.pformat(response))
         raise AnsibleError("Error requesting EC2 offerings.") from err
 
-# TODO: create a class ODCRFactory
 
-class LookupModule(LookupBase):
-    """LookupModule class"""
+class ODCRFactory:
+    """ActionModule class"""
 
     def get_azs(self, region):
         """Return all availability zones for a region"""
@@ -414,59 +396,85 @@ class LookupModule(LookupBase):
                                             region_name=region,
                                             )
 
-    def run(self, terms, variables=None, **kwargs):
-        # pylint: disable=attribute-defined-outside-init
-        self.ttl = kwargs.get('ttl', '1h')
-        self.aws_key = variables['aws_access_key_id']
-        self.aws_secret = variables['aws_secret_access_key']
+    def __init__(self, aws_key, aws_secret, task_vars, ttl, dry_run=False):
+        self.aws_key = aws_key
+        self.aws_secret = aws_secret
         self.tags = []
+        self.ttl = ttl
         self.clients = {}
         self.availability_zones = {}
-        self.action = variables['ACTION']
-        if 'odcr_DRYRUN' in variables:
+        if 'odcr_DRYRUN' in task_vars:
             self.dry_run = True
         else:
             self.dry_run = False
 
-        if 'uuid' in variables:
-            self.tags.append({'Key': 'uuid', 'Value': variables['uuid']})
+        if 'uuid' in task_vars:
+            self.tags.append({'Key': 'uuid', 'Value': task_vars['uuid']})
 
-        self.tags.append({'Key': 'guid', 'Value': variables['guid']})
+        self.tags.append({'Key': 'guid', 'Value': task_vars['guid']})
         self.tags.append({'Key': 'created-by', 'Value': 'agnosticd'})
 
+class ActionModule(ActionBase):
+    """ActionModule Class"""
+    def run(self, tmp=None, task_vars=None):
+        self._supports_check_mode = True
+
+        if task_vars is None:
+            task_vars = dict()
+
+        result = super(ActionModule, self).run(tmp, task_vars)
+        del tmp # tmp no longer has any effect
+
+        ttl = self._task.args.get('ttl', '1h')
+        state = self._task.args.get('state', 'present')
+
+        aws_access_key_id = self._task.args.get('aws_access_key_id')
+        aws_secret_access_key = self._task.args.get('aws_secret_access_key')
+        if not aws_access_key_id or not aws_secret_access_key:
+            result['failed'] = True
+            result['error'] = 'aws_access_key_id and aws_secret_access_key arg must be passed'
+            return result
+
+        data = self._task.args.get('data', {})
+
+        odcr = ODCRFactory(
+            aws_key = aws_access_key_id,
+            aws_secret = aws_secret_access_key,
+            task_vars = task_vars,
+            ttl=ttl,
+        )
 
         # First, cleanup all reservations matching tags
-        for region in set(self._flatten(term['regions'] for term in terms)):
-            self.set_client(region)
-            self.cancel_all_reservations(region)
+        for region in set(data['regions']):
+            odcr.set_client(region)
+            odcr.cancel_all_reservations(region)
 
-        if self.action == 'destroy':
-            return []
+        result['changed'] = True
+        if state == 'absent':
+            return result
 
-        ret = []
-        for term in terms:
-            display.v("# input\n%s" % pp.pformat(term))
-            display.v("ttl: %s" % self.ttl)
+        display.v("# input\n%s" % pp.pformat(data))
+        display.v("ttl: %s" % ttl)
 
-            for region in term['regions']:
-                r_ok, result = self.do_region(region, term['reservations'])
-                if r_ok:
-                    # In case of a single availability zone
-                    if len(result) == 1:
-                        for k in list(result):
-                            result['single_availability_zone'] = result[k]['availability_zone']
+        for region in data['regions']:
+            r_ok, result['data'] = odcr.do_region(region, data['reservations'])
+            if r_ok:
+                # In case of a single availability zone
+                if len(result['data']) == 1:
+                    for k in list(result['data']):
+                        result['data']['single_availability_zone'] = result['data'][k]['availability_zone']
 
-                    result['region'] = region
-                    ret.append(result)
-                    break
+                result['data']['region'] = region
+                break
 
-                # All reservation groups could not be created in the available AZs
-                display.display(
-                    "Reservations could not be created in %s, trying next region."
-                    %(region)
-                )
-            else:
-                display.display("No more regions.")
-                raise AnsibleError("Reservations could not be created.")
+            # All reservation groups could not be created in the available AZs
+            display.display(
+                "Reservations could not be created in %s, trying next region."
+                %(region)
+            )
+        else:
+            display.display("No more regions.")
+            result['failed'] = True
+            result['error'] = "Reservations could not be created."
 
-        return ret
+        return result
