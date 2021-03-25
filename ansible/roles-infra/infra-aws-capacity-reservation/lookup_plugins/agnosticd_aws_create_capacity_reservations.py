@@ -1,6 +1,7 @@
+"""agnosticd_aws_create_capcity_reservations Lookup plugin"""
+
 from __future__ import (absolute_import, division, print_function)
 import datetime
-import os
 import re
 import pprint
 from ansible.errors import AnsibleError
@@ -9,7 +10,9 @@ from ansible.utils.display import Display
 
 import boto3
 import botocore.exceptions
+#pylint: disable=invalid-name
 __metaclass__ = type
+#pylint: enable=invalid-name
 
 DOCUMENTATION = """
         lookup: agnosticd_aws_create_capacity_reservations
@@ -63,14 +66,18 @@ _raw:
 display = Display()
 pp = pprint.PrettyPrinter(indent=2)
 
-regex = re.compile(
-    r'((?P<days>\d+?)d)?((?P<hours>\d+?)h)?((?P<minutes>\d+?)m)?((?P<seconds>\d+?)s)?'
-)
-
 def parse_time(time_str):
+    """Parse duration (str) and return timedelta
+
+    Return False if the string doesn't match"""
+
+    regex = re.compile(
+        r'((?P<days>\d+?)d)?((?P<hours>\d+?)h)?((?P<minutes>\d+?)m)?((?P<seconds>\d+?)s)?'
+    )
+
     parts = regex.match(time_str)
     if not parts:
-        return
+        return False
     parts = parts.groupdict()
     time_params = {}
     for (name, param) in iter(parts.items()):
@@ -90,14 +97,14 @@ def translate_to_api_names(key_str):
 
     if key_str in entries:
         return entries[key_str]
-    else:
-        raise AnsibleError("Key {} is not supported in a reservation.".format(key_str))
+
+    raise AnsibleError("Key {} is not supported in a reservation.".format(key_str))
 
 
 def tag_match(tags1, tags2):
     """All tags1 are in tags2"""
-    for t1 in tags1:
-        if t1 in tags2:
+    for tag in tags1:
+        if tag in tags2:
             continue
 
         return False
@@ -110,36 +117,38 @@ def check_response(response):
         if response['ResponseMetadata']['HTTPStatusCode'] != 200:
             display.error(pp.pformat(response))
             raise AnsibleError("Error requesting EC2 offerings.")
-    except:
+    except Exception as err:
         display.error(pp.pformat(response))
-        raise AnsibleError("Error requesting EC2 offerings.")
+        raise AnsibleError("Error requesting EC2 offerings.") from err
+
+# TODO: create a class ODCRFactory
 
 class LookupModule(LookupBase):
+    """LookupModule class"""
 
-    def get_azs(self):
+    def get_azs(self, region):
         """Return all availability zones for a region"""
 
-        response = self.client.describe_availability_zones()
+        if region not in self.availability_zones:
+            response = self.clients[region].describe_availability_zones()
 
-        return list(
-            map(
-                lambda elem: elem['ZoneName'],
-                filter(
-                    lambda elem: elem['State'] == 'available',
-                    response['AvailabilityZones']
+            self.availability_zones[region] = list(
+                map(
+                    lambda elem: elem['ZoneName'],
+                    filter(
+                        lambda elem: elem['State'] == 'available',
+                        response['AvailabilityZones']
+                    )
                 )
             )
-        )
 
-    def filter_azs(self, azs, instance_types):
-        """Return the intersection of possible AZs for a list of instance types.
+        return self.availability_zones[region]
 
-        args: 1) set of all AZs
-              2) set of all instance types
-
-        return:  set of AZs for which there is an offering for all instance types
+    def filter_azs(self, region, instance_types):
+        """Return the AZs with matching InstanceType offerings,
+        given a list of instance types.
         """
-        response = self.client.describe_instance_type_offerings(
+        response = self.clients[region].describe_instance_type_offerings(
             LocationType='availability-zone',
             Filters=[
                 {
@@ -153,61 +162,29 @@ class LookupModule(LookupBase):
 
         display.vvv(pp.pformat(response['InstanceTypeOfferings']))
 
-        result = azs
+        # Start with all AZs
+        result = set(self.get_azs(region))
 
         # Get the intersection of all AZs
         for instance_type in instance_types:
-            result = result & set(map(lambda elem: elem['Location'],
-                                      list(filter(lambda elem: elem['InstanceType'] == instance_type,
-                                                  response['InstanceTypeOfferings']))))
+            instance_type_azs = set()
+            for offering in response['InstanceTypeOfferings']:
+                if offering['InstanceType'] == instance_type:
+                    instance_type_azs.add(offering['Location'])
+
+            # Reduce the set
+            result = result & instance_type_azs
 
         return result
 
-
-    def create_reservation(self, ttl, reservation, tags=[], az=''):
-        """Create an on-demand reservation
-
-        returns ...
-        """
-        reservation_translated = {
-            translate_to_api_names(k): v for k, v in reservation.items()
-        }
-
-        try:
-            duration = parse_time(ttl)
-        except:
-            raise AnsibleError("could not parse duration {}".format(ttl))
-
-        if len(tags) > 0:
-            tag_spec =[{
-                'ResourceType': 'capacity-reservation',
-                'Tags':tags,
-            }]
-        else:
-            tag_spec = []
-
-        response = self.client.create_capacity_reservation(
-            **reservation_translated,
-            AvailabilityZone=az,
-            EndDate=datetime.datetime.now() + duration,
-            EndDateType='limited',
-            InstanceMatchCriteria='open',
-            TagSpecifications=tag_spec,
-        )
-
-        check_response(response)
-
-        display.vvvv("response: %s" % pp.pformat(response))
-        return response
-
-    def describe_reservations(self, tags=[], az='*'):
+    def describe_reservations(self, region, availability_zone='*'):
         """Filter reservations by tag and return Ids"""
 
         filters = [{'Name':'state', 'Values':['active','pending']}]
-        if az != None and az != '*' and az != '':
-            filters.append({'Name': 'availability-zone', 'Values': [az]})
+        if availability_zone is not None and availability_zone != '*' and availability_zone != '':
+            filters.append({'Name': 'availability-zone', 'Values': [availability_zone]})
 
-        response = self.client.describe_capacity_reservations(
+        response = self.clients[region].describe_capacity_reservations(
             Filters=filters,
         )
 
@@ -215,172 +192,281 @@ class LookupModule(LookupBase):
 
         display.vvvvv(pp.pformat(response))
         result = list(
-            filter(lambda elem: tag_match(tags, elem['Tags']),
+            filter(lambda elem: tag_match(self.tags, elem['Tags']),
                    response['CapacityReservations']))
 
         return [i['CapacityReservationId'] for i in result]
 
-    def cancel_reservation(self, reservation_id, context):
+    def cancel_reservation(self, region, reservation_id):
         """Cancel a reservation by ID"""
 
-        response = self.client.cancel_capacity_reservation(
+        response = self.clients[region].cancel_capacity_reservation(
             CapacityReservationId=reservation_id,
         )
         display.vvvv(pp.pformat(response))
 
         check_response(response)
 
-        display.display("Reservation canceled: %s  (%s)" %(reservation_id, context))
+        display.display("Reservation canceled: %s  (%s)" %(reservation_id, region))
 
-    def cancel_all_reservations(tags, context):
-        """Cancel all reservations matching tags"""
-        reservation_ids = self.describe_reservations(tags=tags)
+    def cancel_all_reservations(self, region):
+        """Cancel all reservations in a region matching tags"""
+        reservation_ids = self.describe_reservations(region)
         for r_id in reservation_ids:
-            self.cancel_reservation(r_id, context)
+            self.cancel_reservation(region, r_id)
+
+    def create_reservation(self, region, availability_zone, reservation):
+        """Create a reservation in an Availability Zone.
+
+        On success:
+            Return True, reservation_id
+        On Failure:
+            Return False, ''
+        """
+        try:
+            reservation_translated = {
+                translate_to_api_names(k): v for k, v in reservation.items()
+            }
+
+            try:
+                duration = parse_time(self.ttl)
+            except Exception as err:
+                raise AnsibleError("could not parse duration {}".format(self.ttl)) from err
+
+            if len(self.tags) > 0:
+                tag_spec =[{
+                    'ResourceType': 'capacity-reservation',
+                    'Tags':self.tags,
+                }]
+            else:
+                tag_spec = []
+
+            response = self.clients[region].create_capacity_reservation(
+                **reservation_translated,
+                AvailabilityZone=availability_zone,
+                EndDate=datetime.datetime.now() + duration,
+                EndDateType='limited',
+                InstanceMatchCriteria='open',
+                TagSpecifications=tag_spec,
+            )
+
+            check_response(response)
+            display.vvvv("response: %s" % pp.pformat(response))
+
+            display.vvv(pp.pformat(response))
+        except botocore.exceptions.ClientError as err:
+            if 'InstanceLimitExceeded' in str(err):
+                display.display("InstanceLimitExceeded %s - %d * %s"
+                                %(availability_zone,
+                                  reservation['instance_count'],
+                                  reservation['instance_type']))
+                display.display(
+                    "Reservation could not be created in %s, trying next AZ."
+                    %(availability_zone)
+                )
+                return False, ''
+
+            if 'InsufficientInstanceCapacity' in str(err):
+                display.display("InsufficientInstanceCapacity %s - %d * %s"
+                                %(availability_zone, reservation['instance_count'],
+                                    reservation['instance_type']))
+
+                return False, ''
+
+            display.error(pp.pformat(err))
+            raise AnsibleError(
+                "Client Error while creating reservation."
+            ) from err
+
+        if response['ResponseMetadata']['HTTPStatusCode'] == 200:
+            # if success, continue
+            r_id = response['CapacityReservation']['CapacityReservationId']
+            display.display("Reservation created: %s (%s)" %(r_id, availability_zone))
+            return True, r_id
+
+        return False, ''
+
+
+    def create_reservations(self, region, availability_zone, reservations):
+        """Create all reservations in the specified AZ
+
+        Return a tuple (ok, reservations_ids)
+
+        On success:
+            ok is True
+            reservations_ids is the list of capacity-reservation IDs created
+
+        On failure:
+            ok is False
+            reservation_ids is the empty list
+        """
+        reservation_ids = []
+        for reservation in reservations:
+            if self.dry_run:
+                continue
+
+            return_ok, reservation_id = self.create_reservation(
+                region,
+                availability_zone,
+                reservation)
+
+            if not return_ok:
+                display.display(
+                    "reservation could not be created in %s, trying next AZ."
+                    %(availability_zone)
+                )
+                for r_id in reservation_ids:
+                    self.cancel_reservation(region, r_id)
+
+                return False, []
+
+            reservation_ids.append(reservation_id)
+
+        return True, reservation_ids
+
+    def do_reservation_group(self, region, reservation_group):
+        """Determine the AZs with matching instance-type offerings.
+
+        Try to create capacity reservations in one of those AZs.
+        If fails, move the next matching AZ.
+        If all fail, fail.
+
+        On success:
+        Return True, availability_zone, reservation_ids
+
+        On failure:
+        Return False, '', empty list
+        """
+        display.v("..loop2: reservation_group: %s" % (pp.pformat(reservation_group)))
+
+        all_instance_types = set(
+            i['instance_type'] for i in reservation_group
+        )
+        matching_azs = self.filter_azs(region, all_instance_types)
+        display.v(
+            "..loop2: AZs with matching offerings for group: %s" %
+            (pp.pformat(matching_azs)))
+
+        for availability_zone in matching_azs:
+            display.v("...loop3: trying AZ %s" %(availability_zone))
+
+            r_ok, reservation_ids = self.create_reservations(
+                region,
+                availability_zone,
+                reservation_group)
+
+            if r_ok:
+                return True, availability_zone, reservation_ids
+
+        return False, '', []
+
+    def do_region(self, region, reservation_groups):
+        """Create reservations, try a region.
+
+        On success:
+            Return True,
+                   {
+                     'az1': {
+                         'availability_zone': ...,
+                         'reservation_ids': ...,
+                     },
+                     ...
+                   }
+
+        On failure:
+            Return False, {}
+        """
+
+
+        display.v(".loop1: Trying region %s" % (region))
+
+        if region not in self.clients:
+            self.set_client(region)
+
+        display.v(".loop1: available AZs: %s" % self.get_azs(region))
+
+        result = {}
+        for reservation_group_name in reservation_groups:
+            reservation_group = reservation_groups[reservation_group_name]
+            display.v("..loop2: group %s" %(reservation_group_name))
+            r_ok, availability_zone, reservation_ids = self.do_reservation_group(
+                region,
+                reservation_group
+            )
+
+            if not r_ok:
+                # cancel all reservations made in that region
+                self.cancel_all_reservations(region)
+                return False, {}
+
+            result[reservation_group_name] = {
+                'availability_zone': availability_zone,
+                'reservation_ids': reservation_ids,
+            }
+
+        return True, result
+
+    def set_client(self, region):
+        """Create and save boto3 EC2 client for a region"""
+        self.clients[region] = boto3.client('ec2',
+                                            aws_access_key_id=self.aws_key,
+                                            aws_secret_access_key=self.aws_secret,
+                                            region_name=region,
+                                            )
 
     def run(self, terms, variables=None, **kwargs):
-        ttl = kwargs.get('ttl', '1h')
+        # pylint: disable=attribute-defined-outside-init
+        self.ttl = kwargs.get('ttl', '1h')
+        self.aws_key = variables['aws_access_key_id']
+        self.aws_secret = variables['aws_secret_access_key']
+        self.tags = []
+        self.clients = {}
+        self.availability_zones = {}
+        self.action = variables['ACTION']
+        if 'odcr_DRYRUN' in variables:
+            self.dry_run = True
+        else:
+            self.dry_run = False
 
-        aws_key = variables['aws_access_key_id']
-        aws_secret = variables['aws_secret_access_key']
-
-        tags = []
         if 'uuid' in variables:
-            tags.append({'Key': 'uuid', 'Value': variables['uuid']})
+            self.tags.append({'Key': 'uuid', 'Value': variables['uuid']})
 
-        tags.append({'Key': 'guid', 'Value': variables['guid']})
-        tags.append({'Key': 'created-by', 'Value': 'agnosticd'})
+        self.tags.append({'Key': 'guid', 'Value': variables['guid']})
+        self.tags.append({'Key': 'created-by', 'Value': 'agnosticd'})
 
+
+        # First, cleanup all reservations matching tags
+        for region in set(self._flatten(term['regions'] for term in terms)):
+            self.set_client(region)
+            self.cancel_all_reservations(region)
+
+        if self.action == 'destroy':
+            return []
 
         ret = []
         for term in terms:
             display.v("# input\n%s" % pp.pformat(term))
-            display.v("ttl: %s" % ttl)
-            regions = term['regions']
+            display.v("ttl: %s" % self.ttl)
 
-            for region in regions:
-                self.client = boto3.client('ec2',
-                                        aws_access_key_id=aws_key,
-                                        aws_secret_access_key=aws_secret,
-                                        region_name=region,
-                                        )
-                self.cleanup_all_reservations(tags, context=region)
+            for region in term['regions']:
+                r_ok, result = self.do_region(region, term['reservations'])
+                if r_ok:
+                    # In case of a single availability zone
+                    if len(result) == 1:
+                        for k in list(result):
+                            result['single_availability_zone'] = result[k]['availability_zone']
 
-
-            loop1_break = False
-            for region in regions:
-                display.v(".loop1: Trying region %s" % (region))
-
-                self.client = boto3.client('ec2',
-                                        aws_access_key_id=aws_key,
-                                        aws_secret_access_key=aws_secret,
-                                        region_name=region,
-                                        )
-
-                all_azs = set(self.get_azs())
-                display.v(".loop1: available AZs: %s" % all_azs)
-
-                loop2_break = False
-                for reservation_group in term['reservations']:
-                    display.v("..loop2: reservation_group: %s" % (pp.pformat(reservation_group)))
-
-                    all_instance_types = set(
-                        i['instance_type'] for i in term['reservations'][reservation_group]
-                    )
-                    all_possible_azs = self.filter_azs(all_azs, all_instance_types)
-                    display.v(
-                        "..loop2: AZs with matching offerings for group %s: %s" %
-                        (reservation_group, pp.pformat(all_possible_azs)))
-
-                    loop3_break = False
-                    for az in all_possible_azs:
-                        created_reservations = []
-                        display.v("...loop3: trying az %s" %(az))
-
-                        for reservation in term['reservations'][reservation_group]:
-                            # TODO: remove DRYRUN or replace with action=destroy
-                            if 'DRYRUN' in variables and variables['DRYRUN']:
-                                continue
-                            try:
-                                response = self.create_reservation(
-                                    ttl=ttl,
-                                    reservation=reservation,
-                                    az=az,
-                                    tags=tags)
-                            except botocore.exceptions.ClientError as err:
-                                if 'InstanceLimitExceeded' in str(err):
-                                    display.display("InstanceLimitExceeded %s - %d * %s"
-                                                    %(az, reservation['instance_count'], reservation['instance_type']))
-                                    display.display(
-                                        "Reservation could not be created in %s, trying next AZ."
-                                        %(az)
-                                    )
-                                    for r_id in created_reservations:
-                                        self.cancel_reservation(r_id, context=az)
-                                    break
-
-                                if 'InsufficientInstanceCapacity' in str(err):
-                                    display.display("InsufficientInstanceCapacity %s - %d * %s"
-                                                    %(az, reservation['instance_count'],
-                                                      reservation['instance_type']))
-
-                                    display.display(
-                                        "Reservation could not be created in %s, trying next AZ."
-                                        %(az)
-                                    )
-                                    for r_id in created_reservations:
-                                        self.cancel_reservation(r_id, context=az)
-                                    break
-
-                                display.error(pp.pformat(err))
-                                raise AnsibleError(
-                                    "Client Error while creating reservation."
-                                ) from err
-
-                            if response['ResponseMetadata']['HTTPStatusCode'] == 200:
-                                # if success, continue
-                                r_id = response['CapacityReservation']['CapacityReservationId']
-                                display.display("Reservation created: %s (%s)" %(r_id, az))
-                                created_reservations.append(r_id)
-                                continue
-
-                            display.v(pp.pformat(r))
-                            display.display(
-                                "Reservation could not be created in %s, trying next AZ."
-                                %(az)
-                            )
-                            for r_id in created_reservations:
-                                self.cancel_reservation(r_id, context=az)
-                            break
-                        else:
-                            # All reservations of the reservation group (az) are created
-                            break
-                        if loop3_break:
-                            break
-                    else:
-                        # All AZ were tried for that reservation group
-                        display.display(
-                            "Reservations could not be created in %s, trying next region."
-                            %(region)
-                        )
-                        # cancel all reservations made in that region
-                        self.cleanup_all_reservations(tags, context=region)
-
-                        break
-                    if loop2_break:
-                        break
-                else:
-                    # All reservation groups (az) are done
-                    break
-                if loop1_break:
+                    result['region'] = region
+                    ret.append(result)
                     break
 
-        # TODO: testing (aws api down, etc)
-        # TODO: return value
-        ret_i = {}
-        ret_i['azs'] = {}
-        ret_i['ids'] = {}
-        ret_i['region'] = "us-east-1"
-        ret.append(ret_i)
-        display.vvv("result: %s" % ret)
+                # All reservation groups could not be created in the available AZs
+                display.display(
+                    "Reservations could not be created in %s, trying next region."
+                    %(region)
+                )
+            else:
+                display.display("No more regions.")
+                raise AnsibleError("Reservations could not be created.")
+
         return ret
