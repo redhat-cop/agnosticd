@@ -4,12 +4,17 @@ from __future__ import (absolute_import, division, print_function)
 import datetime
 import re
 import pprint
+import sys
 from ansible.errors import AnsibleError
 from ansible.plugins.action import ActionBase
 from ansible.utils.display import Display
 
 import boto3
 import botocore.exceptions
+
+if sys.version_info < (2, 7):
+    raise AnsibleError("agnosticd_odcr Ansible module require Python >= 2.7")
+
 #pylint: disable=invalid-name
 __metaclass__ = type
 #pylint: enable=invalid-name
@@ -51,18 +56,28 @@ _raw:
 display = Display()
 pp = pprint.PrettyPrinter(indent=2)
 
-def parse_time(time_str):
+def parse_duration(time_str):
     """Parse duration (str) and return timedelta
+
+    input examples:
+      3d
+      3h
+      2s
+      2h12m
+      3d 12h 3m
+      60s    (same as 60)
+
+    default is second.  3600 = 1h
 
     Return False if the string doesn't match"""
 
     regex = re.compile(
-        r'((?P<days>\d+?)d)?((?P<hours>\d+?)h)?((?P<minutes>\d+?)m)?((?P<seconds>\d+?)s)?'
+        r'^((?P<days>\d+?)[dD])? *((?P<hours>\d+?)[hH])? *((?P<minutes>\d+?)m)? *((?P<seconds>\d+?)s?)?$'
     )
 
-    parts = regex.match(time_str)
+    parts = regex.match(time_str.strip())
     if not parts:
-        return False
+        return 0
     parts = parts.groupdict()
     time_params = {}
     for (name, param) in iter(parts.items()):
@@ -216,7 +231,7 @@ class ODCRFactory:
             }
 
             try:
-                duration = parse_time(self.ttl)
+                duration = parse_duration(self.ttl)
             except Exception as err:
                 raise AnsibleError("could not parse duration {}".format(self.ttl)) from err
 
