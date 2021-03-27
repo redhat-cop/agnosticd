@@ -17,6 +17,8 @@ def test_parse_duration():
         ['1h', datetime.timedelta(hours=1)],
         ['0h', datetime.timedelta(0)],
         ['0', datetime.timedelta(0)],
+        ['0d0m0s', datetime.timedelta(0)],
+        ['1d0m0s', datetime.timedelta(days=1)],
         ['0s', datetime.timedelta(0)],
         ['3600', datetime.timedelta(hours=1)],
         ['1d12h', datetime.timedelta(days=1, hours=12)],
@@ -25,3 +27,23 @@ def test_parse_duration():
     ]
     for tc in testcases:
         assert(agnosticd_odcr.parse_duration(tc[0]) == tc[1])
+
+    error_testcases = [
+        '3 days',
+        'INVALID',
+        'duration in the middle 3d of a sentence',
+        '2.3d',
+        '2.3m',
+        'd',
+        'm',
+        's',
+        '',
+        None,
+        {},
+        [],
+        ["nonemptylist"],
+    ]
+
+    for tc in error_testcases:
+        with pytest.raises(agnosticd_odcr.InvalidDuration):
+            agnosticd_odcr.parse_duration(tc)

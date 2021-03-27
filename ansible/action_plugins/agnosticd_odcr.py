@@ -56,6 +56,9 @@ _raw:
 display = Display()
 pp = pprint.PrettyPrinter(indent=2)
 
+class InvalidDuration(Exception):
+    """Exception for parse_duration."""
+
 def parse_duration(time_str):
     """Parse duration (str) and return timedelta
 
@@ -75,9 +78,11 @@ def parse_duration(time_str):
         r'^((?P<days>\d+?)[dD])? *((?P<hours>\d+?)[hH])? *((?P<minutes>\d+?)m)? *((?P<seconds>\d+?)s?)?$'
     )
 
+    if not time_str or not isinstance(time_str, str):
+        raise InvalidDuration("'%s' is not a valid duration" %(time_str))
     parts = regex.match(time_str.strip())
     if not parts:
-        return 0
+        raise InvalidDuration("'%s' is not a valid duration" %(time_str))
     parts = parts.groupdict()
     time_params = {}
     for (name, param) in iter(parts.items()):
