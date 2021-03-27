@@ -40,7 +40,7 @@ DOCUMENTATION = """
 EXAMPLES = """
 - name: Create on-demand capacity reservations and save result
   agnosticd_odcr:
-    data: "{{ agnosticd_aws_capacity_reservation }}"
+    reservations: "{{ agnosticd_aws_capacity_reservations }}"
     aws_access_key_id: "{{ aws_access_key_id }}"
     aws_secret_access_key: "{{ aws_secret_access_key }}"
     ttl: 1h
@@ -267,10 +267,6 @@ class ODCRFactory:
                                 %(availability_zone,
                                   reservation['instance_count'],
                                   reservation['instance_type']))
-                display.display(
-                    "Reservation could not be created in %s, trying next AZ."
-                    %(availability_zone)
-                )
                 return False, ''
 
             if 'InsufficientInstanceCapacity' in str(err):
@@ -319,7 +315,7 @@ class ODCRFactory:
 
             if not return_ok:
                 display.display(
-                    "reservation could not be created in %s, trying next AZ."
+                    "Reservation could not be created in %s, trying next AZ."
                     %(availability_zone)
                 )
                 for r_id in reservation_ids:
@@ -441,7 +437,14 @@ class ODCRFactory:
 
 class ActionModule(ActionBase):
     """ActionModule Class"""
-    _VALID_ARGS = frozenset(('data','aws_access_key_id','aws_secret_access_key','ttl','state'))
+    _VALID_ARGS = frozenset((
+        'reservations',
+        'regions',
+        'aws_access_key_id',
+        'aws_secret_access_key',
+        'ttl',
+        'state'
+    ))
     def run(self, tmp=None, task_vars=None):
         self._supports_check_mode = True
 
@@ -461,7 +464,8 @@ class ActionModule(ActionBase):
             result['error'] = 'aws_access_key_id and aws_secret_access_key arg must be passed'
             return result
 
-        data = self._task.args.get('data', {})
+        reservations = self._task.args.get('reservations', {})
+        regions = self._task.args.get('regions', [])
 
         odcr = ODCRFactory(
             aws_key = aws_access_key_id,
@@ -473,7 +477,7 @@ class ActionModule(ActionBase):
         try:
             # First, cleanup all reservations matching tags
             total_canceled = 0
-            for region in set(data['regions']):
+            for region in set(regions):
                 odcr.set_client(region)
                 total_canceled += odcr.cancel_all_reservations(region)
             if total_canceled > 0:
@@ -486,23 +490,24 @@ class ActionModule(ActionBase):
         if state == 'absent':
             return result
 
-        display.v("# input\n%s" % pp.pformat(data))
+        display.v("# input\n%s" % pp.pformat(reservations))
+        display.v("regions: %s" % regions)
         display.v("ttl: %s" % ttl)
 
-        for region in data['regions']:
+        for region in regions:
             try:
-                r_ok, result['data'] = odcr.do_region(region, data['reservations'])
+                r_ok, result['reservations'] = odcr.do_region(region, reservations)
             except Exception as err:
                 result['failed'] = True
                 result['error'] = str(err)
                 break
             if r_ok:
                 # In case of a single availability zone
-                if len(result['data']) == 1:
-                    for k in list(result['data']):
-                        result['data']['single_availability_zone'] = result['data'][k]['availability_zone']
+                if len(result['reservations']) == 1:
+                    for k in list(result['reservations']):
+                        result['single_availability_zone'] = result['reservations'][k]['availability_zone']
 
-                result['data']['region'] = region
+                result['region'] = region
                 break
 
             # All reservation groups could not be created in the available AZs
