@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 from __future__ import (absolute_import, division, print_function)
 import datetime
 import re
@@ -192,10 +194,13 @@ class ODCRFactory:
         display.display("Reservation canceled: %s  (%s)" %(reservation_id, region))
 
     def cancel_all_reservations(self, region):
-        """Cancel all reservations in a region matching tags"""
+        """Cancel all reservations in a region matching tags.
+
+        Return the number of canceled reservations."""
         reservation_ids = self.describe_reservations(region)
         for r_id in reservation_ids:
             self.cancel_reservation(region, r_id)
+        return len(reservation_ids)
 
     def create_reservation(self, region, availability_zone, reservation):
         """Create a reservation in an Availability Zone.
@@ -416,6 +421,7 @@ class ODCRFactory:
 
 class ActionModule(ActionBase):
     """ActionModule Class"""
+    _VALID_ARGS = frozenset(('data','aws_access_key_id','aws_secret_access_key','ttl','state'))
     def run(self, tmp=None, task_vars=None):
         self._supports_check_mode = True
 
@@ -444,12 +450,19 @@ class ActionModule(ActionBase):
             ttl=ttl,
         )
 
-        # First, cleanup all reservations matching tags
-        for region in set(data['regions']):
-            odcr.set_client(region)
-            odcr.cancel_all_reservations(region)
+        try:
+            # First, cleanup all reservations matching tags
+            total_canceled = 0
+            for region in set(data['regions']):
+                odcr.set_client(region)
+                total_canceled += odcr.cancel_all_reservations(region)
+            if total_canceled > 0:
+                result['changed'] = True
+        except Exception as err:
+            result['failed'] = True
+            result['error'] = str(err)
+            return result
 
-        result['changed'] = True
         if state == 'absent':
             return result
 
@@ -457,7 +470,12 @@ class ActionModule(ActionBase):
         display.v("ttl: %s" % ttl)
 
         for region in data['regions']:
-            r_ok, result['data'] = odcr.do_region(region, data['reservations'])
+            try:
+                r_ok, result['data'] = odcr.do_region(region, data['reservations'])
+            except Exception as err:
+                result['failed'] = True
+                result['error'] = str(err)
+                break
             if r_ok:
                 # In case of a single availability zone
                 if len(result['data']) == 1:
