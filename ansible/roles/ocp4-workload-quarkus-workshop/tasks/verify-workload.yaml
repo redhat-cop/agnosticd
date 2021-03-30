@@ -1,0 +1,158 @@
+---
+- name: verify user projects exist
+  k8s_facts:
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}-project"
+    field_selectors:
+      - status.phase=Active
+  register: r_user_namespace
+  failed_when: r_user_namespace.resources | list | length != 1
+  loop: "{{ users }}"
+
+- name: verify guides pod is running
+  when: num_users | int > 0
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: guides
+    label_selectors:
+      - deploymentconfig=web-{{ item }}
+    field_selectors:
+      - status.phase=Running
+  register: r_guides_pod
+  retries: 200
+  delay: 10
+  until: r_guides_pod.resources | list | length == 1
+  loop: "{{ modules }}"
+
+- name: verify guides are accessible
+  when: num_users | int > 0
+  uri:
+    url: http://web-{{ item }}-guides.{{ route_subdomain }}
+    method: GET
+    status_code: 200
+  loop: "{{ modules }}"
+
+- name: verify codeready pod is running
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: codeready
+    label_selectors:
+      - app=codeready
+      - component=codeready
+    field_selectors:
+      - status.phase=Running
+  register: r_codeready_pod
+  retries: 200
+  delay: 10
+  until: r_codeready_pod.resources | list | length == 1
+
+- name: verify codeready is accessible
+  uri:
+    url: https://codeready-codeready.{{ route_subdomain }}/dashboard/
+    method: GET
+    status_code: 200
+
+- name: verify keycloak pod is running
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: rhsso
+    label_selectors:
+      - application = rhsso
+      - deploymentconfig = rhsso
+    field_selectors:
+      - status.phase=Running
+  register: r_keycloak_pod
+  retries: 200
+  delay: 10
+  until: r_keycloak_pod.resources | list | length == 1
+
+- name: verify keycloak is accessible
+  uri:
+    url: https://secure-rhsso-rhsso.{{ route_subdomain }}
+    method: GET
+    status_code: 200
+
+- name: Get SSO admin token
+  uri:
+    url: https://secure-rhsso-rhsso.{{ route_subdomain }}/auth/realms/master/protocol/openid-connect/token
+    validate_certs: false
+    method: POST
+    body:
+      username: "{{workshop_rhsso_admin_user_name}}"
+      password: "{{workshop_rhsso_admin_password}}"
+      grant_type: "password"
+      client_id: "admin-cli"
+    body_format: form-urlencoded
+    status_code: 200,201,204
+  register: sso_admin_token
+
+- name: Verify custom realm exists
+  uri:
+    url: https://secure-rhsso-rhsso.{{ route_subdomain }}/auth/admin/realms/quarkus
+    method: GET
+    headers:
+      Accept: application/json
+      Authorization: "Bearer {{ sso_admin_token.json.access_token }}"
+    status_code: 200
+
+- name: Verify Kafka CRD
+  k8s_facts:
+    api_version: apiextensions.k8s.io/v1beta1
+    kind: CustomResourceDefinition
+    name: kafkas.kafka.strimzi.io
+  register: r_kafka_crd
+  retries: 200
+  delay: 10
+  until: r_kafka_crd.resources | list | length == 1
+
+- name: verify Kafka operator pod is running
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: openshift-operators
+    label_selectors:
+      - name=amq-streams-cluster-operator
+    field_selectors:
+      - status.phase=Running
+  register: r_amq_operator_pod
+  retries: 200
+  delay: 10
+  until: r_amq_operator_pod.resources | list | length == 1
+
+- name: Verify Jaeger CRD
+  k8s_facts:
+    api_version: apiextensions.k8s.io/v1beta1
+    kind: CustomResourceDefinition
+    name: jaegers.jaegertracing.io
+  register: r_jaeger_crd
+  retries: 200
+  delay: 10
+  until: r_jaeger_crd.resources | list | length == 1
+
+- name: verify Jaeger operator pod is running
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: openshift-operators
+    label_selectors:
+      - name = jaeger-operator
+  register: r_jaeger_operator_pod
+  retries: 200
+  delay: 10
+  until: r_jaeger_operator_pod.resources | list | length == 1
+
+- name: verify user workspaces are started
+  include_tasks: confirm_che_workspace.yaml
+  vars:
+    user: "{{ item }}"
+  with_list: "{{ users }}"
+
+# Leave this as the last task in the playbook.
+- name: workload verification tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

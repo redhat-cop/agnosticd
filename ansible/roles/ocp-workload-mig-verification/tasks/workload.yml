@@ -1,0 +1,84 @@
+---
+# verify velero + operator in mig_namespace
+- block:
+  - name: "[{{ mig_namespace }}] Reading deployments"
+    k8s_info:
+      api_version: v1
+      kind: Deployment
+      namespace: "{{ mig_namespace }}"
+    register: mig_verify_dc
+
+  - fail:
+      msg: "[{{ mig_namespace }}] Some/all deployments are not ready"
+    when: item.replicas != item.readyReplicas
+    loop: "{{ mig_verify_dc|json_query('resources[*].status') }}"
+
+# verify restic in mig_namespace
+- block:
+  - name: "[{{ mig_namespace }}] Reading statefulsets"
+    k8s_info:
+      api_version: v1
+      kind: DaemonSet
+      namespace: "{{ mig_namespace }}"
+    register: mig_verify_ds
+  - fail:
+      msg: "[{{ mig_namespace }}] Some/all daemonsets are not ready"
+    when: item.desiredNumberScheduled != item.numberReady
+    loop: "{{ mig_verify_ds|json_query('resources[*].status') }}"
+
+# verify sample apps are running
+- block:
+  - name: "Discover demo apps' routes"
+    k8s_info:
+      api_version: route.openshift.io/v1
+      kind: Route
+      namespace: "{{ item }}"
+    register: mig_demo_apps_routes
+    loop: "{{ mig_demo_apps_ns }}"
+
+  - name: "Probing demo apps' routes"
+    uri:
+      url: "http://{{ item | json_query('resources[*].spec.host') | first }}"
+      validate_certs: false
+    register: result
+    failed_when: result.status != 200 and result.status != 302
+    loop: "{{ mig_demo_apps_routes.results }}"
+
+# Test Gluster and NFS
+- block:
+  - name: "Create test pod"
+    k8s:
+      state: present
+      definition: "{{ lookup('template', 'storage-test.yml.j2') }}"
+
+  - name: "Waiting for the pod to come up"
+    k8s_info:
+      api_version: v1
+      kind: Pod
+      name: storage-test
+      namespace: "{{ mig_namespace }}"
+    retries: 20
+    delay: 10
+    register: pod_stat
+    ignore_errors: true
+    until: pod_stat.resources|length > 0 and
+           pod_stat.resources[0].status is defined and
+           pod_stat.resources[0].status.phase == 'Running'
+
+  - name: "Cleaning up test pod"
+    k8s:
+      state: absent
+      definition: "{{ lookup('template', 'storage-test.yml.j2') }}"
+
+  - fail:
+      msg: "Storage tests failed..."
+    when: pod_stat.resources[0] is not defined or
+          pod_stat.resources[0].status is not defined or
+          pod_stat.resources[0].status.phase != 'Running'
+
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

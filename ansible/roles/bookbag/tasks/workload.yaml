@@ -1,0 +1,101 @@
+---
+- name: Get bookbag namespace
+  k8s_info:
+    kubeconfig: "{{ _bookbag_kubeconfig | default(omit) }}"
+    api_version: project.openshift.io/v1
+    kind: Project
+    name: "{{ bookbag_namespace }}"
+  register: r_get_bookbag_namespace
+  failed_when: false
+
+- name: Create bookbag namespace
+  when: r_get_bookbag_namespace.resources | default([]) | length == 0
+  k8s:
+    kubeconfig: "{{ _bookbag_kubeconfig | default(omit) }}"
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: ProjectRequest
+      metadata:
+        name: "{{ bookbag_namespace }}"
+
+- name: Create temporary directory for bookbag source
+  tempfile:
+    prefix: bookbag-{{ guid }}-
+    state: directory
+  register: r_bookbag_tmp
+
+- name: Clone bookbag repository to output dir
+  git:
+    repo: "{{ bookbag_git_repo }}"
+    version: "{{ bookbag_git_version | default(omit) }}"
+    dest: "{{ r_bookbag_tmp.path }}"
+
+- name: Process bookbag build template
+  command: >-
+    oc process --local -f {{ (r_bookbag_tmp.path ~ '/build-template.yaml') | quote }} -o json
+  register: r_process_build_template
+
+- name: Apply resources from build template
+  k8s:
+    kubeconfig: "{{ _bookbag_kubeconfig | default(omit) }}"
+    namespace: "{{ bookbag_namespace }}"
+    definition: "{{ item }}"
+  loop: "{{ r_process_build_template.stdout | from_json | json_query('items') }}"
+
+- name: Build bookbag image
+  command: >-
+    oc start-build bookbag --follow
+    {% if _bookbag_kubeconfig is defined %}--kubeconfig={{ _bookbag_kubeconfig | quote }}{% endif %}
+    --namespace={{ bookbag_namespace | quote }}
+    --from-dir={{ r_bookbag_tmp.path | quote }}
+
+- name: Process bookbag deploy template
+  command: >-
+    oc process --local -f {{ (r_bookbag_tmp.path ~ '/deploy-template.yaml') | quote }} -o json
+    -p NAME={{ bookbag_name | quote }}
+    -p WORKSHOP_VARS={{ _workshop_vars | to_json | quote }}
+  register: r_process_deploy_template
+  vars:
+    _user_data: >-
+      {{ lookup('file', hostvars.localhost.output_dir ~ '/user-data.yaml')
+       | from_yaml | default({}, True)
+      }}
+    _user_info_messages: >-
+      {{ lookup('file', hostvars.localhost.output_dir ~ '/user-info.yaml')
+       | from_yaml | default([], True) | join("\n")
+      }}
+    _workshop_vars: >-
+      {{ _user_data | combine({'guid': guid, 'user_info_messages': _user_info_messages}) }}
+
+- name: Apply resources from deploy template
+  k8s:
+    kubeconfig: "{{ _bookbag_kubeconfig | default(omit) }}"
+    namespace: "{{ bookbag_namespace }}"
+    definition: "{{ item }}"
+  loop: "{{ r_process_deploy_template.stdout | from_json | json_query('items') }}"
+
+- name: Get bookbag route
+  k8s_info:
+    kubeconfig: "{{ _bookbag_kubeconfig | default(omit) }}"
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: "{{ bookbag_name }}"
+    namespace: "{{ bookbag_namespace }}"
+  register: r_bookbag_route
+  failed_when: r_bookbag_route.resources | length != 1
+
+- name: Set agnosticd_user_info for bookbag
+  agnosticd_user_info:
+    msg: "Lab instructions: {{ _bookbag_url }}"
+    data:
+      bookbag_url: "{{ _bookbag_url }}"
+  vars:
+    _route: "{{ r_bookbag_route.resources[0] }}"
+    _bookbag_url: >-
+      {{ 'https' if 'tls' in _route.spec else 'http' }}://{{ _route.spec.host }}/
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

@@ -1,0 +1,113 @@
+#jinja2: lstrip_blocks: "True"
+---
+heat_template_version: 2018-03-02
+
+description: >-
+  Top level HOT for creating instances. This template
+  relies on exiting security groups, network, images
+  to provision instances, ports, & floating IPs.
+
+resources:
+
+  #############
+  # Instances #
+  #############
+
+{% for instance in instances %}
+  {% for myinstanceindex in range(instance.count|int) %}
+    {% set iname = instance.name if instance.count|int == 1 else [instance.name, loop.index] | join() %}
+  ########### {{ iname }} ###########
+
+
+    {% if instance.floating_ip | default(false) or instance.public_dns | default(false) %}
+  fip_{{ iname }}:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: {{ provider_network }}
+           
+  fip_association_{{ iname }}:
+    type: OS::Nova::FloatingIPAssociation
+    properties:
+      floating_ip: { get_resource: fip_{{ iname }} }
+      server_id: { get_resource: server_{{ iname }} }
+    {% endif %}
+
+
+  server_{{ iname }}:
+    type: OS::Nova::Server
+    properties:
+      name: {{ iname }}
+      flavor: {{ instance.flavor.osp }}
+      key_name: {{ guid }}-infra_key
+      config_drive: True
+      block_device_mapping_v2:
+        - image: {{ instance.image_id | default(instance.image) }}
+          delete_on_termination: true
+          volume_size: {{ instance['rootfs_size'] | default(osp_default_rootfs_size) }}
+          boot_index: 0
+
+      user_data: |
+        #cloud-config
+        ssh_authorized_keys: {{ all_ssh_authorized_keys | to_json }}
+      user_data_format: RAW
+      networks:
+        - network: {{guid}}-{{ instance.network }}-network
+    {% if instance['metadata'] is defined %}
+      metadata: {{ instance.metadata | combine(default_metadata) | to_json }}
+    {% endif %}
+
+    {% if instance.tags is defined %}
+      # Convert EC2 tags
+      metadata:
+      {% for key, value in default_metadata.items() %}
+        '{{ key }}': {{ value | to_json }}
+      {% endfor %}
+      {% for tag in instance.tags %}
+        '{{ tag.key }}': {{ tag.value | to_json }}
+      {% endfor %}
+    {% endif %}
+
+      security_groups:
+    {% if instance.security_groups is defined %}
+      {% for security_group in instance.security_groups %}
+        - {{ guid }}-{{ security_group }}
+      {% endfor %}
+    {% endif %}
+
+
+    {% if instance.volumes is defined %}
+  #### Volumes for {{ iname }} ####
+      {% for volume in instance.volumes %}
+        {% set loopvolume = loop %}
+        {% set vname = ["volume", iname, loopvolume.index] | join('_') %}
+  {{ vname }}:
+    type: OS::Cinder::Volume
+    properties:
+      size: {{ volume.volume_size | default(volume.size) }}
+          {% if volume.volume_name is defined %}
+      name: {{ volume.volume_name | default(volume.name) }}
+          {% endif %}
+
+  volume_attachment_{{ vname }}:
+    type: OS::Cinder::VolumeAttachment
+    properties:
+      volume_id: {get_resource: {{ vname }}}
+      instance_uuid: {get_resource: server_{{ iname }}}
+      {% endfor %}
+    {% endif %}
+  {% endfor %}
+{% endfor %}
+
+{% if additional_fips | default( '' ) | length > 0 %}
+{% for fipname in additional_fips %}
+  {{ fipname }}:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: "{{ additional_fips[fipname].network }}"
+{% if additional_fips[fipname].description is defined %}
+      value_specs:
+        description: "{{ additional_fips[fipname].description }}"
+{% endif %}
+{% endfor %}
+{% endif %}
+                             

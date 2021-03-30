@@ -1,0 +1,12 @@
+PRJ_NAME="dm7-red"
+PRJ_DESCRIPTION="Red Hat Decision Manager 7 Realtime Event Decisioning Demo"
+
+DECISION_CENTRAL_REST_URL="$DC_URL/rest"
+SPACE="DemoSpace"
+DEFAULT_GROUPID="com.redhat"
+#PROJECT_GIT="https://github.com/DuncanDoyle/IT_Orders.git"
+PROJECT_GIT="https://github.com/jbossdemocentral/rhdm-realtime-event-decisioning-demo-personalization-repo"
+PROJECT_ID="Personalization_Rules"
+PROJECT_NAME="Personalization_Rules"
+USERNAME="dmAdmin"
+PASSWORD="redhatdm1!"

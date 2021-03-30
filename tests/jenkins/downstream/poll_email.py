@@ -6,6 +6,7 @@ import re
 import os
 import sys
 import argparse
+from socket import error as SocketError
 from time import sleep
 
 credentials = os.environ['credentials']
@@ -50,9 +51,18 @@ else:
 
 
 def connect():
-    M = imaplib.IMAP4_SSL(imap_server)
-    M.login(username, password)
-    return M
+    max_retries = 10
+    retries=0
+    while retries < max_retries:
+        try:
+            M = imaplib.IMAP4_SSL(imap_server)
+            M.login(username, password)
+            return M
+        except imaplib.IMAP4.error as err:
+            print("IMAP4 error: {0}".format(err))
+            print("[%d / %d] retrying to login.. wait %d sec" % (retries, max_retries, 2**retries))
+            sleep(2**retries)
+            retries += 1
 
 def disconnect(M):
     try:
@@ -67,7 +77,8 @@ def wait_email(pattern, time_window):
     while max_retries > 0:
         try:
             M.select('INBOX')
-            typ, data = M.search(None, '(UNSEEN HEADER Subject "%s")' % (guid))
+            # Add _COMPLETED here because gmail do not follow RFC and matches words, not substrings
+            typ, data = M.search(None, '(UNSEEN (OR HEADER Subject "%s" HEADER Subject "%s_COMPLETED"))' % (guid, guid))
             for num in data[0].split():
                 typ, data = M.fetch(num, '(RFC822)')
                 email_message = email.message_from_string(data[0][1])
@@ -93,6 +104,12 @@ def wait_email(pattern, time_window):
 
         except imaplib.IMAP4.error as err:
             print("IMAP4 error: {0}".format(err))
+            print("reconnecting")
+            # reconnect
+            disconnect(M)
+            M = connect()
+        except SocketError as err:
+            print("SOCKET error: {0}".format(err))
             print("reconnecting")
             # reconnect
             disconnect(M)

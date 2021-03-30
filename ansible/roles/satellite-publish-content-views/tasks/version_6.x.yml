@@ -1,0 +1,101 @@
+---
+
+- hosts: satellite
+  
+  collections:
+   - theforeman.foreman
+
+  vars:
+    today: "{{ ansible_date_time.date }}"
+    updated_repo_ids: []
+    updated_repo_names: []
+    updated_content_view_ids: []
+    updated_content_view_names: []
+    updated_composite_view_ids: []
+    updated_composite_view_names: []
+    content_views_for_publishing: []
+    published_views: []
+    
+  tasks:
+   - name: get task info for all sync tasks that finished today
+     theforeman.foreman.foreman_search_facts:
+       username: "{{ satellite_admin }}"
+       password: "{{ satellite_admin_password }}"
+       server_url: "https://{{ publicname }}"
+       organization: "{{ org }}"
+       validate_certs: no
+       resource: foreman_tasks
+       search: action ~ Synchronize and result = success and ended_at = today
+     register: synced_tasks_details
+
+   - name: create a list of repository ids for updated repos
+     set_fact:
+       updated_repo_ids: "{{ updated_repo_ids + [ item.input.repository.id ] }}"
+       updated_repo_names: "{{ updated_repo_names + [ item.input.repository.name ] }}"
+     when: item.input.contents_changed == true
+     loop: "{{ synced_tasks_details.resources }}"
+     loop_control:
+       label: "{{ item.action }}"
+
+   - name: get details for all content views
+     theforeman.foreman.foreman_search_facts:
+       username: "{{ satellite_admin }}"
+       password: "{{ satellite_admin_password }}"
+       server_url: "https://{{ publicname }}"
+       organization: "{{ org }}"
+       validate_certs: no
+       resource: content_views
+     register: content_view_details
+
+   - name: find content views which contain updated repos
+     set_fact:
+       updated_content_view_ids: "{{ updated_content_view_ids + [ item.1.id ] }}"
+       updated_content_view_names: "{{ updated_content_view_names + [ item.1.name ] }}"
+     when: item.0 | int in item.1.repository_ids
+     loop: "{{ updated_repo_ids | product(content_view_details.resources) | list }}"
+     loop_control:
+       label: "{{ item.1.id }}"
+
+   - name: remove duplicate entries from content view IDs
+     set_fact:
+      updated_content_view_ids: "{{ updated_content_view_ids | unique }}"
+      updated_content_view_names: "{{ updated_content_view_names | unique }}"
+
+   - name: find matching composite content views
+     set_fact:
+       updated_composite_view_ids: "{{ updated_composite_view_ids + [ item.1.id ] }}"
+       updated_composite_view_names: "{{ updated_composite_view_names + [ item.1.name ] }}"
+     when: item.0 in (lookup('flattened',[ item.1.content_view_components | map(attribute='content_view') | map(attribute='id') | list ])) and item.1.composite == true
+     loop: "{{ updated_content_view_ids | product(content_view_details.resources) | list }}"
+     loop_control:
+       label: "{{ item.1.id }}"
+
+   - name: remove duplicate entries from composite content view IDs
+     set_fact:
+      updated_composite_view_ids: "{{ updated_composite_view_ids | flatten | unique }}"
+      updated_composite_view_names: "{{ updated_composite_view_names | flatten | unique }}"
+
+   - name: Collate list of all content views to update
+     set_fact:
+      content_views_for_publishing: "{{ updated_content_view_names }} + {{ updated_composite_view_names }}"
+
+   - name: final publish list - removing composite views set to auto-publish and any published less than a day ago
+     set_fact:
+       published_views: "{{ published_views + [ item.0 ] }}"
+     when: item.1.name == item.0 and item.1.auto_publish != true and ( ((today | to_datetime('%Y-%m-%d')) - (item.1.last_published | to_datetime('%Y-%m-%d %H:%M:%S %Z'))).days >= 0 )
+     loop: "{{ content_views_for_publishing | product(content_view_details.resources) | list }}"
+     loop_control:
+       label: "{{ item.0 }}"
+
+   - name: Publish content views and promote to Library. Not idempotent
+     theforeman.foreman.katello_content_view_version:
+       username: "{{ satellite_admin }}"
+       password: "{{ satellite_admin_password }}"
+       server_url: "https://{{ publicname }}"
+       organization: "{{ org }}"
+       validate_certs: false
+       content_view: "{{ item }}"
+       lifecycle_environments:
+         - Library
+     loop: "{{ published_views }}"
+

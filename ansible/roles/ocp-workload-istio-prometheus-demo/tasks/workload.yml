@@ -1,0 +1,207 @@
+---
+
+- name: check if user is cluster admin
+  shell: "oc get project default"
+  register: default_project_result
+  ignore_errors: true
+  changed_when: false
+
+- fail:
+    msg: "User does not have cluster-admin rights to install Istio"
+  when: default_project_result is failed
+
+- name: define user ocp_operator_project
+  set_fact:
+    ocp_projects: "istio-operator"
+
+- name: Parse Git Repo into Vars
+  set_fact:
+    git_user: "{{ git_repo | regex_search(regexp,'\\2') }}"
+    git_repo_short: "{{ git_repo | regex_search(regexp,'\\3') }}"
+  vars:
+    regexp: '^https:\/\/(.*)\/(.*)\/(.*)\.git'
+
+- debug:
+    var: git_repo_short
+
+- debug:
+    var: git_user
+
+- name: Make sure we go back to default project
+  shell: "oc project default"
+
+
+
+# #######         Istio Control Plane      ############## #
+
+- name: Determine if istio-operator namespace already exists.  Provision istio operator once per OCP cluster
+  command: "oc get projects -o name"
+  register: ocp_projects
+  changed_when: false
+
+- name: Create istio-operator project
+  command: "oc new-project istio-operator"
+  when: '"project.project.openshift.io/" ~ "istio-operator" not in ocp_projects.stdout_lines'
+
+- name: Provision Istio Operator
+  shell:  "oc new-app -f https://raw.githubusercontent.com/Maistra/openshift-ansible/{{istio_maistra_branch}}/istio/istio_{{istio_community_or_product_images}}_operator_template.yaml --param=OPENSHIFT_ISTIO_MASTER_PUBLIC_URL={{master_public_url}}"
+  when: '"project.project.openshift.io/" ~ "istio-operator" not in ocp_projects.stdout_lines'
+
+- name: wait for istio operator to initialize
+  shell: "oc get deployment istio-operator -o jsonpath='{.status.availableReplicas}' -n istio-operator"
+  register: istio_operator_replicas
+  until: istio_operator_replicas.stdout == "1"
+  retries: "30"
+  delay: "30"
+
+- name: Wait for Istio Operator to initialize
+  shell: "oc logs $(oc get pods -n istio-operator -l name=istio-operator -o=jsonpath='{.items[0].metadata.name}') -n istio-operator |grep 'Watching resource istio'"
+  register: istio_operator_logs
+  until: istio_operator_logs != ""
+  retries: "30"
+  delay: "10"
+  ignore_errors: true
+
+- name: Copy istio-installation template to known path
+  template:
+    src: templates/istio-installation.yaml.j2
+    dest: /tmp/istio-installation.yaml
+  when: '"project.project.openshift.io/" ~ "istio-operator" not in ocp_projects.stdout_lines'
+
+- name: Deploy Istio Control Plane
+  shell: "oc create -n istio-operator -f /tmp/istio-installation.yaml"
+  when: '"project.project.openshift.io/" ~ "istio-system" not in ocp_projects.stdout_lines'
+
+- name: wait for istio sidecar-injector to initialize
+  shell: "oc get deployment istio-sidecar-injector -o jsonpath='{.status.availableReplicas}' -n istio-system"
+  register: sidecar_injector_replicas
+  until: sidecar_injector_replicas.stdout == "1"
+  retries: "30"
+  delay: "30"
+
+########## Setup Hello-World Projects ############
+- name: Create Hello World CI/CD Project
+  shell: |
+    oc new-project {{ocp_project_name}}-cicd --display-name='{{ocp_project_display_name}} CI/CD'
+    oc process -f https://raw.githubusercontent.com/{{git_user[0]}}/{{git_repo_short[0]}}/{{git_branch}}/k8s/production/cicd-project-template.yaml -p SOURCE_REPOSITORY_URL={{git_repo}} -p BRANCH={{git_branch}} -p APP_SUBDOMAIN={{ocp_apps_domain}} | oc create -f-
+    oc set resources deploymentconfig jenkins --limits=cpu=1500m,memory=1Gi
+
+- name: Start build
+  shell: oc start-build hello-world
+
+- name: Wait for build to complete
+  shell: oc logs bc/hello-world --follow
+
+- name: Wait for Jenkins Pod to be available
+  shell: "oc get dc jenkins -o jsonpath='{.status.availableReplicas}'"
+  register: jenkins_replicas
+  until: jenkins_replicas.stdout == "1"
+  retries: "30"
+  delay: "30"
+
+- name: Create Hello World Application Project
+  shell: |
+    oc new-project {{ocp_project_name}}-prod --display-name='{{ocp_project_display_name}} Production'
+    oc delete limitrange --all
+
+- name: Setup Service Account Access
+  shell: |
+    oc adm policy add-scc-to-user anyuid -z default -n {{ocp_project_name}}-prod
+    oc adm policy add-scc-to-user privileged -z default -n {{ocp_project_name}}-prod
+    oc policy add-role-to-user edit system:serviceaccount:{{ocp_project_name}}-cicd:jenkins -n {{ocp_project_name}}-prod
+
+- name: Create Image Stream
+  shell: "oc create is hello-world"
+
+- name: Tag images
+  shell: |
+    oc tag {{ocp_project_name}}-cicd/hello-world:latest {{ocp_project_name}}-prod/hello-world:canary
+    oc tag {{ocp_project_name}}-cicd/hello-world:latest {{ocp_project_name}}-prod/hello-world:production
+
+- name: Deploy Apps
+  shell: |
+    oc new-app --name=hello-world-canary --image-stream=hello-world:canary --labels=app=hello-world-istio,version=canary
+    oc new-app --name=hello-world-production --image-stream=hello-world:production --labels=app=hello-world-istio,version=production
+
+# Delete the generated services for each DC because we're going to create one that selects pods from both
+- name: Delete Services that aren't needed
+  shell: |
+    oc delete svc hello-world-canary
+    oc delete svc hello-world-production
+
+- name: Create Service for Istio to Use
+  shell: oc create svc clusterip hello-world-istio --tcp=8080:8080
+
+- name: Expose Metrics Ports
+  shell: |
+    oc patch svc/hello-world-istio --patch '{"spec":{"ports":[{"name": "metrics","port": '8000',"protocol": "TCP","targetPort":'8000'}]}}'
+
+- name: Add Sidecar Injection
+  shell: |
+    oc patch dc/hello-world-production --patch '{"spec":{"template":{"metadata":{"annotations":{"sidecar.istio.io/inject":"true"}}}}}'
+    oc patch dc/hello-world-canary --patch '{"spec":{"template":{"metadata":{"annotations":{"sidecar.istio.io/inject":"true"}}}}}'
+
+- name: Create Prometheus Subscription
+  shell: "oc create -f https://raw.githubusercontent.com/{{git_user[0]}}/{{git_repo_short[0]}}/{{git_branch}}/k8s/monitoring/prometheus-operator-subscription.yaml"
+
+- name: Create Prometheus Instance
+  shell: "oc create -f https://raw.githubusercontent.com/{{git_user[0]}}/{{git_repo_short[0]}}/{{git_branch}}/k8s/monitoring/prometheus.yaml"
+
+- name: Create Prometheus Service Monitor
+  shell: "oc create -f https://raw.githubusercontent.com/{{git_user[0]}}/{{git_repo_short[0]}}/{{git_branch}}/k8s/monitoring/prometheus-service-monitor.yaml"
+
+- name: Create Prometheus Alert Rule
+  shell: "oc create -f https://raw.githubusercontent.com/{{git_user[0]}}/{{git_repo_short[0]}}/{{git_branch}}/k8s/monitoring/prometheus-alert-rule.yaml"
+
+- name: Wait Prometheus Service to be Created
+  shell: "oc get svc -l operated-prometheus=true -o name"
+  register: prom_services
+  until: prom_services.stdout == "service/prometheus-operated"
+  retries: "30"
+  delay: "30"
+
+- name: Expose Prometheus
+  shell: "oc expose svc/prometheus-operated"
+
+- name: Scale Deployments to 2 Replicas
+  shell: |
+    oc scale dc/hello-world-production --replicas=2 --timeout=0s
+    oc scale dc/hello-world-canary --replicas=2 --timeout=0s
+
+- name: Cancel rollouts
+  shell: |
+    oc rollout cancel dc/hello-world-production
+    oc rollout cancel dc/hello-world-canary
+
+- name: Disable Triggers
+  shell: |
+    oc set triggers dc/hello-world-production --remove-all=true
+    oc set triggers dc/hello-world-canary --remove-all=true
+
+- name: Copy Virtual Service template to known path
+  template:
+    src: templates/istio-virtual-service-init.yaml.j2
+    dest: /tmp/istio-virtual-service-init.yaml
+
+- name: Copy Istio Gateway template to known path
+  template:
+    src: templates/istio-gateway.yaml.j2
+    dest: /tmp/istio-gateway.yaml
+
+- name: Copy Istio Destination Rule to known path
+  template:
+    src: templates/istio-destination-rule.yaml.j2
+    dest: /tmp/istio-destination-rule.yaml
+
+- name: Deploy Istio Virtual Service, Gateway and Destination Rule
+  shell: |
+    oc create -f /tmp/istio-virtual-service-init.yaml
+    oc create -f /tmp/istio-gateway.yaml
+    oc create -f /tmp/istio-destination-rule.yaml
+
+# This is a workaround to a problem with `upstream connect error or disconnect/reset before headers` errors
+- name: Delete default meshpolicy
+  shell: oc delete meshpolicy default -n istio-system
+
+- name: Expose Route through Istio Ingress Gateway
+  shell: oc expose service istio-ingressgateway --name=hello-world-istio --port=80 --generator="route/v1" --hostname=hello-world-istio.{{ocp_apps_domain}} -n istio-system

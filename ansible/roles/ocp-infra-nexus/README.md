@@ -1,38 +1,33 @@
-Role Name
+ocp-infra-nexus
 =========
 
-A brief description of the role goes here.
+This role installs a Sonatype Nexus 3 on an OpenShift Cluster.
 
 Requirements
 ------------
 
-Any pre-requisites that may not be covered by Ansible itself or the role should be mentioned here. For instance, if the role uses the EC2 module, it may be a good idea to mention in this section that the boto package is required.
+Running OpenShift 3.9 or higher Cluster
 
 Role Variables
 --------------
 
-A description of the settable variables for this role should go here, including any variables that are in defaults/main.yml, vars/main.yml, and any variables that can/should be set via parameters to the role. Any variables that are read from other roles and/or the global scope (ie. hostvars, group vars, etc.) should be mentioned here as well.
+All variables are optional. If a variable is not passed when calling the role the defaults are being used.
 
-Dependencies
-------------
-
-A list of other roles hosted on Galaxy should go here, plus any details in regards to parameters that may need to be set for other roles, or variables that are used from other roles.
+|Variable Name|Required|Default Value
+|------------ |----------- |-----------
+|*nexus_project*|Yes|nexus
+|*nexus_project_display_name*|Yes|Sonatype Nexus
+|*nexus_volume_capacity*|Yes|10Gi
+|*nexus_memory_request*|Yes|2Gi
+|*nexus_memory_limit*|Yes|6Gi
+|*nexus_cpu_request*|Yes|1
+|*nexus_cpu_limit*|Yes|4
+|*nexus_version*|Yes|3.12.1
 
 Example Playbook
 ----------------
 
-Including an example of how to use your role (for instance, with variables passed in as parameters) is always nice for users too:
-
-    - hosts: servers
+    - hosts: masters
+      run_once: true
       roles:
-         - { role: username.rolename, x: 42 }
-
-License
--------
-
-BSD
-
-Author Information
-------------------
-
-An optional section for the role authors to include contact information, or a website (HTML is not allowed).
+        - { role: "ocp-infra-nexus", nexus_project: "sonatype-nexus" }

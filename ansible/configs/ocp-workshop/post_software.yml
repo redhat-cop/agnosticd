@@ -1,29 +1,41 @@
 ---
 - name: Step 00xxxxx post software
   hosts: support
-  gather_facts: False
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  gather_facts: false
+  become: true
   tasks:
-  - name: Create user vols
-    shell: "mkdir -p /srv/nfs/user-vols/vol{1..{{user_vols}}}"
-  - name: chmod the user vols
-    shell: "chmod -R 777 /srv/nfs/user-vols"
+  - when:
+    - install_nfs | default(true) | bool
+    - not install_dynamic_nfs | default(false) | bool
+    block:
+    - name: Create user vols
+      shell: "mkdir -p /srv/nfs/user-vols/vol{1..{{user_vols}}}"
+    - name: chmod the user vols
+      shell: "chmod -R 777 /srv/nfs/user-vols"
+  - when:
+    - install_nfs | default(true) | bool
+    - install_dynamic_nfs | default(false) | bool
+    name: Create Directory for dynamic provisioning on NFS Server
+    file:
+      path: /srv/nfs/user-vols
+      state: directory
+      owner: nfsnobody
+      group: nfsnobody
+      mode: 0777
 
 - name: Step 00xxxxx post software
   hosts: bastions
   run_once: true
-  gather_facts: False
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  gather_facts: false
+  become: true
   tasks:
-  - when: install_nfs|bool
+  - when:
+    - install_nfs|bool
+    - not install_dynamic_nfs | default(false) | bool
     block:
     - name: get nfs Hostname
       set_fact:
-        nfs_host: "{{ groups['support']|sort|first }}"
+        nfs_host: "{{ groups['support'] | sort | first }}"
 
     - set_fact:
         pv_size: '10Gi'
@@ -32,50 +44,66 @@
 
     - name: Generate PV file
       template:
-        src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/pvs.j2"
+        src: "./files/pvs.j2"
         dest: "/root/pvs-{{ env_type }}-{{ guid }}.yml"
-      tags: [ gen_pv_file ]
+      tags: [gen_pv_file]
       when: pv_list.0 is defined
 
     - set_fact:
-        pv_size: "{{user_vols_size}}"
+        pv_size: "{{ user_vols_size }}"
         persistentVolumeReclaimPolicy: Recycle
 
       notify: restart nfs services
-      run_once: True
+      run_once: true
 
     - name: Generate user vol PV file
       template:
-        src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/userpvs.j2"
+        src: "./files/userpvs.j2"
         dest: "/root/userpvs-{{ env_type }}-{{ guid }}.yml"
       tags:
-        - gen_user_vol_pv
+      - gen_user_vol_pv
 
-    - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
+    - shell: >-
+        oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml
+        || oc replace -f /root/pvs-{{ env_type }}-{{ guid }}.yml
       tags:
-        - create_user_pv
+      - create_user_pv
       when: pv_list.0 is defined
 
-    - shell: 'oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
+    - shell: >-
+        oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml
+        || oc replace -f /root/userpvs-{{ env_type }}-{{ guid }}.yml
       tags:
-        - create_user_pv
+      - create_user_pv
+  - when:
+    - install_nfs | bool
+    - install_dynamic_nfs | default(false) | bool
+    block:
+    - name: get nfs Hostname
+      set_fact:
+        nfs_host: "{{ groups['support'] | sort | first }}"
+    - name: Deploy Dynamic NFS Provisioner
+      include_role:
+        name: "ocp-dynamic-nfs-provisioner"
+      vars:
+        nfs_provisioner_nfs_server_hostname: "{{ nfs_host }}"
+        nfs_provisioner_storage_class_is_default: true
+        nfs_provisioner_storage_class_archiveOnDelete: true
 
 - name: For CNS change default storage class to glusterfs-storage (3.9.27, 3.9.30)
   hosts: masters
   run_once: true
-  become: yes
-  gather_facts: False
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  become: true
+  gather_facts: false
   tags:
   - env-specific
   - env-specific_infra
   - storage-class
   tasks:
   - when:
-      - osrelease is version_compare('3.9.27', '>=')
-      - osrelease is version_compare('3.9.30', '<=')
-      - install_glusterfs|bool
+    - osrelease is version_compare('3.9.27', '>=')
+    - osrelease is version_compare('3.9.30', '<=')
+    - install_glusterfs | bool
     block:
     - name: Set glusterfs-storage class to default
       command: >
@@ -83,37 +111,37 @@
         -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "true"}}}'
       register: changesc_r
       failed_when:
-        - changesc_r.stdout.find('storageclass "glusterfs-storage" not patched') == -1 
-        - changesc_r.rc != 0
+      - changesc_r.stdout.find('storageclass "glusterfs-storage" not patched') == -1
+      - changesc_r.rc != 0
       changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage" patched') != -1
     - name: Remove default from glusterfs-storage-block class
       register: changesc_r
       changed_when: changesc_r.stdout.find('storageclass "glusterfs-storage-block" patched') != -1
       failed_when:
-        - changesc_r.stdout.find('storageclass "glusterfs-storage-block" not patched') == -1 
-        - changesc_r.rc != 0
+      - changesc_r.stdout.find('storageclass "glusterfs-storage-block" not patched') == -1
+      - changesc_r.rc != 0
       command: >
         oc patch storageclass glusterfs-storage-block
         -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "false"}}}'
 
 - name: Configure Bastion for CF integration
   hosts: bastions
-  become: yes
-  gather_facts: False
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/mgr_users.yml"
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  become: true
+  gather_facts: false
   tags:
   - env-specific
   - cf_integration
   - opentlc_integration
   tasks:
+  - name: Include mgr_users vars
+    include_vars:
+      file: mgr_users.yml
+
   - name: Configure Bastion
     include_role:
-      name: "{{ ANSIBLE_REPO_PATH }}/roles/opentlc-integration"
+      name: opentlc-integration
     vars:
-      no_log: yes
+      no_log: true
     when: install_opentlc_integration|bool
   - name: Copy /root/.kube to ~opentlc-mgr/
     command: "cp -rf /root/.kube /home/opentlc-mgr/"
@@ -125,15 +153,13 @@
       path: /home/opentlc-mgr/.kube
       owner: opentlc-mgr
       group: opentlc-mgr
-      recurse: yes
+      recurse: true
 
 - name: env-specific infrastructure
   hosts: masters
   run_once: true
-  become: yes
-  gather_facts: False
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  become: true
+  gather_facts: false
   tags:
   - env-specific
   - env-specific_infra
@@ -153,13 +179,16 @@
   - name: Create admin_project project (for OCP before 3.10)
     command: "oc adm new-project {{admin_project}} --admin {{admin_user}} --node-selector='env=infra'"
     when:
-    - result | failed
+    - result is failed
     - osrelease is version_compare("3.10", "<")
 
   - name: Create admin_project project (for OCP 3.10+)
-    command: "oc adm new-project {{admin_project}} --admin {{admin_user}} --node-selector='node-role.kubernetes.io/infra=true'"
+    command: >-
+      oc adm new-project {{admin_project}}
+      --admin {{admin_user}}
+      --node-selector='node-role.kubernetes.io/infra=true'
     when:
-    - result | failed
+    - result is failed
     - osrelease is version_compare("3.10", ">=")
 
   - name: Make admin_project project network global
@@ -177,25 +206,27 @@
     shell: oc annotate namespace openshift-template-service-broker openshift.io/node-selector="" --overwrite
     ignore_errors: true
     when:
-      - osrelease is version_compare('3.7', '>=')
-      - osrelease is version_compare('3.10', '<')
+    - osrelease is version_compare('3.7', '>=')
+    - osrelease is version_compare('3.10', '<')
 
 - name: Remove all users from self-provisioners group
   hosts: masters
   run_once: true
-  become: yes
-  gather_facts: False
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  tags: [ env-specific, remove_self_provisioners ]
+  become: true
+  gather_facts: false
+  tags: [env-specific, remove_self_provisioners]
   tasks:
-  - when: remove_self_provisioners|bool
+  - when: remove_self_provisioners | bool
     block:
     - name: Set clusterRoleBinding auto-update to false
-      command: oc annotate -n default --overwrite clusterrolebinding.rbac self-provisioners rbac.authorization.kubernetes.io/autoupdate=false
+      command: >-
+        oc annotate -n default
+        --overwrite clusterrolebinding.rbac self-provisioners
+        rbac.authorization.kubernetes.io/autoupdate=false
 
     - name: Remove system:authenticated from self-provisioner role
-      command: "oc adm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth"
+      command: >-
+        oc adm policy remove-cluster-role-from-group self-provisioner system:authenticated system:authenticated:oauth
       ignore_errors: true
 
     - name: create our own OPENTLC-PROJECT-PROVISIONERS
@@ -207,17 +238,15 @@
 
 - name: Project Request Template
   hosts: masters
-  gather_facts: False
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  gather_facts: false
+  become: true
   tags:
   - env-specific
   - project_request
   tasks:
   - name: Copy project request template to master
-    copy:
-      src: ./files/project-template.yml
+    template:
+      src: ./files/project-template.j2
       dest: /root/project-template.yml
 
   - name: Check for project request template
@@ -227,7 +256,7 @@
 
   - name: Create project request template in default project
     shell: "oc create -f /root/project-template.yml -n default || oc replace -f /root/project-template.yml -n default"
-    when: request_template | failed
+    when: request_template is failed
 
   - name: Update master config file to use project request template
     lineinfile:
@@ -237,42 +266,50 @@
       state: present
     register: master_config
 
+  - name: Label default Namespace for NetworkPolicy
+    command: oc label namespace default name=default
+    when: ovs_plugin == "networkpolicy"
+    ignore_errors: true
+
   - name: Add Project request message
     replace:
       dest: '/etc/origin/master/master-config.yaml'
       regexp: 'projectRequestMessage.*'
       replace: "projectRequestMessage: '{{project_request_message}}'"
-      backup: yes
+      backup: true
 
   - name: Restart master service (Pre 3.7)
     service:
       name: atomic-openshift-master
       state: restarted
     when:
-      - master_config.changed
-      - osrelease is version_compare('3.7', '<')
+    - master_config.changed
+    - osrelease is version_compare('3.7', '<')
 
   - name: Restart master API service (3.7 - 3.9)
     service:
       name: atomic-openshift-master-api
       state: restarted
     when:
-      - master_config.changed
-      - osrelease is version_compare('3.7', '>=')
-      - osrelease is version_compare('3.10', '<')
+    - master_config.changed
+    - osrelease is version_compare('3.7', '>=')
+    - osrelease is version_compare('3.10', '<')
 
   - name: Restart master API Pods (3.10+)
     command: /usr/local/bin/master-restart api
     when:
-      - master_config.changed
-      - osrelease is version_compare('3.10', '>=')
+    - master_config.changed
+    - osrelease is version_compare('3.10', '>=')
+
+  - name: Wait for API Server to be back up
+    wait_for:
+      port: "{{ master_api_port }}"
+      delay: 5
 
 - name: node admin configs
   hosts: nodes
-  gather_facts: False
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  gather_facts: false
+  become: true
   tags:
   - env-specific
   - env_specific_images
@@ -282,203 +319,101 @@
     with_items: '{{ env_specific_images }}'
     when: env_specific_images.0 is defined
 
-- name: Import jenkins images for OCP 3.7 and newer
-  hosts: masters
-  run_once: true
-  become: yes
-  gather_facts: False
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  tags:
-  - env-specific
-  - env_specific_images
-  tasks:
-  - when: osrelease is version_compare('3.7', '>=')
-    block:
-    - name: Remove default Jenkins ImageStream
-      command: oc delete is jenkins -n openshift
-      ignore_errors: true
-
-    - name: Import jenkins from Red Hat Registry
-      command: oc tag --source=docker registry.access.redhat.com/openshift3/jenkins-2-rhel7:v{{ repo_version }} openshift/jenkins:v{{ repo_version }} -n openshift
-      ignore_errors: true
-
-    - name: Tag Jenkins jenkins:latest
-      command: oc tag openshift/jenkins:v{{ repo_version }} openshift/jenkins:latest -n openshift
-      register: octag_result
-      retries: 5
-      delay: 2
-      until: octag_result is succeeded
-      ignore_errors: true
-
-    - name: Tag Jenkins jenkins:2
-      command: oc tag openshift/jenkins:v{{ repo_version }} openshift/jenkins:2 -n openshift
-      register: octag_result
-      retries: 5
-      delay: 2
-      until: octag_result is succeeded
-      ignore_errors: true
-
-- name: Fix NFS PV Recycling for OCP 3.7 and newer
-  gather_facts: False
-  become: yes
-  hosts:
-  - nodes
-  - infranodes
-  - masters
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  tags:
-  - env-specific
-  - install_nfs
-  tasks:
-  - name: Fix NFS PV Recycling
-    when:
-    - install_nfs|d(True)|bool
-    block:
-    - name: Pull ose-recycler Image
-      command: docker pull registry.access.redhat.com/openshift3/ose-recycler:latest
-      register: pull_result
-      retries: 5
-      delay: 10
-      until: pull_result is succeeded
-      when:
-      - osrelease is version_compare('3.7', '>=')
-
-    - name: Tag ose-recycler Image (for OCP 3.7 - 3.9)
-      command: >
-        docker tag registry.access.redhat.com/openshift3/ose-recycler:latest
-        registry.access.redhat.com/openshift3/ose-recycler:v{{ osrelease }}
-      when:
-      - osrelease is version_compare('3.7', '>=')
-      - osrelease is version_compare('3.10', '<')
-
-    - name: Tag ose-recycler Image (for OCP 3.10+)
-      command: >
-        docker tag registry.access.redhat.com/openshift3/ose-recycler:latest
-        registry.access.redhat.com/openshift3/ose-recycler:v1.10.0
-      when:
-      - osrelease is version_compare('3.10', '>=')
-
+# This whole block should not be necessary since tags in the registry
 - name: Fix CRI-O Garbage Collection DaemonSet for OCP 3.9 (up to 3.9.25)
-  gather_facts: False
-  become: yes
+  gather_facts: false
+  become: true
   hosts: masters
   run_once: true
-  vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tasks:
   - name: Fix cri-o garbage collection
     when:
     - osrelease is version_compare('3.9.0', '>=')
     - osrelease is version_compare('3.9.25', '<=')
     - container_runtime == "cri-o"
-    block: 
+    block:
     - name: Patch dockergc DaemonSet
-      shell: "oc patch daemonset dockergc --patch='\"spec\": { \"template\": { \"spec\": { \"containers\": [ { \"command\": [ \"/usr/bin/oc\" ], \"name\": \"dockergc\" } ] } } }' -n default"
+      shell: >-
+        oc patch daemonset dockergc
+        --patch='"spec": { "template": { "spec": { "containers": [ { "command": [ "/usr/bin/oc\" ],
+        "name": "dockergc" } ] } } }' -n default
       ignore_errors: true
     - name: Redeploy dockergc DaemonSet pods
-      shell: "oc delete pod $(oc get pods -n default|grep dockergc|awk -c '{print $1}') -n default"
-
-# - name: Fix Error pods when using CRI-O (3.10+)
-#   gather_facts: False
-#   become: yes
-#   hosts: masters
-#   run_once: true
-#   vars_files:
-#     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-#   tasks:
-#   - name: Fix cri-o containers in error state
-#     when:
-#     - osrelease is version_compare('3.10.0', '>=')
-#     - container_runtime == "cri-o"
-#     block: 
-#     - name: Find Elasticsearch Deployment Config
-#       shell: "oc get dc -o=custom-columns=NAME:.metadata.name -n openshift-logging|grep data"
-#       register: logging_dc
-#     - name: Redeploy elasticsearcht pods
-#       shell: "oc rollout latest {{ logging_dc.stdout }} -n openshift-logging"
-#     - name: Redeploy asb
-#       shell: "oc rollout latest asb -n openshift-ansible-broker"
+      shell: "oc delete pod $(oc get pods -n default | grep dockergc | awk -c '{print $1}') -n default"
 
 # Install OpenWhisk
 - name: Install OpenWhisk
   hosts: masters
   run_once: true
-  gather_facts: False
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  gather_facts: false
+  become: true
   tags:
   - env-specific
   - install_openwhisk
   tasks:
   - include_role:
-      name: "{{ ANSIBLE_REPO_PATH }}/roles/ocp-infra-openwhisk"
+      name: ocp-infra-openwhisk
     when:
-      - install_openwhisk|d(False)|bool
+    - install_openwhisk | default(false) | bool
 
 # Set up Prometheus/Node Exporter/Alertmanager/Grafana
 # on the OpenShift Cluster
 - name: Install Prometheus and Grafana (Pre 3.10)
-  gather_facts: False
-  become: yes
+  gather_facts: false
+  become: true
   hosts:
   - nodes
   - infranodes
   - masters
   - bastions
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tags:
-    - install_prometheus
+  - install_prometheus
   tasks:
-    - include_role:
-        name: "{{ ANSIBLE_REPO_PATH }}/roles/ocp-infra-prometheus-pre310"
-      when:
-      - install_prometheus|d(False)|bool
-      - osrelease is version_compare("3.10", "<")
+  - include_role:
+      name: "ocp-infra-prometheus-pre310"
+    when:
+    - install_prometheus |default(false) | bool
+    - osrelease is version_compare("3.10", "<")
 
-# Deploy Grafana Manually until the install playbooks can
-# (3.10 and onwards)
-- name: Pre-pull Grafana Image (3.10+)
-  gather_facts: False
-  become: yes
+# Deploy Grafana Manually for OCP 3.10
+- name: Pre-pull Grafana Image (3.10)
+  gather_facts: false
+  become: true
   hosts:
   - infranodes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tags:
   - install_prometheus
   tasks:
   - name: Ensure Grafana Image is on Infranodes
     shell: "docker pull docker.io/mrsiano/grafana-ocp:latest"
     when:
-    - install_prometheus|d(False)|bool
+    - install_prometheus | default(false) | bool
     - osrelease is version_compare("3.10", ">=")
+    - osrelease is version_compare("3.11", "<")
 
-- name: Install Grafana (3.10+)
-  gather_facts: False
-  become: yes
+- name: Install Grafana (3.10)
+  gather_facts: false
+  become: true
   hosts:
   - bastions
   run_once: true
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tags:
   - install_prometheus
   tasks:
   - when:
-    - install_prometheus|bool
+    - install_prometheus | bool
     - osrelease is version_compare("3.10", ">=")
+    - osrelease is version_compare("3.11", "<")
     block:
     - name: Check if Grafana is already there
       command: "oc get project openshift-grafana"
       register: grafana_exists
-      changed_when: False
+      changed_when: false
       ignore_errors: true
     - name: Run Grafana Installation Playbook
-      shell: "ansible-playbook -i /etc/ansible/hosts /usr/share/ansible/openshift-ansible/playbooks/openshift-grafana/config.yml"
+      shell: >-
+        ansible-playbook -i /etc/ansible/hosts
+        /usr/share/ansible/openshift-ansible/playbooks/openshift-grafana/config.yml
       when: grafana_exists is failed
     - name: Add admin permissions to admin_user for Grafana project
       shell: "oc policy add-role-to-user admin {{admin_user}} -n openshift-grafana"
@@ -487,15 +422,15 @@
 - name: Customize Service Catalog UI for workshops
   hosts: masters
   run_once: true
-  gather_facts: False
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  gather_facts: false
+  become: true
   tasks:
   - name: Customize Service Catalog UI for workshops
     include_role:
-      name: "{{ ANSIBLE_REPO_PATH }}/roles/ocp-infra-enable-custom-catalog"
-    when: enable_workshops_catalog|d(False)|bool
+      name: "ocp-infra-enable-custom-catalog"
+    when:
+    - enable_workshops_catalog | default(false) | bool
+    - osrelease is version_compare("3.9", ">=")
   tags:
   - env-specific
   - custom_ui
@@ -503,17 +438,14 @@
 - name: Install Nexus
   hosts: masters
   run_once: true
-  gather_facts: False
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  gather_facts: false
+  become: true
   tasks:
   - include_role:
-      name: "{{ ANSIBLE_REPO_PATH }}/roles/ocp-infra-nexus"
+      name: ocp-infra-nexus
     vars:
-      desired_project: "{{admin_project}}"
-      nexus_version: "3"
-    when: install_nexus|d(False)|bool
+      nexus_project: "{{ admin_project }}"
+    when: install_nexus | default(false) | bool
   tags:
   - env-specific
   - install_nexus
@@ -521,146 +453,77 @@
 - name: Install AWS Broker
   hosts: masters
   run_once: true
-  gather_facts: False
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  gather_facts: false
+  become: true
   tags:
   - env-specific
   - install_aws_broker
   tasks:
   - include_role:
-      name: "{{ ANSIBLE_REPO_PATH }}/roles/ocp-infra-aws-service-broker"
-    when: install_aws_broker|d(False)|bool
+      name: ocp-infra-aws-service-broker
+    when: install_aws_broker | default(false) | bool
+
+- name: Install Open Service Broker for Azure
+  hosts: masters
+  run_once: true
+  gather_facts: false
+  become: true
+  tags:
+  - env-specific
+  - install_azure_broker
+  tasks:
+  - include_role:
+      name: ocp-infra-azure-service-broker
+    when: cloud_provider == 'azure'
 
 - name: Update Ansible (Automation) Broker to show images from DockerHub
   hosts: masters
   run_once: true
-  gather_facts: False
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  gather_facts: false
+  become: true
   tags:
   - env-specific
   - install_openshiftapb
   tasks:
   - name: Update ASB
     include_role:
-      name: "{{ ANSIBLE_REPO_PATH }}/roles/openshift-ansible-broker"
-    when: install_openshiftapb|d(False)|bool
+      name: openshift-ansible-broker
+    when: install_openshiftapb | default(false) | bool
 
 - name: Install Maistra (Istio)
   hosts: masters
   run_once: true
-  gather_facts: False
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  gather_facts: false
+  become: true
   tags:
   - env-specific
   - install_maistra
   tasks:
   - name: Install Maistra
     include_role:
-      name: "{{ ANSIBLE_REPO_PATH }}/roles/ocp-infra-maistra"
+      name: ocp-infra-maistra
     vars:
       openshift_master_public: "{{ master_lb_dns }}"
-    when: install_maistra|d(False)|bool
+    when: install_maistra | default(false) | bool
 
-# WK Added for RHTE
-# Install Infrastructure workloads first
-# - name: Install ocp-infra workloads
-#   hosts: masters
-#   gather_facts: false
-#   run_once: true
-#   become: yes
-#   vars_files:
-#     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-#     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-#   tasks:
-#   - name: Install ocp-infra workloads
-#     when:
-#     - infra_workloads|d("")|length > 0
-#     block:
-#     - name: Check if admin_user is set
-#       fail:
-#         msg: admin_user must be set for ocp-infra workloads
-#       when:
-#       - not admin_user is defined or admin_user|length == 0
-#     - name: Install ocp-infra-workloads
-#       when:
-#       - infra_workloads|d("")|length >0
-#       block:
-#       - name: Deploy ocp-infra workloads
-#         include_role:
-#           name: "{{ ANSIBLE_REPO_PATH }}/roles/{{ workload_loop_var }}"
-#         vars:
-#           admin_user: "{{ admin_user }}"
-#           ocp_username: "{{ admin_user }}"
-#           ACTION: "provision"
-#         loop: "{{ infra_workloads.split(',')|list }}"
-#         loop_control:
-#           loop_var: workload_loop_var
-
-# Install User Workloads second
-# - name: Install ocp-workload workloads for multiple Users
-#   hosts: masters
-#   gather_facts: false
-#   run_once: true
-#   become: yes
-#   vars_files:
-#     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-#     - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
-#   tasks:
-#   - name: Install ocp-workloads
-#     when:
-#     - num_users|d(0)|int > 0
-#     - student_workloads|d("")|length > 0
-#     block:
-#     - name: Check if authentication mechanism is set to htpasswd
-#       fail:
-#         msg: Authentication Mechanism must be htpasswd
-#       when:
-#       - install_idm|d("") != "htpasswd"
-#     - name: Check if remove_self_provisioners=true
-#       fail:
-#         msg: remove_self_provisioners must be set to true
-#       when:
-#       - not remove_self_provisioners|d(False)|bool
-
-#     - name: Generate list of User IDs
-#       set_fact:
-#         users: "{{ lookup('sequence', 'start=1 end={{ num_users|int }}', wantlist=true) | map('int') | list }}"
-
-#     - name: Deploy ocp-workloads for each user ID
-#       include_role:
-#         name: "{{ ANSIBLE_REPO_PATH }}/roles/{{ workload_loop_var[1] }}"
-#       vars:
-#         ocp_username: "user{{ workload_loop_var[0] }}"
-#         ACTION: "provision"
-#       loop: "{{ users | product(student_workloads.split(','))|list }}"
-#       loop_control:
-#         loop_var: workload_loop_var
-# WK Added for RHTE End
+- name: Install Workloads on OpenShift Cluster
+  import_playbook: ocp_workloads.yml
 
 - name: Zabbix for masters
   hosts: masters
   gather_facts: true
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  become: true
   vars:
     zabbix_auto_registration_keyword: OCP Master
   tasks:
-    - when: install_zabbix|bool
-      block:
-      - include_role:
-          name: "{{ ANSIBLE_REPO_PATH }}/roles/zabbix-client"
-      - include_role:
-          name: "{{ ANSIBLE_REPO_PATH }}/roles/zabbix-client-openshift-master"
-      - include_role:
-          name: "{{ ANSIBLE_REPO_PATH }}/roles/zabbix-client-openshift-node"
+  - when: install_zabbix | bool
+    block:
+    - include_role:
+        name: zabbix-client
+    - include_role:
+        name: zabbix-client-openshift-master
+    - include_role:
+        name: zabbix-client-openshift-node
   tags:
   - env-specific
   - install_zabbix
@@ -670,21 +533,18 @@
   - nodes
   - infranodes
   gather_facts: true
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  become: true
   vars:
     zabbix_auto_registration_keyword: OCP Node
     zabbix_token: "{{ hostvars[groups['masters'][0]].zabbix_token }}"
     hawkular_route: "{{ hostvars[groups['masters'][0]].hawkular_route }}"
   tasks:
-  - when: install_zabbix|bool
+  - when: install_zabbix | bool
     block:
-      - include_role:
-          name: "{{ ANSIBLE_REPO_PATH }}/roles/zabbix-client"
-      - include_role:
-          name: "{{ ANSIBLE_REPO_PATH }}/roles/zabbix-client-openshift-node"
+    - include_role:
+        name: "zabbix-client"
+    - include_role:
+        name: "zabbix-client-openshift-node"
   tags:
   - env-specific
   - install_zabbix
@@ -694,32 +554,51 @@
   - bastions
   - support
   gather_facts: true
-  become: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  become: true
   vars:
     zabbix_auto_registration_keyword: OCP Host
   tasks:
-    - when: install_zabbix|bool
-      include_role:
-        name: "{{ ANSIBLE_REPO_PATH }}/roles/zabbix-client"
+  - when: install_zabbix | bool
+    include_role:
+      name: zabbix-client
   tags:
   - env-specific
   - install_zabbix
 
+- name: Set up Scripts on Bastion Host
+  hosts:
+  - bastions
+  gather_facts: false
+  become: true
+  tasks:
+  - name: Copy wack_terminating_project.sh to bastions
+    copy:
+      src: ./files/wack_terminating_project.sh
+      dest: /usr/local/bin/wack_terminating_project.sh
+      owner: root
+      group: root
+      mode: 0775
+  - name: Copy wack_all_terminating_projects.sh to bastions
+    copy:
+      src: ./files/wack_all_terminating_projects.sh
+      dest: /usr/local/bin/wack_all_terminating_projects.sh
+      owner: root
+      group: root
+      mode: 0775
+  tags:
+  - env-specific
+  - install_scripts
+
 # start supporting this only for OCP >= 3.9
 - name: Run diagnostics from master
   hosts: masters
-  become: yes
-  gather_facts: False
-  run_once: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  become: true
+  gather_facts: false
+  run_once: true
   tasks:
   - when:
     - osrelease is version_compare('3.9', '>=')
-    - run_ocp_diagnostics|d(False)| bool
+    - run_ocp_diagnostics | default(false) | bool
     block:
     # this command should return 0 (no error)
     - name: Run oc adm diagnostics
@@ -738,14 +617,14 @@
     - name: Create an archive of diagnostics output logs
       archive:
         path:
-          - /tmp/openshift
-          - /tmp/diagnostics.log
+        - /tmp/openshift
+        - /tmp/diagnostics.log
         dest: /tmp/diagnostics.tar.gz
 
     - name: Fetch the diagnostic archive and logs
       fetch:
         src: /tmp/diagnostics.tar.gz
-        dest: "{{ANSIBLE_REPO_PATH}}/workdir/{{project_tag}}_diagnostics.tar.gz"
+        dest: "{{output_dir}}/{{project_tag}}_diagnostics.tar.gz"
         flat: true
 
     - name: Report diagnostics failure
@@ -755,24 +634,19 @@
 
 - name: Configure IPA on bastion
   hosts: bastions
-  become: yes
-  gather_facts: False
-  run_once: yes
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  become: true
+  gather_facts: false
+  run_once: true
   tasks:
   - include_role:
-      name: "{{ ANSIBLE_REPO_PATH }}/roles/bastion-opentlc-ipa"
-    when: install_ipa_client|bool
+      name: bastion-opentlc-ipa
+    when: install_ipa_client | bool
 
 - name: PostSoftware flight-check
   hosts: localhost
   connection: local
   gather_facts: false
   become: false
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tags:
   - post_flight_check
   tasks:
@@ -782,20 +656,14 @@
 - name: Gather facts
   hosts:
   - all
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   gather_facts: true
   tags:
-    - ocp_report
+  - ocp_report
 
 - name: Generate reports
   hosts: localhost
   connection: local
   become: false
-
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   tags:
   - ocp_report
   vars:
@@ -804,24 +672,63 @@
   - name: get repo version used to deploy
     command: git rev-parse HEAD
     args:
-      chdir: "{{ ANSIBLE_REPO_PATH }}"
+      chdir: "{{ ANSIBLE_REPO_PATH | default('.') }}"
     register: ansible_agnostic_deployer_head
 
   - name: Gather ec2 facts
-    ec2_remote_facts:
+    ec2_instance_facts:
       aws_access_key: "{{ aws_access_key_id }}"
       aws_secret_key: "{{ aws_secret_access_key }}"
-      region: "{{ aws_region_final|d(aws_region) }}"
+      region: "{{ aws_region_final | default(aws_region) }}"
       filters:
         instance-state-name: running
         "tag:Project": "{{project_tag}}"
     when:
-      - ocp_report|bool
-      - cloud_provider == 'ec2'
+    - ocp_report | bool
+    - cloud_provider == 'ec2'
   - name: Generate report
     template:
-      src: "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/files/ocp_report.adoc.j2"
-      dest: "{{ ANSIBLE_REPO_PATH }}/workdir/ocp_report_{{ env_type }}-{{ guid }}.adoc"
+      src: "./files/ocp_report.adoc.j2"
+      dest: "{{output_dir}}/ocp_report_{{ env_type }}-{{ guid }}.adoc"
     when:
-      - ocp_report|bool
-      - cloud_provider == 'ec2'
+    - ocp_report | bool
+    - cloud_provider == 'ec2'
+
+  - name: Sending Console URL user info
+    agnosticd_user_info:
+      msg: "Openshift Master Console: https://{{ master_lb_dns }}/console"
+      data:
+        ocp_workshop_console_url: "https://{{ master_lb_dns }}/console"
+
+  - when:
+    - install_student_user | bool
+    - student_name is defined
+    - student_password is defined or hostvars[groups.bastions.0].student_password is defined
+    block:
+    - name: Print user info message blank line before SSH access information
+      agnosticd_user_info:
+        msg: ""
+
+    - name: Set user info for Student SSH command
+      agnosticd_user_info:
+      # yamllint disable-line rule:line-length
+        msg: "SSH Access: ssh {{ student_name }}@{{ hostvars[groups.bastions.0].ansible_hostname }}.{{ guid }}{{ subdomain_base_suffix }}"
+        data:
+        # yamllint disable-line rule:line-length
+          ocp_workshop_ssh_command: "ssh {{ student_name }}@{{ hostvars[groups.bastions.0].ansible_hostname }}.{{ guid }}{{ subdomain_base_suffix }}"
+
+    - name: Set user info for Student SSH password
+      when: print_student_password | default(true) | bool
+      agnosticd_user_info:
+        msg: "SSH password: {{ t_student_password }}"
+        data:
+          ocp_workshop_ssh_password: "{{ t_student_password }}"
+      vars:
+        t_student_password: "{{ student_password | default(hostvars[groups.bastions.0].student_password) }}"
+
+  - name: Sending Console URL for Azure and Documentation
+    when: cloud_provider == 'azure'
+    agnosticd_user_info:
+      msg: "User guide for the workshop: https://gist.github.com/vincepower/e16aaf96b996aa2dbe581cb67c7fdf12"
+      data:
+        ocp_workshop_azure_user_guide: "https://gist.github.com/vincepower/e16aaf96b996aa2dbe581cb67c7fdf12"

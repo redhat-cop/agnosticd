@@ -18,7 +18,7 @@ def openshift_location = ''
 // Catalog items
 def choices = [
     'DevOps Shared Cluster Development / DEV - IOT Enterprise 4.0 Demo',
-    'IoT Demos / IoT Enterprise 4.0 Demo',
+    'IoT Demos / IoT Industry 4.0 Demo',
 ].join("\n")
 
 pipeline {
@@ -46,15 +46,25 @@ pipeline {
             environment {
                 uri = "${cf_uri}"
                 credentials = credentials("${opentlc_creds}")
+                DEBUG = 'true'
             }
             /* This step use the order_svc_guid.sh script to order
              a service from CloudForms */
             steps {
-                git 'https://github.com/fridim/cloudforms-oob'
+                git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 script {
                     def catalog = params.catalog_item.split(' / ')[0].trim()
                     def item = params.catalog_item.split(' / ')[1].trim()
+                    def cfparams = [
+                        'check=t',
+                        'quotacheck=t',
+                        "region=global_gpte",
+                        'expiration=7',
+                        'runtime=8',
+                        'users=2',
+                        'nodes=2',
+                    ].join(',').trim()
                     echo "'${catalog}' '${item}'"
                     guid = sh(
                         returnStdout: true,
@@ -63,7 +73,7 @@ pipeline {
                           -c '${catalog}' \
                           -i '${item}' \
                           -G '${cf_group}' \
-                          -d 'check=t,quotacheck=t'
+                          -d '${cfparams}'
                         """
                     ).trim()
 
@@ -77,7 +87,7 @@ pipeline {
                 credentials=credentials("${imap_creds}")
             }
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
                 script {
@@ -135,11 +145,12 @@ pipeline {
                 uri = "${cf_uri}"
                 credentials = credentials("${opentlc_creds}")
                 admin_credentials = credentials("${opentlc_admin_creds}")
+                DEBUG = 'true'
             }
             /* This step uses the delete_svc_guid.sh script to retire
              the service from CloudForms */
             steps {
-                git 'https://github.com/fridim/cloudforms-oob'
+                git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
 
                 sh "./opentlc/delete_svc_guid.sh '${guid}'"
             }
@@ -168,7 +179,7 @@ pipeline {
         }
         stage('Wait for deletion email') {
             steps {
-                git url: 'https://github.com/sborenst/ansible_agnostic_deployer',
+                git url: 'https://github.com/redhat-cop/agnosticd',
                     branch: 'development'
 
                 withCredentials([usernameColonPassword(credentialsId: imap_creds, variable: 'credentials')]) {
@@ -191,7 +202,7 @@ pipeline {
 
     post {
         failure {
-            git 'https://github.com/fridim/cloudforms-oob'
+            git 'https://github.com/redhat-gpte-devopsautomation/cloudforms-oob'
             /* retire in case of failure */
             withCredentials(
                 [
@@ -201,6 +212,7 @@ pipeline {
             ) {
                 sh """
                 export uri="${cf_uri}"
+                export DEBUG=true
                 ./opentlc/delete_svc_guid.sh '${guid}'
                 """
             }

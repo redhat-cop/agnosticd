@@ -1,0 +1,123 @@
+---
+- name: Set state
+  set_fact:
+    state: present
+
+- name: "Create Namespace"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'namespace.yml.j2') }}"
+  with_items:
+  - "{{ ocs_namespace }}"
+
+- name: "Create OperatorGroup"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'operator_group.yml.j2') }}"
+
+- name: create the CatalogSource for the snapshot
+  when: ocs_operator_source is not defined
+  k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: CatalogSource
+      metadata:
+        name: redhat-operators-snapshot
+        namespace: "{{ ocs_namespace }}"
+      spec:
+        sourceType: grpc
+        image: quay.io/openshiftroadshow/operator-snapshot:snapshot-03-20
+        displayName: Red Hat Operators Snapshot
+
+- name: "Create Subscription"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'subscription.yml.j2') }}"
+
+- name: "Wait for MCG CRD's to exist"
+  k8s_facts:
+    api_version: "apiextensions.k8s.io/v1beta1"
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop: "{{ ocs_expected_crds }}"
+  register: crds
+  until: crds.resources | length > 0
+  retries: 30
+  delay: 10
+
+- name: "Create OCS Storage cluster"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'storagecluster.yml.j2') }}"
+
+- name: "Waiting for MCG to become ready"
+  k8s_facts:
+    api_version: "noobaa.io/v1alpha1"
+    kind: NooBaa
+    namespace: "{{ ocs_namespace }}"
+  register: noobaa_system_status
+  retries: 60
+  delay: 10
+  until: noobaa_system_status.resources | length > 0 and
+         noobaa_system_status.resources[0].status is defined and
+         noobaa_system_status.resources[0].status.phase == 'Ready'
+  ignore_errors: true
+
+- when: ocs_install_mcg
+  block:
+  - when: ocs_mcg_pv_pool
+    block:
+    - name: "Create PV Pool BackingStore"
+      k8s:
+        state: "{{ state }}"
+        definition: "{{ lookup('template', 'pv_pool_backingstore.yml.j2') }}"
+
+    - name: "Create PV Pool BucketClass"
+      k8s:
+        state: "{{ state }}"
+        definition: "{{ lookup('template', 'pv_pool_bucketclass.yml.j2') }}"
+
+    - name: "Create PV Pool ObjectBucketClaim"
+      k8s:
+        state: "{{ state }}"
+        definition: "{{ lookup('template', 'pv_pool_objectbucketclaim.yml.j2') }}"
+
+    - name: "Wait for Bucket to exist"
+      k8s_facts:
+        api_version: "objectbucket.io/v1alpha1"
+        kind: ObjectBucketClaim
+        name: "{{ ocs_mcg_pv_pool_bucket_name }}"
+        namespace: "{{ ocs_namespace }}"
+      register: bucket
+      until: (bucket.resources | length) > 0
+      retries: 30
+      delay: 10
+
+    - name: "Wait for Bucket to have status"
+      k8s_facts:
+        api_version: "objectbucket.io/v1alpha1"
+        kind: ObjectBucketClaim
+        name: "{{ ocs_mcg_pv_pool_bucket_name }}"
+        namespace: "{{ ocs_namespace }}"
+      register: bucket
+      until: (bucket.resources | first).status is defined
+      retries: 30
+      delay: 10
+
+    - name: "Wait for Bucket to become bound"
+      k8s_facts:
+        api_version: "objectbucket.io/v1alpha1"
+        kind: ObjectBucketClaim
+        name: "{{ ocs_mcg_pv_pool_bucket_name }}"
+        namespace: "{{ ocs_namespace }}"
+      register: bucket
+      until: (bucket.resources | first).status.phase == "Bound"
+      retries: 75
+      delay: 10
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

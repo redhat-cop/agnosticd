@@ -1,0 +1,129 @@
+# vim: set ft=ansible
+---
+
+# Implement your Workload deployment tasks here
+
+### all following based on files at https://github.com/rook/rook/blob/0.9.3/cluster/examples/kubernetes/ceph/
+
+- name: Verify user can create projects
+  command: "oc auth can-i create project"
+  register: canicreateprojects
+  failed_when: canicreateprojects.stdout != 'yes'
+
+- name: Apply rook scc.yaml
+  k8s:
+    state: present
+    definition: "{{ lookup('file', 'scc.yaml') }}"
+  register: r_scc
+  until: r_scc is succeeded
+  retries: 10
+  delay: 5
+
+- name: Apply rook operator.yaml
+  k8s:
+    state: present
+    definition: "{{ lookup('file', 'operator.yaml') }}"
+
+- name: Wait for Rook deployment in project rook-ceph-system
+  command: "oc rollout status {{ item }} -n rook-ceph-system -w"
+  register: result
+  until: result.stderr.find("Error from server (NotFound)") != 0
+  retries: 30
+  delay: 10
+  loop:
+    - daemonset rook-ceph-agent
+    - daemonset rook-discover
+    - deployment rook-ceph-operator
+
+- name: Apply rook cluster.yaml
+  k8s:
+    state: present
+    definition: "{{ lookup('file', 'cluster.yaml') }}"
+  register: result
+  retries: 60
+  delay: 10
+
+- name: Wait for rook-ceph-mon/osd a to get to status of running
+  shell: |
+    for i in $(oc get deployment -l app={{ item }} --no-headers | cut -d\  -f1); \
+    do \
+        oc rollout status deployment "$i" -n rook-ceph -w
+    done
+  loop:
+    - rook-ceph-mon
+    - rook-ceph-osd
+
+- name: Apply rook toolbox.yaml
+  k8s:
+    state: present
+    definition: "{{ lookup('file', 'toolbox.yaml') }}"
+
+- name: Apply rook object.yaml
+  k8s:
+    state: present
+    definition: "{{ lookup('file', 'object.yaml') }}"
+
+- name: Wait for deploy rook-ceph-rgw-my-store
+  command: "oc rollout status deployment rook-ceph-rgw-my-store -n rook-ceph -w"
+  register: result
+  until: result.stderr.find("Error from server (NotFound)") != 0
+  retries: 45
+  delay: 60
+
+- name: Get Rook Ceph RGW Service
+  k8s_facts:
+    kind: Service
+    namespace: rook-ceph
+    name: rook-ceph-rgw-my-store
+  register: rgw_service
+  until: rgw_service.resources
+  retries: 5
+  delay: 60
+
+- name: Set the Rook Ceph RGW IP and Port
+  set_fact:
+    rgw_service_ip: "{{ rgw_service.resources[0].spec.clusterIP }}"
+    rgw_service_port: "{{ rgw_service.resources[0].spec.ports[0].port }}"
+
+- name: Confirm Open Data Hub CRD is present
+  k8s:
+    state: present
+    definition: "{{ lookup('file', 'opendatahub_v1alpha1_opendatahub_crd.yaml') }}"
+
+- name: Create an opendatahub-admin cluster role
+  k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: opendatahub-admin
+      rules:
+        - apiGroups:
+            - opendatahub.io
+          resources:
+            - '*'
+          verbs:
+            - '*'
+
+- name: Confirm Seldon CRD and ClusterRole are present
+  k8s:
+    state: present
+    definition: "{{ item }}"
+  with_items:
+    - "{{ lookup('file', 'seldon/seldon-deployment.crd.json') }}"
+    - "{{ lookup('file', 'seldon/seldon-user.clusterrole.yaml') }}"
+
+- name: Confirm Kafka CRDs and ClusterRoles are present
+  k8s:
+    state: present
+    definition: "{{ item }}"
+  with_items:
+    - "{{ lookup('file', 'kafka/kafka.crd.yaml') }}"
+    - "{{ lookup('file', 'kafka/kafka.clusterrole.yaml') }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

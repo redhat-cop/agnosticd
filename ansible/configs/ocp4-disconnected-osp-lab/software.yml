@@ -1,0 +1,340 @@
+---
+- name: Step 001 software
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+    - when: cloud_provider == "osp"
+      block:
+        - name: Install packages for OpenStack CLI
+          package:
+            name:
+              - gcc
+              - python3
+              - python3-devel
+
+        - name: Copy requirements.txt
+          copy:
+            src: "./files/openstack_requirements.txt"
+            dest: "/root/requirements.txt"
+
+        - name: Install python requirements for OpenStack CLI
+          command: "pip3 install -r /root/requirements.txt"
+
+        - name: Remove requirements.txt
+          file:
+            path: "/root/requirements.txt"
+            state: absent
+
+        - name: Add /usr/local/bin to PATH
+          copy:
+            dest: /etc/profile.d/custom-path.sh
+            content: 'PATH=$PATH:/usr/local/bin'
+
+        - name: Create .config directory
+          file:
+            path: /home/{{ student_name }}/.config/openstack
+            state: directory
+            owner: "{{ student_name }}"
+            group: users
+            mode: 0744
+
+        - name: Create clouds.yaml file
+          template:
+            src: "./files/clouds.yaml.j2"
+            dest: "/home/{{ student_name }}/.config/openstack/clouds.yaml"
+            owner: "{{ student_name }}"
+            mode: 0700
+          vars:
+            osp_auth_username_member: "{{ hostvars['localhost']['osp_auth_username_member'] }}"
+            osp_auth_password_member: "{{ hostvars['localhost']['osp_auth_password_member'] }}"
+
+        - name: Add environment variables for API and Ingress FIPs
+          lineinfile:
+            path: "/home/{{ student_name }}/.bashrc"
+            regexp: "^export {{ item.env_var }}"
+            line: "export {{ item.env_var }}={{ item.ip }}"
+          loop:
+            - ip: "{{ hostvars['localhost']['ocp_api_fip'] }}"
+              env_var: "API_FIP"
+            - ip: "{{ hostvars['localhost']['ocp_ingress_fip'] }}"
+              env_var: "INGRESS_FIP"
+          loop_control:
+            label: item.ip
+          when: openshift_fip_provision
+
+        - name: Add environment variable for DNS domain
+          lineinfile:
+            path: "/home/{{ student_name }}/.bashrc"
+            regexp: "^export OPENSHIFT_DNS_ZONE"
+            line: "export OPENSHIFT_DNS_ZONE={{ osp_cluster_dns_zone }}"
+          when: openshift_fip_provision
+
+        - name: Add environment variable for OpenStack credentials
+          lineinfile:
+            path: "/home/{{ student_name }}/.bashrc"
+            regexp: "^export OS_CLOUD"
+            line: "export OS_CLOUD={{ guid }}-project"
+
+        - name: Create resources directory
+          file:
+            path: "/home/{{ student_name }}/resources"
+            state: directory
+            owner: "{{ student_name }}"
+            group: users
+            mode: 0744
+
+        - name: Add python script to update ignition
+          copy:
+            dest: "/home/{{ student_name }}/resources/update_ignition.py"
+            src: "./files/update_ignition.py"
+            owner: "{{ student_name }}"
+
+        - name: Add jinja for machinesets to resources directory
+          copy:
+            dest: "/home/{{ student_name }}/resources/general-ms.yaml.j2"
+            src: "./files/general-ms.yaml.j2"
+            owner: "{{ student_name }}"
+
+        - name: Add PV file for OCP registry
+          template:
+            src: "./files/pv-registry.yaml.j2"
+            dest: "/home/{{ student_name }}/resources/pv-registry.yaml"
+            owner: "{{ student_name }}"
+
+        - name: Add PV files for user vols
+          template:
+            src: "./files/pv-user.yaml.j2"
+            dest: "/home/{{ student_name }}/resources/pv-user.yaml"
+            owner: "{{ student_name }}"
+
+        - name: Add PVC file for OCP registry
+          copy:
+            src: "./files/pvc-registry.yaml"
+            dest: "/home/{{ student_name }}/resources/pvc-registry.yaml"
+            owner: "{{ student_name }}"
+
+        - name: Add machineconfig files for cinder/iscsi/symlink 20 char limit workaround
+          copy:
+            src: "./files/{{ item }}"
+            dest: "/home/{{ student_name }}/resources/{{ item }}"
+            owner: "{{ student_name }}"
+          loop:
+            - 99-scsi-device-detection-machineconfig.yml
+            - 99-scsi-symlink.rules
+            - 99-scsi-symlink.rules.b64
+
+- name: Step 002 rootless podman
+  hosts: bastions,utility
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Install slirp4netns
+      package:
+        name: slirp4netns
+
+    - name: update max_user_namespaces in sysctl
+      sysctl:
+        name: user.max_user_namespaces
+        value: "28633"
+        sysctl_file: /etc/sysctl.d/userns.conf
+        reload: true
+
+- name: Step 003 Utility VM config
+  hosts: utility
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Install httpd on utilityVM
+      package:
+        name: httpd
+
+    - name: Start and enable httpd on utilityVM
+      service:
+        name: httpd
+        state: started
+        enabled: true
+
+    - name: Create vols for registry NFS
+      file:
+        path: /srv/nfs/ocp-registry
+        state: directory
+        mode: 777
+
+    - name: Create user vols for NFS
+      shell: "mkdir -p /srv/nfs/user_vols/vol{1..{{user_vols}}}"
+
+    - name: chmod the user vols
+      shell: "chmod -R 777 /srv/nfs"
+
+    - name: create exports file
+      file:
+        path: /etc/exports.d/{{ env_type }}-{{ guid }}.exports
+        state: touch
+        mode: 755
+
+    - name: create exports file
+      lineinfile:
+        dest: /etc/exports.d/{{ env_type }}-{{ guid }}.exports
+        line: '/srv/nfs {{ nfs_exports_config }}'
+        state: present
+
+    - name: Enable and start NFS server
+      service:
+        name: nfs-server
+        state: restarted
+        enabled: true
+
+- name: Step 004 LE certs
+  hosts: bastions
+  gather_facts: false
+  become: true
+  vars:
+    _certbot_dns_provider: "rfc2136"
+    _certbot_domain: "api.cluster-{{ guid }}.{{ osp_cluster_dns_zone }}"
+    _certbot_wildcard_domain: "*.apps.cluster-{{ guid }}.{{ osp_cluster_dns_zone }}"
+    _certbot_remote_dir: "/home/{{ student_name }}"
+    _certbot_remote_dir_owner: "{{ student_name }}"
+    _certbot_install_dir: "/home/{{ student_name }}/certificates"
+    _certbot_install_dir_owner: "{{ student_name }}"
+    _certbot_production: true
+    _certbot_user: "{{ student_name }}"
+    _certbot_cache_archive_file: "{{ output_dir|d('/tmp') }}/{{ guid }}-certs.tar.gz"
+    _certbot_use_cache: false
+    use_python3: "{{ all_use_python3 }}"
+  tasks:
+    - name: Copy credentials to host temporarily
+      template:
+        src: ./files/rfc2136.ini.j2
+        dest: /home/{{ _certbot_user }}/.rfc2136.ini
+        owner: "{{ _certbot_user }}"
+
+    - import_role:
+        name: host-lets-encrypt-certs-certbot
+
+    - name: Remove credentials once LE certs complete
+      file:
+        state: absent
+        path: /home/{{ _certbot_user }}/.rfc2136.ini
+      when: _certbot_setup_complete
+
+    - name: Copy the LE root certs into trusted bundle
+      copy:
+        dest: /etc/pki/ca-trust/source/anchors/le-chain.pem
+        src: /home/{{ student_name }}/certificates/chain.pem
+        remote_src: true
+
+    - name: Update CA trust
+      command: update-ca-trust
+
+- name: Step 005 Run solver and performance test (optional)
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Set python3
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3
+
+    - name: Run the solver to install OpenShift
+      when: test_deploy_enable | default(false) | bool
+      block:
+        - name: Create pull secret file
+          file:
+            state: touch
+            path: "/home/{{ student_name }}/ocp_pullsecret.json"
+            mode: 0644
+            owner: "{{ student_name }}"
+
+        - name: Add pull secret to bastion
+          copy:
+            dest: "/home/{{ student_name }}/ocp_pullsecret.json"
+            content: "{{ test_deploy_pull_secret }}"
+
+        - name: Create neutral clouds.yaml directory
+          file:
+            path: /etc/openstack
+            state: directory
+            mode: 0644
+
+        - name: copy clouds.yaml to neutral location
+          copy:
+            remote_src: true
+            src: "/home/{{ student_name }}/.config/openstack/clouds.yaml"
+            dest: "/etc/openstack/clouds.yaml"
+            mode: 0644
+
+        - name: Run solver for lab 03
+          shell: /usr/local/bin/solve_lab ocp4_advanced_deployment 03_1
+          register: r_solve_lab_03
+          become_user: "{{ student_name }}"
+          environment:
+            OS_CLOUD: "{{ guid }}-project"
+            GUID: "{{ guid }}"
+            OPENSHIFT_DNS_ZONE: "{{ osp_cluster_dns_zone }}"
+            API_FIP: "{{ hostvars['localhost']['ocp_api_fip'] }}"
+            INGRESS_FIP: "{{ hostvars['localhost']['ocp_ingress_fip'] }}"
+          vars:
+            GUID: "{{ guid }}"
+
+    - name: Run the fio tests and report results
+      when:
+        - test_deploy_enable | default(false) | bool
+        - test_deploy_results | default(false) | bool
+      block:
+        - name: Get metadata.json
+          stat:
+            path: /home/{{ student_name }}/openstack-upi/metadata.json
+          register: r_metadata
+
+        - name: Get the infra ID
+          shell: jq -r .infraID /home/{{ student_name }}/openstack-upi/metadata.json
+          register: r_infra_id
+          when: r_metadata.stat.exists
+
+        - name: create fio testing project
+          k8s:
+            name: fio-test
+            api_version: v1
+            kind: Namespace
+            state: present
+
+        - name: give default sa privileged scc
+          shell: oc adm policy add-scc-to-user privileged system:serviceaccount:fio-test:default
+
+        - name: run job pod with fio-etcd-osp container
+          k8s:
+            state: present
+            definition: "{{ lookup('template', './files/fio-test-job.yaml.j2') }}"
+          vars:
+            INFRA_ID: "{{ r_infra_id.stdout }}"
+
+        - name: Wait for job to finish (1h max)
+          k8s_info:
+            api_version: batch/v1
+            kind: Job
+            name: fio-test
+            namespace: fio-test
+          register: r_fio_test_job
+          retries: 60
+          delay: 60
+          until: r_fio_test_job.resources[0].status.conditions | json_query(fio_query) | bool
+          vars:
+            fio_query: >-
+              [?type=='Complete'].status[] | [0]
+            INFRA_ID: "{{ r_infra_id.stdout }}"
+
+        - name: Remove job
+          k8s:
+            name: fio-test
+            kind: Job
+            api_version: batch/v1
+            namespace: fio-test
+            state: absent
+
+        - name: Remove fio testing project
+          k8s:
+            name: fio-test
+            kind: Namespace
+            api_version: v1
+            state: absent

@@ -1,0 +1,75 @@
+---
+- name: Setup krb5.conf file
+  copy:
+    dest: "{{ output_dir }}/krb5.conf"
+    content: |
+      [libdefaults]
+      default_realm = {{ kerberos_realm }}
+      dns_lookup_realm = true
+      dns_lookup_kdc = true
+      rdns = false
+      dns_canonicalize_hostname = false
+      ticket_lifetime = 24h
+      forwardable = true
+      udp_preference_limit = 0
+      default_ccache_name = KEYRING:persistent:%{uid}
+
+- environment:
+    KRB5CCNAME: /tmp/krb_cache_{{ account_name }}
+    KRB5_CONFIG: "{{ output_dir }}/krb5.conf"
+  tags:
+    - nuke
+    - ipa
+  when: nuke_sandbox | bool
+  block:
+    - when: kerberos_keytab is defined
+      name: Login kerberos
+      command: >-
+        kinit -kt "{{ kerberos_keytab }}" {{ kerberos_user }}
+
+    - when: kerberos_password is defined
+      name: Login kerberos
+      command: >-
+        kinit {{ kerberos_user }}
+      args:
+        stdin: "{{ kerberos_password }}"
+
+    - name: Fetch all NS records for this sandbox
+      shell: >-
+        host -t ns -W 60 -R 10 {{ account_name }}.{{ ipa_domain }}
+        | awk '{ print $4 }'
+        | perl -pe 's/\.$//'
+      register: _recordfind
+
+    - set_fact:
+        ipa_ns_records: "{{ _recordfind.stdout.split('\n') }}"
+
+    - name: Delete all NS records that are not needed anymore
+      command: >-
+        ipa dnsrecord-del {{ ipa_domain }}. {{ account_name }} --ns-rec={{ _z }}.
+      loop_control:
+        loop_var: _z
+      loop: "{{ ipa_ns_records | difference(ns_records) }}"
+      when: _z != ''
+
+    - name: Add NS records to IPA
+      when: >-
+        ipa_ns_records | length == 0
+        or ipa_ns_records | difference(ns_records) | length != 0
+        or  ns_records | difference(ipa_ns_records) | length != 0
+      command: >-
+        ipa dnsrecord-add {{ ipa_domain }}. {{ account_name }} --ns-rec={{ _z }}.
+      loop: "{{ ns_records }}"
+      loop_control:
+        loop_var: _z
+      register: _ipacommand
+      failed_when:
+        - _ipacommand.rc != 0
+        - '"ERROR: no modifications to be performed" not in _ipacommand.stderr'
+      changed_when: >-
+        "ERROR: no modifications to be performed"
+        not in _ipacommand.stderr
+
+  always:
+    - name: Destroy kerberos ticket
+      command: kdestroy

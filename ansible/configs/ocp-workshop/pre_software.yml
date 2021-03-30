@@ -4,30 +4,27 @@
   connection: local
   gather_facts: false
   become: false
-  vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   tags:
     - step003
     - generate_env_keys
   tasks:
     - name: Generate SSH keys
-      shell: ssh-keygen -b 2048 -t rsa -f "{{ ANSIBLE_REPO_PATH }}/workdir/{{env_authorized_key}}" -q -N ""
+      shell: ssh-keygen -b 2048 -t rsa -f "{{output_dir}}/{{env_authorized_key}}" -q -N ""
       args:
-        creates: "{{ ANSIBLE_REPO_PATH }}/workdir/{{env_authorized_key}}"
-      when: set_env_authorized_key
+        creates: "{{output_dir}}/{{env_authorized_key}}"
+      when: set_env_authorized_key | bool
 
     - name: fix permission
       file:
-        path: "{{ ANSIBLE_REPO_PATH }}/workdir/{{env_authorized_key}}"
+        path: "{{output_dir}}/{{env_authorized_key}}"
         mode: 0400
-      when: set_env_authorized_key
+      when: set_env_authorized_key | bool
 
     - name: Generate SSH pub key
-      shell: ssh-keygen -y -f "{{ ANSIBLE_REPO_PATH }}/workdir/{{env_authorized_key}}" > "{{ ANSIBLE_REPO_PATH }}/workdir/{{env_authorized_key}}.pub"
+      shell: ssh-keygen -y -f "{{output_dir}}/{{env_authorized_key}}" > "{{output_dir}}/{{env_authorized_key}}.pub"
       args:
-        creates: "{{ ANSIBLE_REPO_PATH }}/workdir/{{env_authorized_key}}.pub"
-      when: set_env_authorized_key
+        creates: "{{output_dir}}/{{env_authorized_key}}.pub"
+      when: set_env_authorized_key | bool
 
 # Cloudformation template or equivalent should tag all hosts with Project:{{ env_type }}-{{ guid }}
 
@@ -35,61 +32,117 @@
   hosts:
     - all:!windows
   become: true
-  gather_facts: False
-  vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
+  gather_facts: false
   tags:
     - step004
     - common_tasks
   pre_tasks:
-    - name: add rhel-7-server-ansible-2.4-rpms repo for OCP 3.9+
+    - name: add rhel-7-server-ansible-2.4-rpms repo for OCP 3.9 and 3.10
       set_fact:
         rhel_repos: "{{ rhel_repos + ['rhel-7-server-ansible-2.4-rpms'] }}"
-      when: osrelease is version_compare('3.9', '>=')
+      when:
+        - osrelease is version_compare('3.9', '>=')
+        - osrelease is version_compare('3.11', '<')
+    - name: add rhel-7-server-ansible-2.6-rpms repo for OCP 3.11
+      set_fact:
+        rhel_repos: "{{ rhel_repos + ['rhel-7-server-ansible-2.6-rpms'] }}"
+      when:
+        - osrelease is version_compare('3.11', '>=')
+    - name: add rhel-7-fast-datapath-rpms repo for OCP 3.9, 3.10
+      set_fact:
+        rhel_repos: "{{ rhel_repos + ['rhel-7-fast-datapath-rpms'] }}"
+      when:
+        - osrelease is version_compare('3.9', '>=')
+        - osrelease is version_compare('3.11', '<')
   roles:
-    - role: "{{ ANSIBLE_REPO_PATH }}/roles/set-repositories"
+    - role: set-repositories
       when: repo_method is defined
-    - role: "{{ ANSIBLE_REPO_PATH }}/roles/common"
-      when: install_common|bool
-    - role: "{{ ANSIBLE_REPO_PATH }}/roles/set_env_authorized_key"
-      when: set_env_authorized_key|bool
+    - role: common
+      when: install_common | bool
+    - role: set_env_authorized_key
+      when: set_env_authorized_key | bool
 
-- name: Install Let's Encrypt Wildcard Certificates
+- name: Prepare for Let's Encrypt Wildcard Certificates
   hosts: bastions
   run_once: true
   become: true
   gather_facts: false
-  vars_files:
-  - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   tasks:
-  - name: Create Let's Encrypt Certificates
-    include_role:
-      name: "{{ ANSIBLE_REPO_PATH }}/roles/host-lets-encrypt-certs"
-    vars:
-    - acme_domain: "{{ master_lb_dns }}"
-    - acme_wildcard_domain: "*.{{ cloudapps_suffix }}"
-    - acme_aws_access_key: "{{ hostvars['localhost'].route53user_access_key }}"
-    - acme_aws_secret_access_key: "{{ hostvars['localhost'].route53user_secret_access_key }}"
-    - acme_production: "{{ lets_encrypt_production|d(False)|bool}}"
-    - acme_remote_dir: "/root"
-    - acme_cache_cert_file: "{{ANSIBLE_REPO_PATH}}/workdir/{{guid}}.cert"
-    - acme_cache_key_file: "{{ANSIBLE_REPO_PATH}}/workdir/{{guid}}.key"
-    - acme_cache_archive_file: "{{ANSIBLE_REPO_PATH}}/workdir/{{guid}}_acme.tgz"
-    - acme_renew_automatically: True
-    - acme_force_issue: False
-    when:
-    - install_lets_encrypt_certificates|d(False)|bool
+    - name: Request Let's Encrypt Certificatest
+      when: install_lets_encrypt_certificates | default(false) | bool
+      block:
+        - name: Ensure python3 and python3-pip are installed
+          yum:
+            state: present
+            name:
+              - python3
+              - python3-pip
+        - name: Ensure virtualenv is installed
+          pip:
+            state: present
+            name: virtualenv
+            executable: /usr/bin/pip3
+        - name: Ensure /home/{{ ansible_user }}/.aws directory exists
+          file:
+            state: directory
+            path: "/home/{{ ansible_user }}/.aws"
+            owner: "{{ ansible_user }}"
+            group: "{{ ansible_user }}"
+            mode: 0775
+        - name: Create AWS Credentials File
+          template:
+            src: ./files/aws_credentials.j2
+            dest: "/home/{{ ansible_user }}/.aws/credentials"
+            owner: "{{ ansible_user }}"
+            group: "{{ ansible_user }}"
+            mode: 0664
+          vars:
+            _certbot_aws_key: "{{ hostvars['localhost'].route53user_access_key }}"
+            _certbot_aws_secret_key: "{{ hostvars['localhost'].route53user_secret_access_key }}"
+
+        - name: Request Let's Encrypt Certificates
+          include_role:
+            name: host-lets-encrypt-certs-certbot
+          vars:
+            - _certbot_domain: "{{ master_lb_dns }}"
+            - _certbot_wildcard_domain: "*.{{ cloudapps_suffix }}"
+            - _certbot_dns_provider: "route53"
+            - _certbot_remote_dir: "/home/{{ ansible_user }}"
+            - _certbot_remote_dir_owner: "{{ ansible_user }}"
+            - _certbot_install_dir: "/root/certificates"
+            - _certbot_install_dir_owner: "{{ ansible_user }}"
+            - _certbot_cache_archive_file: "{{ output_dir|d('/tmp') }}/{{ guid }}-certs.tar.gz"
+            - _certbot_renew_automatically: true
+            - _certbot_use_cache: false
+            - _certbot_force_issue: false
+            - _certbot_production: true
+            - _certbot_cron_job_name: LETS_ENCRYPT_RENEW
+            - use_python3: true
+
+        - name: Create /root/certificates/ca.cer
+          copy:
+            remote_src: true
+            src: "/home/{{ansible_user }}/certbot/lets-encrypt-x3-cross-signed.pem"
+            dest: "/root/certificates/ca.cer"
+            owner: root
+            group: root
+            mode: 0664
+
+        - name: Create /root/certificates/key.pem symlink for backwards compatibility
+          file:
+            state: link
+            src: "/root/certificates/privkey.pem"
+            path: "/root/certificates/key.pem"
 
 - name: Configuring Bastion Hosts
   hosts: bastions
   become: true
   gather_facts: false
-  vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   roles:
-    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/bastion", when: 'install_bastion' }
+    - role: bastion
+      when: install_bastion | bool
+    - role: bastion-student-user
+      when: install_student_user | bool
   tags:
     - step004
     - bastion_tasks
@@ -99,9 +152,6 @@
   connection: local
   gather_facts: false
   become: false
-  vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_secret_vars.yml"
   tags:
     - flight_check
   tasks:
@@ -110,10 +160,8 @@
 
 - name: Copy lets encrypt certificates for SSO
   hosts: masters
-  gather_facts: False
-  become: yes
-  vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
+  gather_facts: false
+  become: true
   tags:
     - env-specific
     - project_request
@@ -125,3 +173,19 @@
         dest: /etc/origin/master/
       when: >-
         'ssodev' in install_idms
+
+- name: Set up vm.max_map_count Kernel setting on all Nodes
+  hosts: nodes
+  gather_facts: false
+  become: true
+  tags:
+    - env-specific
+    - service_mesh
+  tasks:
+    - name: Create file /etc/sysctl.d/99-elasticsearch.conf
+      lineinfile:
+        path: /etc/sysctl.d/99-elasticsearch.conf
+        line: 'vm.max_map_count = 262144'
+        create: true
+    - name: Set vm.max_map_count on running Nodes
+      command: sysctl vm.max_map_count=262144

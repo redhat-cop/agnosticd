@@ -1,0 +1,242 @@
+:toc2:
+
+= Custom images using Packer
+
+This document describes how we use Packer to create custom images for our deployments.
+It allows us to speed up deployment by a significant factor.
+
+Currently this process is tested only against AWS cloud provider. But packer supporting a link:https://www.packer.io/docs/builders/index.html[plethora] of builders, there is no reason to stop there.
+
+== What happens during deployment ?
+
+During deployment, before the infrastructure step, the AMI, *if it exists*, is detected and picked before the cloudformation stack is created.
+
+There is 2 detection strategies:
+
+. Common images using the image name
++
+Variable: `custom_image_filter`
++
+Example:
++
+[source,yaml]
+----
+custom_image_filter: RHEL 7.5 GOLD packer 1542702393
+----
+. Opinionated image using (cloud) tags and the tuple (env_type, version, stage)
++
+Variable: `custom_image_stage`
++
+(`env_type` and `version` are always provided when deploying)
++
+This allows us to enable or disable an AMI easily by adding or not the stage into its tag `stages` in ec2. `env_type` and version have to match the values in the tags of the image too.
++
+Example:
++
+[source,yaml]
+----
+custom_image_stage: PROD
+----
+
+If no AMI is found, then it defaults to what is used in the Cloudformation template.
+
+== Requirements to use custom images
+
+When deploying a config:
+
+. Make sure either:
+  * the config is using the common CloudFormation template
+  * the CF template in the config directory supports the variable `custom_image`
+. Run the playbook with `-e custom_image_filter=IMAGENAME`. For example:
++
+----
+-e "custom_image_filter='RHEL 7.5 GOLD packer 1542702393'"
+----
++
+Or if you are using config-specific images, set the `custom_image_stage` variable:
++
+----
+-e custom_image_stage=PROD
+----
+
+If the image is found, then it will be used, otherwise, playbook defaults to what is defined in the CloudFormation template.
+
+== Build common images
+
+=== Build to your account
+
+Create and copy the image to multiple regions:
+
+[source,bash]
+----
+packer build -var-file=${HOME}/secrets/gpte.json rhel_gold.json
+----
+
+This is pretty straightforward. See the file link:../tools/builds/packer/rhel_gold.json[rhel_gold.json].
+
+The packer command will:
+
+. Create an instance using a source AMI.
+. Shutdown and save the AMI
+. Push the AMI to the regions specified in the `rhel_gold.json`
+
+== Build and use opinionated images
+
+
+We described the process for creating a common image that can be used for any config.
+In this section we describe the process for creating a custom image specific to a config.
+
+The directory to build packer opiniated images is private because it contains private information like the repository path.
+For the GPTE organisation, it lives in the private OPEN_Admin repo here: link:https://github.com/redhat-gpe/OPEN_Admin/tree/master/OPENTLC-Deployer/packer[OPENTLC-Deployer/packer/].
+Inside it, there is a directory for each config.
+
+Inside a config directory, you will find:
+
+- `packer.json`: It's the file used by packer to build the image. It gathers all the information needed for the build.
+- `variables.yml`: If you have a look inside `packer.json` you will see that it's calling `ansible-playbook` with `--extra-vars @variables.yml`. The file contains the variables needed for the deployment to work: `cloud_provider`, `own_repo_path`, etc.
+- `readme.adoc`: describe how to build an image for the config.
+
+
+Usually to create the image for a specific version, you run:
+
+[source,shell]
+----
+# Change the variables for your need
+packer build -var-file=/home/user/secrets/gpte.json
+                 -var "variables=variables.yml"
+                 -var "version=3.10.14"
+                 -var "stages=TEST"
+                 packer.json
+----
+
+The packer command will:
+
+. Create an instance using a source AMI.
+. Run the `main.yml` playbook there using the variables you passed in `variables.yml`
+  Only the tasks tagged `packer` will be executed.
+. Shutdown and save the AMI
+. Push the AMI to the regions specified in the `packer.json` or using `-var regions=...`
+
+Let's describe the 3 files used in this command:
+
+- `packer.json`
+- `gpte.json` secret file
+- `variables.yml` config variables
+
+=== `packer.json`
+
+
+`packer.json` is the main piece. Here is an example:
+
+[source,json]
+----
+{
+    "variables": {
+        "ami_regions": "us-east-1,eu-central-1,ap-southeast-1,sa-east-1",
+        "env_type": "ocp-clientvm"
+    },
+    "builders": [
+        {
+            "type": "amazon-ebs",
+            "region": "us-east-1",
+            "source_ami": "ami-0456c465f72bd0c95",
+            "subnet_id": "subnet-0110de3d886fb926e",
+            "associate_public_ip_address": "true",
+            "instance_type": "t2.large",
+            "ssh_username": "ec2-user",
+            "access_key": "{{user `aws_access_key_id`}}",
+            "secret_key": "{{user `aws_secret_access_key`}}",
+            "ami_regions": "{{user `ami_regions`}}",
+            "ami_name": "RHEL 7.5 {{user `env_type`}} {{user `osrelease`}} packer {{timestamp}}",
+            "tags": {
+                "env_type": "{{user `env_type`}}",
+                "version": "{{user `version`}}",
+                "stages": "{{user `stages`}}",
+                "skip_packer_tasks": "yes",
+                "hosts": "all"
+            }
+        }
+    ],
+
+    "provisioners": [
+        {
+            "type": "ansible",
+            "playbook_file": "main.yml",
+            "groups": ["bastions"],
+            "user": "ec2-user",
+            "extra_arguments": [
+                "--extra-vars", "osrelease={{user `version`}}",
+                "--extra-vars", "env_type={{user `env_type`}}",
+                "--extra-vars", "@{{user `variables`}}",
+                "--tags", "step0000,packer"
+            ],
+            "ansible_env_vars": ["ANSIBLE_HOST_KEY_CHECKING=False"]
+        }
+    ]
+}
+----
+
+=== Secret file
+
+In the previous command, `gpte.json` is the secret file. It contains variables like:
+
+[source,json]
+----
+{
+        "aws_access_key_id": "...",
+        "aws_secret_access_key": "..."
+}
+----
+
+=== Config variables
+
+This file (`variables.yml` in this example) contains the variables needed to run the config and create the image.
+Here is an example:
+
+[source,yaml]
+----
+---
+cloud_provider: ec2
+software_to_deploy: none
+own_repo_path: http://example.com/repos/ocp/{{ osrelease }}
+install_ipa_client: true
+----
+
+=== During deployment
+
+If you want the image to be used, you need to provide the variable `custom_image_stage`. For example:
+
+[source,yaml]
+----
+custom_image_stage: TEST
+----
+
+During deployment, the image, *if it exists*, will automatically be picked by AgnosticD, unless you set `allow_custom_images` to `false`.
+
+AgnosticD will pick an image if those tags on AMI tags match some variables:
+
+- `env_type` variable <==> `env_type` tag value
+- `osrelease` variable <==> `version` tag value
+- `custom_image_stage` variable included in `stages` tag value
+
+If a custom image is detected and used during deployment, then the tasks tagged `packer` will be skipped. This is how we save time!
+
+=== Skip packer tasks, or not.
+
+By default, when building the image, all tasks tagged `packer` will be executed.
+
+Then, when you deploy, if a custom image is detected for you, all the tasks tagged `packer` will be skipped.
+If you want to change this and still want to run those tasks again (even if they were already done in the image), you can update the cloud Tag `skip_packer_tasks` on the AMI.
+
+
+=== How to tag tasks to be part of the image
+
+When building an image, if you want to add more tasks to it, just tag the task with `packer` and add a condition so it's not run during the deployment:
+
+[source,yaml]
+----
+- name: My heavy task that is done in the image and not during deployment
+  tags: packer
+  when: not hostvars.localhost.skip_packer_tasks | d(false)
+  [...]
+----

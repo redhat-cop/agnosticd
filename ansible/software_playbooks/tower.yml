@@ -1,130 +1,68 @@
-# vim: set ft=ansible:
 ---
-- name: Step 003 - Prepare Ansible Host Files
-  hosts: localhost
-  connection: local
-  become: False
+- name: Step 00xxxxx software
+  hosts: bastions[0]
   gather_facts: False
-  vars_files:
-    - "../configs/{{ env_type }}/env_vars.yml"
-    - "../configs/{{ env_type }}/env_secret_vars.yml"
-  tags:
-    - generate_ansible_hosts_file
+  become: true
   tasks:
-    - name: generate ansible hosts file
+    - debug:
+        msg: "Software tasks Started"
+    - name: Download Tower Setup file
+      unarchive:
+        src: "https://releases.ansible.com/ansible-tower/setup/ansible-tower-setup-{{tower_version}}.tar.gz"
+        dest: /root/
+        remote_src: yes
+      tags:
+        - install-tower
+
+    - name: Create Tower Inventory file
       template:
         src: "../configs/{{ env_type }}/files/hosts_template.j2"
-        dest: "../workdir/hosts-{{ env_type }}-{{ guid }}"
-    - name: generate ansible tower hosts file
-      template:
-        src: "../configs/{{ env_type }}/files/tower_hosts_template.j2"
-        dest: "../workdir/tower_hosts-{{ env_type }}-{{ guid }}"
-
-- name: Prepare bastion for Tower Deployment
-  hosts: bastions
-  become: true
-  gather_facts: False
-  vars_files:
-    - "../configs/{{ env_type }}/env_vars.yml"
-    - "../configs/{{ env_type }}/env_secret_vars.yml"
-  vars:
-    tower_inventory_path: /root/tower_hosts
-
-  tags:
-    - install_tower
-  tasks:
-    - name: Ensure directory /opt/tower
-      file:
-        path: /opt/tower
-        state: directory
-
-    - name: Copy over ansible hosts file
-      copy:
-        src: "../workdir/hosts-{{ env_type }}-{{ guid }}"
         dest: /etc/ansible/hosts
-
-    - name: Copy over ansible tower hosts file
-      copy:
-        src: "../workdir/tower_hosts-{{ env_type }}-{{ guid }}"
-        dest: "{{tower_inventory_path}}"
-    - name: unarchive the latest tower software
-      unarchive:
-        src: "https://releases.ansible.com/ansible-tower/setup/ansible-tower-setup-{{ tower_setup_version | default('latest') }}.tar.gz"
-        dest: /opt/tower
-        remote_src: yes
-
-    - name: list current repository files
-      shell: "ls /opt/tower/ansible-tower-setup-*/setup.sh"
-      register: tower_installer_path
-
-    - name: print out tower Installer
-      debug:
-        var: tower_installer_path
-
-    - name: Add log path to Ansible configuration
-      lineinfile:
-        regexp: "^#log_path"
-        dest: "/etc/ansible/ansible.cfg"
-        line: "log_path = /root/ansible.log"
-        state: present
       tags:
-        - ansible_log_enable
+        - create_tower_inventory
 
-    - name: print out tower Installer
-      debug:
-        msg: "{{tower_installer_path.stdout}} -i {{tower_inventory_path}}"
-    - name: run the tower installer
-      shell: "{{tower_installer_path.stdout}} -i {{tower_inventory_path}}"
+    - name: Run Ansible Tower setup
+      shell: ./setup.sh -i /etc/ansible/hosts
+      args:
+        chdir: /root/ansible-tower-setup-{{tower_version}}
+      async: 3600
+      poll: 36
+      tags:
+        - install-tower
 
-
-
-- name: Prepare bastion for Tower Deployment
-  hosts: towers[0]
-  become: true
-  gather_facts: False
-  vars_files:
-    - "../configs/{{ env_type }}/env_vars.yml"
-    - "../configs/{{ env_type }}/env_secret_vars.yml"
-  vars:
-    tower_inventory_path: /root/tower_hosts
-
-  tags:
-    - install_tower_post
-  tasks:
-    - name: install pip via yum
-      yum:
-       name: python-pip
-
-    - name: Install Tower cli
+    - name: Install tower-cli
       pip:
-       name: 'ansible-tower-cli'
-    #   version: '3.1.8'
-
-    - name: Configure the tower cli file
-      blockinfile:
-        path: "~/.tower_cli.cfg"
-        create: true
-        block: |
-          [general]
-          host = tower1.{{guid}}.example.opentlc.com
-          username = admin
-          password = {{tower_admin_password}}
-
+        name: ansible-tower-cli
+        state: latest
+      tags:
+          - tower-cli
+    
+    - name: Set tower_hostname fact if not present
+      when: tower_hostname is not defined
+      set_fact:
+        tower_hostname: "{{ item | first }}"
+      loop:
+        - "{{ query('inventory_hostnames', 'towers') }}"
+      tags:
+          - tower-cli
+      
     - name: Configure the tower cli file
       template:
-        src: "{{ ANSIBLE_REPO_PATH }}/files/tower_cli.j2"
-        dest: "~/.tower_cli.cfg"
-        mode: 0640
-    - name: Download Licence file
-      get_url:
-        url: "{{license_file_url}}"
-        dest: /root/license.txt
-    - name: Append file
-      lineinfile:
-        path: /root/license.txt
-        insertbefore: '"company_name.*"'
-        line: '"eula_accepted" : "true",'
+        src: "../configs/{{env_type}}/files/tower_cli.j2"
+        dest: "/root/.tower_cli.cfg"
+        mode: 0600
+      tags:
+          - tower-cli
+          - install-tower
 
-    - name: Add the tower license
-      command: |
-        tower-cli setting modify LICENSE @/root/license.txt
+   
+- name: Software flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Software checks completed successfully"

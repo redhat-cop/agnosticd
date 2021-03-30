@@ -25,10 +25,8 @@ Example Playbook
   run_once: true
   gather_facts: False
   become: yes
-  vars_files:
-    - "{{ ANSIBLE_REPO_PATH }}/configs/{{ env_type }}/env_vars.yml"
   roles:
-    - { role: "{{ ANSIBLE_REPO_PATH }}/roles/openwhisk" }
+    - { role: "openwhisk" }
 
 License
 -------

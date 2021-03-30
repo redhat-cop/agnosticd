@@ -1,0 +1,87 @@
+- name: Adding new target_host to the target_group
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+  - name: Adding the remote host to the inventory
+    add_host:
+      name: "{{ target_host }}"
+      groups: target_group
+    changed_when: false
+
+  - name: Setting right permissions to .ssh directory
+    file:
+      path: /opt/apb/.ssh
+      state: directory
+      mode: 0700
+  
+  #- name: Generate a brand new SSH key 
+  #  shell: "ssh-keygen -N '' -f /opt/apb/id_rsa"
+
+  - name: Copy the pre-generated master private key in .ssh dir
+    shell: cp /opt/apb/id_rsa /opt/apb/.ssh/
+
+  - name: Setting right permissing for keyfile
+    file:
+      path: /opt/apb/.ssh/id_rsa
+      mode: 0600
+
+- name: Starting containers privisioning on remote RHEL
+  hosts: target_group
+  remote_user: ec2-user
+  become: true
+  gather_facts: false
+  vars:
+    token: "YOUR_TOKEN_HERE"
+    registryaddr: "YOUR_OCP_ADDRESS_HERE"
+  tasks:
+  - name: Log into private registry and force re-authorization
+    shell: "docker login -u openshift -p {{ token }} {{ registryaddr }}"
+
+  - name: Pulling images of latest tag (force)
+    shell: "docker pull {{item}}:latest"
+    with_items:
+     - jboss-amq-6/amq63-openshift
+     - "{{ registryaddr }}/iot-testing/businessrules"
+     - "{{ registryaddr }}/iot-testing/software-sensor"
+     - "{{ registryaddr }}/iot-testing/routingservice"
+
+  - name: Killing any previous container that I'll deploy next
+    shell: "docker kill {{ item }}"
+    ignore_errors: yes
+    with_items:
+     - amq63
+     - routingservice
+     - businessrules
+     - software-sensor
+
+  - name: Removing any previous container that I handle
+    shell: "docker rm {{ item }}"
+    ignore_errors: yes
+    with_items:
+     - amq63
+     - routingservice
+     - businessrules
+     - software-sensor
+
+  - name: Starting AMQ container on the host
+    shell: "docker run -d --name amq63 --restart always -e AMQ_USER=admin -e AMQ_PASSWORD=change12_me -e AMQ_TRANSPORTS='openwire, mqtt' -e AMQ_QUEUES=message.to.rules -e AMQ_SPLIT=true -e AMQ_MESH_DISCOVERY_TYPE=dns -e AMQ_MESH_SERVICE_NAME=broker-amq-mesh -e AMQ_MESH_SERVICE_NAMESPACE=default -e AMQ_STORAGE_USAGE_LIMIT='1 gb' jboss-amq-6/amq63-openshift:latest"
+    
+  - pause:
+      seconds: 30
+
+  - name: Starting RoutingService container on the host
+    shell: "docker run -d --name routingservice --link amq63:amq63 --restart always -e SOURCE_AMQ_BROKER=tcp://amq63:61616 -e SOURCE_BROKER_ADMIN_UID=admin -e SOURCE_BROKER_ADMIN_PASSWD=change12_me -e BROKER_AMQ_MQTT_HOST=amq63 {{ registryaddr }}/iot-testing/routingservice:latest"
+     
+  - pause:
+      seconds: 10
+
+  - name: Starting BusinessRules container on the host
+    shell: "docker run -d --name businessrules --link amq63:amq63 --restart always -e JAVA_APP_JAR=rules-jar-with-dependencies.jar -e SOURCE_AMQ_BROKER=tcp://amq63:61616 -e SOURCE_QUEUE=message.to.rules -e SOURCE_BROKER_ADMIN_UID=admin -e SOURCE_BROKER_ADMIN_PASSWD=change12_me -e TARGET_AMQ_BROKER=tcp://YOUR_INFRA_ADDR:30616 -e TARGET_QUEUE=message.to.datacenter -e TARGET_BROKER_ADMIN_UID=admin -e TARGET_BROKER_ADMIN_PASSWD=change12_me {{ registryaddr }}/iot-testing/businessrules:latest"
+
+  - pause:
+      seconds: 10
+
+  - name: Starting SoftwareSensor container on the host
+    shell: "docker run -d --name software-sensor --link amq63:amq63 --restart always -e JAVA_OPTIONS='-DhighWater=800 -DlowWater=200 -DbrokerUID=admin -DbrokerPassword=change12_me -DreceiverURL=amq63 -DdeviceType=temperature -DdeviceID=4711 -DinitialValue=70 -Dcount=1000 -DwaitTime=1' -e JAVA_APP_JAR=softwareSensor-jar-with-dependencies.jar {{ registryaddr }}/iot-testing/software-sensor:latest"
+

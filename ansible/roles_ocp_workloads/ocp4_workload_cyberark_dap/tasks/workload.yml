@@ -1,0 +1,164 @@
+---
+- name: Setting up CyberArk DAP workload for user
+  debug:
+    msg: "Setting up CyberArk DAP workload for user ocp_username = {{ ocp_username }}"
+
+# CyberArk DAP workload tasks
+# -------------------------------------------------------------------------
+
+- name: Create the cyberark setup directory
+  file:
+    path: ~{{ansible_user}}/cyberark_setup
+    state: directory
+
+- name: Download the CyberArk RHPDS setup files
+  become: true
+  unarchive:
+    src: "{{ ocp4_workload_cyberark_setup_files_url }}"
+    dest: ~{{ansible_user}}/cyberark_setup
+    remote_src: true
+    owner: "{{ ansible_user }}"
+    group: users
+
+- name: Set random password for dap
+  set_fact:
+    dap_pwd: "{{ lookup('password', '/dev/null length=111 chars=ascii_letters,digits,hexdigits,@,#,$,%,^,*,') }}"
+
+- name: create CyberArk resources
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+    - namespace.j2
+    - service.j2
+    - dap_authn_role.j2
+    - role_binding.j2
+    - dap_cm_role.j2
+    - secrets_cluster_role.j2
+    - security_context_constraints.j2
+
+- name: Deploy cyberark conjur master
+  command: >-
+    ~{{ansible_user}}/cyberark_setup/{{ ocp4_workload_cyberark_setup_files_release }}/master_deploy.sh
+    {{ ocp4_workload_cyberark_project }} {{ dap_pwd }} {{ ocp4_workload_cyberark_setup_files_release }}
+
+- name: Deploy mysqldb
+  command: >-
+    ~{{ansible_user}}/cyberark_setup/{{ ocp4_workload_cyberark_setup_files_release }}/mysqldb_deploy.sh
+    {{ ocp4_workload_cyberark_project }} {{ ocp4_workload_cyberark_setup_files_release }}
+
+- name: Create lab user demo projects
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: 'user{{ item }}'
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Grant the authentication service access to pods in each user project
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: dap-authn-service
+        namespace: 'user{{ item }}'
+      subjects:
+        - kind: ServiceAccount
+          name: dap-authn-service
+          namespace: '{{ ocp4_workload_cyberark_project }}'
+      roleRef:
+        kind: ClusterRole
+        name: dap-authn-role
+        apiGroup: rbac.authorization.k8s.io
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Grant namespace admin privileges to user & labadmin SA
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: admin
+        namespace: 'user{{ item }}'
+      subjects:
+        - kind: User
+          name: 'user{{ item }}'
+        - kind: User
+          name: 'system:serviceaccount:user{{ item }}:labadmin'
+      roleRef:
+        kind: ClusterRole
+        name: admin
+        apiGroup: rbac.authorization.k8s.io
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Apply Policies to user namespaces
+  command: >-
+    ~{{ansible_user}}/cyberark_setup/{{ ocp4_workload_cyberark_setup_files_release }}/apply_namespace_policies.sh
+    {{ ocp4_workload_cyberark_project }} {{ dap_pwd }} {{item}} {{ ocp4_workload_cyberark_setup_files_release }}
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Grant users read-only access to the DAP config map
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: 'dap-cm-access-user{{ item }}'
+        namespace: '{{ ocp4_workload_cyberark_project }}'
+      roleRef:
+        kind: ClusterRole
+        name: dap-cm-access-role
+        apiGroup: rbac.authorization.k8s.io
+      subjects:
+        - kind: User
+          name: 'user{{ item }}'
+        - kind: User
+          name: system:serviceaccount:user{{ item }}:labadmin
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Deploy labadmin
+  command: >-
+    ~{{ansible_user}}/cyberark_setup/{{ ocp4_workload_cyberark_setup_files_release }}/deploy_labadmin.sh
+    {{ ocp4_workload_cyberark_project }} {{ ocp4_workload_cyberark_setup_files_release }} {{ item }}
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Get cluster domain name
+  command: >-
+    ~{{ansible_user}}/cyberark_setup/{{ ocp4_workload_cyberark_setup_files_release }}/get_cyberark_appliance_url.sh
+    {{ ocp4_workload_cyberark_project }} {{ ocp4_workload_cyberark_setup_files_release }}
+  register: cyberark_url
+
+- name: Ensure CyberArk availability by querying the OpenShift API
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: "{{ ocp4_workload_cyberark_project }}"
+    name: "dap-service-node"
+  register: r_dap_cyberark_core_deployment
+  retries: 30
+  delay: 30
+  until:
+    - r_dap_cyberark_core_deployment.resources | length | int > 0
+    - r_dap_cyberark_core_deployment.resources[0].status.readyReplicas is defined
+    - r_dap_cyberark_core_deployment.resources[0].status.readyReplicas | int == r_dap_cyberark_core_deployment.resources[0].spec.replicas | int
+
+- name: Provide DAP Access to RHPDS deployer
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+    - "Conjur URL: {{ cyberark_url.stdout }}"
+    - "Conjur Admin User: admin"
+    - "Conjur Admin Password: {{ dap_pwd }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

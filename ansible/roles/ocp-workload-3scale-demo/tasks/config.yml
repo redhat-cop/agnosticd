@@ -1,19 +1,31 @@
 ---
-- name: Wait until RH SSO API is available
-  uri:
-    url: https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}
+- name: Wait until RH SSO API is available 
+  uri: 
+    url: https://keycloak-{{sso_project}}.{{ocp_apps_domain}}
     method: HEAD
     follow_redirects: safe
     validate_certs: no
   register: wait_sso_result
-  until: wait_sso_result|succeeded
-  ignore_errors: yes
-  retries: 15
+  until: wait_sso_result is succeeded
+  retries: 30
   delay: 60
 
+- name: Retrieve SSO admin credentials
+  k8s_facts:
+    kind: secret
+    name: credential-sso
+    namespace: '{{sso_project}}'
+  register: _sso_credentials
+
+- debug: var=_sso_credentials
+
+- set_fact:
+    _sso_admin_user: '{{ _sso_credentials.resources[0].data.ADMIN_USERNAME | b64decode }}'
+    _sso_admin_password: '{{ _sso_credentials.resources[0].data.ADMIN_PASSWORD | b64decode }}'
+
 - name: Get SSO token
-  shell: "curl --insecure -X POST 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/realms/master/protocol/openid-connect/token' \
-  -H 'Content-Type: application/x-www-form-urlencoded' -d 'username=keyadmin' -d 'password=keypassword' -d 'grant_type=password' -d 'client_id=admin-cli'"
+  shell: "curl --insecure -X POST 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/realms/master/protocol/openid-connect/token' \
+  -H 'Content-Type: application/x-www-form-urlencoded' -d 'username={{_sso_admin_user}}' -d 'password={{_sso_admin_password}}' -d 'grant_type=password' -d 'client_id=admin-cli'"
   register: token_text
 
 - set_fact: TKN={{ (token_text.stdout | from_json).access_token }}
@@ -29,8 +41,8 @@
 - debug: var=get_realm.content
 
 - name: Create Insurance Realm
-  uri:
-    url: 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms'
+  uri: 
+    url: 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms'
     method: POST
     body: "{{get_realm.content}}"
     body_format: json
@@ -42,7 +54,7 @@
     status_code: 201
 
 - name: Get id for client 'real-management'
-  shell: "curl --insecure 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients' \
+  shell: "curl --insecure 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients' \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
   register: clients_text
 
@@ -53,7 +65,7 @@
 - debug: var=IdClient
 
 - name: Get id for service account '3scale-admin'
-  shell: "curl --insecure 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients/1/service-account-user' \
+  shell: "curl --insecure 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients/1/service-account-user' \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
   register: users_text
 
@@ -62,7 +74,7 @@
 - debug: var=IdUser
 
 - name: Get id for role 'manage-clients'
-  shell: "curl --insecure 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/users/{{IdUser}}/role-mappings/clients/{{IdClient}}/available' \
+  shell: "curl --insecure 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/users/{{IdUser}}/role-mappings/clients/{{IdClient}}/available' \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
   register: roles_text
 
@@ -73,12 +85,12 @@
 - debug: var=IdRole
 
 - name: Add role 'manage-clients' to service account
-  shell: "curl --insecure -X POST 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/users/{{IdUser}}/role-mappings/clients/{{IdClient}}' \
+  shell: "curl --insecure -X POST 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/users/{{IdUser}}/role-mappings/clients/{{IdClient}}' \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}' -d '{{IdRole | to_json}}'"
   register: outcome_text
 
 - name: Get client secret
-  shell: "curl --insecure 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients/1/client-secret' \
+  shell: "curl --insecure 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients/1/client-secret' \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
   register: secret_text
 
@@ -87,26 +99,27 @@
 - debug: var=client_secret
 
 - name: Get the admin access_token
-  shell: "oc get dc system-app -o jsonpath='{.spec.template.spec.containers[?(@.name==\"system-provider\")].env[?(@.name==\"ADMIN_ACCESS_TOKEN\")].value}' -n {{ threescale_project }}"
+  shell: "oc get secret/system-seed --template='{% raw %}{{.data.ADMIN_ACCESS_TOKEN}}{% endraw %}' -n {{ threescale_project }} | base64 -d"
   register: env_text
 
 - set_fact: access_token="{{ env_text.stdout }}"
 
 - debug: msg="access_token is {{ access_token }}"
 
-- name: Wait until 3scale API is available
-  uri:
-    url: https://3scale-admin.{{guid}}.{{ocp_apps_domain}}
-    method: HEAD
+- name: Wait for Developer account to be ready 
+  uri: 
+    url: https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/accounts/find.xml
     validate_certs: no
-  register: wait_threescale_result
-  until: wait_threescale_result|succeeded
-  ignore_errors: yes
+    headers:
+      Content-Type: "application/x-www-form-urlencoded"
+    body: "access_token={{access_token}}&username=john"
+  register: wait_dev_account
+  until: wait_dev_account is succeeded
   retries: 10
   delay: 60
 
 - name: Create backend service
-  uri:
+  uri: 
     url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services.xml"
     method: POST
     return_content: yes
@@ -119,9 +132,20 @@
 
 - debug: var=create_svc_result
 
+- name: Get backend Id
+  xml:
+    xmlstring: '{{ create_svc_result.content }}'
+    xpath: //service/id
+    content: text
+  register: xmlstring
+
+- debug: var=xmlstring.matches[0].id
+
+- set_fact: svc_id={{ xmlstring.matches[0].id }}
+
 - name: Update backend service (workaround for oidc bug)
-  uri:
-    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services/3.xml"
+  uri: 
+    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services/{{svc_id}}.xml"
     method: PUT
     return_content: yes
     headers:
@@ -130,8 +154,8 @@
     validate_certs: no
 
 - name: Create application plan
-  uri:
-    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services/3/application_plans.xml"
+  uri: 
+    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services/{{svc_id}}/application_plans.xml"
     method: POST
     return_content: yes
     headers:
@@ -143,27 +167,66 @@
 
 - debug: var=create_plan_result
 
+- name: Get plan Id
+  xml:
+    xmlstring: '{{ create_plan_result.content }}'
+    xpath: //plan/id
+    content: text
+  register: xmlstring
+
+- debug: var=xmlstring.matches[0].id
+
+- set_fact: plan_id={{ xmlstring.matches[0].id }}
+
 - name: Config backend service proxy
-  uri:
-    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services/3/proxy.xml"
+  uri: 
+    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services/{{svc_id}}/proxy.xml"
     method: PATCH
     return_content: yes
     headers:
       Content-Type: "application/x-www-form-urlencoded"
-    body: "access_token={{access_token}}&endpoint={{ ('https://accidentalert-production.amp.' + guid + '.' + ocp_apps_domain + ':443') | urlencode }}\
+    body: "access_token={{access_token}}&endpoint={{ ('https://accidentalert-production-' + guid + '.' + ocp_apps_domain + ':443') | urlencode }}\
     &api_backend={{ ('http://accidentalert-backend-' + service_project + '.' +  ocp_apps_domain + ':80') | urlencode }}\
-    &sandbox_endpoint={{ ('https://accidentalert-staging.amp.' + guid + '.' + ocp_apps_domain + ':443') | urlencode }}\
-    &oidc_issuer_endpoint={{ ('http://3scale-admin:' + client_secret + '@sso-' + sso_project + '.' + ocp_apps_domain + '/auth/realms/insurance') | urlencode }}"
+    &sandbox_endpoint={{ ('https://accidentalert-staging-' + guid + '.' + ocp_apps_domain + ':443') | urlencode }}\
+    &oidc_issuer_endpoint={{ ('https://3scale-admin:' + client_secret + '@keycloak-' + sso_project + '.' + ocp_apps_domain + '/auth/realms/insurance') | urlencode }}"
     validate_certs: no
+  register: config_proxy_result
+
+- debug: var=config_proxy_result
+
+- name: Get policy chain template
+  uri:
+    url: 'https://raw.githubusercontent.com/jbossdemocentral/3scale-security-oidc-demo/master/support/templates/policy-config.json'
+    return_content: yes
+  register: get_policies
+
+- debug: var=get_policies.content
+
+- name: Enable CORS
+  uri: 
+    url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/services/{{svc_id}}/proxy/policies.json"
+    method: PUT
+    return_content: yes
+    headers:
+      Content-Type: "application/x-www-form-urlencoded"
+    body: "access_token={{access_token}}&policies_config={{ get_policies.content | urlencode }}"
+    validate_certs: no
+    status_code: 200
+  register: update_policies_result
+  retries: 3
+  delay: 10
+  until: update_policies_result is not failed
+
+- debug: var=update_policies_result
 
 - name: Create the accidentalert-ui application
-  uri:
+  uri: 
     url: "https://3scale-admin.{{guid}}.{{ocp_apps_domain}}/admin/api/accounts/3/applications.xml"
     method: POST
     return_content: yes
     headers:
       Content-Type: "application/x-www-form-urlencoded"
-    body: "access_token={{access_token}}&plan_id=9&name=Accident+Report+App\
+    body: "access_token={{access_token}}&plan_id={{plan_id}}&name=Accident+Report+App\
     &description=Accident+Alert+Web+App&application_id=accidentalert-ui\
     &redirect_url=http%3A%2F%2Fwww-accidentalert-{{guid}}.{{ocp_apps_domain}}%2F%2A"
     validate_certs: no
@@ -173,20 +236,25 @@
 - debug: var=create_app_result
 
 - name: Get SSO token
-  shell: "curl --insecure -X POST 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/realms/master/protocol/openid-connect/token' \
-  -H 'Content-Type: application/x-www-form-urlencoded' -d 'username=keyadmin' -d 'password=keypassword' -d 'grant_type=password' -d 'client_id=admin-cli'"
+  shell: "curl --insecure -X POST 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/realms/master/protocol/openid-connect/token' \
+  -H 'Content-Type: application/x-www-form-urlencoded' -d 'username={{_sso_admin_user}}' -d 'password={{_sso_admin_password}}' -d 'grant_type=password' -d 'client_id=admin-cli'"
   register: token2_text
 
 - set_fact: TKN2={{ (token2_text.stdout | from_json).access_token }}
 
+- debug: var=TKN2
+
 - name: Get id for client 'accidentalert-ui'
   uri:
-    url: 'https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients'
+    url: 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients'
     return_content: yes
     headers:
       Authorization: 'Bearer {{TKN2}}'
     validate_certs: no
   register: client_text
+  until: ("accidentalert-ui" in client_text.content)
+  retries: 20
+  delay: 20
 
 - set_fact: IdClientApp={{ (client_text.content | from_json | json_query(query)) }}
   vars:
@@ -195,8 +263,8 @@
 - debug: var=IdClientApp
 
 - name: Update the rh sso app
-  uri:
-    url: "https://secure-sso-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients/{{IdClientApp}}"
+  uri: 
+    url: "https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients/{{IdClientApp}}"
     method: PUT
     return_content: yes
     headers:

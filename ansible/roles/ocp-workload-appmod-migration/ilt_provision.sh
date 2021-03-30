@@ -60,7 +60,7 @@ function executeAnsibleViaLocalhost() {
     echo -en "\n\nexecuteAnsibleViaLocalhost():  Provisioning project with GUID = $GUID and OCP_USERNAME = $OCP_USERNAME\n" >> $LOG_FILE
 
     ansible-playbook -i localhost, -c local ./configs/ocp-workloads/ocp-workload.yml \
-                    -e"ANSIBLE_REPO_PATH=`pwd`" \
+
                     -e"ocp_username=${OCP_USERNAME}" \
                     -e"ocp_workload=${WORKLOAD}" \
                     -e"guid=${GUID}" \
@@ -77,4 +77,3 @@ function executeAnsibleViaLocalhost() {
 ensurePreReqs
 login
 executeLoop
-
