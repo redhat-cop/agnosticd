@@ -175,7 +175,7 @@ do_ansible_syntax() {
     done
 }
 
-if [[ ${baseref} ]]; then
+if [[ ${baseref} = "foobar-temporary-do-all-tests" ]]; then
     ##########################################################
     # PULL REQUEST
     # SHORT version for pull_request action, only a few files
