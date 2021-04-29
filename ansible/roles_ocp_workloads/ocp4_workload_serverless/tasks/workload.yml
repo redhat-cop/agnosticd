@@ -4,122 +4,29 @@
   debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
-- name: Create Catalogsource for use with catalog snapshot
-  when: ocp4_workload_serverless_use_catalog_snapshot | bool
-  k8s:
-    state: present
-    definition: "{{ lookup('template', './templates/catalogsource.j2' ) | from_yaml }}"
-
-- name: Determine channel for Serverless operator is no channel specified
-  when: ocp4_workload_serverless_channel | default("") | length == 0
-  block:
-  - name: Get cluster version
-    k8s_info:
-      api_version: config.openshift.io/v1
-      kind: ClusterVersion
-      name: version
-    register: r_cluster_version
-
-  - name: Get current stable channel for Serverless operator
-    k8s_info:
-      api_version: packages.operators.coreos.com/v1
-      kind: PackageManifest
-      name: serverless-operator
-      namespace: openshift-marketplace
-    register: r_so_channel
-
-  # Set Serverless channel to the one matching the deployed cluster version.
-  # If no matching channel available set to defaultChannel from the subscription.
-  - name: Set Serverless operator channel
-    set_fact:
-      ocp4_workload_serverless_channel: >-
-        {{ t_version_match_channel | default(r_so_channel.resources[0].status.defaultChannel, true) }}
-    vars:
-      t_cluster_version: >-
-        {{ r_cluster_version.resources[0].spec.channel | regex_replace('.*-(\d+\.\d+)', '\1') }}
-      t_version_match_query: "[?name=='{{ t_cluster_version }}']|[0].name"
-      t_version_match_channel: >-
-        {{ r_so_channel.resources[0].status.channels | json_query(t_version_match_query) }}
-
-- name: Print Serverless operator channel to be installed
-  debug:
-    msg: "Serverless operator channel to be installed: {{ ocp4_workload_serverless_channel }}"
-
-- name: Create OpenShift Serverless subscription
-  k8s:
-    state: present
-    definition: "{{ lookup('template', './templates/subscription.j2' ) | from_yaml }}"
-
-- name: Wait until InstallPlan is created
-  k8s_info:
-    api_version: operators.coreos.com/v1alpha1
-    kind: InstallPlan
-    namespace: openshift-operators
-  register: r_install_plans
+- name: Install Operator
+  include_role:
+    name: install_operator
   vars:
-    _query: >-
-      [?starts_with(spec.clusterServiceVersionNames[0], 'serverless-operator')]
-  retries: 30
-  delay: 5
-  until:
-  - r_install_plans.resources | length > 0
-  - r_install_plans.resources | to_json | from_json | json_query(_query)
-
-- name: Set InstallPlan Name
-  set_fact:
-    ocp4_workload_serverless_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(query) }}"
-  vars:
-    query: >-
-      [?starts_with(spec.clusterServiceVersionNames[0], 'serverless-operator')].metadata.name|[0]
-
-- name: Get InstallPlan
-  k8s_info:
-    api_version: operators.coreos.com/v1alpha1
-    kind: InstallPlan
-    name: "{{ ocp4_workload_serverless_install_plan_name }}"
-    namespace: openshift-operators
-  register: r_install_plan
-
-- name: Approve InstallPlan if necessary
-  when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
-  k8s:
-    state: present
-    definition: "{{ lookup( 'template', './templates/installplan.j2' ) }}"
-
-- name: Get Installed CSV
-  k8s_info:
-    api_version: operators.coreos.com/v1alpha1
-    kind: Subscription
-    name: serverless-operator
-    namespace: openshift-operators
-  register: r_subscription
-  retries: 30
-  delay: 5
-  until:
-  - r_subscription.resources[0].status.currentCSV is defined
-  - r_subscription.resources[0].status.currentCSV | length > 0
-
-- name: Wait until CSV is Installed
-  k8s_info:
-    api_version: operators.coreos.com/v1alpha1
-    kind: ClusterServiceVersion
-    name: "{{ r_subscription.resources[0].status.currentCSV }}"
-    namespace: openshift-operators
-  register: r_csv
-  retries: 30
-  delay: 5
-  until:
-  - r_csv.resources[0].status.phase is defined
-  - r_csv.resources[0].status.phase | length > 0
-  - r_csv.resources[0].status.phase == "Succeeded"
+    install_operator_action: install
+    install_operator_name: serverless-operator
+    install_operator_namespace: openshift-operators
+    install_operator_channel: "{{ ocp4_workload_serverless_channel }}"
+    install_operator_catalog: redhat-operators
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_serverless_automatic_install_plan_approval | default(true) }}"
+    install_operator_starting_csv: "{{ ocp4_workload_serverless_starting_csv }}"
+    install_operator_use_catalog_snapshot: "{{ ocp4_workload_serverless_use_catalog_snapshot | default(false)}}"
+    install_operator_catalogsource_name: "{{ ocp4_workload_serverless_catalogsource_name | default('') }}"
+    install_operator_catalog_snapshot_image: "{{ ocp4_workload_serverless_catalog_snapshot_image | default('') }}"
+    install_operator_catalog_snapshot_image_tag: "{{ ocp4_workload_serverless_catalog_snapshot_image_tag | default('') }}"
 
 - name: Create knative-serving namespace and KNative Serving object
   k8s:
     state: present
     definition: "{{ lookup('file', item ) | from_yaml }}"
   loop:
-  - ./files/ns-knative-serving.yaml
-  - ./files/knative_serving.yaml
+  - ns-knative-serving.yaml
+  - knative_serving.yaml
 
 - name: Wait until KNative Serving installation is complete
   when: ocp4_workload_serverless_wait_for_deploy | bool
@@ -149,8 +56,8 @@
       state: present
       definition: "{{ lookup('file', item ) | from_yaml }}"
     loop:
-    - ./files/ns-knative-eventing.yaml
-    - ./files/knative_eventing.yaml
+    - ns-knative-eventing.yaml
+    - knative_eventing.yaml
 
   - name: Wait until KNative Eventing installation is complete
     when: ocp4_workload_serverless_wait_for_deploy | bool

@@ -1,13 +1,8 @@
 # vim: set ft=ansible
 ---
 # Implement your Workload deployment tasks here
-- name: Create spark-notebook ImageStreamTag in openshift project
-  k8s:
-    namespace: "openshift"
-    definition: "{{ lookup('template', 'workshop-notebook-openshift-image.imagestreamtag.yaml.j2') }}"
-
 - name: Get the storagecluster to extract its uid
-  k8s_facts:
+  k8s_info:
     api_version: ocs.openshift.io/v1
     namespace: "{{ ocs_namespace }}"
     name: ocs-storagecluster
@@ -19,8 +14,8 @@
     definition: "{{ lookup('template', 'cephobjectstore.yaml.j2') }}"
 
 - name: Wait for the RGW deployment
-  k8s_facts:
-    api_version: extensions/v1beta1
+  k8s_info:
+    api_version: apps/v1
     kind: Deployment
     namespace: "{{ ocs_namespace }}"
     label_selectors:
@@ -37,27 +32,99 @@
   delay: 10
 
 - name: Get the ceph rgw service
-  k8s_facts:
+  k8s_info:
     api_version: v1
     kind: Service
     namespace: "{{ ocs_namespace }}"
     label_selectors:
       - app=rook-ceph-rgw
   register: rgw_service
- 
+
+- name: "Create ODH project for workshop"
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: "{{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }}"
+
+- name: Create spark-notebook ImageStreamTag in workshop project
+  k8s:
+    namespace: "{{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }}"
+    definition: "{{ lookup('template', 'workshop-notebook-openshift-image.imagestreamtag.yaml.j2') }}"
+
+- name: Create the ODH kfdef for the workshop
+  k8s:
+    definition: "{{ lookup('template', 'data-engineering-kfdef.yaml.j2') }}"
+
+- name: Wait for various deploymentconfigs to deploy
+  k8s_info:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    name: "{{ item }}"
+    namespace: "{{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }}"
+  register: r_deployment_out
+  until:
+    - r_deployment_out is defined
+    - r_deployment_out.resources is defined
+    - r_deployment_out.resources[0] is defined
+    - r_deployment_out.resources[0].status is defined
+    - r_deployment_out.resources[0].status.readyReplicas is defined
+    - r_deployment_out.resources[0].status.readyReplicas | int >= r_deployment_out.resources[0].status.replicas | int
+  loop: "{{ validation_deploymentconfigs | list }}"
+  retries: 18
+  delay: 10
+
+- name: Wait for various deployments to deploy
+  k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: "{{ item }}"
+    namespace: "{{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }}"
+  register: r_deployment_out
+  until:
+    - r_deployment_out is defined
+    - r_deployment_out.resources is defined
+    - r_deployment_out.resources[0] is defined
+    - r_deployment_out.resources[0].status is defined
+    - r_deployment_out.resources[0].status.readyReplicas is defined
+    - r_deployment_out.resources[0].status.readyReplicas | int >= r_deployment_out.resources[0].status.replicas | int
+  loop: "{{ validation_deployments | list }}"
+  retries: 18
+  delay: 10
+
+- name: Wait for various statefulsets to deploy
+  k8s_info:
+    api_version: apps/v1
+    kind: StatefulSet
+    name: "{{ item }}"
+    namespace: "{{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }}"
+  register: r_deployment_out
+  until:
+    - r_deployment_out is defined
+    - r_deployment_out.resources is defined
+    - r_deployment_out.resources[0] is defined
+    - r_deployment_out.resources[0].status is defined
+    - r_deployment_out.resources[0].status.readyReplicas is defined
+    - r_deployment_out.resources[0].status.readyReplicas | int >= r_deployment_out.resources[0].status.replicas | int
+  loop: "{{ validation_statefulsets | list }}"
+  retries: 18
+  delay: 10
+
 - include_tasks: per_user_pre_operator_workload.yml
   loop: "{{ range(1, num_users | int + 1, 1) | list }}"
   loop_control:
     loop_var: user_num
 
 - name: wait for OBC S3 bindings
-  k8s_facts:
+  k8s_info:
     name: "user{{ item }}-odh-obc"
-    namespace: "opendatahub-user{{ item }}"
+    namespace: "{{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }}"
     api_version: objectbucket.io/v1alpha1
     kind: ObjectBucketClaim
   register: obc_claim_out
-  until: 
+  until:
     - obc_claim_out is defined
     - obc_claim_out.resources is defined
     - obc_claim_out.resources[0] is defined
@@ -68,120 +135,14 @@
   delay: 6
   loop: "{{ range(1, num_users | int + 1, 1) | list }}"
 
-- name: Wait for Open Data Hub ClusterServiceVersion to finish installing
-  k8s_facts:
-    api_version: operators.coreos.com/v1alpha1
-    kind: ClusterServiceVersion
-    namespace: "opendatahub-user{{ item }}"
-    name: opendatahub-operator.v0.5.2
-  register: odh_csv
-  until: 
-    - odh_csv.resources is defined
-    - odh_csv.resources[0] is defined
-    - odh_csv.resources[0].status is defined
-    - odh_csv.resources[0].status.phase is defined
-    - odh_csv.resources[0].status.phase == 'Succeeded'
-  retries: 10
-  delay: 60
-  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
-
-- name: Wait for Open Data Hub operator to deploy
-  k8s_facts:
-    api_version: extensions/v1beta1
-    kind: Deployment
-    namespace: "opendatahub-user{{ item }}"
-    name: opendatahub-operator
-  register: odh_operator
-  until: 
-    - odh_operator.resources is defined
-    - odh_operator.resources[0] is defined
-    - odh_operator.resources[0].status is defined
-    - odh_operator.resources[0].status.readyReplicas is defined
-    - odh_operator.resources[0].status.readyReplicas | int >= 1
-  retries: 10
-  delay: 60
-  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
 
 - include_tasks: per_user_post_operator_workload.yml
   loop: "{{ range(1, num_users | int + 1, 1) | list }}"
   loop_control:
     loop_var: user_num
 
-# parallel-ish validation of deployments
-- name: Wait for various deploymentconfigs to deploy
-  k8s_facts:
-    api_version: apps.openshift.io/v1
-    kind: DeploymentConfig
-    name: "{{ item.1 }}"
-    namespace: "opendatahub-user{{ item.0 }}"
-  register: deployment_out
-  until:
-    - deployment_out is defined
-    - deployment_out.resources is defined
-    - deployment_out.resources[0] is defined
-    - deployment_out.resources[0].status is defined
-    - deployment_out.resources[0].status.readyReplicas is defined
-    - deployment_out.resources[0].status.readyReplicas | int >= 1
-  loop: "{{ (range(1, num_users | int + 1, 1) | list) | product(validation_deploymentconfigs) | list }}"
-  retries: 18
-  delay: 10
-
-- name: Wait for various deployments to deploy
-  k8s_facts:
-    api_version: extensions/v1beta1
-    kind: Deployment
-    name: "{{ item.1 }}"
-    namespace: "opendatahub-user{{ item.0 }}"
-  register: deployment_out
-  until:
-    - deployment_out is defined
-    - deployment_out.resources is defined
-    - deployment_out.resources[0] is defined
-    - deployment_out.resources[0].status is defined
-    - deployment_out.resources[0].status.readyReplicas is defined
-    - deployment_out.resources[0].status.readyReplicas | int >= 1
-  loop: "{{ (range(1, num_users | int + 1, 1) | list) | product(validation_deployments) | list }}"
-  retries: 18
-  delay: 10
-
-- name: Wait for various statefulsets to deploy
-  k8s_facts:
-    api_version: apps/v1
-    kind: StatefulSet
-    name: "{{ item.1 }}"
-    namespace: "opendatahub-user{{ item.0 }}"
-  register: deployment_out
-  until:
-    - deployment_out is defined
-    - deployment_out.resources is defined
-    - deployment_out.resources[0] is defined
-    - deployment_out.resources[0].status is defined
-    - deployment_out.resources[0].status.readyReplicas is defined
-    - deployment_out.resources[0].status.readyReplicas | int >= 1
-  loop: "{{ (range(1, num_users | int + 1, 1) | list) | product(validation_statefulsets) | list }}"
-  retries: 18
-  delay: 10
-
-- name: Wait for various 3-member statefulsets to deploy
-  k8s_facts:
-    api_version: apps/v1
-    kind: StatefulSet
-    name: "{{ item.1 }}"
-    namespace: "opendatahub-user{{ item.0 }}"
-  register: deployment_out
-  until:
-    - deployment_out is defined
-    - deployment_out.resources is defined
-    - deployment_out.resources[0] is defined
-    - deployment_out.resources[0].status is defined
-    - deployment_out.resources[0].status.readyReplicas is defined
-    - deployment_out.resources[0].status.readyReplicas | int >= 3
-  loop: "{{ (range(1, num_users | int + 1, 1) | list) | product(validation_3statefulsets) | list }}"
-  retries: 18
-  delay: 10
-
 - name: Get the cluster apps domain
-  k8s_facts:
+  k8s_info:
     api_version: config.openshift.io/v1
     name: cluster
     kind: Ingress
@@ -190,27 +151,26 @@
 
 - name: register cluster apps domain as a fact
   set_fact:
-    cluster_apps_domain: "{{ r_ingress_config.resources[0].spec.domain }}"
-    notebook_suffix: "/notebooks/data-engineering-and-machine-learning-workshop.git/source/notebooks/hybrid-data-engineering.ipynb"
-
-- name: make sure the guides project exists
-  k8s:
-    state: present
-    definition:
-      apiVersion: project.openshift.io/v1
-      kind: Project
-      metadata:
-        name: guides
+    f_cluster_apps_domain: "{{ r_ingress_config.resources[0].spec.domain }}"
+    f_notebook_suffix: "/notebooks/data-engineering-and-machine-learning-workshop.git/source/notebooks/hybrid-data-engineering.ipynb"
 
 - name: search for username distribution tool
-  k8s_facts:
-    kind: DeploymentConfig
+  k8s_info:
+    kind: Deployment
     name: get-a-username
-    namespace: guides
+    namespace: "{{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }}"
   register: r_gau_dc
 
+- name: search for redis
+  k8s_info:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    name: redis
+    namespace: "{{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }}"
+  register: r_redis_dc
+
 - name: deploy redis
-  when: r_gau_dc.resources | list | length == 0
+  when: r_redis_dc.resources | list | length == 0
   shell: >
     oc process -f -
     -p DATABASE_SERVICE_NAME=redis
@@ -218,16 +178,16 @@
     -p VOLUME_CAPACITY=1Gi
     -p MEMORY_LIMIT=1Gi
     -p REDIS_VERSION=latest
-    | oc create -n guides  -f -
+    | oc create -n {{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }}  -f -
   args:
     stdin: "{{ lookup('file', 'redis-template.yaml') }}"
 
 - name: wait for redis to be ready
   when: r_gau_dc.resources | list | length == 0
-  k8s_facts:
+  k8s_info:
     api_version: v1
     kind: Pod
-    namespace: guides
+    namespace: "{{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }}"
     label_selectors:
       - name = redis
       - deploymentconfig = redis
@@ -237,11 +197,11 @@
   retries: 120
   delay: 10
   until: r_redis_pod.resources | list | length == 1
-  
+
 - name: deploy username distribution tool
   when: r_gau_dc.resources | list | length == 0
   shell: >
-    oc -n guides new-app quay.io/openshiftlabs/username-distribution:1.2 --name=get-a-username
+    oc -n {{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }} new-app quay.io/openshiftlabs/username-distribution:1.2 --name=get-a-username
     -e LAB_REDIS_HOST=redis
     -e LAB_REDIS_PASS=redis
     -e LAB_TITLE={{ 'Data Engineering Workshop' | quote }}
@@ -252,12 +212,12 @@
     -e LAB_USER_PREFIX=user
     -e LAB_USER_PAD_ZERO=false
     -e LAB_ADMIN_PASS={{ 'openshift' | quote }}
-    -e LAB_MODULE_URLS={{ ( 'http://jupyterhub-opendatahub-%USERNAME%.' + cluster_apps_domain + '/user/%USERNAME%' + notebook_suffix + ';Workshop Jupyter Notebook') | quote }}
+    -e LAB_MODULE_URLS={{ ( 'http://jupyterhub-opendatahub-workshop.' + f_cluster_apps_domain + '/user/%USERNAME%' + f_notebook_suffix + ';Workshop Jupyter Notebook') | quote }}
 
 - name: expose username distribution tool
   k8s:
     api_version: route.openshift.io/v1
-    namespace: guides
+    namespace: "{{ ocp4_workload_rhte_analytics_data_ocp_workshop_namespace }}"
     state: present
     kind: Route
     definition:
@@ -275,9 +235,11 @@
           targetPort: 8080-tcp
   register: r_route
 
-- debug:
-    msg:
-    - "user.info: Credentials URL for students: http://{{ r_route.result.spec.host }}"
+- name: Report demo user info
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+    - "Credentials URL for students: http://{{ r_route.result.spec.host }}"
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
