@@ -4,8 +4,8 @@
 
 FROM registry.redhat.io/codeready-workspaces/plugin-java11-rhel8:latest
 
-ENV MANDREL_VERSION=20.1.0.2.Final
-ENV QUARKUS_VERSION=1.7.5.Final-redhat-00007
+ENV MANDREL_VERSION=20.3.1.2-Final
+ENV QUARKUS_VERSION=1.11.6.Final-redhat-00001
 ENV TKN_VERSION=0.11.0
 ENV KN_VERSION=0.15.2
 ENV OC_VERSION=4.5
@@ -43,3 +43,9 @@ USER root
 RUN chown -R jboss /home/jboss/.m2
 RUN chmod -R a+w /home/jboss/.m2
 RUN chmod -R a+rwx /home/jboss/.siege
+RUN chown -R jboss /tmp/vertx-cache
+RUN chmod -R a+w /tmp/vertx-cache
+RUN chown -R jboss /tmp/quarkus
+RUN chmod -R a+w /tmp/quarkus
+
+USER jboss
