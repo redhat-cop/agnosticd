@@ -78,7 +78,7 @@ def parse_duration(time_str):
         r'^((?P<days>\d+?)[dD])? *((?P<hours>\d+?)[hH])? *((?P<minutes>\d+?)m)? *((?P<seconds>\d+?)s?)?$'
     )
 
-    if not time_str or not isinstance(time_str, str):
+    if not time_str or not isinstance(time_str, six.string_types):
         raise InvalidDuration("'%s' is not a valid duration" %(time_str))
     parts = regex.match(time_str.strip())
     if not parts:
@@ -124,7 +124,7 @@ def check_response(response):
             raise AnsibleError("Error requesting EC2 offerings.")
     except Exception as err:
         display.error(pp.pformat(response))
-        raise AnsibleError("Error requesting EC2 offerings.") from err
+        six.raise_from(AnsibleError("Error requesting EC2 offerings."), err)
 
 
 class ODCRFactory:
@@ -238,7 +238,7 @@ class ODCRFactory:
             try:
                 duration = parse_duration(self.ttl)
             except Exception as err:
-                raise AnsibleError("could not parse duration {}".format(self.ttl)) from err
+                six.raise_from(AnsibleError("could not parse duration {}".format(self.ttl)), err)
 
             if len(self.tags) > 0:
                 tag_spec =[{
@@ -249,12 +249,12 @@ class ODCRFactory:
                 tag_spec = []
 
             response = self.clients[region].create_capacity_reservation(
-                **reservation_translated,
                 AvailabilityZone=availability_zone,
                 EndDate=datetime.datetime.now() + duration,
                 EndDateType='limited',
                 InstanceMatchCriteria='open',
                 TagSpecifications=tag_spec,
+                **reservation_translated
             )
 
             check_response(response)
@@ -277,9 +277,7 @@ class ODCRFactory:
                 return False, ''
 
             display.error(pp.pformat(err))
-            raise AnsibleError(
-                "Client Error while creating reservation."
-            ) from err
+            six.raise_from(AnsibleError("Client Error while creating reservation."), err)
 
         if response['ResponseMetadata']['HTTPStatusCode'] == 200:
             # if success, continue
