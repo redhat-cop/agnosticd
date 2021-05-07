@@ -1,7 +1,7 @@
 #!/bin/bash
 
 usage() {
-    echo "$0 [CONFIG] [STAGE]"
+    echo "$0 CONFIG [STAGE]"
     echo
     echo "CONFIG: ALL | ocp-workshop | ocp-demo-lab | ans-tower-lab | ..."
     echo "STAGE: test | prod | rhte"
