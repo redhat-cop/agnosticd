@@ -401,7 +401,7 @@ class ODCRFactory:
 
         result = {}
         az_done = set()
-        for reservation_group_name in reservation_groups:
+        for reservation_group_name in sorted(reservation_groups):
             reservation_group = reservation_groups[reservation_group_name]
             display.v("..loop2: group %s" %(reservation_group_name))
             r_ok, availability_zone, reservation_ids = self.do_reservation_group(
