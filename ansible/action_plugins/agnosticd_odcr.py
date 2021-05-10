@@ -257,7 +257,7 @@ class ODCRFactory:
 
             response = self.clients[region].create_capacity_reservation(
                 AvailabilityZone=availability_zone,
-                EndDate=datetime.datetime.now() + duration,
+                EndDate=datetime.datetime.utcnow() + duration,
                 EndDateType='limited',
                 InstanceMatchCriteria='open',
                 TagSpecifications=tag_spec,
