@@ -15,25 +15,6 @@ resources:
       name: {{ guid }}-infra_key
       save_private_key: true
 
-{% if osp_project_create | bool %}
-  {{ guid }}-project_user:
-    type: OS::Keystone::User
-    properties:
-      name: {{ guid }}-user
-      password: {{ heat_user_password }}
-      domain: Default
-
-  {{ guid }}-project_role_user:
-    type: OS::Keystone::UserRoleAssignment
-    properties:
-      user: {get_resource: {{ guid }}-project_user}
-      roles:
-        - {project: {{ osp_project_name }}, role: _member_}
-        - {project: {{ osp_project_name }}, role: swiftoperator}
-    depends_on:
-      - {{ guid }}-project_user
-{% endif %}
-
 {% for network in networks %}
   {{ network['name'] }}-network:
     type: OS::Neutron::Net
@@ -46,6 +27,7 @@ resources:
     properties:
       name: "{{ guid }}-{{ network['name'] }}-subnet"
       network_id: {get_resource: {{ network['name'] }}-network}
+      enable_dhcp: True
 {% if network['dns_nameservers'] is defined %}
       dns_nameservers: [{{ network['dns_nameservers'] | list | join(",") }}]
 {% endif %}
@@ -74,7 +56,8 @@ resources:
   ###################
   # Security groups #
   ###################
-{% for security_group in security_groups | list + default_security_groups | list %}
+{% for security_group in security_groups | list + default_security_groups | list
+   if security_group.name in used_security_groups %}
   {{ security_group['name'] }}:
     type: OS::Neutron::SecurityGroup
     properties:
@@ -117,23 +100,39 @@ resources:
 {% endfor %}
 {% endfor %}
 
+####################
+# RHVH Extra ports #
+####################
+{% for network in networks[1:] %}
+  {% for n in range(3) %}
+  port_{{ network.name }}_rhv_{{ n }}:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: {{ network['name'] }}-network }
+      port_security_enabled: false
+  {% endfor %}
+{% endfor %}
+
+{% for network in networks[1:] %}
+  port_{{ network.name }}_bastion:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: {{ network['name'] }}-network }
+      port_security_enabled: false
+{% endfor %}
+
   #############
   # Instances #
   #############
 {% for instance in instances %}
   {% for myinstanceindex in range(instance.count|int) %}
-    {% set iname = instance.name if instance.count == 1 else [instance.name, loop.index0] | join() %}
+    {% set iname = instance.name if instance.count == 1 else [instance.name, loop.index] | join() %}
   ########### {{ iname }} ###########
   port_{{ iname }}:
     type: OS::Neutron::Port
     properties:
       network: { get_resource: {{ instance['network'] | default('default') }}-network }
-      security_groups:
-    {% if instance.security_groups is defined %}
-      {% for security_group in instance.security_groups %}
-        - {get_resource: {{ security_group }}}
-      {% endfor %}
-    {% endif %}
+      port_security_enabled: false
     depends_on:
       - {{ instance['network'] | default('default') }}-router_private_interface
 
@@ -171,6 +170,12 @@ resources:
           volume_size: {{ instance['softwarefs_size'] }}
           boot_index: -1
         {% endif %}
+        {% if iname == "rhvm-" + guid %}
+        - image: {{ instance.sap_rhel_images_id | default("images-sap") }}
+          delete_on_termination: true
+          volume_size: {{ instance['images_size'] }}
+          boot_index: -1
+        {% endif %}
 
       user_data: |
         #cloud-config
@@ -178,6 +183,20 @@ resources:
       user_data_format: RAW
       networks:
         - port: {get_resource: port_{{ iname }}}
+        {% if iname | regex_search('rhvh') %}
+        - port: {get_resource: port_interconnect_rhv_{{ loop.index0 }}}
+        - port: {get_resource: port_scaleout01_rhv_{{ loop.index0 }}}
+        - port: {get_resource: port_scaleout02_rhv_{{ loop.index0 }}}
+        - port: {get_resource: port_hana_rhv_{{ loop.index0 }}}
+        {% endif %}
+        {% if iname | regex_search('bastion') %}
+        - port: {get_resource: port_interconnect_bastion}
+        - port: {get_resource: port_scaleout01_bastion}
+        - port: {get_resource: port_scaleout02_bastion}
+        - port: {get_resource: port_hana_bastion}
+        {% endif %}
+
+
     {% if instance['metadata'] is defined %}
       metadata: {{ instance.metadata | combine(default_metadata) | to_json }}
     {% endif %}

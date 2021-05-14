@@ -1,0 +1,334 @@
+---
+- name: Step 000 Infrastructure
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+    - step001
+    - infrastructure
+  tasks:
+    - debug:
+        msg: "Step 001 Infra - Starting"
+
+- name: Prep work so the infrastructure can be build
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    ## Authenticating
+    - name: Authorize to get bearer token for REST calls
+      uri:
+        url: "{{ ibm_cloud_api_iam_url }}"
+        method: POST
+        body_format: form-urlencoded
+        body: "grant_type=urn%3Aibm%3Aparams%3Aoauth%3Agrant-type%3Aapikey&apikey={{ sandbox_master_api_key }}"
+      register: r_token
+      tags: create-token
+      until: r_token.status == 200
+      retries: 10
+      delay: 6
+
+    - name: Set fact for bearer token
+      set_fact:
+        ibm_access_token: "{{ r_token.json.access_token }}"
+      tags: store-token
+
+    ## Getting Resource Group ID
+    - name: Get a list of Resource Groups
+      uri:
+        url: "{{ ibm_cloud_api_resource_groups_url }}?account_id={{ sandbox_account_id }}&name={{ ibm_cloud_resource_group }}"
+        method: GET
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      register: r_rgs
+      tags: list-resource-groups
+      until: r_rgs.status == 200
+      retries: 10
+      delay: 6
+
+    - name: set Resource Group name
+      debug:
+        var: r_rgs
+        verbosity: 2
+
+    - name: get Resource Group ID
+      set_fact:
+        rhoic_rg_id: "{{ item.id }}"
+      with_items: "{{ r_rgs.json.resources }}"
+      when: item.name == ibm_cloud_resource_group
+
+- name: Creating required infrastructure components for a RHOIC cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    ## Starting VPC Section
+    - name: Get a list of VPCs
+      uri:
+        url: "{{ ibm_cloud_api_vpc_url }}?{{ ibm_cloud_api_query_params }}"
+        method: GET
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      register: r_vpcs
+      tags: list-vpcs
+      until: r_vpcs.status == 200
+      retries: 10
+      delay: 6
+
+    - name: Create VPC if it does not exist
+      when: r_vpcs.json.vpcs | json_query(vpc_query) | length == 0
+      uri:
+        url: "{{ ibm_cloud_api_vpc_url }}?{{ ibm_cloud_api_query_params }}"
+        method: POST
+        body_format: json
+        status_code: 201
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+        body:
+          name: "vpc-{{ guid }}"
+      vars:
+        vpc_query: >
+          [?name=='vpc-{{ guid }}']
+      register: r_new_vpc
+      tags: create-vpc
+      until: r_new_vpc.status == 201
+      retries: 10
+      delay: 6
+
+    - name: Fail if variable not defined
+      fail:
+        msg: "Infrastructure components under {{ guid }} already exist -- clean up first"
+      when: r_new_vpc.json.id is not defined
+      tags: fail-because-something-exists
+
+    - name: Set fact for VPC ID
+      set_fact:
+        rhoic_vpc_id: "{{ r_new_vpc.json.id }}"
+      tags: store-vpc-id
+
+    - name: Set fact for Security Group ID
+      set_fact:
+        rhoic_sg_id: "{{ r_new_vpc.json.default_security_group.id }}"
+      tags: store-sg-id
+
+    - name: Pausing for 15s to allow the VPC to build
+      pause:
+        seconds: 15
+
+    ## Starting Public Gateway Section
+    - name: Get a list of Public Gateways
+      uri:
+        url: "{{ ibm_cloud_api_public_gateway_url }}?{{ ibm_cloud_api_query_params }}"
+        method: GET
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      register: r_public_gateways
+      tags: list-public-gateways
+      until: r_public_gateways.status == 200
+      retries: 10
+      delay: 6
+
+    - name: Create Public Gateway if it does not exist
+      when: r_public_gateways.json.public_gateways | json_query(public_gateway_query) | length == 0
+      uri:
+        url: "{{ ibm_cloud_api_public_gateway_url }}?{{ ibm_cloud_api_query_params }}"
+        method: POST
+        body_format: json
+        status_code: 201
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+        body:
+          name: "gateway-{{ guid }}"
+          vpc:
+            id: "{{ rhoic_vpc_id }}"
+          zone:
+            name: "{{ rhoic_zone }}"
+      vars:
+        public_gateway_query: >
+          [?name=='gateway-{{ guid }}']
+      register: r_new_public_gateway
+      tags: create-public-gateway
+      until: r_new_public_gateway.status == 201
+      retries: 10
+      delay: 6
+
+    - name: Fail if variable not defined
+      fail:
+        msg: "Infrastructure components under {{ guid }} already exist -- clean up first"
+      when: r_new_public_gateway.json.id is not defined
+      tags: fail-because-something-exists
+
+    - name: Set fact for Public Gateway ID
+      set_fact:
+        rhoic_public_gateway_id: "{{ r_new_public_gateway.json.id }}"
+      tags: store-public-gateway-id
+
+    ## Starting Subnet Section
+    - name: Get a list of Subnets
+      uri:
+        url: "{{ ibm_cloud_api_subnet_url }}?{{ ibm_cloud_api_query_params }}"
+        method: GET
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      register: r_subnets
+      tags: get-subnets
+      until: r_subnets.status == 200
+      retries: 10
+      delay: 6
+
+    - name: Picking proper IP range based on region and zone
+      set_fact:
+        rhoic_cidr: "{{ item.cidr }}"
+      when: item.zone == rhoic_zone
+      loop: "{{ ibm_cloud_zones_default_ip }}"
+
+    - name: Create Subnet if it does not exist
+      when: r_subnets.json.subnets | json_query(subnet_query) | length == 0
+      uri:
+        url: "{{ ibm_cloud_api_subnet_url }}?{{ ibm_cloud_api_query_params }}"
+        method: POST
+        status_code: 201
+        body_format: json
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+        body:
+          zone:
+            name: "{{ rhoic_zone }}"
+          ip_version: "ipv4"
+          ipv4_cidr_block: "{{ rhoic_cidr }}"
+          name: "subnet-{{ guid }}"
+          vpc:
+            id: "{{ rhoic_vpc_id }}"
+      vars:
+        subnet_query: >
+          [?name=='subnet-{{ guid }}']
+      register: r_new_subnet
+      tags: create-subnet
+      until: r_new_subnet.status == 201
+      retries: 10
+      delay: 6
+
+    - name: Fail if variable not defined
+      fail:
+        msg: "Infrastructure components under {{ guid }} already exist -- clean up first"
+      when: r_new_subnet.json.id is not defined
+      tags: fail-because-something-exists
+
+    - name: Set fact for Subnet ID
+      set_fact:
+        rhoic_subnet_id: "{{ r_new_subnet.json.id }}"
+      tags: store-subnet-id
+
+    ## Connect Public Gateway to Subnet
+    - name: Pausing for 15s to allow the Subnet and Public Gateway to finish
+      pause:
+        seconds: 15
+
+    - name: Attach the Public Gateway to the Subnet if they both exist
+      when: rhoic_sg_id is defined and rhoic_public_gateway_id is defined
+      uri:
+        url: "{{ ibm_cloud_api_subnet_url }}/{{ rhoic_subnet_id }}/public_gateway?{{ ibm_cloud_api_query_params }}"
+        method: PUT
+        body_format: json
+        status_code: 201
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+        body:
+          id: "{{ rhoic_public_gateway_id }}"
+      register: r_map_pg
+      tags: attach-subnet-public-gateway
+      until: r_map_pg.status == 201
+      retries: 10
+      delay: 6
+
+    ## Starting Security Groups Section
+    - name: Update Security Group to add NodePort tcp ports
+      when: r_vpcs.json.vpcs | json_query(vpc_query) | length == 0
+      uri:
+        url: "{{ ibm_cloud_api_security_groups_url }}/{{ rhoic_sg_id }}/rules?{{ ibm_cloud_api_query_params }}"
+        method: POST
+        body_format: json
+        status_code: 201
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+        body:
+          direction: "inbound"
+          protocol: "tcp"
+          port_min: 30000
+          port_max: 32767
+      vars:
+        vpc_query: >
+          [?name=='vpc-{{ guid }}']
+      register: r_update_sg1
+      tags: update-sg-tcp
+      until: r_update_sg1.status == 201
+      retries: 10
+      delay: 6
+
+    - name: Update Security Group to add NodePort tcp ports
+      when: r_vpcs.json.vpcs | json_query(vpc_query) | length == 0
+      uri:
+        url: "{{ ibm_cloud_api_security_groups_url }}/{{ rhoic_sg_id }}/rules?{{ ibm_cloud_api_query_params }}"
+        method: POST
+        body_format: json
+        status_code: 201
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+        body:
+          direction: "inbound"
+          protocol: "udp"
+          port_min: 30000
+          port_max: 32767
+      vars:
+        vpc_query: >
+          [?name=='vpc-{{ guid }}']
+      register: r_update_sg2
+      tags: update-sg-tcp
+      until: r_update_sg2.status == 201
+      retries: 10
+      delay: 6
+
+    ## Starting Cloud Object Storage Section
+    - name: Create Cloud Object Storage resource if it does not exist
+      uri:
+        url: "{{ ibm_cloud_api_resource_instances_url }}"
+        method: POST
+        body_format: json
+        status_code: 201
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+        body:
+          name: "cos-{{ guid }}"
+          target: "bluemix-global"
+          resource_group: "{{ rhoic_rg_id }}"
+          resource_plan_id: "{{ ibm_cloud_cos_resource_plan }}"
+      register: r_new_cos
+      tags: create-cos
+      until: r_new_cos.status == 201
+      retries: 10
+      delay: 6
+
+    - name: Set fact for COS CRN
+      set_fact:
+        rhoic_cos_id: "{{ r_new_cos.json.id }}"
+      tags: store-cos-id
+
+    - name: Pausing for 15s to allow the COS to build
+      pause:
+        seconds: 15
+
+- name: Infra flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Infra checks completed successfully"

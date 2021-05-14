@@ -1,0 +1,103 @@
+---
+- import_playbook: ../../setup_runtime.yml
+
+- name: Teardown OpenStack project and resources
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Cleanup OpenStack DNS and IPs
+    when: cloud_provider == 'osp'
+    block:
+    - name: Run infra-osp-dns to cleanup DNS
+      include_role:
+        name: infra-osp-dns
+      vars:
+        _dns_state: absent
+
+    - name: Remove DNS entry for OpenShift API and ingress
+      nsupdate:
+        server: "{{ osp_cluster_dns_server }}"
+        zone: "{{ osp_cluster_dns_zone }}"
+        record: "{{ item }}.{{ guid }}"
+        type: A
+        key_name: "{{ ddns_key_name }}"
+        key_algorithm: "{{ ddns_key_algorithm | d('hmac-md5') }}"
+        key_secret: "{{ ddns_key_secret }}"
+        state: absent
+      loop:
+        - "api"
+        - "*.apps"
+      when:
+        - openshift_fip_provision
+        - use_dynamic_dns
+
+    - name: Run infra-osp-resources-destroy role
+      include_role:
+        name: infra-osp-resources-destroy
+
+- name: Building the Inventory for different clouds
+  hosts: localhost
+  connection: local
+  become: false
+  tasks:
+  - name: Get SSH public key
+    set_fact:
+      ssh_key: "~/.ssh/{{key_name}}.pem"
+      ssh_key_data: "{{lookup('file', '~/.ssh/{{key_name}}.pub')}}"
+    tags:
+    - set_existing_ssh_key
+    - must
+    - create_inventory
+    when:
+    - not set_env_authorized_key | bool
+    - cloud_provider != 'osp'
+  - name: Get SSH public key
+    set_fact:
+      ssh_key: "{{output_dir}}/{{env_authorized_key}}"
+      ssh_key_data: "{{lookup('file', '{{output_dir}}/{{env_authorized_key}}.pub')}}"
+    tags:
+    - set_generated_ssh_key
+    - must
+    - create_inventory
+    when:
+    - set_env_authorized_key | bool
+    - cloud_provider != 'osp'
+
+  - name: Cloud Specific SSH Config Setup
+    when:
+    - cloud_provider != 'osp'
+    - groups["bastions"] is defined
+    - groups["bastions"] | length > 0
+    include_role:
+      name: infra-common-ssh-config-generate
+
+- name: Set ssh extra args for all hosts, use ssh_config just created
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  tasks:
+  - name: add -F option ansible_ssh_extra_args
+    set_fact:
+      ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|d() }} -F {{ hostvars['localhost'].ansible_ssh_config }}"
+
+- name: Having the OpenShift installer cleanup what it did
+  hosts: bastions
+  gather_facts: false
+  become: false
+  tasks:
+  - name: OpenShift uninstall for all platforms except OpenStack
+    when: cloud_provider != 'osp'
+    block:
+    - name: Test the bastion host is available, if not skip host-ocp4-destroy
+      wait_for_connection:
+        timeout: 60
+      register: bwait
+      ignore_errors: true
+
+    - name: Call Role to destroy the OpenShift cluster
+      when: bwait is successful
+      include_role:
+        name: host-ocp4-destroy

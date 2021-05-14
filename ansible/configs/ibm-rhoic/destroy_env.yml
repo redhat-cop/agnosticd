@@ -1,0 +1,308 @@
+---
+- import_playbook: ../../include_vars.yml
+
+- name: Cleanup and Delete all Infrastructure for the RHOIC cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - debug:
+        msg: "Cleaning up Networking, Storage, and RHOIC cluster"
+
+- name: Logging into IBM Cloud
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - name: Get token for sandbox-api
+      uri:
+        url: "{{ sandbox_api_url }}/token"
+        method: POST
+        body_format: json
+        body:
+          api_key: "{{ sandbox_account_db_api_key }}"
+      register: r_sandbox_account_db_api_key
+      until: r_sandbox_account_db_api_key.status != 500
+      retries: 10
+      delay: 6
+
+    - name: Get details of sandbox account
+      uri:
+        url: "{{ sandbox_api_url }}/sandbox"
+        method: GET
+        headers:
+          Authorization: Bearer {{ r_sandbox_account_db_api_key['json']['access_token'] }}
+        body_format: json
+        body:
+          # This should move to UUID
+          guid: "{{ guid }}"
+          cloud_provider: "{{ cloud_provider }}"
+      register: r_sandbox_account
+      until: r_sandbox_account.status != 500
+      retries: 10
+      delay: 6
+
+    - name: Set IBM Cloud account_id
+      set_fact:
+        sandbox_account_id: "{{ r_sandbox_account['json']['account_id']['S'] }}"
+
+    - name: Set IBM Cloud account_name
+      set_fact:
+        sandbox_account_name: "{{ r_sandbox_account['json']['account_name']['S'] }}"
+
+    - name: Set account master API key
+      set_fact:
+        sandbox_master_api_key: "{{ r_sandbox_account['json']['master_api_key']['S'] }}"
+
+    - name: Get bearer token
+      uri:
+        url: "{{ ibm_cloud_api_iam_url }}"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: "urn:ibm:params:oauth:grant-type:apikey"
+          apikey: "{{ sandbox_master_api_key }}"
+      register: r_token
+      tags: create-token
+      until: r_token.status != 500
+      retries: 10
+      delay: 6
+
+    - name: Set fact for bearer token
+      set_fact:
+        ibm_access_token: "{{ r_token.json.access_token }}"
+      tags: store-token
+
+- name: Cleanup and Delete all Infrastructure for the RHOIC cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    # Processing delete for RHOIC Cluster
+    - name: Get a list of RHOIC clusters
+      uri:
+        url: "{{ ibm_cloud_api_container_v2_url }}/getClusters"
+        method: GET
+        status_code: 200
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      register: r_rhoic_cluster_list
+      until: r_rhoic_cluster_list.status == 200
+      retries: 10
+      delay: 6
+
+    - name: Delete RHOIC cluster if it exists
+      when: r_rhoic_cluster_list.json | json_query(_rhoic_cluster_query) | length > 0
+      include_tasks: destroy_rhoic_cluster.yml
+      vars:
+        _rhoic_cluster_query: "[?contains(keys(@), 'name') && name=='rhpds-{{ guid }}']"
+
+    ## Processing delete for Subnet
+    - name: Get a list of Subnets
+      uri:
+        url: "{{ ibm_cloud_api_subnet_url }}?{{ ibm_cloud_api_query_params }}"
+        method: GET
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      register: r_subnets
+      tags: list-subnets
+      until: r_subnets.status == 200
+      retries: 10
+      delay: 6
+
+    - name: set Subnet Name
+      set_fact:
+        rhoic_subnet_name: "subnet-{{ guid }}"
+
+    - name: get Subnet ID
+      set_fact:
+        rhoic_subnet_id: "{{ item.id }}"
+      with_items: "{{ r_subnets.json.subnets }}"
+      when: item.name == rhoic_subnet_name
+
+    - name: Delete Subnet if it exists
+      when: rhoic_subnet_id is defined and rhoic_subnet_id != ""
+      uri:
+        url: "{{ ibm_cloud_api_subnet_url }}/{{ rhoic_subnet_id }}?{{ ibm_cloud_api_query_params }}"
+        method: DELETE
+        status_code: 204
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      register: r_existing_subnet
+      until: r_existing_subnet.status == 204
+      retries: 30
+      delay: 30
+      tags: delete-subnet
+
+    - name: Pausing for 10 seconds to allow the Subnet to be removed
+      when: rhoic_subnet_id is defined and rhoic_subnet_id != ""
+      pause:
+        seconds: 10
+
+    ## Processing delete for Public Gateway
+    - name: Get a list of Public Gateways
+      uri:
+        url: "{{ ibm_cloud_api_public_gateway_url }}?{{ ibm_cloud_api_query_params }}"
+        method: GET
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      register: r_public_gateways
+      tags: list-public-gateways
+      until: r_public_gateways.status == 200
+      retries: 10
+      delay: 6
+
+    - name: set Public Gateway Name
+      set_fact:
+        rhoic_public_gateway_name: "gateway-{{ guid }}"
+
+    - name: get Public Gateway ID
+      set_fact:
+        rhoic_public_gateway_id: "{{ item.id }}"
+      with_items: "{{ r_public_gateways.json.public_gateways }}"
+      when: item.name == rhoic_public_gateway_name
+
+    - name: Delete Public Gateway if it exists
+      when: rhoic_public_gateway_id is defined and rhoic_public_gateway_id != ""
+      uri:
+        url: "{{ ibm_cloud_api_public_gateway_url }}/{{ rhoic_public_gateway_id }}?{{ ibm_cloud_api_query_params }}"
+        method: DELETE
+        status_code: 204
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      tags: delete-public-gateway
+      register: r_existing_pg
+      until: r_existing_pg.status == 204
+      retries: 30
+      delay: 30
+
+    - name: Pausing for 10 seconds to allow the Public Gateway to be removed
+      when: rhoic_public_gateway_id is defined and rhoic_public_gateway_id != ""
+      pause:
+        seconds: 10
+
+    ## Processing delete for VPC
+    - name: Get a list of VPCs
+      uri:
+        url: "{{ ibm_cloud_api_vpc_url }}?{{ ibm_cloud_api_query_params }}"
+        method: GET
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      register: r_vpcs
+      tags: list-vpcs
+      until: r_vpcs.status == 200
+      retries: 10
+      delay: 6
+
+    - name: set VPC Name
+      set_fact:
+        rhoic_vpc_name: "vpc-{{ guid }}"
+
+    - name: get VPC ID
+      set_fact:
+        rhoic_vpc_id: "{{ item.id }}"
+      with_items: "{{ r_vpcs.json.vpcs }}"
+      when: item.name == rhoic_vpc_name
+
+    - name: Delete VPC if it exists
+      when: rhoic_vpc_id is defined and rhoic_vpc_id != ""
+      uri:
+        url: "{{ ibm_cloud_api_vpc_url }}/{{ rhoic_vpc_id }}?{{ ibm_cloud_api_query_params }}"
+        method: DELETE
+        status_code: 204
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      tags: delete-vpc
+      register: r_existing_vpc
+      until: r_existing_vpc.status == 204
+      retries: 30
+      delay: 30
+
+    ## Processing delete for COS
+    - name: Get a list of Resource Instances
+      uri:
+        url: "{{ ibm_cloud_api_resource_instances_url }}?{{ ibm_cloud_api_query_params }}&name=cos-{{ guid }}"
+        method: GET
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      register: r_ris
+      tags: list-ris
+      until: r_ris.status == 200
+      retries: 10
+      delay: 6
+
+    - name: set Resource Instance name for the Cloud Storage Object
+      set_fact:
+        rhoic_cos_name: "cos-{{ guid }}"
+
+    - name: get Resource Instance ID for the Cloud Storage Object
+      set_fact:
+        rhoic_cos_id: "{{ item.guid }}"
+      with_items: "{{ r_ris.json.resources }}"
+      when: item.name == rhoic_cos_name
+
+    - name: Delete Resource Instances if it exists
+      when: rhoic_cos_id is defined and rhoic_cos_id != ""
+      uri:
+        url: "{{ ibm_cloud_api_resource_instances_url }}/{{ rhoic_cos_id }}?recursive=true"
+        method: DELETE
+        status_code: 204
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      tags: delete-cos
+      register: r_existing_cos
+      until: r_existing_cos.status == 204
+      retries: 30
+      delay: 30
+
+    - name: Pausing for 15 seconds to allow the all removals to catch/sync up
+      when: rhoic_cos_id is defined and rhoic_cos_id != ""
+      pause:
+        seconds: 15
+
+    - debug:
+        msg: "IBM-RHOIC is all cleaned up"
+
+- name: Disable sandbox account and mark for cleanup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Remove the sandbox account access
+      import_role:
+        name: sandbox-ibm
+      vars:
+        action: "destroy"
+        ibm_rhoic_install: true
+        ibm_roks_install: true
+
+    - name: Get token for sandbox-api
+      uri:
+        url: "{{ sandbox_api_url }}/token"
+        method: POST
+        body_format: json
+        body:
+          api_key: "{{ sandbox_account_db_api_key }}"
+      register: r_sandbox_account_db_api_key
+      until: r_sandbox_account_db_api_key.status != 500
+      retries: 10
+      delay: 6
+
+    - name: Update account for cleanup
+      uri:
+        url: "{{ sandbox_api_url }}/sandbox"
+        method: DELETE
+        headers:
+          Authorization: Bearer {{ r_sandbox_account_db_api_key['json']['access_token'] }}
+        body_format: json
+        body:
+          account_name: "{{ r_sandbox_account['json']['account_name']['S'] }}"
+          cloud_provider: "{{ cloud_provider }}"
+          available: false
+          needs_cleanup: true

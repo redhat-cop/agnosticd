@@ -1,0 +1,186 @@
+= How to add more than one version of RHEL on your nodes machines
+
+It is a very common practice to have multiple versions of RHEL on different nodes on your deployment, to cover different use cases of real life. It is not trivial to have those mixed on a single deployment file in AgnosticD, and we are going to cover it here.
+
+We will use the AgnosticD config `a-base-config` comes with sample vars files included for OpenStack, locally at `~/agnosticd/ansible/configs/a-base-config/sample_variables/rhel8_server_on_osp.yml`. We will need to modify some of those vars.
+
+== Preparing your a-base-config vars
+
+. Copy the `rhel8_server_on_osp.yml` file and call it `my_vars.yml`.
++
+[source,bash]
+----
+[agilpipp-redhat.com@bastion ~]$ cd agnosticd/ansible
+[agilpipp-redhat.com@bastion ~]$ cp configs/a-base-config/sample_variables/rhel8_server_on_osp.yml \
+  ~/my_vars.yml
+----
+
+. Edit your copy of the vars file, changing the value of guid to a valid subdomain name (For example an alphanumeric string starting with a letter). The values that need changing are identified below:
++
+[source,bash]
+----
+# RHEL 8 Server on OpenStack.
+# This example creates a single RHEL 8 server
+
+# Mandatory Variables
+cloud_provider: osp                  # This var file is meant for an openstack deployment
+env_type: a-base-config              # Name of the config to deploy
+software_to_deploy: none             # Not deploying any software onto the environment
+
+# Environment Variables
+
+# guid is the deployment unique identifier, it will be appended to all tags,
+# files and anything that identifies this environment from another "just like it"
+# The current value is an example guid based on a openstack project name.
+guid: CHANGE_ME
+email: example@example.com               # User info for notifications
+
+----
+
+*WARNING*: Do not pick the same *GUID* as the one you got for access to the OSP cluster.	
+
+== Setting the repo method
+
+In order to deploy separate versions of RHEL with specified repos, there are two options, either with RHN or using a Satellite server. 
+
+* When using Satellite you can define an activation key associated with a content-view that will automatically handle repos for each major version of RHEL. 
+
+* When registering to RHN you can define separate repo dictionaries for both RHEL 7 and 8. 
+
+*NOTE*: Content view creation is out of the scope of this training.
+
+Add the following lines to the vars file, `~/my_vars.yml`
+
+Examples:
+[source,bash]
+----
+[agilpipp-redhat.com@bastion ~]$ vi ~/my_vars.yml
+# Method without multiple versions of RHEL 
+rhel_repos:
+  - rhel-8-for-x86_64-baseos-rpms
+  - rhel-8-for-x86_64-appstream-rpms
+
+# repo_method: satellite for multiple versions of RHEL
+use_content_view: true                   # We do not define a repo list since this is handled with the content-view
+
+# repo_method: rhn with multiple versions of RHEL
+rhel_repos_el7:                          # Repositories that will be available in the environment RHEL 7
+  - rhel-7-server-rpms
+  - rhel-7-server-rh-common-rpms
+  - rhel-7-server-extras-rpms
+  - rhel-7-server-optional-rpms
+  - rhel-server-rhscl-7-rpms
+
+rhel_repos_el8:                          # Repositories that will be available in the environment RHEL 8
+  - rhel-8-for-x86_64-baseos-rpms
+  - rhel-8-for-x86_64-appstream-rpms
+  - ansible-2-for-rhel-8-x86_64-rpms
+
+----
+
+Let's explain a bit more what is happening behind the curtains.
+
+Satellite is populated using the following tasks file `roles/set-repositories/tasks/satellite-repos.yml` and it populates repos in this way:
+
+[source,bash]
+----
+[agilpipp-redhat.com@bastion ~]$ cd agnosticd/ansible
+[agilpipp-redhat.com@bastion ~]$ vi roles/set-repositories/tasks/satellite-repos.yml
+- name: Register with activation-key
+  when: set_repositories_satellite_activationkey != ''
+  redhat_subscription:
+    state: present
+    consumer_name: "{{ set_repositories_subscription_hostname }}"
+    server_hostname: "{{ set_repositories_satellite_hostname }}"
+    activationkey: "{{ set_repositories_satellite_activationkey }}"
+    org_id: "{{ set_repositories_satellite_org | default(satellite_org) }}"
+
+- name: Enable repos
+  rhsm_repository:
+    name: "*"
+    state: enabled
+  when:
+  - use_content_view
+  - set_repositories_satellite_activationkey != ''
+
+- name: Enable repos for RHEL
+  rhsm_repository:
+    name: "{{ item }}"
+    state: enabled
+  with_items:
+    - '{{ rhel_repos }}'
+  when:
+  - not use_content_view
+  - rhel_repos is defined
+----
+
+From the above example we see that when using an activationkey and content-view the role automatically enables all available repos. The Satellite server automatically parses major versions of the RHEL systems and assigns the repos accordingly.
+
+RHN is populated using the following tasks file `roles/set-repositories/tasks/rhn-repos.yml` and it populates repos in this way:
+
+[source,bash]
+----
+# Enable Repositories with rhsm_repository module
+- name: Enable repos with rhsm_repository
+  when:
+    - rhel_repos is defined
+  rhsm_repository:
+    name: "{{ rhel_repos }}"
+    state: enabled
+
+- name: Enable repos for RHEL 7
+  when:
+    - rhel_repos_el7 is defined
+    - ansible_facts['distribution'] == "RedHat"
+    - ansible_facts['distribution_major_version'] == "7"
+  rhsm_repository:
+    name: "{{ rhel_repos_el7 }}"
+    state: enabled
+
+- name: Enable repos for RHEL 8
+  when:
+    - rhel_repos_el8 is defined
+    - ansible_facts['distribution'] == "RedHat"
+    - ansible_facts['distribution_major_version'] == "8"
+  rhsm_repository:
+    name: "{{ rhel_repos_el8 }}"
+    state: enabled
+----
+
+Last, we need to add the environment configuration variables, in this case we are going to use a Satellite sever and an activation key, but we could as well use our own activation key (or even a pool id) in our personal RHN account. As explained in the Foundational Level of this training, we need to add this to our `secrets.yaml` file:
+
+[source,bash]
+----
+[agilpipp-redhat.com@bastion ~]$ vi ~/secrets.yaml
+## Environment Repositories
+
+## Option 1: Credentials
+# rhel_subscription_user: CHANGEME
+# rhel_subscription_pass: CHANGEME
+# rhsm_pool_ids: CHANGEME
+
+## Option 2: Activation key
+# rhel_subscription_activation_key: CHANGEME
+# rhel_subscription_org_id: CHANGEME
+# rhsm_pool_ids: CHANGEME
+
+## Defining 'satellite' registers systems to an existing Red Hat Satellite server.
+
+repo_method: satellite
+set_repositories_satellite_hostname: CHANGEME      # Hostname of satellite server.
+set_repositories_satellite_org: CHANGEME       # CA certificate used to validate satellite server TLS
+set_repositories_satellite_ca_rpm_url: CHANGEME    # URL to download the Katello/Satellite CA certificate configuration RPM
+set_repositories_satellite_activationkey: CHANGEME # Activation key to register to satellite.
+
+# Packages
+use_content_view: true    # Repo dictionary can contain both rhel 7 and 8 if using satellite content view
+# See roles/set-repositories/tasks/satellite-repos.yml
+----
+
+IMPORTANT: If you don't have access to a Satellite server, you can always use your own personal activation key for your own RHN account. Please refer to this link:https://github.com/redhat-cop/agnosticd/blob/development/training/03_Infrastructure/01_Foundational/04_a_Create_an_AK.adoc[page] for guidance.
+
+In this example you can see that we use the two *rhel_repos_el7* and *rhel_repos_el8* lists to enable repositories on different versions of RHEL based on the Ansible facts of the systems.
+
+*NOTE*: The *rhel_repos* variable and the *_el7* and *_el8* variables are exclusive of each other. This means you cannot define all three at the same time, this is checked prior to the *rhn-repos.yml* within `roles/set-repositories/tasks/pre_checks_rhn.yml`
+
+NOTE: A fully configured file has been provided to you under training/2RHELs.yml

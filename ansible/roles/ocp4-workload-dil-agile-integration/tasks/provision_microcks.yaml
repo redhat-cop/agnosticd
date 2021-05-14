@@ -1,0 +1,138 @@
+---
+# Use the Microcks Operator to Install Microcks
+
+- name: Evaluate {{microcks_project }} namespace if not exists 
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ microcks_project }}'
+    state: present
+
+- name: Evaluate Microcks Operator Group
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'microcks-operatorgroup.yaml.j2') }}"
+
+- name: Evaluate Microcks Subscription
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'microcks-subscription.yaml.j2') }}"
+
+- name: Wait for Microcks operator to install
+  k8s_info:
+    api_version: apiextensions.k8s.io/v1beta1
+    kind: CustomResourceDefinition
+    name: microcksinstalls.microcks.github.io
+  register: crd_microcks
+  until: crd_microcks.resources | list | length == 1
+  retries: 10
+  delay: 30
+
+- name: Evaluate Microcks Install
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'microcks-install.yaml.j2') }}"    
+
+- name: Wait for Microcks to be running
+  uri:
+    url: https://microcks-{{ microcks_project }}.{{ route_subdomain }}
+    status_code: '200'
+  register: result
+  until: result.status == 200
+  retries: 90
+  delay: 30    
+
+- name: Wait for Microcks Keycloak to be running
+  uri:
+    url: https://microcks-keycloak-{{ microcks_project }}.{{ route_subdomain }}
+    status_code: '200'
+  register: result
+  until: result.status == 200
+  retries: 90
+  delay: 30    
+
+
+- name: Extract key_cloak_admin_password
+  k8s_info: 
+    kind: Secret
+    name: microcks-keycloak-admin
+    namespace: '{{ microcks_project }}'
+  register: key_cloak_result
+
+- name: Set the username and password
+  set_fact:
+    key_cloak_admin_password: "{{ key_cloak_result.resources[0].data.password | b64decode }}"
+    key_cloak_admin_username: "{{ key_cloak_result.resources[0].data.username | b64decode }}"
+
+
+- name: Get Admin Token from Keycloack
+  uri:
+    url: https://microcks-keycloak-{{ microcks_project }}.{{ route_subdomain }}/auth/realms/master/protocol/openid-connect/token
+    method: POST
+    body_format: form-urlencoded
+    body:
+      client_id: admin-cli
+      username: "{{ key_cloak_admin_username }}"
+      password: "{{ key_cloak_admin_password }}"
+      grant_type: password    
+    status_code: '200'
+  register: token_result
+
+- name: Extract Admin Token from Keycloack from result
+  set_fact:
+    admin_token: '{{token_result.json.access_token}}'
+
+
+- name: Increase Token Lifespan (60mins)
+  uri: 
+    url: 'https://microcks-keycloak-{{ microcks_project }}.{{ route_subdomain }}/auth/admin/realms/master'
+    method: PUT
+    body:
+      realm: "master"
+      accessTokenLifespan: "3600"    
+    body_format: json
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer {{ admin_token }}"
+    return_content: yes
+    validate_certs: no
+    status_code: 204
+
+- name: Get Admin Token with Longer Lifespan
+  uri:
+    url: https://microcks-keycloak-{{ microcks_project }}.{{ route_subdomain }}/auth/realms/master/protocol/openid-connect/token
+    method: POST
+    body_format: form-urlencoded
+    body:
+      client_id: admin-cli
+      username: "{{ key_cloak_admin_username }}"
+      password: "{{ key_cloak_admin_password }}"
+      grant_type: password   
+    status_code: '200'
+  register: token_result
+
+- name: Extract Admin Token with Longer Lifespan from Keycloack from result
+  set_fact:
+    admin_token: '{{token_result.json.access_token}}'
+
+- name: Create Microcks users
+  uri: 
+    url: 'https://microcks-keycloak-{{ microcks_project }}.{{route_subdomain}}/auth/admin/realms/microcks/users'
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer {{ admin_token }}"
+    body:
+      username: "user{{ item }}"
+      enabled: true
+      firstName: "user{{ item }}"
+      credentials: 
+        - type: "password"
+          value: "openshift"
+          temporary: false
+    body_format: json
+    validate_certs: no
+    status_code: [201, 409]
+  loop: "{{ range(1, num_users|int + 1, 1)|list }}"
+  when:
+    - num_users|int > 0

@@ -11,72 +11,102 @@
   package:
     name: rh-amazon-rhui-client
     state: absent
+    disablerepo: "*"    ## This option is undocumented but works, Pulls from yum & dnf
   when: cloud_provider == 'ec2'
+
+- name: Copy satellite CA certificate to /etc/pki/ca-trust/source/anchors/{{ set_repositories_satellite_hostname }}.ca.crt
+  copy:
+    content: "{{ set_repositories_satellite_ca_cert }}"
+    dest: /etc/pki/ca-trust/source/anchors/{{ set_repositories_satellite_hostname }}.ca.crt
+    mode: u=rw,go=r
+  register: r_copy_satellite_ca_cert
+
+- name: Update CA Trust Bundle
+  command: update-ca-trust
+  when: r_copy_satellite_ca_cert.changed
 
 - name: Remove satellite Cert
   tags: packer
   package:
     name: katello-ca-consumer-*.noarch
     state: absent
+    disablerepo: "*"
+  ignore_errors: true
 
-- name: Download Cert from Satellite
-  get_url:
-    url: "https://{{ set_repositories_satellite_url | default(satellite_url) }}/pub/katello-ca-consumer-latest.noarch.rpm"
-    dest: /root/katello-ca-consumer-latest.noarch.rpm
-    mode: 0664
-    validate_certs: no
-
-- name: Install Cert
-  command: "rpm -Uvh /root/katello-ca-consumer-latest.noarch.rpm"
-  args:
-    warn: no
-
-- name: Delete Cert Package
-  file:
-    name: /root/katello-ca-consumer-latest.noarch.rpm
-    state: absent
-
-- name: list current repository files
-  command: "ls -1 /etc/yum.repos.d/"
-  register: repodircontents
-  changed_when: false
+- name: Find current repository files
+  find:
+    paths: /etc/yum.repos.d
+    recurse: no
+    patterns:
+    - '*.repo'
+  register: r_find_repos
   tags:
     - configure_repos
     - remove_existing_repos
 
-- name: remove current repository files
+- name: Remove current repository files
   file:
-    path: /etc/yum.repos.d/{{ item }}
+    path: "{{ file.path }}"
     state: absent
-  with_items: "{{ repodircontents.stdout_lines }}"
+  loop: "{{ r_find_repos.files }}"
+  loop_control:
+    loop_var: file
+    label: "{{ file.path }}"
   ignore_errors: true
   tags:
     - configure_repos
     - remove_existing_repos
+
+# WK: use `yum` to allow ignore of GPG errors
+#     `package` does not have that options and results in random failures
+- name: Install Satellite CA certificate package
+  yum:
+    name: "{{ set_repositories_satellite_ca_rpm_url }}"
+    state: present
+    disablerepo: "*"
+    disable_gpg_check: true
+  register: r_install_satellite_ca_rpm
+  until: not r_install_satellite_ca_rpm.failed
+  retries: 10
+  delay: 10
+
+# prutledg - package profile reporting is slamming the satellite server and not necessary
+- name: Disable Reporting Of Package Profile to Satellite
+  ini_file:
+    path: /etc/rhsm/rhsm.conf
+    section: rhsm
+    option: report_package_profile
+    value: 0
 
 - name: Run setup if gather_facts hasn't been run
   setup:
     gather_subset: min
   when: ansible_date_time is not defined
 
-- name: Randomize hostname for Satellite
+- name: Set set_repositories_subscription_hostname with randomization
+  set_fact:
+    set_repositories_subscription_hostname: >-
+      {%- if guid in inventory_hostname -%}
+      {{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic | lower }}
+      {%- else -%}
+      {{ inventory_hostname }}.{{ guid }}.internal-{{ ansible_date_time.iso8601_basic | lower }}
+      {%- endif -%}
+
+- name: Set network.fqdn in /etc/rhsm/facts/katello.facts
   copy:
     dest: /etc/rhsm/facts/katello.facts
-    content: >-
-        {
-          "network.fqdn": {% if guid in inventory_hostname %}
-          "{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic | lower }}"
-          {% else %}
-          "{{ inventory_hostname }}.{{guid}}.internal-{{ ansible_date_time.iso8601_basic | lower }}" 
-          {% endif %}
-        } 
+    content: "{{ __content | to_json }}"
+  vars:
+    __content:
+      network.fqdn: "{{ set_repositories_subscription_hostname }}"
 
 - name: Register with activation-key
-  when: satellite_activationkey is defined or set_repositories_satellite_activationkey is defined
+  when: set_repositories_satellite_activationkey != ''
   redhat_subscription:
     state: present
-    server_hostname: "{{ set_repositories_satellite_url | default(satellite_url) }}"
-    activationkey: "{{ set_repositories_satellite_activationkey | default(satellite_activationkey) }}"
+    consumer_name: "{{ set_repositories_subscription_hostname }}"
+    server_hostname: "{{ set_repositories_satellite_hostname }}"
+    activationkey: "{{ set_repositories_satellite_activationkey }}"
     org_id: "{{ set_repositories_satellite_org | default(satellite_org) }}"
 
 - name: Enable repos
@@ -85,7 +115,17 @@
     state: enabled
   when:
   - use_content_view
-  - satellite_activationkey is defined or set_repositories_satellite_activationkey is defined
+  - set_repositories_satellite_activationkey != ''
+
+# Remove all repos when using rhel_repos 
+# This will resolve any dependency issues with unwanted repositories still being enabled
+- name: Purge existing repos
+  rhsm_repository:
+    name: '*'
+    purge: true
+  when:
+    - not use_content_view
+    - rhel_repos is defined
 
 - name: Enable repos for RHEL
   rhsm_repository:
@@ -100,7 +140,7 @@
 # This would be used to skip registering with Satellite,
 # but still be able to access the repos via certificate auth.
 # This will only run if you have satellite_key and satellite_cert defined,
-# but not satellite_activationkey
+# but not set_repositories_satellite_activationkey
 - name: Set up repos to access Satellite using cert
   when:
   - satellite_key is defined

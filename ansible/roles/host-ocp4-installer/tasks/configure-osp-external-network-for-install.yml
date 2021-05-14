@@ -1,0 +1,67 @@
+---
+- name: Read metadata.json
+  slurp:
+    path: ~{{ ansible_user }}/{{ cluster_name }}/metadata.json
+  register: r_read_metadata_json
+  until: r_read_metadata_json is success
+  retries: 10
+  delay: 5
+
+- name: Set ocp4_cluster_infra_id
+  set_fact:
+    ocp4_cluster_infra_id: "{{ (r_read_metadata_json.content | b64decode | from_json).infraID }}"
+
+- name: Create OpenShift external router
+  command: >-
+    openstack --os-cloud={{ osp_cloud_name }}
+    router create {{ ocp4_cluster_infra_id }}-external-router
+
+- name: Set external gateway for OpenShift external router
+  command: >-
+    openstack --os-cloud={{ osp_cloud_name }}
+    router set {{ ocp4_cluster_infra_id }}-external-router
+    --external-gateway={{ provider_network | default('external') }}
+
+- name: Add OpenShift nodes subnet to router
+  command: >-
+    openstack --os-cloud={{ osp_cloud_name }}
+    router add subnet {{ ocp4_cluster_infra_id }}-external-router
+    {% if ocp_use_single_network | bool %}
+    {{ internal_network_subnet_id }}
+    {% else %}
+    {{ ocp4_cluster_infra_id }}-nodes
+    {% endif %}
+  # Initial attempt to add subnet may occur before the install creates the subnet
+  register: r_router_add_subnet
+  until: r_router_add_subnet is success
+  retries: 30
+  delay: 10
+
+- name: Set floating ip to point to OpenShift api port
+  command: >-
+    openstack --os-cloud={{ osp_cloud_name }}
+    floating ip set --port {{ ocp4_cluster_infra_id }}-api-port {{ hostvars.localhost.ocp_api_fip }}
+  # Initial attempt to add subnet may occur before the install creates the api port
+  register: r_set_api_fip_port
+  until: r_set_api_fip_port is success
+  retries: 30
+  delay: 10
+
+- name: Set floating ip to point to OpenShift ingress port
+  command: >-
+    openstack --os-cloud={{ osp_cloud_name }}
+    floating ip set --port {{ ocp4_cluster_infra_id }}-ingress-port {{ hostvars.localhost.ocp_ingress_fip }}
+  # Initial attempt to add subnet may occur before the install creates the api port
+  register: r_ingress_fip_port
+  until: r_ingress_fip_port is success
+  retries: 30
+  delay: 10
+
+
+- name: Wait for openshift-install to complete
+  async_status:
+    jid: "{{ r_openshift_install.ansible_job_id }}"
+  register: r_openshift_install_wait
+  until: r_openshift_install_wait.finished
+  retries: 200
+  delay: 30

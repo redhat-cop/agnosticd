@@ -1,0 +1,163 @@
+---
+- name: Step 000 Software
+  hosts: localhost
+  connection: local
+  become: false
+  tags:
+    - step001
+    - software
+  tasks:
+    - debug:
+        msg: "Software tasks Started"
+
+- name: Software deployment
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - actual_sausage_making
+  tasks:
+    ## Authenticated alredy from infrastructure creation
+    ## Getting Exact OpenShift version to deploy
+    - name: Get full OpenShift version
+      uri:
+        url: "{{ ibm_cloud_api_openshift_version_url }}"
+        method: GET
+        status_code: 200
+      register: r_openshift_version_list
+      tags: get-versions
+      until: r_openshift_version_list.status == 200
+      retries: 10
+      delay: 6
+
+    - debug:
+        var: r_openshift_version_list.json.openshift
+        verbosity: 2
+      tags: get-versions
+
+    - name: Set fact for RHOIC patch version
+      set_fact:
+        rhoic_openshift_version_patch: "{{  r_openshift_version_list.json.openshift | json_query(jmesquery) }}"
+      vars:
+        jmesquery: "[?major==`{{ rhoic_openshift_version_major }}` && minor==`{{ rhoic_openshift_version_minor }}`].patch"
+      tags: get-versions
+
+    - name: Set fact for RHOIC version
+      set_fact:
+        rhoic_openshift_version: "{{ rhoic_openshift_version_major }}.{{ rhoic_openshift_version_minor }}.{{ rhoic_openshift_version_patch[0] }}_openshift"
+      tags: get-versions
+
+    - debug:
+        var: rhoic_openshift_version
+      tags: get-versions
+
+    ## Cluster Creation
+    - name: Create RHOIC cluster
+      uri:
+        url: "{{ ibm_cloud_api_container_v2_url }}/createCluster"
+        method: POST
+        body_format: json
+        status_code: 201
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+        body:
+          cosInstanceCRN: "{{ rhoic_cos_id }}"
+          cseACLEnabled: true
+          disablePublicServiceEndpoint: false
+          kubeVersion: "{{ rhoic_openshift_version }}"
+          name: "rhpds-{{ guid }}"
+          podSubnet: "{{ rhoic_subnet_pod }}"
+          provider: "vpc-gen2"
+          serviceSubnet: "{{ rhoic_subnet_service }}"
+          workerPool:
+            diskEncryption: true
+            flavor: "{{ rhoic_compute_type }}"
+            isolation: "public"
+            name: "default"
+            vpcID: "{{ rhoic_vpc_id }}"
+            workerCount: "{{ rhoic_compute_count }}"
+            zones:
+              - id: "{{ rhoic_zone }}"
+                subnetID: "{{ rhoic_subnet_id }}"
+      register: r_new_rhoic
+      tags: create-rhoic
+      until: r_new_rhoic.status == 201
+      retries: 10
+      delay: 6
+
+    - debug:
+        var: r_new_rhoic
+        verbosity: 2
+
+    - name: Set fact for RHOIC Cluster ID
+      set_fact:
+        rhoic_cluster_id: "{{ r_new_rhoic.json.clusterID }}"
+      tags: store-rhoic-id
+
+    - name: Pausing for 45 minutes to allow the RHOIC cluster to build
+      pause:
+        minutes: 45
+
+    ## Re-Authenticating because token only good for 60 minutes
+    ## and we don't want it to expire
+    - name: Authorize to get bearer token for REST calls
+      uri:
+        url: "{{ ibm_cloud_api_iam_url }}"
+        method: POST
+        body_format: form-urlencoded
+        body: "grant_type=urn%3Aibm%3Aparams%3Aoauth%3Agrant-type%3Aapikey&apikey={{ sandbox_master_api_key }}"
+      register: r_token
+      tags: create-token
+      until: r_token.status == 200
+      retries: 10
+      delay: 6
+
+    - name: Set fact for bearer token
+      set_fact:
+        ibm_access_token: "{{ r_token.json.access_token }}"
+      tags: store-token
+
+    ## Now let us wait for the cluster to come alive (2 minutes between checks)
+    - pause:
+        seconds: 15
+
+    - name: Wait for the RHOIC cluster to finish deploying
+      uri:
+        url: "{{ ibm_cloud_api_container_v2_url }}/getCluster?cluster={{ rhoic_cluster_id }}"
+        method: GET
+        status_code: 200
+        headers:
+          Authorization: Bearer {{ ibm_access_token }}
+      register: r_existing_rhoic
+      tags: retrieve-rhoic
+      until: r_existing_rhoic.json.state is defined and r_existing_rhoic.json.state == "normal"
+      retries: 30
+      delay: 120
+
+    - name: Displaying RHOIC cluster details
+      debug:
+        var: r_existing_rhoic
+        verbosity: 2
+
+    ## Sending details of the cluster to the client
+    - name: Passing along the cluster info
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+        - "The information below can be used to access your Red Hat OpenShift on IBM Cloud Sandbox environment."
+        - "IBM Cloud User: {{ email }}"
+        - "OpenShift Admin Console: {{ r_existing_rhoic.json.masterURL }}"
+        - "IBM Cloud Console: https://cloud.ibm.com/"
+        - "RHOIC RHPDS Lab Guide (README IMPORTANT!): https://red.ht/ROKSRHPDS"
+
+- name: Software flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Software checks completed successfully"

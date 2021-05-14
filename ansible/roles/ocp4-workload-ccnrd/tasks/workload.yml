@@ -19,11 +19,23 @@
 
 - name: create module list
   set_fact:
-    modules: "{{ module_type.split(',') | map('trim') | list }}"
+    modules: "{{ module_type.split(';') | map('trim') | list }}"
 
 - name: Selected Modules
   debug:
     msg: "selected modules list: {{ modules }}"
+
+- name: create labs-infra project
+  k8s:
+    state: present
+    kind: Project
+    api_version: project.openshift.io/v1
+    definition:
+      metadata:
+        name: "labs-infra"
+        annotations:
+          openshift.io/description: ""
+          openshift.io/display-name: "Lab Infrastructure"
 
 - name: deploy templates to openshift namespace
   command: oc replace --force -n openshift -f -
@@ -32,8 +44,19 @@
   loop:
     - ./files/coolstore-monolith-binary-build-template.yaml
     - ./files/coolstore-monolith-pipeline-build-template.yaml
-    - ./files/ccn-sso72-template.yaml
     - ./files/jaeger-all-in-one-template.yml
+    - ./files/ccn-sso74-template.yaml
+
+- name: import sso74-image-stream to openshift namespace
+  k8s:
+    state: present
+    namespace: openshift
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/sso74-image-stream.yaml
 
 - name: create inventory and catalog user projects
   when: ("m1" in modules or "m2" in modules or "m3" in modules)
@@ -67,47 +90,21 @@
     user: "{{ item[0] }}"
   loop: "{{ users|product(['cloudnative-pipeline'])|list }}"
 
-- name: create labs-infra project
-  k8s:
-    state: present
-    kind: Project
-    api_version: project.openshift.io/v1
-    definition:
-      metadata:
-        name: "labs-infra"
-        annotations:
-          openshift.io/description: ""
-          openshift.io/display-name: "Lab Infrastructure"
-
-# Search for rhamt
-- name: Search for RHAMT
-  when: ("m1" in modules)
+- name: Look for jaeger subscription
+  when: ("m2" in modules or "m3" in modules)
   k8s_facts:
-    kind: DeploymentConfig
-    namespace: labs-infra
-    name: rhamt-web-console
-  register: rhamt_dc
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: jaeger-product
+    namespace: openshift-operators
+  register: r_jaeger_sub
 
-# deploy RHAMT
-- name: Deploy RHAMT
-  when: ("m1" in modules) and (rhamt_dc.resources | list | length == 0)
-  include_tasks: install-rhamt.yaml
-
-# Skip Gogs for now
-#
-# - name: Search for Gogs
-#   k8s_facts:
-#     kind: DeploymentConfig
-#     namespace: labs-infra
-#     name: gogs
-#   register: gogs_dc
-
-# - name: Deploy gogs
-#   when: gogs_dc.resources | list | length == 0
-#   include_tasks: install-gogs.yaml
+- name: Create Jaeger
+  when: ("m2" in modules or "m3" in modules) and (r_jaeger_sub.resources | list | length == 0)
+  include_tasks: install-jaeger.yaml
 
 - name: Look for service mesh subscription
-  when: ("m3" in modules or "m4" in modules)
+  when: ("m3" in modules)
   k8s_facts:
     api_version: operators.coreos.com/v1alpha1
     kind: Subscription
@@ -116,14 +113,13 @@
   register: r_sm_sub
 
 - name: show existing service mesh cr
-  when: ("m3" in modules or "m4" in modules)
+  when: ("m3" in modules )
   debug:
     msg: "existing service mesh sub: {{ r_sm_sub }}"
 
 # Setup OpenShift Service Mesh via operator
-
 - name: Create OpenShift Objects for Service Mesh
-  when: ("m3" in modules or "m4" in modules) and (r_sm_sub.resources | list | length == 0)
+  when: ("m3" in modules) and (r_sm_sub.resources | list | length == 0)
   include_tasks: install-servicemesh.yaml
 
 # Setup OpenShift Serverless via operator
@@ -188,6 +184,9 @@
   vars:
     guide: "{{ item }}"
   loop: "{{ modules }}"
+
+- name: install username distribution
+  include_tasks: install-username-distribution.yaml
 
 # Install CodeReady Workspaces
 - name: see if codeready is installed

@@ -1,0 +1,111 @@
+---
+# This playbook redeploys Lets Encrypt certificates
+# It does not renew the certs, which is done by the certbot cronjob.
+#
+# Please ensure CA and key have not changed.
+
+- hosts: localhost
+  gather_facts: false
+  become: false
+  vars:
+  - _certbot_install_dir: "/home/{{ ansible_user }}/certificates"
+  - _certbot_remote_dir: "/home/{{ ansible_user }}"
+  - _certbot_dir: "/home/{{ ansible_user }}/certbot"
+  tasks:
+  - name: Determine API server URL
+    k8s_info:
+      api_version: config.openshift.io/v1
+      kind: Infrastructure
+      name: cluster
+    register: r_api_url
+
+  - name: Set API Server hostname
+    set_fact:
+      ocp4_workload_le_certificates_api_hostname: >-
+        {{ r_api_url.resources[0].status.apiServerURL | urlsplit('hostname') }}
+
+  - name: "Install certificates into {{ _certbot_install_dir }}/{{ item }}"
+    copy:
+      src: "{{ _certbot_dir }}/config/live/{{ ocp4_workload_le_certificates_api_hostname }}/{{ item }}"
+      dest: "{{ _certbot_install_dir }}/{{ item }}"
+      remote_src: true
+    loop:
+    - "cert.pem"
+    - "fullchain.pem"
+    - "chain.pem"
+    - "privkey.pem"
+
+  - name: Read Certificate
+    slurp:
+      src: "$HOME/certificates/fullchain.pem"
+    register: server_cert
+
+  - name: Read Key
+    slurp:
+      src: "$HOME/certificates/privkey.pem"
+    register: server_key
+
+  - name: Ensure Ansible Date/Time Facts are set
+    setup:
+      filter: "ansible_date_time*"
+
+  - name: Set new Ingress Controller Certificate Name
+    set_fact:
+      ocp4_workload_le_certificates_ingress_controller_certificate_secret_name: >-
+        ingress-certs-{{ ansible_date_time.date }}
+      ocp4_workload_le_certificates_api_certificate_secret_name: "api-certs-{{ ansible_date_time.date }}"
+
+  - name: Create new ingress controller certificate ssecret
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './ingress-controller-certificate-secret.j2' ) | from_yaml }}"
+
+  - name: Update Ingress Controller for new certificates secrete
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './ingress-controller-with-certificates.j2' ) | from_yaml }}"
+
+  - name: Update API Certificates
+    when: _certbot_update_api_certs | default( false ) | bool
+    block:
+    - name: Create API certificate secret
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './api-certificate-secret.j2' ) | from_yaml }}"
+
+    - name: Update API Server to use new certificates
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './api-server-with-certificates.j2' ) | from_yaml }}"
+
+    # It takes about 4 minutes per API Server to
+    # restart with certificates (due to AWS
+    # Load Balancer). Therefore sleep
+    # 12 minutes to give the kube-apiserver
+    # cluster operator enough time to progress.
+    - name: Wait 12m for all APIservers to be back up
+      pause:
+        minutes: 12
+
+    - name: Find all Kube Configs
+      become: true
+      become_user: root
+      find:
+        file_type: file
+        hidden: true
+        paths:
+        - /root
+        - /home
+        contains: "^ +certificate-authority-data:"
+        patterns: "*config*"
+        recurse: true
+      register: r_config_files
+
+    - name: Fix Kube Configs
+      become: true
+      become_user: root
+      lineinfile:
+        path: "{{ item.path }}"
+        regexp: "^ +certificate-authority-data:"
+        state: absent
+      loop: "{{r_config_files.files}}"

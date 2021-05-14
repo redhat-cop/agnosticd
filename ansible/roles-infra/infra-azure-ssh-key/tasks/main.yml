@@ -1,0 +1,77 @@
+---
+# This role creates a keyvault to store the SSH key generated and stored in
+# output_dir on creation so it can be retrieved on destroy.
+# That way, it will be used in the common SSH config
+
+# The role:
+# SKIP if key exists locally
+# FAIL if key exists remotely but not locally
+
+- name: Login to Azure
+  command: >-
+    az login --service-principal
+    -u {{ azure_service_principal | quote }}
+    -p {{ azure_password | quote }}
+    --tenant {{ azure_tenant | quote }}
+  environment:
+    AZURE_CONFIG_DIR: "{{ output_dir }}/.azure-{{project_tag}}"
+
+- name: Set infra_ssh_key
+  set_fact:
+    infra_ssh_key: "{{ output_dir }}/{{ env_authorized_key }}"
+
+- name: Stat local infra key
+  stat:
+    path: "{{ infra_ssh_key }}"
+  register: stat_infra_ssh_key
+
+- name: Stat local infra key
+  stat:
+    path: "{{ ssh_key }}"
+  register: stat_ssh_key
+
+- when: not stat_ssh_key.stat.exists
+  block:
+    - name: Retrieve SSH Key from keyvault
+      environment:
+        AZURE_CONFIG_DIR: "{{ output_dir }}/.azure-{{project_tag}}"
+      command: >
+        az keyvault secret show
+        --vault-name '{{ az_ssh_keyvault }}'
+        --name '{{guid[:12]}}'
+        --query value -o tsv
+      register: r_ssh_key
+      failed_when:
+        - (r_ssh_key.rc != 0)
+        - ("VaultNotFound" not in r_ssh_key.stderr)
+
+    - name: Copy the SSH key locally
+      copy:
+        dest: "{{ ssh_key }}"
+        mode: 0400
+        content: "{{ r_ssh_key.stdout }}\n"
+      when:
+        - r_ssh_key is changed
+        - r_ssh_key.rc == 0
+
+    - name: Generate SSH pub key
+      shell: >-
+        ssh-keygen -y
+        -f "{{ ssh_key }}"
+        > "{{ ssh_key }}.pub"
+      args:
+        creates: "{{ ssh_key }}.pub"
+      when:
+        - r_ssh_key is changed
+        - r_ssh_key.rc == 0
+
+- when: stat_infra_ssh_key.stat.exists
+  block:
+    - name: Store SSH Key in keyvault
+      environment:
+        AZURE_CONFIG_DIR: "{{ output_dir }}/.azure-{{project_tag}}"
+      command: >
+          az keyvault secret set
+          --vault-name '{{ az_ssh_keyvault }}'
+          --name '{{guid[:12]}}'
+          --file '{{ infra_ssh_key }}'

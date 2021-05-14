@@ -1,4 +1,15 @@
 ---
+- name: Step 003 - Pre Software
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+  - step003
+  tasks:
+  - debug:
+      msg: "Step 003 - Pre Software"
+
 - name: Step 003 - Create env key
   hosts: localhost
   connection: local
@@ -9,21 +20,23 @@
   - generate_env_keys
   tasks:
   - name: Generate SSH keys
-    shell: ssh-keygen -b 2048 -t rsa -f "{{output_dir}}/{{env_authorized_key}}" -q -N ""
+    shell: ssh-keygen -b 2048 -t rsa -f "{{ output_dir }}/{{ env_authorized_key }}" -q -N ""
     args:
-      creates: "{{output_dir}}/{{env_authorized_key}}"
+      creates: "{{ output_dir }}/{{ env_authorized_key }}"
     when: set_env_authorized_key | bool
 
   - name: fix permission
     file:
-      path: "{{output_dir}}/{{env_authorized_key}}"
+      path: "{{ output_dir }}/{{ env_authorized_key }}"
       mode: 0400
     when: set_env_authorized_key | bool
 
   - name: Generate SSH pub key
-    shell: ssh-keygen -y -f "{{output_dir}}/{{env_authorized_key}}" > "{{output_dir}}/{{env_authorized_key}}.pub"
+    shell: >-
+      ssh-keygen -y -f "{{ output_dir }}/{{ env_authorized_key }}"
+      > "{{ output_dir }}/{{ env_authorized_key }}.pub"
     args:
-      creates: "{{output_dir}}/{{env_authorized_key}}.pub"
+      creates: "{{ output_dir }}/{{ env_authorized_key }}.pub"
     when: set_env_authorized_key | bool
 
 # Cloudformation template or equivalent should tag all hosts with Project:{{ env_type }}-{{ guid }}
@@ -31,25 +44,80 @@
   hosts:
   - all:!windows
   become: true
-  gather_facts: False
+  gather_facts: false
   tags:
   - step004
   - common_tasks
   roles:
-  - { role: "set-repositories",       when: 'repo_method is defined' }
-  - { role: "common",                 when: 'install_common | bool' }
-  - { role: "set_env_authorized_key", when: 'set_env_authorized_key | bool' }
+  - role: set-repositories
+    when: repo_method is defined
+  - role: common
+    when: install_common | bool
+  - role: set_env_authorized_key
+    when: set_env_authorized_key | bool
 
 - name: Configuring Bastion Hosts
   hosts: bastions
   become: true
   roles:
-  - { role: "bastion",              when: 'install_bastion | bool' }
-  - { role: "bastion-student-user", when: 'install_student_user | bool' }
-  - { role: "bastion-opentlc-ipa",  when: 'install_ipa_client | bool' }
+  - role: bastion-lite
+    when: install_bastion | bool
+  - role: bastion-student-user
+    when: install_student_user | bool
   tags:
   - step004
   - bastion_tasks
+  tasks:
+  - name: Set up Bastion Hosts for student user
+    when:
+    - student_name is defined
+    - env_authorized_key is defined
+    block:
+    - name: Copy SSH private key to student user .ssh directory
+      copy:
+        src: "/root/.ssh/{{ env_authorized_key }}.pem"
+        dest: "/home/{{ student_name }}/.ssh/{{ env_authorized_key }}.pem"
+        mode: 0600
+        owner: "{{ student_name }}"
+        remote_src: true
+
+    - name: Copy SSH public key to student user .ssh directory
+      copy:
+        src: "/root/.ssh/{{ env_authorized_key }}.pub"
+        dest: "/home/{{ student_name }}/.ssh/{{ env_authorized_key }}.pub"
+        mode: 0600
+        owner: "{{ student_name }}"
+        remote_src: true
+
+    - name: Copy SSH config to student user .ssh directory
+      copy:
+        src: "/root/.ssh/config"
+        dest: "/home/{{ student_name }}/.ssh/config"
+        mode: 0600
+        owner: "{{ student_name }}"
+        remote_src: true
+
+    - name: Set up GUID environment variable for root
+      lineinfile:
+        state: present
+        path: /root/.bashrc
+        insertafter: EOF
+        line: "export GUID={{ guid }}"
+
+    - name: Set up short name SSH connectivity to Utility VM
+      when:
+      - install_utilityvm | bool
+      blockinfile:
+        dest: "/home/{{ student_name }}/.ssh/config"
+        create: true
+        content: |
+          Host utilityvm
+            User ec2-user
+            IdentityFile ~/.ssh/{{ guid }}key.pem
+            ForwardAgent yes
+            StrictHostKeyChecking no
+            ConnectTimeout 60
+            ConnectionAttempts 10
 
 - name: PreSoftware flight-check
   hosts: localhost

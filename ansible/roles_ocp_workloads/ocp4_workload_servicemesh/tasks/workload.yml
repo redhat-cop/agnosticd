@@ -1,0 +1,69 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Create Catalogsource for use with catalog snapshot
+  when: ocp4_workload_servicemesh_use_catalog_snapshot | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/catalogsource.j2' ) | from_yaml }}"
+
+- name: Install Service Mesh operator
+  include_tasks: ./install_servicemesh_operator.yml
+
+- name: Check if Jaeger Operator is already installed
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: openshift-operators
+    name: jaeger-operator
+  register: r_jaeger_exists
+
+- name: Install Jaeger operator
+  when: r_jaeger_exists.resources | length == 0
+  include_tasks: ./install_jaeger_operator.yml
+
+- name: Check if Kiali Operator is already installed
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: openshift-operators
+    name: kiali-operator
+  register: r_kiali_exists
+
+- name: Install Kiali operator
+  when: r_kiali_exists.resources | length == 0
+  include_tasks: ./install_kiali_operator.yml
+
+- name: Deploy Service Mesh Control Plane
+  when: ocp4_workload_servicemesh_deploy_control_plane | bool
+  block:
+  - name: Create Service Mesh Namespace and Control Plane
+    k8s:
+      state: present
+      definition: "{{ lookup('file', item ) | from_yaml }}"
+    loop:
+    - ./files/istio_namespace.yaml
+    - ./files/service_mesh_control_plane.yaml
+
+  # This is somewhat ugly but MUCH easier than trying to parse the ServiceMeshControlPlane status arrays...
+  - name: Wait for Service Mesh Control Plane to finish installation
+    shell: "oc get smcp -n istio-system | grep -v NAME | awk -c '{print $3}'"
+    register: r_smcp
+    retries: 40
+    delay: 10
+    until: r_smcp.stdout == "InstallSuccessful"
+
+  - name: Create OpenShift Service Mesh Member Roll
+    when: ocp4_workload_servicemesh_member_roll_projects | length > 0
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './templates/service_mesh_member_roll.j2' ) }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

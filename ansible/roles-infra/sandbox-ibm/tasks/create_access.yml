@@ -1,0 +1,158 @@
+---
+- name: Store account information in vars
+  agnosticd_user_info:
+    data:
+      ibm_sandbox_name: "{{ sandbox_account_name }}"
+      ibm_sandbox_account: "{{ sandbox_account_id }}"
+
+- name: Create auth token for IBM Cloud
+  uri:
+    url: "https://iam.cloud.ibm.com/identity/token"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      grant_type: "urn:ibm:params:oauth:grant-type:apikey"
+      apikey: "{{ sandbox_master_api_key }}"
+  register: r_sandbox_token
+  until: r_sandbox_token.status == 200
+  retries: 3
+  delay: 10
+
+- name: Set auth bearer token
+  set_fact:
+    auth_token: "{{ r_sandbox_token['json']['access_token'] }}"
+
+- name: Get list of SIDs in account
+  uri:
+    url: "https://iam.cloud.ibm.com/v1/serviceids?account_id={{ sandbox_account_id }}"
+    headers:
+      Authorization: Bearer {{ auth_token }}
+  register: r_sandbox_serviceids
+  until: r_sandbox_serviceids.status == 200
+  retries: 3
+  delay: 10
+    
+- name: Delete SID if it exists
+  uri:
+    url: "https://iam.cloud.ibm.com/v1/serviceids/{{ item }}"
+    method: DELETE
+    headers:
+      Authorization: Bearer {{ auth_token }}
+    status_code: 204
+  loop: "{{ r_sandbox_serviceids['json']['serviceids'] | json_query(sid_query) }}"
+  vars:
+    sid_query: "[?name=='{{ guid }}-sid'].id"
+  register: r_sid_delete
+  until: r_sid_delete.status == 204
+  retries: 3
+  delay: 10
+
+- name: Create service ID (SID) in account
+  uri:
+    url: "https://iam.cloud.ibm.com/v1/serviceids"
+    method: POST
+    headers:
+      Authorization: Bearer {{ auth_token }}
+    status_code: 201
+    body_format: json
+    body:
+      name: "{{ guid }}-sid"
+      description: "Service ID for {{ guid }}"
+      account_id: "{{ sandbox_account_id }}"
+  register: r_sandbox_sid
+  until: r_sandbox_sid.status == 201
+  retries: 3
+  delay: 10
+
+- name: Set sandbox_sid_id
+  set_fact:
+    sandbox_sid_id: "{{ r_sandbox_sid['json']['iam_id'] }}"
+
+- name: Create API key for SID
+  uri:
+    url: "https://iam.cloud.ibm.com/v1/apikeys"
+    method: POST
+    headers:
+      Authorization: Bearer {{ auth_token }}
+    status_code: 201
+    body_format: json
+    body:
+      name: "{{ guid }}-sid-key"
+      description: "{{ guid }}-sid API Key"
+      iam_id: "{{ sandbox_sid_id }}"
+      account_id: "{{ sandbox_account_id }}"
+      store_value: false
+  register: r_sandbox_sid_apikey
+  until: r_sandbox_sid_apikey.status == 201
+  retries: 3
+  delay: 10
+
+- name: Set SID API key
+  set_fact:
+    sandbox_sid_apikey: "{{ r_sandbox_sid_apikey['json']['apikey'] }}"
+
+- name: Get Access Group ID
+  uri:
+    url: "https://iam.cloud.ibm.com/v2/groups?account_id={{ sandbox_account_id }}"
+    headers:
+      Authorization: Bearer {{ auth_token }}
+  register: r_sandbox_access_groups
+  until: r_sandbox_access_groups.status == 200
+  retries: 3
+  delay: 10
+
+- name: Set access group ID
+  set_fact: 
+    sandbox_access_group: "{{ r_sandbox_access_groups['json']['groups'] | json_query(ag_query) }}"
+  vars:
+    ag_query: "[?name=='sandbox_ag'].id | [0]"
+
+- name: Add SID to access group
+  when: not ibm_roks_install
+  uri:
+    url: "https://iam.cloud.ibm.com/v2/groups/{{ sandbox_access_group }}/members"
+    method: PUT
+    headers:
+      Authorization: Bearer {{ auth_token }}
+    status_code: 207
+    body_format: json
+    body:
+      members:
+        - iam_id: "{{ sandbox_sid_id }}"
+          type: "service"
+  register: r_sid_access_group
+  until: r_sid_access_group.status == 207
+  retries: 3
+  delay: 10
+
+- name: Set access group for ROKS install
+  when: ibm_roks_install
+  include_tasks: create_roks_access_groups.yml
+
+- name: Enable UI access
+  when: 
+    - sandbox_enable_ui | default(false)
+    - not ibm_roks_install
+  uri:
+    url: "https://user-management.cloud.ibm.com/v2/accounts/{{ sandbox_account_id }}/users"
+    method: POST
+    headers:
+      Authorization: Bearer {{ auth_token }}
+    status_code: 202
+    body_format: json
+    body:
+      users:
+        - email: "{{ email }}"
+          account_role: "Member"
+      access_groups:
+        - "{{ sandbox_access_group }}"
+  register: r_enable_ui
+  until: r_enable_ui.status == 202
+  retries: 3
+  delay: 10
+
+- name: Enable UI access for ROKS
+  when:
+    - sandbox_enable_ui | default(false)
+    - ibm_roks_install | default(false)
+  include_tasks: create_roks_ui_access.yml
