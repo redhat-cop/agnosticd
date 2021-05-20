@@ -18,7 +18,34 @@
   tags:
     - actual_sausage_making
   tasks:
-    ## Authenticated alredy from infrastructure creation
+    ## Authenticating
+    - name: Authorize to get bearer access and refresh tokens
+      uri:
+        url: "{{ ibm_cloud_api_iam_url }}"
+        headers:
+          Authorization: Basic Yng6Yng=
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: "urn:ibm:params:oauth:grant-type:apikey"
+          response_type: "cloud_iam"
+          apikey: "{{ sandbox_sid_apikey }}"
+      register: r_token
+      tags: create-token
+      until: r_token.status == 200
+      retries: 10
+      delay: 3
+
+    - name: Set fact for bearer access token
+      set_fact:
+        ibm_access_token: "{{ r_token.json.access_token }}"
+      tags: store-access-token
+
+    - name: Set fact for bearer refresh token
+      set_fact:
+        ibm_refresh_token: "{{ r_token.json.refresh_token }}"
+      tags: store-refresh-token
+
     ## Getting Exact OpenShift version to deploy
     - name: Get full OpenShift version
       uri:
@@ -52,79 +79,167 @@
         var: rhoic_openshift_version
       tags: get-versions
 
-    ## Cluster Creation
-    - name: Create RHOIC cluster
+- name: Building the Cloud Object Storage and RHOIC Cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    ## Authenticated from last section in this playbook
+    # Create Workspace to support RHOIC
+    - name: Create a new workspace
       uri:
-        url: "{{ ibm_cloud_api_container_v2_url }}/createCluster"
+        url: "{{ ibm_cloud_schematics_url }}"
         method: POST
-        body_format: json
         status_code: 201
         headers:
-          Authorization: Bearer {{ ibm_access_token }}
+          Authorization: "Bearer {{ ibm_access_token }}"
+        body_format: json
         body:
-          cosInstanceCRN: "{{ rhoic_cos_id }}"
-          cseACLEnabled: true
-          disablePublicServiceEndpoint: false
-          kubeVersion: "{{ rhoic_openshift_version }}"
-          name: "rhpds-{{ guid }}"
-          podSubnet: "{{ rhoic_subnet_pod }}"
-          provider: "vpc-gen2"
-          serviceSubnet: "{{ rhoic_subnet_service }}"
-          workerPool:
-            diskEncryption: true
-            flavor: "{{ rhoic_compute_type }}"
-            isolation: "public"
-            name: "default"
-            vpcID: "{{ rhoic_vpc_id }}"
-            workerCount: "{{ rhoic_compute_count }}"
-            zones:
-              - id: "{{ rhoic_zone }}"
-                subnetID: "{{ rhoic_subnet_id }}"
-      register: r_new_rhoic
-      tags: create-rhoic
-      until: r_new_rhoic.status == 201
+          name: "rhpds-rhoic"
+          type:
+            - terraform_v0.14
+          location: "us-east"
+          description: "Creating Cloud Object Storage and the RHOIC cluster"
+          tags: []
+          template_repo:
+            url: "{{ terraform_rhoic }}"
+          template_data:
+            - folder: "."
+              type: terraform_v0.14
+              variablestore:
+                - name: ibmcloud_api_key
+                  value: "{{ sandbox_sid_apikey }}"
+                - name: ibmcloud_region
+                  value: "{{ rhoic_region }}"
+                - name: cluster_version
+                  value: "{{ rhoic_openshift_version }}"
+                - name: cluster_flavor
+                  value: "{{ rhoic_compute_type }}"
+      register: r_ws_rhoic_create
+      tags: create-ws-rhoic
+      until: r_ws_rhoic_create.status == 201
       retries: 10
-      delay: 6
+      delay: 3
 
-    - debug:
-        var: r_new_rhoic
-        verbosity: 2
+    - name: Get a list of workspaces
+      uri:
+        url: "{{ ibm_cloud_schematics_url }}"
+        method: GET
+        status_code: 200
+        headers:
+          Authorization: "{{ ibm_access_token }}"
+      register: r_ws_list
+      tags: retrieve-ws-list
+      until: r_ws_list.status == 200
+      retries: 10
+      delay: 3
 
-    - name: Set fact for RHOIC Cluster ID
-      set_fact:
-        rhoic_cluster_id: "{{ r_new_rhoic.json.clusterID }}"
-      tags: store-rhoic-id
+    - set_fact:
+        rhoic_ws_id: "{{ item.id }}"
+      with_items: "{{ r_ws_list.json.workspaces }}"
+      when: item.name == "rhpds-rhoic"
 
-    - name: Pausing for 45 minutes to allow the RHOIC cluster to build
+    - name: Pausing for 30 seconds for lock to be released
       pause:
-        minutes: 45
+        seconds: 30
+
+    - name: Making the plan that IBM Schematics will run
+      uri:
+        url: "{{ ibm_cloud_schematics_url }}/{{ rhoic_ws_id }}/plan"
+        method: POST
+        status_code: 202
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+          refresh_token: "{{ ibm_refresh_token }}"
+      register: r_ws_rhoic_plan
+      tags: plan-ws-rhoic
+      until: r_ws_rhoic_plan.status == 202
+      retries: 10
+      delay: 3
+
+    - name: Waiting for the plan to finish creating
+      uri:
+        url: "{{ ibm_cloud_schematics_url }}/{{ rhoic_ws_id }}"
+        method: GET
+        status_code: 200
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+      register: r_ws_detail
+      tags: retrieve-ws
+      until: r_ws_detail.json.status is defined and r_ws_detail.json.status != "INPROGRESS"
+      retries: 30
+      delay: 30
+
+    - name: Pausing for 30 seconds for lock to be released
+      pause:
+        seconds: 30
+
+    - name: Applying the plan
+      uri:
+        url: "{{ ibm_cloud_schematics_url }}/{{ rhoic_ws_id }}/apply"
+        method: PUT
+        status_code: 202
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+          refresh_token: "{{ ibm_refresh_token }}"
+      register: r_ws_rhoic_apply
+      tags: apply-ws-rhoic
+      until: r_ws_rhoic_apply.status == 202
+      retries: 10
+      delay: 3
+
+    - name: Pausing for 40 minutes to allow the RHOIC cluster to build
+      pause:
+        minutes: 40
 
     ## Re-Authenticating because token only good for 60 minutes
     ## and we don't want it to expire
-    - name: Authorize to get bearer token for REST calls
+    - name: Authorize to get bearer access and refresh tokens
       uri:
         url: "{{ ibm_cloud_api_iam_url }}"
+        headers:
+          Authorization: Basic Yng6Yng=
         method: POST
         body_format: form-urlencoded
-        body: "grant_type=urn%3Aibm%3Aparams%3Aoauth%3Agrant-type%3Aapikey&apikey={{ sandbox_master_api_key }}"
+        body:
+          grant_type: "urn:ibm:params:oauth:grant-type:apikey"
+          response_type: "cloud_iam"
+          apikey: "{{ sandbox_sid_apikey }}"
       register: r_token
       tags: create-token
       until: r_token.status == 200
       retries: 10
-      delay: 6
+      delay: 3
 
-    - name: Set fact for bearer token
+    - name: Set fact for bearer access token
       set_fact:
         ibm_access_token: "{{ r_token.json.access_token }}"
-      tags: store-token
+      tags: store-access-token
 
-    ## Now let us wait for the cluster to come alive (2 minutes between checks)
-    - pause:
-        seconds: 15
+    - name: Set fact for bearer refresh token
+      set_fact:
+        ibm_refresh_token: "{{ r_token.json.refresh_token }}"
+      tags: store-refresh-token
 
-    - name: Wait for the RHOIC cluster to finish deploying
+    - name: Waiting for the plan to be active
       uri:
-        url: "{{ ibm_cloud_api_container_v2_url }}/getCluster?cluster={{ rhoic_cluster_id }}"
+        url: "{{ ibm_cloud_schematics_url }}/{{ rhoic_ws_id }}"
+        method: GET
+        status_code: 200
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+      register: r_ws_detail
+      tags: retrieve-ws
+      until: r_ws_detail.json.status is defined and r_ws_detail.json.status == "ACTIVE"
+      retries: 30
+      delay: 60
+
+    - name: Gathering RHOIC Cluster information
+      uri:
+        url: "{{ ibm_cloud_api_container_v2_url }}/getCluster?cluster={{ rhoic_cluster_name }}"
         method: GET
         status_code: 200
         headers:
@@ -132,8 +247,8 @@
       register: r_existing_rhoic
       tags: retrieve-rhoic
       until: r_existing_rhoic.json.state is defined and r_existing_rhoic.json.state == "normal"
-      retries: 30
-      delay: 120
+      retries: 10
+      delay: 60
 
     - name: Displaying RHOIC cluster details
       debug:
