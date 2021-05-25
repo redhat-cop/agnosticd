@@ -154,13 +154,69 @@
   - r_smmr.resources[0].spec.members is defined
   - r_smmr.resources[0].spec.members | length > 0
 
-# This is hacky, but there's no field in the Service Mesh Control Plane to modify this right now
-# We can't use set_fact either because the content we need to modify is inside a long, unformatted string
-- name: Remove DeploymentConfig from Kiali's excluded workloads
-  shell: "oc get cm kiali -n {{ t_user_servicemesh_project }} -o yaml | sed '/DeploymentConfig/d' | oc apply -n {{ t_user_servicemesh_project }} -f -"
+## This is hacky, but there's no field in the Service Mesh Control Plane to modify this easily right now
+- name: Get Kiali Config Map
+  k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: kiali
+    namespace: "{{ t_user_servicemesh_project }}"
+  register: r_kiali_cm
 
-- name: Restart Kiali to take effect
-  shell: "oc rollout restart deployment kiali -n {{ t_user_servicemesh_project }}"
+- name: Remove DeploymentConfig from excluded workloads
+  set_fact:
+    r_kiali_cm_config: "{{ r_kiali_cm.resources[0].data['config.yaml'] | replace('- DeploymentConfig\n', '') }}"
+
+- name: Create new Kiali Config Map
+  set_fact:
+    r_kiali_cm_new: {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': "{{ r_kiali_cm.resources[0].metadata }}", 'data': {'config.yaml': "{{ r_kiali_cm_config}}"}}
+
+- name: Apply new Config Map
+  k8s:
+    state: present
+    definition: "{{ r_kiali_cm_new | to_yaml }}"
+
+- name: Scale Kiali down
+  k8s_scale:
+    api_version: v1
+    kind: Deployment
+    name: kiali
+    namespace: "{{ t_user_servicemesh_project }}"
+    replicas: 0
+    wait: no
+
+- name: Wait for scale down
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    name: kiali
+    namespace: "{{ t_user_servicemesh_project }}"
+  register: r_kiali_deployment
+  retries: 15
+  delay: 5
+  until:
+  - r_kiali_deployment.resources | json_query('[*].status.conditions[?type==`Available`][].status') | select ('match','True') | list | length == 1
+
+- name: Restart Kiali for config map change to take effect
+  k8s_scale:
+    api_version: v1
+    kind: Deployment
+    name: kiali
+    namespace: "{{ t_user_servicemesh_project }}"
+    replicas: 1
+    wait: no
+
+- name: Wait for scale up
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    name: kiali
+    namespace: "{{ t_user_servicemesh_project }}"
+  register: r_kiali_deployment
+  retries: 15
+  delay: 5
+  until:
+  - r_kiali_deployment.resources | json_query('[*].status.conditions[?type==`Available`][].status') | select ('match','True') | list | length == 1
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
