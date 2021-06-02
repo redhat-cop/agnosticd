@@ -1,0 +1,179 @@
+---
+- name: Step 000 Infrastructure
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+    - step001
+    - infrastructure
+  tasks:
+    - debug:
+        msg: "Step 001 Infra - Starting"
+
+- name: Building the networking prerequisites
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    ## Authenticating
+    - name: Authorize to get bearer access and refresh tokens
+      uri:
+        url: "{{ ibm_cloud_api_iam_url }}"
+        headers:
+          Authorization: Basic Yng6Yng=
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: "urn:ibm:params:oauth:grant-type:apikey"
+          response_type: "cloud_iam"
+          apikey: "{{ sandbox_sid_apikey }}"
+      register: r_token
+      tags: create-token
+      until: r_token.status == 200
+      retries: 10
+      delay: 3
+
+    - name: Set fact for bearer access token
+      set_fact:
+        ibm_access_token: "{{ r_token.json.access_token }}"
+      tags: store-access-token
+
+    - name: Set fact for bearer refresh token
+      set_fact:
+        ibm_refresh_token: "{{ r_token.json.refresh_token }}"
+      tags: store-refresh-token
+
+- name: Creating and activting a workspace in IBM Schematics
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    # Create Workspace to support VPC
+    - name: Create a new workspace
+      uri:
+        url: "{{ ibm_cloud_schematics_url }}"
+        method: POST
+        status_code: 201
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+        body_format: json
+        body:
+          name: "rhpds-vpc"
+          type:
+            - terraform_v0.14
+          location: "us-east"
+          description: "Creating VPC, Subnet, and Public Gateway for RHOIC"
+          tags: []
+          template_repo:
+            url: "{{ terraform_vpc }}"
+          template_data:
+            - folder: "."
+              type: terraform_v0.14
+              variablestore:
+                - name: ibmcloud_api_key
+                  value: "{{ sandbox_sid_apikey }}"
+                  secure: true
+                - name: ibmcloud_region
+                  value: "{{ rhoic_region }}"
+      register: r_ws_vpc_create
+      tags: create-ws-vpc
+      until: r_ws_vpc_create.status == 201
+      retries: 10
+      delay: 3
+
+    - name: Get a list of workspaces
+      uri:
+        url: "{{ ibm_cloud_schematics_url }}"
+        method: GET
+        status_code: 200
+        headers:
+          Authorization: "{{ ibm_access_token }}"
+      register: r_ws_list
+      tags: retrieve-ws-list
+      until: r_ws_list.status == 200
+      retries: 10
+      delay: 3
+
+    - name: Setting the vpc_ws_id variable
+      set_fact:
+        vpc_ws_id: "{{ item.id }}"
+      with_items: "{{ r_ws_list.json.workspaces }}"
+      when: item.name == "rhpds-vpc"
+
+    - name: Pausing for 30 seconds for lock to be released
+      pause:
+        seconds: 30
+
+    - name: Making the plan that IBM Schematics will run
+      uri:
+        url: "{{ ibm_cloud_schematics_url }}/{{ vpc_ws_id }}/plan"
+        method: POST
+        status_code: 202
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+          refresh_token: "{{ ibm_refresh_token }}"
+      register: r_ws_vpc_plan
+      tags: plan-ws-vpc
+      until: r_ws_vpc_plan.status == 202
+      retries: 10
+      delay: 3
+
+    - name: Waiting for the plan to finish creating
+      uri:
+        url: "{{ ibm_cloud_schematics_url }}/{{ vpc_ws_id }}"
+        method: GET
+        status_code: 200
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+      register: r_ws_detail
+      tags: retrieve-ws
+      until: r_ws_detail.json.status is defined and r_ws_detail.json.status != "INPROGRESS"
+      retries: 30
+      delay: 30
+
+    - name: Pausing for 30 seconds for lock to be released
+      pause:
+        seconds: 30
+
+    - name: Applying the plan
+      uri:
+        url: "{{ ibm_cloud_schematics_url }}/{{ vpc_ws_id }}/apply"
+        method: PUT
+        status_code: 202
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+          refresh_token: "{{ ibm_refresh_token }}"
+      register: r_ws_vpc_apply
+      tags: apply-ws-vpc
+      until: r_ws_vpc_apply.status == 202
+      retries: 10
+      delay: 3
+
+    - name: Waiting for the plan to be active
+      uri:
+        url: "{{ ibm_cloud_schematics_url }}/{{ vpc_ws_id }}"
+        method: GET
+        status_code: 200
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+      register: r_ws_detail
+      tags: retrieve-ws
+      until: r_ws_detail.json.status is defined and r_ws_detail.json.status == "ACTIVE"
+      retries: 30
+      delay: 60
+
+- name: Infra flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Infra checks completed successfully"
