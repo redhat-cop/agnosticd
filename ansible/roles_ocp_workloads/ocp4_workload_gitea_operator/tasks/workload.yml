@@ -3,40 +3,61 @@
   debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
-- name: Create OpenShift Objects for Gitea Operator
-  k8s:
-    state: present
-    definition: "{{ lookup('template', item ) | from_yaml }}"
-  loop:
-  - ./templates/project.j2
-  - ./templates/crd.j2
-  - ./templates/service_account.j2
-  - ./templates/cluster_role.j2
-  - ./templates/cluster_role_binding.j2
-  - ./templates/operator.j2
+- name: Check Gitea Tag
+  assert:
+    that:
+    - ocp4_workload_gitea_operator_gitea_image_tag is not match('latest')
+    fail_msg: "Gitea image tag must not be set to 'latest'. Please specify the image version explicitely."
 
-- name: Wait for Gitea operator Pod to be ready
-  k8s_info:
-    api_version: v1
-    kind: Deployment
-    namespace: "{{ ocp4_workload_gitea_operator_project }}"
-    name: "gitea-operator"
-  register: r_gitea_operator_deployment
-  retries: 20
-  delay: 10
-  until:
-  - r_gitea_operator_deployment.resources is defined
-  - r_gitea_operator_deployment.resources | length | int > 0
-  - r_gitea_operator_deployment.resources[0].status.readyReplicas is defined
-  - r_gitea_operator_deployment.resources[0].status.readyReplicas | int == r_gitea_operator_deployment.resources[0].spec.replicas | int
+- name: Install Operator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: gitea-operator
+    install_operator_namespace: openshift-operators
+    install_operator_channel: "{{ ocp4_workload_gitea_operator_channel }}"
+    install_operator_catalog: ""
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_gitea_operator_automatic_install_plan_approval | default(true) }}"
+    install_operator_starting_csv: "{{ ocp4_workload_gitea_operator_starting_csv }}"
+    install_operator_use_catalog_snapshot: true
+    install_operator_catalogsource_name: gitea-operator-catalogsource
+    install_operator_catalog_snapshot_image: "{{ ocp4_workload_gitea_operator_catalog_image }}"
+    install_operator_catalog_snapshot_image_tag: "{{ ocp4_workload_gitea_operator_catalog_image_tag }}"
 
 - name: Deploy default Gitea instance
   when: ocp4_workload_gitea_operator_deploy_gitea_instance | bool
   block:
+  - name: Ensure Gitea namespace exists
+    k8s:
+      state: present
+      api_version: v1
+      kind: Namespace
+      name: "{{ ocp4_workload_gitea_operator_project }}"
+
+  - name: Set Gitea Route
+    when: ocp4_workload_gitea_operator_gitea_hostname | default("") | length > 0
+    block:
+    - name: Determine Wildcard Domain
+      k8s_info:
+        api_version: operator.openshift.io/v1
+        kind: IngressController
+        name: default
+        namespace: openshift-ingress-operator
+      register: r_ingress_controller
+    - name: Set Gitea Route URL
+      set_fact:
+        __ocp4_workload_gitea_operator_gitea_route: >-
+          {{ ocp4_workload_gitea_operator_gitea_hostname }}.{{
+             r_ingress_controller.resources[0].status.domain }}
+    - name: Debug Route
+      debug:
+        msg: "Gitea Route: {{ __ocp4_workload_gitea_operator_gitea_route }}"
+
   - name: Create OpenShift Custom Resource for Gitea Instance
     k8s:
       state: present
-      definition: "{{ lookup('template', './templates/gitea.j2' ) | from_yaml }}"
+      definition: "{{ lookup('template', 'gitea.j2' ) | from_yaml }}"
 
   - name: Wait for Gitea Pod to be ready
     k8s_info:
@@ -52,21 +73,21 @@
     - r_gitea_deployment.resources[0].status.readyReplicas is defined
     - r_gitea_deployment.resources[0].status.readyReplicas | int == r_gitea_deployment.resources[0].spec.replicas | int
 
-- name: Search for Gitea pod
+- name: Retrieve Gitea pod
   k8s_info:
     kind: Pod
     namespace: "{{ ocp4_workload_gitea_operator_project }}"
     label_selectors:
-    - app = gitea
+    - app = {{ ocp4_workload_gitea_operator_name }}
   register: r_gitea_pod
 
-- name: Search for Gitea route
+- name: Retrieve Gitea route
   k8s_info:
     kind: Route
     api_version: route.openshift.io/v1
     namespace: "{{ ocp4_workload_gitea_operator_project }}"
     label_selectors:
-    - app = gitea
+    - app = {{ ocp4_workload_gitea_operator_name }}
   register: r_gitea_route
 
 - name: Configure a Gitea admin user
@@ -81,8 +102,10 @@
     register: r_giteaadmin_user
     failed_when: r_giteaadmin_user.status != 200 and r_giteaadmin_user.status != 404
 
-  - name: Create Gitea admin user
-    when: r_giteaadmin_user.status == 404
+  - name: Create Gitea admin user (before Gitea 1.14)
+    when:
+    - r_giteaadmin_user.status == 404
+    - ocp4_workload_gitea_operator_gitea_image_tag is version_compare('1.14', '<')
     command: >
       oc exec {{ r_gitea_pod.resources[0].metadata.name }}
       -n {{ ocp4_workload_gitea_operator_project }}
@@ -90,6 +113,18 @@
       --password {{ ocp4_workload_gitea_operator_admin_password }}
       --email {{ ocp4_workload_gitea_operator_admin_user }}@workshop.com
       --must-change-password=false --admin -c /home/gitea/conf/app.ini
+
+  - name: Create Gitea admin user (Gitea 1.14 and later)
+    when:
+    - r_giteaadmin_user.status == 404
+    - ocp4_workload_gitea_operator_gitea_image_tag is version_compare('1.14', '>=')
+    command: >
+      oc exec {{ r_gitea_pod.resources[0].metadata.name }}
+      -n {{ ocp4_workload_gitea_operator_project }}
+      -- /home/gitea/gitea admin user create --username {{ ocp4_workload_gitea_operator_admin_user }}
+      --password {{ ocp4_workload_gitea_operator_admin_password }}
+      --email {{ ocp4_workload_gitea_operator_admin_user }}@workshop.com
+      --must-change-password=false --admin --config /home/gitea/conf/app.ini
 
 - name: Create the users in Gitea
   when: ocp4_workload_gitea_operator_create_users | bool
