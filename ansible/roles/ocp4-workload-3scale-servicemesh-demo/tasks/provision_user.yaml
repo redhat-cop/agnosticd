@@ -1,0 +1,97 @@
+---
+- name: Retrieve 3scale Admin URL and token from 
+  k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "system-seed"
+    namespace: "{{ threescale_project }}"
+  register: _3scale_secret
+  retries: 3
+  delay: 5
+  until:
+    - _3scale_secret.resources is defined
+    - _3scale_secret.resources | length | int > 0
+    - _3scale_secret.resources[0].data is defined
+    - _3scale_secret.resources[0].data.TENANT_NAME is defined
+
+- name: Setting 3scale tenant parameters - provider key and admin url
+  set_fact:
+    _tenant_provider_key: "{{ _3scale_secret.resources[0].data.ADMIN_ACCESS_TOKEN | b64decode }}"
+    _tenant_admin_url: "https://{{ _3scale_secret.resources[0].data.TENANT_NAME | b64decode }}-admin.{{route_subdomain}}"
+
+- name: Setting the _tenant_basic_auth_token param
+  set_fact:
+    _tenant_basic_auth_token: "Basic {{ (':' + _tenant_provider_key) | b64encode }}"
+
+- name: Create the Admin User 'user1' in 3scale
+  uri:
+    method: POST
+    url: "{{_tenant_admin_url}}/admin/api/users.xml"
+    headers:
+      Authorization: "{{ _tenant_basic_auth_token }}"
+    return_content: true
+    status_code: 
+    - 201
+    - 422
+    body_format: form-urlencoded
+    body:
+    - [ username, 'user1' ]
+    - [ password, "{{ocp4_workload_3scale_servicemesh_demo_openshift_user_password}}" ]
+    - [ email, "admin+user1@e3scale.{{route_subdomain}}" ]
+  register: _tenant_account_create
+  until: _tenant_account_create is defined    
+
+
+- name: Extract User Account Id from response
+  xml:
+    xmlstring: "{{_tenant_account_create.content}}"
+    xpath: //user/id
+    content: text
+  register: _tenant_account_create_parse 
+
+- name: Set _user1_account_id
+  set_fact: 
+    _user1_account_id: "{{ _tenant_account_create_parse.matches[0].id }}"
+
+- name: Update user1 Account to Admin & Approve the User  
+  uri:
+    method: PUT
+    url: "{{_tenant_admin_url}}/admin/api/users/{{ _user1_account_id }}/admin.xml"
+    headers:
+      Authorization: "{{ _tenant_basic_auth_token }}"
+    return_content: true
+    status_code: 200
+  register: _tenant_account_update
+  until: _tenant_account_update is defined  
+
+- name: Activate user1 Account registration 
+  uri:
+    method: PUT
+    url: "{{_tenant_admin_url}}/admin/api/users/{{ _user1_account_id }}/activate.xml"
+    headers:
+      Authorization: "{{ _tenant_basic_auth_token }}"
+    return_content: true
+    status_code: 200
+  register: _tenant_account_activate
+  until: _tenant_account_activate is defined    
+
+- name: Provider user1 Admin Access to the required namespaces    
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'user-rolebinding.yaml.j2') }}"
+  loop:
+    - user: 'user1'
+      namespace: '{{ threescale_project}}'
+      role: view
+    - user: 'user1'
+      namespace: '{{ ossm_project}}'
+      role: view
+    - user: 'user1'
+      namespace: '{{ sso_project}}'
+      role: view
+    - user: 'user1'
+      namespace: '{{ backend_project}}'
+      role: admin  
+  loop_control:
+    loop_var: item_project
+
