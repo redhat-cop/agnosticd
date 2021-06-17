@@ -34,6 +34,9 @@ search_last_image() {
 for region in $(aws ec2 --profile $profile describe-regions --query "Regions[].RegionName" --output text --region us-east-1)
 do
     echo "${region}:"
+    echo -n "  RHEL83GOLD: "
+    search_last_image 309956199498 'RHEL-8.3*x86_64*Access*' false
+
     echo -n "  RHEL82GOLD: "
     search_last_image 309956199498 'RHEL-8.2*x86_64*Access*' false
 
@@ -51,6 +54,9 @@ do
 
     echo -n "  RHEL81NBDE: "
     search_last_image 719622469867 'rhel81nbde' false
+
+    echo -n "  RHEL83: "
+    search_last_image 309956199498 'RHEL-8.3*x86_64*' true
 
     echo -n "  RHEL82: "
     search_last_image 309956199498 'RHEL-8.2*x86_64*' true
