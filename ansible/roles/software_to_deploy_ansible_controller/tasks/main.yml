@@ -1,0 +1,93 @@
+---
+
+- name: Download Ansible controller installer tar.gz
+  get_url:
+    url: '{{ ansible_controller_installer_url | default(default_ansible_controller_url) }}'
+    dest: /tmp/ansible_controller.tar.gz
+
+- name: Create directory for Ansible Tower
+  file:
+    path: /tmp/ansible_controller_installer
+    state: directory
+
+- name: Extract Ansible controller installer tar.gz
+  unarchive:
+    src: /tmp/ansible_controller.tar.gz
+    dest: /tmp/ansible_controller_installer
+    remote_src: true
+    extra_opts: 
+      - '--strip-components=1'
+      - '--show-stored-names'
+
+- name: Create template based inventory file for Ansible controller install
+  when: not ansible_controller_create_cluster | default(false) | bool
+  template:
+    src: ansible_controlller_inventory.j2
+    dest: /tmp/ansible_controller_installer/inventory
+
+- name: Create template based inventory file for Ansible controller install cluster
+  when: ansible_controller_create_cluster | default(false) | bool
+  template:
+    src: ansible_controller_cluster_install.j2
+    dest: /tmp/ansible_controller_installer/inventory
+
+- name: Run the Automation Controller installer
+  shell: ./setup.sh
+  args:
+    chdir: /tmp/ansible_controller_installer
+  async: 1400
+  poll: 15
+
+- name: Wait for Ansible controller to be up
+  uri:
+    url: https://localhost/api/v2/ping/
+    method: GET
+    user: "{{ ansible_controller_admin }}"
+    password: "{{ ansible_controller_admin_password }}"
+    validate_certs: false
+  register: r_ansible_controller_ping
+  until: 
+    - r_ansible_controller_ping.json is defined
+    - r_ansible_controller_ping.json.instances[0].capacity > 0
+    - r_ansible_controller_ping.json.instance_groups[0].capacity > 0
+  retries: 60
+  delay: 10
+
+- name: Display Ansible controller /api/v2/ping results
+  debug:
+    msg: '{{ r_ansible_controller_ping.json }}'
+
+- name: Install ansible-ansible_controller-cli and requests
+  become: true
+  pip:
+    name:
+      - ansible-tower-cli
+      - "requests==2.6.0"
+    state: latest
+
+- name: Install venv
+  include_tasks: venv.yml
+
+- name: License Ansible controller via manifest block
+  when: ansible_controller_use_manifest | default(false) | bool
+  block:
+
+    - name: Load manifest into register
+      local_action:
+        module: slurp
+        src: "{{ ansible_controller_manifest_dir }}/ansible_controller_manifest.zip"
+      register: r_ansible_controller_manifest_file
+      become: false
+
+    - name: Insert Ansible controller License via manifest
+      uri:
+        url: https://{{ ansible_host }}/api/v2/config/
+        method: POST
+        user: "{{ ansible_controller_admin }}"
+        password: "{{ ansible_controller_admin_password}}"
+        body: '{ "eula_accepted": true, "manifest": "{{ r_ansible_controller_manifest_file.content }}" }'
+        body_format: json
+        validate_certs: false
+        force_basic_auth: true
+
+...
