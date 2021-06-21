@@ -18,6 +18,7 @@ Dependencies
 
 Example Playbook
 ----------------
+
 ```yaml
 - name: Install Ansible controller
   hosts: controllers
