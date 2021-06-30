@@ -31,8 +31,8 @@ ansible-playbook main.yml \
 ```
 
 1. A sample vars files defining instances in the group 
-* `ansiblecontroller`
-* `ansiblecontroller_database`
+* `automationcontroller`
+* `automationcontroller_database`
 2. Cloud secrets - get from your cluster admin
 3. Repo method secrets e.g satellite, RHN (Red hat Network), file (see the docs)
 4. See **Role Variables** below, but you must provide at a minimum
