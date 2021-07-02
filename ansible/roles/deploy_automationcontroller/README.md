@@ -57,11 +57,12 @@ Invoking this role
     - deploy_automationcontroller
 ```
 
+The tag `deploy_automationcontroller_installer` can be skipped to avoid going again through the cluster installation, which takes the longest time (for test purposes).
 
 Requirements
 ------------
 
-None.
+Make sure in your inventory that the cluster nodes are in the group "automationcontroller", and that the (optional) database node is in the group "automationcontroller_database".
 
 Role Variables
 --------------
