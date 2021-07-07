@@ -31,7 +31,7 @@
         name: admin
         apiGroup: rbac.authorization.k8s.io
 
-- name: "Make '{{ user_name }}' an Open Data Hub administrator "
+- name: "Make '{{ user_name }}' an Open Data Hub administrator"
   k8s:
     state: present
     definition:
@@ -118,16 +118,53 @@
     - pipeline-task-definition.yaml.j2
     - pipeline-definition.yaml.j2
 
+- name: Create the SA, role, and rolebinding in {{ user_project }}
+  k8s:
+    state: present
+    namespace: "{{ user_project }}"
+    definition: "{{ lookup('template', item) }}"
+  vars:
+    namespace: "{{ user_project }}"
+  loop:
+    - tekton-privileged-role.yml.j2
+    - tekton-sa-rolebinding.yml.j2
+
 - name: Wait for JupyterHub to successfully deploy
-  k8s_facts:
+  k8s_info:
     api_version: apps.openshift.io/v1
     kind: DeploymentConfig
     name: "jupyterhub"
     namespace: "{{ user_project }}"
   register: r_odh_deploy_wait
-  until: r_odh_deploy_wait.resources[0].status.readyReplicas | default(0) | int >= 1
+  until:
+    - r_odh_deploy_wait.resources[0].status.readyReplicas is defined
+    - r_odh_deploy_wait.resources[0].status.readyReplicas | default(0) | int >= 1
   delay: 30
   retries: 22
+
+- name: Scale the ODH operator to zero
+  k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: opendatahub-operator
+        namespace: openshift-operators
+      spec:
+        replicas: 0
+
+- name: Wait for ODH operator pod to disappear
+  k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: openshift-operators
+    label_selectors:
+      - name = opendatahub-operator
+  register: r_odh_operator_deployment
+  until: r_odh_operator_deployment.resources | length == 0
+  delay: 30
+  retries: 10
 
 - name: Remove the control-plane label from the created project (workaround)
   command: "oc label namespace {{ user_project }} control-plane-"
@@ -136,19 +173,19 @@
   k8s:
     state: present
     definition:
-      apiVersion: v1    
-      kind: Service                    
-      metadata:     
+      apiVersion: v1
+      kind: Service
+      metadata:
         labels:
           app: pipeline
         name: pipeline-monitor
         namespace: "{{ user_project }}"
       spec:
         ports:
-        - name: 8080-tcp
-          port: 8080
-          protocol: TCP
-          targetPort: 8080
+          - name: 8080-tcp
+            port: 8080
+            protocol: TCP
+            targetPort: 8080
         selector:
           serving.knative.dev/service: pipeline
           serving.knative.dev/configuration: pipeline
@@ -168,15 +205,15 @@
         namespace: "{{ user_project }}"
       spec:
         endpoints:
-        - interval: 15s
-          port: "8080-tcp"
-          scheme: http
+          - interval: 15s
+            port: "8080-tcp"
+            scheme: http
         selector:
           matchLabels:
             app: pipeline
 
 - name: grab the console route
-  k8s_facts:
+  k8s_info:
     api_version: route.openshift.io/v1
     kind: Route
     name: console
@@ -184,7 +221,7 @@
   register: console_route_out
 
 - name: grab the jupyterhub route
-  k8s_facts:
+  k8s_info:
     api_version: route.openshift.io/v1
     kind: Route
     name: jupyterhub
@@ -205,7 +242,7 @@
     - "Main JH notebook: {{ jh_route }}/user/user1/tree/fraud-notebooks"
     - "OperatorHub Page: {{ console_route }}/k8s/ns/{{ user_project }}/operators.coreos.com~v1alpha1~ClusterServiceVersion/"
     - "Pipeline: {{ console_route }}/k8s/ns/{{ user_project }}/tekton.dev~v1beta1~Pipeline/pipeline/"
-  
+
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
   debug:

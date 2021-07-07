@@ -4,22 +4,23 @@
 
 FROM registry.redhat.io/codeready-workspaces/plugin-java11-rhel8:latest
 
-ENV MANDREL_VERSION=20.1.0.3.Final
-ENV QUARKUS_VERSION=1.7.6.Final-redhat-00014
-ENV KN_VERSION=0.17.3
-ENV OC_VERSION=4.6
+ENV MANDREL_VERSION=20.3.1.2-Final
+ENV QUARKUS_VERSION=1.11.6.Final-redhat-00001
+ENV TKN_VERSION=0.15.0
+ENV KN_VERSION=0.19.1
+ENV OC_VERSION=4.7
 ENV GRAALVM_HOME="/usr/local/mandrel-java11-${MANDREL_VERSION}"
 ENV PATH="/usr/local/maven/apache-maven-${MVN_VERSION}/bin:${PATH}"
 
 USER root
 
-RUN wget -O /tmp/oc.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/oc/${OC_VERSION}/linux/oc.tar.gz && cd /usr/bin && tar -xvzf /tmp/oc.tar.gz && chmod a+x /usr/bin/oc && rm -f /tmp/oc.tar.gz
+RUN wget -O /tmp/oc.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.7.2/openshift-client-linux-4.7.2.tar.gz && cd /usr/bin && tar -xvzf /tmp/oc.tar.gz && chmod a+x /usr/bin/oc && rm -f /tmp/oc.tar.gz
 
 RUN wget -O /tmp/kn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/serverless/${KN_VERSION}/kn-linux-amd64-${KN_VERSION}.tar.gz && cd /usr/bin && tar -xvzf /tmp/kn.tar.gz ./kn && chmod a+x kn && rm -f /tmp/kn.tar.gz
 
 RUN wget -O /tmp/kn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/serverless/0.11.0/kn-linux-amd64-0.11.0.tar.gz && cd /usr/bin && tar -xvzf /tmp/kn.tar.gz ./kn && chmod a+x kn && rm -f /tmp/kn.tar.gz
 
-RUN wget -O /tmp/tkn.tar.gz https://github.com/tektoncd/cli/releases/download/v0.7.1/tkn_0.7.1_Linux_x86_64.tar.gz && cd /usr/bin && tar -xvzf /tmp/tkn.tar.gz tkn&& chmod a+x tkn && rm -f /tmp/tkn.tar.gz
+RUN wget -O /tmp/tkn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/pipeline/${TKN_VERSION}/tkn-linux-amd64-${TKN_VERSION}.tar.gz && cd /usr/bin && tar -xvzf /tmp/tkn.tar.gz && chmod a+x tkn && rm -f /tmp/tkn.tar.gz
 
 RUN sudo rpm -Uvh https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && sudo microdnf install -y zlib-devel gcc siege && sudo curl -Lo /usr/bin/jq https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 && sudo chmod a+x /usr/bin/jq
 
@@ -46,4 +47,9 @@ USER root
 RUN chown -R jboss /home/jboss/.m2
 RUN chmod -R a+w /home/jboss/.m2
 RUN chmod -R a+rwx /home/jboss/.siege
+RUN chown -R jboss /tmp/vertx-cache
+RUN chmod -R a+w /tmp/vertx-cache
+RUN chown -R jboss /tmp/quarkus
+RUN chmod -R a+w /tmp/quarkus
+
 USER jboss
