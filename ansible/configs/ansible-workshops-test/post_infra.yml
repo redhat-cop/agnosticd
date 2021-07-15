@@ -1,0 +1,145 @@
+---
+- name: Step 002 Post Infrastructure
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  environment: &aws_environment
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_REGION: "{{ ec2_region }}"
+  tags:
+    - step002
+    - post_infrastructure
+  tasks:
+
+    - debug:
+        msg: "Step post infra"
+
+    - name: create_key_changed
+      debug:
+        var: create_key_changed
+
+    - name: Grab all workshop hosts
+      ec2_instance_info:
+        filters:
+          instance-state-name: running
+          "tag:ansible-workshops": "true"
+      register: workshop_hosts
+
+    - name: List created workshop hosts
+      debug:
+        var: workshop_hosts
+
+
+    # to avoid porting templates in {etchosts/,instructor_inventory/,student_inventory/}
+    # we instead emulate what they need here - which are variables
+    - name: Create empty lists
+      set_fact:
+        "{{ item.tags.short_name }}_node_facts":
+          instances: []
+      loop: "{{ workshop_hosts.instances }}"
+      loop_control:
+        label: "{{ item.tags.short_name }} - student{{ item.tags.Student }}"
+
+    - name: Add hosts to their respective lists
+      set_fact:
+        "{{ item.tags.short_name }}_node_facts":
+          instances: "{{ lookup('vars', item.tags.short_name + '_node_facts').instances + [item] }}"
+      loop: "{{ workshop_hosts.instances }}"
+      loop_control:
+        label: "{{ item.tags.short_name }} - student{{ item.tags.Student }}"
+
+
+    - name: Add new instance to host group
+      add_host:
+        name: "{{ item.tags.Name }}"
+        student: "{{ item.tags.Student }}"
+        hostname: "{{ item.tags.short_name }}-host"
+        short_name: "{{ item.tags.short_name }}"
+        username: "student{{ item.tags.Student }}"
+        aws_instance_id: "{{ item.instance_id }}"
+        ansible_user: "{{ item.tags.username }}"
+        ansible_ssh_private_key_file: "{{ playbook_dir }}/{{ ec2_name_prefix }}/{{ ec2_name_prefix }}-private.pem"
+        ansible_host: "{{ item.public_ip_address }}"
+        groups: "{{ item.tags['ansible-workshop-groups'] }}"
+        # these are not set for all hosts
+        ansible_password: "{{ item.tags['password'] | default(omit) }}"
+        ansible_become_password: "{{ item.tags['become_password'] | default(omit) }}"
+        ansible_network_os: "{{ item.tags['ansible_network_os'] | default(omit) }}"
+        ansible_python_interpreter: "{{ item.tags['ansible_python_interpreter'] | default(omit) }}"
+        ansible_winrm_transport: "{{ item.tags['ansible_winrm_transport'] | default(omit) }}"
+        ansible_winrm_server_cert_validation: "{{ item.tags['ansible_winrm_server_cert_validation'] | default(omit) }}"
+        ansible_winrm_operation_timeout_sec: "{{ item.tags['ansible_winrm_operation_timeout_sec'] | default(omit) }}"
+        ansible_winrm_read_timeout_sec: "{{ item.tags['ansible_winrm_read_timeout_sec'] | default(omit) }}"
+        ansible_connection: "{{ item.tags['ansible_connection'] | default(omit) }}"
+        ansible_port: "{{ item.tags['ansible_port'] | default(omit) }}"
+        # this is a special case for the security workshop, which has two enis
+        private_ip:  "{% if item.network_interfaces | length > 1 %}{{ item['network_interfaces']|map(attribute='private_ip_address')|list|ipaddr('172.16.0.0/16')|first }}{% else %}{{ item.private_ip_address }}{% endif %}"
+        private_ip2: "{% if item.network_interfaces | length > 1 %}{{ item['network_interfaces']|map(attribute='private_ip_address')|list|ipaddr('172.17.0.0/16')|first }}{% else %}no-second-interface{% endif %}"
+      with_items: "{{ workshop_hosts.instances }}"
+
+
+- name: wait for all nodes to have SSH reachability
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - include_role:
+        name: ansible.workshops.connectivity_test
+
+
+- name: Step 002 Post Infrastructure - windows
+  hosts: windows
+  become: false
+  gather_facts: false
+  environment: *aws_environment
+  tags:
+    - step002
+    - post_infrastructure
+  tasks:
+    - name: Get windows passwords
+      delegate_to: localhost
+      connection: local
+      ec2_win_password:
+        instance_id: "{{ aws_instance_id }}"
+        key_file: "{{ playbook_dir }}/{{ ec2_name_prefix }}/{{ ec2_name_prefix }}-private.pem"
+        wait: true
+        wait_timeout: 300
+      with_items: "{{ instance1_node_facts.instances }}"
+      register: pass
+
+    - set_fact:
+        ansible_password: "{{ pass.win_password }}"
+        cacheable: true
+
+    - name: Wait for WinRM to come up
+      wait_for_connection:
+
+
+- name: Step 002 Post Infrastructure - generation
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+    - step002
+    - post_infrastructure
+  tasks:
+    ################### Write inventories ##################
+    - name: Generate student inventories
+      template:
+        src: "student_inventory/instances_{{workshop_type}}.j2"
+        dest: "{{ playbook_dir }}/{{ec2_name_prefix}}/student{{item}}-instances.txt"
+      with_sequence: count="{{ student_total }}"
+
+    - name: Generate student etchosts
+      template:
+        src: "etchosts/etchosts_{{workshop_type}}.j2"
+        dest: "{{ playbook_dir }}/{{ec2_name_prefix}}/student{{item}}-etchosts.txt"
+      with_sequence: count="{{ student_total }}"
+
+    - name: Generate instructor inventory
+      template:
+        src: "instructor_inventory/instructor_inventory_{{workshop_type}}.j2"
+        dest: "{{ playbook_dir }}/{{ec2_name_prefix}}/instructor_inventory.txt"

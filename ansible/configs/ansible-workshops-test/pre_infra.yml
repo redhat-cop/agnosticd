@@ -1,0 +1,101 @@
+---
+- name: Step 000 Pre Infrastructure 1/2
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - step001
+    - pre_infrastructure
+    - generate_env_keys
+  environment: &aws_environment
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_REGION: "{{ ec2_region }}"
+  tasks:
+    - debug:
+        msg: "Step 000 Pre Infrastructure 1/2"
+
+    - name: Create workshop generated files directory
+      file:
+        path: "{{ playbook_dir }}/{{ ec2_name_prefix }}/"
+        state: directory
+
+    - name: Create ssh key pair for workshop {{ ec2_name_prefix }}
+      ec2_key:
+        name: "{{ ec2_name_prefix }}-key"
+      register: create_key
+
+    - name: save private key
+      copy:
+        content: "{{ create_key.key.private_key }}"
+        dest: "{{ playbook_dir }}/{{ ec2_name_prefix }}/{{ ec2_name_prefix }}-private.pem"
+        mode: '0400'
+      when: create_key.changed
+
+    - set_fact:
+        create_key_changed: "{{ create_key.changed }}"
+
+- name: Step 000 Pre Infrastructure 2/2
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: false
+  environment: *aws_environment
+  tags:
+    - step001
+    - pre_infrastructure
+  tasks:
+    - debug:
+        msg: "Step 000 Pre Infrastructure 2/2"
+
+    - name: run pre-check role to make sure workshop will complete provisioning
+      include_role:
+        name: ansible.workshops.workshop_check_setup
+
+    - name: run AWS check setup if using AWS
+      include_role:
+        name: ansible.workshops.aws_check_setup
+
+    - name: Cluster nodes
+      set_fact:
+        control_nodes: 4
+      when: create_cluster is defined and create_cluster|bool
+
+    ## find AMI - amazon machine images dynamically
+    - name: find all amis
+      include_tasks: "{{ item }}"
+      with_fileglob:
+        - "{{ playbook_dir }}/ami_find/*.yml"
+
+    - name: set router types to network_type
+      set_fact:
+        rtr1_type: "{{ network_type }}"
+        rtr2_type: "{{ network_type }}"
+        rtr3_type: "{{ network_type }}"
+        rtr4_type: "{{ network_type }}"
+      when: network_type != "multivendor"
+
+    - name: verify EBS-optimized instance type selected
+      lineinfile:
+        path: "{{ playbook_dir }}/files/EBS_optimized_instance_types"
+        line: "{{ ec2_info.satellite.size }}"
+      delegate_to: localhost
+      connection: local
+      check_mode: true
+      register: ebs_optimized_instance_selected
+
+    - name: enable EBS optimized instance
+      set_fact:
+        ebs_optimized_capable: true
+      when: not ebs_optimized_instance_selected.changed
+
+    # this needs to be the last step since it depends on other variables
+    - name: Template out workshop variables
+      template:
+        src: ./autoincluded_vars_workshop_instances.yml
+        dest: "{{ playbook_dir }}/{{ ec2_name_prefix }}/ansible-workshop-vars.yml"
+
+    - name: Include the workshop variables
+      include_vars:
+        file: "{{ playbook_dir }}/{{ ec2_name_prefix }}/ansible-workshop-vars.yml"
