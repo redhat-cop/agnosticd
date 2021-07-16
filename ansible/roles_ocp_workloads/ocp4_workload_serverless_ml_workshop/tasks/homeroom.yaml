@@ -1,0 +1,80 @@
+---
+- name: Determine Cluster Base Domain
+  k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: r_ingress_config
+
+# Example return: CLUSTER_SUBDOMAIN = apps.cluster-84d2.84d2.example.opentlc.com
+- name: Store the subdomain
+  set_fact:
+    CLUSTER_SUBDOMAIN: "{{ r_ingress_config.resources[0].spec.domain }}"
+
+- name: Create homeroom project if it doesn't exist
+  k8s:
+    state: present
+    name: homeroom
+    kind: Project
+    api_version: project.openshift.io/v1
+
+- name: Check if homeroom was already deployed
+  k8s_info:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    name: serverless-ml-workshop-spawner
+    namespace: homeroom
+  register: homeroom_deployment
+
+- name: check for the oauthclient if we're about to deploy the labguide
+  k8s_info:
+    api_version: oauth.openshift.io/v1
+    kind: OAuthClient
+    name: serverless-ml-workshop-console
+  register: oauth_client
+
+- name: ensure the oauthclient is not present from an earlier run if we're about to deploy labguide
+  k8s:
+    state: absent
+    definition:
+      apiVersion: oauth.openshift.io/v1
+      kind: OAuthClient
+      metadata:
+        name: serverless-ml-workshop-console
+  when:
+    - oauth_client.resources | length | int > 0
+    - homeroom_deployment.resources | length | int < 1
+
+- name: Create the homeroom template
+  command: oc apply -f https://raw.githubusercontent.com/RedHatGov/workshop-spawner/develop/templates/hosted-workshop-production.json -n homeroom
+  when: homeroom_deployment.resources | length | int < 1
+
+- name: Deploy the homeroom spawner
+  command: >-
+          oc new-app hosted-workshop-production -n homeroom \
+          -p SPAWNER_NAMESPACE=homeroom \
+          -p CLUSTER_SUBDOMAIN={{ CLUSTER_SUBDOMAIN }} \
+          -p WORKSHOP_NAME=serverless-ml-workshop \
+          -p CONSOLE_IMAGE=quay.io/openshift/origin-console:4.6 \
+          -p WORKSHOP_IMAGE="{{ ocp4_workload_serverless_ml_workshop_image_repo }}":"{{ ocp4_workload_serverless_ml_workshop_image_tag }}"
+  when: homeroom_deployment.resources | length | int < 1
+
+- name: Check if username app was already deployed
+  k8s_info:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    name: username-distribution
+    namespace: homeroom
+  register: username_deployment
+
+- name: Create user distribution template
+  command: oc apply -f https://raw.githubusercontent.com/redhatgov/username-distribution/master/openshift/app-ephemeral.json -n homeroom
+  when: username_deployment.resources | length | int < 1
+
+- name: Deploy user distribution app
+  command: >-
+          oc new-app username-distribution -n homeroom \
+          -p LAB_USER_PREFIX=user \
+          -p LAB_USER_COUNT="{{ ocp4_workload_serverless_ml_workshop_user_count }}" \
+          -p LAB_MODULE_URLS='https://serverless-ml-workshop-homeroom.{{ CLUSTER_SUBDOMAIN }};Workshop Dashboard'
+  when: username_deployment.resources | length | int < 1
