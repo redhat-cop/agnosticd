@@ -38,9 +38,28 @@ ansible-playbook main.yml \
 4. See **Role Variables** below, but you must provide at a minimum
 
 ```
-deploy_automationcontroller_installer_url:  <LINK-TO_GZIPPED-AUTOMATION-CONTROLLER-INSTALLER>
-deploy_automationcontroller_manifest_path:  <PATH-TO-AUTOMATION-CONTROLLERMANIFEST>
+deploy_automationcontroller_installer_url:  <URL-TO_GZIPPED-AUTOMATION-CONTROLLER-INSTALLER>
+deploy_automationcontroller_manifest_url:  <URL-TO-AUTOMATION-CONTROLLERMANIFEST>
 ```
+
+== Using secured remote location
+
+Using a secured remote web server for manifest is supported by optional vars, MANDATORY for a public web server:
+
+```
+deploy_automationcontroller_asset_username: <USERNAME>
+deploy_automationcontroller_asset_password: <PASSWORD>
+```
+
+== Optional - using a local manifest
+
+If you want to deploy, for example from your own laptop, with a local manifest `deploy_automationcontroller_manifest_path` will take precedence over `deploy_automationcontroller_installer_url`.
+
+```
+deploy_automationcontroller_installer_path: "~/secrets/my_manifest.zip"
+```
+
+
 Everything else has safe defaults.
 
 Invoking this role
@@ -73,7 +92,12 @@ You will need to update the first 2 vars, typically supplied via `-e` or `-e @se
 # Supply first 2 vars
 
 deploy_automationcontroller_installer_url: "" # e.g. http://example.com/ansible-automation-platform-setup-bundle-latest.tar.gz"
+deploy_automationcontroller_manifest_url: "" # e.g. http://example.com/manifest.zip
+or
 deploy_automationcontroller_manifest_path: "~/secrets/automationcontroller_manifest.zip" # 
+
+deploy_automationcontroller_asset_username: <USERNAME>
+deploy_automationcontroller_asset_password: <PASSWORD>
 
 # All vars from here set to safe defaults
 deploy_automationcontroller_admin_user: 
@@ -97,18 +121,6 @@ Example Playbook
 
 ```yaml
 
-- name: Install Ansible automation controller
-  hosts: bastions[0]
-  gather_facts: false
-  become: true
-
-  tasks:
-
-    - name: Install Ansible automation controller
-      include_role:
-        name: deploy_automationcontroller
-
-
 - name: Install Ansible controller
   hosts: bastions[0]
   become: true
@@ -119,7 +131,6 @@ Example Playbook
 ```
 
 > NOTE `hosts` reflects the deployment host and not usually a automationcontroller node.
-Some work to the `templates/automationcontroller_inventory.j2` is *currently* required to allow an all-in-one deployment. 
 
 License
 -------
