@@ -1,0 +1,190 @@
+---
+- name: Step 00xxxxx software
+  hosts: bastions
+  gather_facts: false
+  become: false
+  environment:
+    AWS_DEFAULT_REGION: "{{ aws_region }}"
+  tasks:
+    - tags:
+        - install_awscli
+      block:
+        - name: Get awscli bundle
+          get_url:
+            url: https://s3.amazonaws.com/aws-cli/awscli-bundle.zip
+            dest: /tmp/awscli-bundle.zip
+        - name: Unzip awscli-bundle.zip
+          unarchive:
+            src: /tmp/awscli-bundle.zip
+            dest: /tmp/
+            remote_src: true
+        - name: Install awscli
+          command: /tmp/awscli-bundle/install -i /usr/local/aws -b /bin/aws
+          args:
+            creates: /usr/local/aws
+          become: true
+        - name: cleanup archive and tmp files
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/awscli-bundle
+            - /tmp/awscli-bundle.zip
+
+    - tags:
+        - create_aws_dir
+      block:
+        - name: Create .aws directory
+          file:
+            path: ~/.aws
+            state: directory
+
+    - tags:
+        - create_aws_creds
+      block:
+        - name: Add aws credentials
+          blockinfile:
+            path: ~/.aws/credentials
+            block: |-
+              [default]
+              aws_access_key_id={{ hostvars.localhost.student_access_key_id }}
+              aws_secret_access_key={{ hostvars.localhost.student_secret_access_key }}
+
+    - tags:
+        - create_aws_config
+      block:
+        - name: Add aws config
+          blockinfile:
+            path: ~/.aws/config
+            block: |-
+              [default]
+              region={{ aws_region }}
+
+    - tags:
+        - generate_ssh_keys
+      block:
+        - name: Generate SSH keys
+          shell: ssh-keygen -b 2048 -t rsa -f ~/.ssh/id_rsa -q -N ""
+          args:
+            creates: ~/.ssh/id_rsa
+        - name: Generate SSH pub key
+          shell: ssh-keygen -y -f ~/.ssh/id_rsa > ~/.ssh/id_rsa.pub
+          args:
+            creates: ~/.ssh/id_rsa.pub
+        - name: Slurp public key
+          slurp:
+            path: /home/{{ ansible_user }}/.ssh/id_rsa.pub
+          register: idrsapub
+        - name: Set aws access user data
+          agnosticd_user_info:
+            data:
+              subdomain_base_suffix: "{{ subdomain_base_suffix }}"
+              aws_access_key_id: "{{ student_access_key_id }}"
+              aws_secret_access_key: "{{ student_secret_access_key }}"
+
+    - tags:
+        - install_rosacli
+      block:
+        - name: Get ROSA CLI
+          get_url:
+            url: "{{ rosa_installer_url }}"
+            dest: /tmp/rosa-linux.tar.gz
+        - name: Unzip rosa-linux.tar.gz
+          unarchive:
+            src: /tmp/rosa-linux.tar.gz
+            dest: /usr/local/bin/
+            remote_src: true
+          become: true
+        - name: cleanup archive file
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/rosa-linux.tar.gz
+
+    - tags:
+        - verify_rosa_installer
+      block:
+        - name: Log into ROSA
+          command: "/usr/local/bin/rosa login --token {{ rosa_token }}"
+        - name: Verify permissions for ROSA
+          command: "/usr/local/bin/rosa verify permissions"
+        - name: Verify quota for ROSA
+          command: "/usr/local/bin/rosa verify quota"
+
+    - tags:
+        - run_rosa_installer
+      block:
+        - name: Create ROSA Cluster
+          command: "/usr/local/bin/rosa create cluster --cluster-name={{ rosa_cluster_name }}"
+        - name: Wait 5 minutes for the ROSA installer to get started
+          pause:
+            minutes: 5
+
+    - tags:
+        - wait_rosa_installer
+      block:
+        - name: Wait for ROSA installer to complete
+          command: "/usr/local/bin/rosa describe cluster -c {{ rosa_cluster_name }} |grep ^State:|awk '{print $2}'"
+          register: rosa_installer_status
+          until: rosa_installer_status.stdout.find("ready") != -1
+          retries: 60
+          delay: 60
+
+    - tags:
+        - get_rosa_console_url
+      block:
+        - name: Get ROSA Console URL
+          command: "/usr/local/bin/rosa describe cluster -c {{ rosa_cluster_name }} |grep '^Console URL:'|awk '{print $3}'"
+          register: rosa_console_url
+
+    - tags:
+        - create_rosa_admin
+      block:
+        - name: Wait for ROSA installer to complete
+          command: "/usr/local/bin/rosa dev create admin --cluster={{ rosa_cluster_name }} | grep 'oc login' | awk '{print $7}'"
+          register: rosa_admin_result
+        - name: Copy ROSA token to student user dir
+          ansible.builtin.copy:
+            src: ~/.ocm.json
+            dest: "~{{ student_name }}/.ocm.json"
+            owner: "{{ student_name }}"
+            mode: '0600'
+            remote_src: true
+
+    - when:
+        - install_student_user | bool
+        - student_name is defined
+        - student_password is defined or hostvars[groups.bastions.0].student_password is defined
+      block:
+        - name: Print aws credential info as user.info
+          agnosticd_user_info:
+            msg: "{{ item }}"
+          loop:
+            - ""
+            - "WARNING: with great power comes great responsibility. We monitor usage."
+            - "Your AWS programmatic access is preconfigured in ~/.aws/credentials"
+
+        - name: Print Student SSH access as user.info
+          agnosticd_user_info:
+            msg: "{{ item }}"
+          loop:
+            - ""
+            - "SSH Access: ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix }}"
+            - "SSH password: {{ student_password | default(hostvars[groups.bastions.0].student_password) }}"
+            - ""
+            - "The ROSA CLI is in /usr/local/bin/rosa"
+
+    - when:
+        - rosa_admin_result is defined
+        - rosa_console_url is defined
+      block:
+        - name: Print ROSA admin credentials as user.info
+          agnosticd_user_info:
+            msg: "{{ item }}"
+          loop:
+            - ""
+            - "OpenShift admin user: cluster-admin"
+            - "cluster-admin password: {{ rosa_admin_result.stdout }}"
+            - ""
+            - "OpenShift console URL: {{ rosa_console_url.stdout }}"
