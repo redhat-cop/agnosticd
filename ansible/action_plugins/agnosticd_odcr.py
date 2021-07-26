@@ -316,6 +316,10 @@ class ODCRFactory:
             # sanitize
             reservation['instance_count'] = int(reservation['instance_count'])
 
+            # Skip the creation of reservation when requested count is 0
+            if reservation['instance_count'] == 0:
+                continue
+
             return_ok, reservation_id = self.create_reservation(
                 region,
                 availability_zone,
