@@ -1,15 +1,18 @@
 Role Name
 =========
 
-A role to validate the setup of a Tower installation. It validates that it can ping and get
-the configuration pages with the given credentials, and, if wished, validates that the
-number of instances and instance groups is correct, as well as if the licenses has enough
-nodes and days left.
+A role to validate the setup of a Tower installation.
+It validates that it can, with the given credentials:
+
+1. ping
+2. get the configuration pages
+3. validates that the number of instances and instance groups is correct,
+4. as well as if the licenses has enough nodes and days left.
 
 Requirements
 ------------
 
-Access
+Access to an Ansible Tower or Ansible Controller instance
 
 Role Variables
 --------------
