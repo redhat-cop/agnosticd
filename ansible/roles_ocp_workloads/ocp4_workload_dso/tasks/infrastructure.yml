@@ -2,7 +2,7 @@
 
 # Workaround for Python3 incompatibility
 - name: install oscap tools
-  raw: yum install -y docker openscap-utils openscap-scanner scap-security-guide atomic
+  raw: yum install -y docker openscap-utils openscap-scanner scap-security-guide
   become: true
 
 - name: ensure docker group exists
@@ -24,38 +24,19 @@
     state: restarted
   become: true
 
-- name: retrieve registry route
-  k8s_info:
-    api_version: route.openshift.io/v1
-    kind: route
-    name: default-route
-    namespace: openshift-image-registry
-  register: image_route
-
-- set_fact:
-    ocp4_dso_ocp_registry_route:  "{{ image_route | json_query('resources[*].spec.host') | first }}"
-
 - name: add exposed registry as insecure
   template:
-    src: daemon.json.j2
-    dest: /etc/docker/daemon.json
+    src: registries.conf.j2
+    dest: /etc/containers/registries.conf
     mode: '0644'
-    backup: yes
+    backup: true
   become: true
   register: reg_result
 
-- name: enable docker service
-  service:
-    name: docker
-    enabled: true
+- name: create symbolic link between oscap-docker and oscap-podman
+  raw: ln -s /usr/bin/oscap-podman /usr/bin/oscap-docker
   become: true
-
-- name: restart docker service
-  service:
-    name: docker
-    state: restarted
-  become: true
-  when: reg_result.changed
+  ignore_errors: true
 
 - name: allow group to use oscap-docker without sudo password
   lineinfile:
@@ -64,8 +45,28 @@
     validate: '/usr/sbin/visudo -cf %s'
   become: true
 
+- name: allow group to use docker without sudo password
+  lineinfile:
+    dest: /etc/sudoers
+    line: "%docker ALL=NOPASSWD: /usr/bin/docker"
+    validate: '/usr/sbin/visudo -cf %s'
+  become: true
+
+# yamllint disable rule:line-length
 - name: Add quay route to insecure registries
-  command: "{{ ocp4_dso_openshift_cli }} patch image.config.openshift.io/cluster -p '{ \"spec\" : { \"registrySources\" : { \"insecureRegistries\" : [\"quayecosystem-quay-quay-enterprise.{{ route_subdomain }}\"] }}}' --type=merge"
+  vars:
+    __patch:
+      spec:
+        registrySources:
+          insecureRegistries:
+          - quayecosystem-quay-quay-enterprise.{{ route_subdomain }}
+  command: >-
+    {{ ocp4_dso_openshift_cli }} patch image.config.openshift.io/cluster
+     --type=merge -p {{ __patch | to_json | quote }}
+  register: r_command
+  until: r_command is success
+  retries: 10
+  delay: 10
 
 - name: create custom jenkins image
   shell: |
@@ -81,7 +82,7 @@
   ignore_errors: true
 
 - name: create owasp zap image
-  command: "{{ ocp4_dso_openshift_cli }} new-build --name owasp-zap -l 'role=jenkins-slave' https://github.com/RedHatDemos/SecurityDemos.git --context-dir=2019Labs/ProactiveSecurityCompliance/OpenShiftSecurityPipeline/jenkins-slave-zap -n openshift"
+  command: "{{ ocp4_dso_openshift_cli }} new-build --name owasp-zap -l 'role=jenkins-slave' {{ ocp4_dso_repo_url }} --context-dir=2019Labs/ProactiveSecurityCompliance/OpenShiftSecurityPipeline/jenkins-slave-zap -n openshift"
   ignore_errors: true
 
 - name: wait for owasp zap build to finish
@@ -95,6 +96,7 @@
 - name: create image management image
   command: "{{ ocp4_dso_openshift_cli }} new-build --name image-management -l 'role=jenkins-slave' https://github.com/siamaksade/jenkins-slave-skopeo.git -n openshift"
   ignore_errors: true
+# yamllint enable rule:line-length
 
 - name: wait for image mgmt build to finish
   shell: "{{ ocp4_dso_openshift_cli }} get builds -n openshift | grep image-management | grep Complete"
@@ -110,11 +112,6 @@
   ignore_errors: true
   changed_when: false
   tags: always
-
-- name: expose registry
-  command: "{{ ocp4_dso_openshift_cli }} create route passthrough --service=image-registry -n openshift-image-registry"
-  tags: always
-  ignore_errors: true
 
 - name: create project {{ ocp4_admin_project }}
   command: "{{ ocp4_dso_openshift_cli }} new-project {{ ocp4_admin_project }}"

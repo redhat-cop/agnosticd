@@ -1,0 +1,148 @@
+---
+- name: create project
+  k8s:
+    state: present
+    kind: Project
+    api_version: project.openshift.io/v1
+    definition:
+      metadata:
+        name: "{{item}}"
+        annotations:
+          openshift.io/description: ""
+          openshift.io/display-name: "Lab Infrastructure"
+        labels:
+          prometheus.io/scrape: "true"
+  loop:
+    - labs-grafana
+    - labs-prometheus
+
+- name: Create grafana instance
+  k8s:
+    state: present    
+    definition: "{{ lookup('file', './files/grafana_kfdef.yaml' ) | from_yaml }}"
+
+# Deploy Prometheus operator
+- name: Create operator subscription for Prometheus
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - prom_operatorgroup.yaml
+  - prom_subscription.yaml
+
+- name: "Wait for prometheus operator to be Succeeded"
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: prometheusoperator.0.37.0
+    namespace: labs-prometheus
+  register: result
+  until: result | json_query("resources[0].status.phase=='Succeeded'")
+  retries: 40
+  delay: 10
+
+- name: Get prometheus operator group info
+  k8s_facts:
+    api_version: operators.coreos.com/v1
+    kind: OperatorGroup
+    name: labs-prometheus-operator-group
+    namespace: labs-prometheus
+  register: check_namespace
+  
+- name: Wait for prometheus operator group to appear
+  k8s_facts:
+    api_version: operators.coreos.com/v1
+    kind: OperatorGroup
+    name: labs-prometheus-operator-group
+    namespace: labs-prometheus
+  register: result
+  until: result | json_query("resources[0].status.namespaces") | length == 1
+  when: not (check_namespace | json_query("resources[0].spec.selector")) # Allows reentrant
+  retries: 40
+  delay: 10
+
+- name: Patch operator group to watch ns that are labeled
+  k8s:
+    merge_type: merge    
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: labs-prometheus-operator-group
+        namespace: labs-prometheus
+      spec:
+        selector:
+          matchLabels:
+            prometheus.io/scrape: 'true'
+        targetNamespaces:
+
+- name: Patch csv with MultiNamespace
+  k8s:
+    merge_type: merge    
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: ClusterServiceVersion
+      metadata:
+        name: prometheusoperator.0.37.0
+        namespace: labs-prometheus
+      spec:
+        installModes:
+          - supported: true
+            type: OwnNamespace
+          - supported: true
+            type: SingleNamespace
+          - supported: true
+            type: MultiNamespace
+          - supported: false
+            type: AllNamespaces
+
+- name: Create Prometheus CR
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+    - prom_cr.yaml
+
+- name: Create Prometheus route
+  k8s:
+    definition:
+      kind: Route
+      apiVersion: route.openshift.io/v1
+      metadata:
+        name: prometheus-portal
+        namespace: labs-prometheus
+      spec:
+        to:
+          kind: Service
+          name: prometheus-operated
+        port:
+          targetPort: web
+
+- name: Create ServiceMonitor
+  k8s:
+    state: present
+    definition:
+      apiVersion: monitoring.coreos.com/v1
+      kind: ServiceMonitor
+      metadata:
+        name: odh-seldon
+        namespace: "{{ item[0] }}-{{ item[1] }}"
+      spec:
+        endpoints:
+          - interval: 30s
+            path: /prometheus
+            port: http
+            scheme: http
+        selector:
+          matchExpressions:
+            - key: model
+              operator: DoesNotExists        
+            - key: seldon-app
+              operator: Exists
+  loop: "{{ users|product(user_namespaces)|list }}"

@@ -39,7 +39,7 @@ class ActionModule(ActionBase):
     '''Print statements during execution and save user info to file'''
 
     TRANSFERS_FILES = False
-    _VALID_ARGS = frozenset(('msg','data','user'))
+    _VALID_ARGS = frozenset(('msg','data','user','body'))
 
     def run(self, tmp=None, task_vars=None):
         self._supports_check_mode = True
@@ -48,6 +48,7 @@ class ActionModule(ActionBase):
             task_vars = dict()
 
         result = super(ActionModule, self).run(tmp, task_vars)
+        result['_ansible_verbose_always'] = True
         del tmp # tmp no longer has any effect
 
         msg = self._task.args.get('msg')
@@ -62,15 +63,16 @@ class ActionModule(ActionBase):
 
         if not user and msg != None:
             # Output msg in result, prepend "user.info: " for cloudforms compatibility
-            result['msg'] = 'user.info: ' + msg
-            # Force display of result like debug
-            result['_ansible_verbose_always'] = True
+            if isinstance(msg, list):
+                result['msg'] = ['user.info: ' + m for m in msg]
+            else:
+                result['msg'] = 'user.info: ' + msg
+                # Force display of result like debug
 
         if not user and body != None:
             # Output msg in result, prepend "user.info: " for cloudforms compatibility
             result['msg'] = 'user.body: ' + body
             # Force display of result like debug
-            result['_ansible_verbose_always'] = True
 
         if data:
             result['data'] = data
@@ -87,13 +89,24 @@ class ActionModule(ActionBase):
                     )
                 )
             )
+
+            # Attempt to make output_dir if not exists
+            try:
+                os.makedirs(output_dir)
+            except OSError:
+                pass
+
             if not user and msg != None:
                 fh = open(os.path.join(output_dir, 'user-info.yaml'), 'a')
-                fh.write('- ' + json.dumps(msg) + "\n")
+                if isinstance(msg, list):
+                    for m in msg:
+                        fh.write('- ' + json.dumps(m) + "\n")
+                else:
+                    fh.write('- ' + json.dumps(msg) + "\n")
                 fh.close()
             if not user and body != None:
                 fh = open(os.path.join(output_dir, 'user-body.yaml'), 'a')
-                fh.write('- ' + json.dumps(msg) + "\n")
+                fh.write('- ' + json.dumps(body) + "\n")
                 fh.close()
             if data or user:
                 user_data = None
@@ -117,10 +130,11 @@ class ActionModule(ActionBase):
                         user_data_item = data
                         user_data['users'][user] = user_data_item
                     if msg:
+                        msg_str = "\n".join(msg) if isinstance(msg, list) else msg
                         if 'msg' in user_data_item:
-                            user_data_item['msg'] += "\n" + msg
+                            user_data_item['msg'] += "\n" + msg_str
                         else:
-                            user_data_item['msg'] = msg
+                            user_data_item['msg'] = msg_str
                     if body:
                         if 'body' in user_data_item:
                             user_data_item['body'] += "\n" + body

@@ -1,0 +1,114 @@
+---
+# Implement your Workload deployment tasks here
+- name: Create the projects
+  k8s:
+    state: present
+    kind: Namespace
+    name: "{{ item }}"
+  loop: "{{ ocp4_workload_rhods_olm_namespace_list }}"
+
+- name: Create the modh puller secret in all ODS namespaces
+  k8s:
+    state: present
+    namespace: "{{ item }}"
+    definition: "{{ lookup('template', './templates/pullsecret.yaml.j2' ) | from_yaml }}"
+  loop: "{{ ocp4_workload_rhods_olm_namespace_list }}"
+
+- name: Create RHODS Pagerduty Secret
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'pagerduty-secret.yaml.j2' ) }}"
+
+- name: Install RHODSOperator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: rhods-operator
+    install_operator_namespace: "{{ ocp4_workload_rhods_olm_odh_namespace }}"
+    install_operator_channel: "{{ ocp4_workload_rhods_olm_operator_subscription_channel }}"
+    install_operator_catalog: "{{ ocp4_workload_rhods_olm_catalogsource_name }}"
+    install_operator_packagemanifest_name: "{{ ocp4_workload_rhods_olm_install_operator_name }}"
+    install_operator_automatic_install_plan_approval: true
+    install_operator_csv_nameprefix: rhods-operator
+    install_operator_starting_csv: "{{ ocp4_workload_rhods_olm_starting_csv }}"
+    install_operator_catalogsource_setup: true
+    install_operator_catalogsource_name: "{{ ocp4_workload_rhods_olm_catalogsource_name }}"
+    install_operator_catalogsource_namespace: "{{ ocp4_workload_rhods_olm_catalogsource_namespace }}"
+    install_operator_catalogsource_image: "{{ ocp4_workload_rhods_olm_catalog_snapshot_image }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_rhods_olm_catalog_snapshot_image_tag }}"
+    install_operator_catalogsource_pullsecrets:
+    - addon-managed-odh-pullsecret
+
+- name: Wait for Jupyter Deployment Configs to exist
+  k8s_info:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    name: "{{ item }}"
+    namespace: "{{ ocp4_workload_rhods_olm_applications_namespace }}"
+  loop:
+  - "jupyterhub"
+  - "jupyterhub-db"
+  register: r_jh_dc
+  retries: 24
+  delay: 20
+  until:
+  - r_jh_dc.resources | length > 0
+
+- name: Wait for ready Jupyter Deployment Configs
+  k8s_info:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    name: "{{ item }}"
+    namespace: "{{ ocp4_workload_rhods_olm_applications_namespace }}"
+  loop:
+  - "jupyterhub"
+  - "jupyterhub-db"
+  register: r_jh_dc
+  retries: 24
+  delay: 20
+  until:
+  - r_jh_dc.resources[0].status.readyReplicas is defined
+  - r_jh_dc.resources[0].status.readyReplicas | int >= 1
+
+- name: Update the RHODS config to allow all users
+  k8s:
+    api_version: v1
+    kind: ConfigMap
+    namespace: redhat-ods-applications
+    name: rhods-groups-config
+    definition:
+      labels:
+        opendatahub.io/modified: "true"
+      data:
+        allowed_groups: system:authenticated
+
+- name: Redeploy Jupyter after updating config
+  command: |
+    oc rollout latest deploymentconfig/{{ item }} -n redhat-ods-applications
+  loop:
+  - "jupyterhub-db"
+  - "jupyterhub"
+
+- name: Get the ODH dashboard route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: odh-dashboard
+    namespace: "{{ ocp4_workload_rhods_olm_applications_namespace }}"
+  register: r_odh_dashboard_route
+
+- name: Report demo user info
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Here are the URLs that you need for the demo (open each in a browser tab):"
+  - ""
+  - "ODH Dashboard: https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

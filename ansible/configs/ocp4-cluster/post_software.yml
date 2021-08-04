@@ -9,145 +9,6 @@
   - debug:
       msg: "Post-Software Steps starting"
 
-- name: Step 005.1 - Post Software flight-check
-  hosts: bastions
-  run_once: true
-  gather_facts: false
-  become: false
-  tags:
-  - post_flight_check
-  tasks:
-  - when:
-    - install_ocp4 | default( false ) | bool
-    - run_smoke_tests | default( false ) | bool
-    environment:
-      KUBECONFIG: "{{ cluster_name }}/auth/kubeconfig"
-    ignore_errors: true
-    block:
-    - name: Get API for command line
-      command: oc whoami --show-server
-      register: showserver
-
-    - name: Ensure web console is known
-      when: webconsole is not defined
-      block:
-      - name: Get console route
-        command: oc get route -n openshift-console console -o json
-        register: routeconsole
-        retries: 10
-        delay: 30
-        until: routeconsole is succeeded
-        ignore_errors: true
-
-      - name: Set webconsole address
-        set_fact:
-          webconsole: "http://{{ routeconsole.stdout | from_json | json_query('spec.host') }}"
-        when: routeconsole is succeeded
-
-    - name: Check DNS webconsole
-      command: nslookup "{{ webconsole | urlsplit('hostname') }}"
-      register: checkdnswebconsole
-      changed_when: false
-      retries: 15
-      until: checkdnswebconsole is succeeded
-      delay: 30
-
-    - name: Check DNS API
-      command: nslookup "{{ showserver.stdout | trim | urlsplit('hostname') }}"
-      register: checkdnsapi
-      changed_when: false
-
-    - name: Webconsole
-      uri:
-        url: "{{ webconsole }}"
-        validate_certs: false
-      register: testwebconsole
-      retries: 5
-      until: testwebconsole is succeeded
-      delay: 60
-
-    - name: Cluster-info
-      command: oc cluster-info
-      register: clusterinfor
-      changed_when: false
-
-    - name: Create project
-      command: oc new-project postflightcheck
-      register: newproject
-
-    - name: New-app
-      command: oc new-app cakephp-mysql-persistent -n postflightcheck
-      register: newapp
-
-    - name: Wait for mysql
-      command: timeout 300 oc rollout status dc/mysql -w -n postflightcheck
-      register: mysqlw
-      changed_when: false
-
-    - name: Wait for php
-      command: timeout 300 oc rollout status dc/cakephp-mysql-persistent -w -n postflightcheck
-      register: phpw
-      changed_when: false
-      retries: 2
-      delay: 60
-      until: phpw is succeeded
-
-    - name: Get route
-      command: >-
-        oc get route
-        -l template=cakephp-mysql-persistent
-        --no-headers
-        -o json
-        -n postflightcheck
-      register: getroute
-      changed_when: false
-      retries: 10
-      delay: 5
-      until: getroute is succeeded
-
-    - name: Test that route is reachable
-      uri:
-        url: "http://{{ getroute.stdout|from_json|json_query('items[0].spec.host') }}"
-      register: testroute
-      retries: 15
-      delay: 5
-      until: testroute is succeeded
-
-    - name: Delete project
-      command: oc delete project postflightcheck
-
-    - name: Switch back to default project
-      command: oc project default
-
-    - debug:
-        msg: "{{ item }}"
-      loop:
-      - "user.info: "
-      - "user.info: Post Flight Check"
-      - "user.info: DNS Web Console ............... {{ 'OK' if checkdnswebconsole.rc == 0 else 'FAIL' }}"
-      - "user.info: DNS API ....................... {{ 'OK' if checkdnsapi.rc == 0 else 'FAIL' }}"
-      - "user.info: Web console ................... {{ 'OK' if testwebconsole is succeeded else 'FAIL' }}"
-      - "user.info: API ........................... {{ 'OK' if clusterinfor.rc == 0 else 'FAIL' }}"
-      - "user.info: Create Project with PV ........ {{ 'OK' if newproject.rc == 0 else 'FAIL' }}"
-      - "user.info: App deployed .................. {{ 'OK' if phpw.rc == 0 and mysqlw.rc == 0 else 'FAIL' }}"
-      - "user.info: Route ......................... {{ 'OK' if testroute is succeeded else 'FAIL' }}"
-
-    - name: Fail smoke tests
-      when:
-      - run_smoke_tests | default( false ) | bool
-      - >-
-        checkdnswebconsole.rc != 0
-        or checkdnsapi.rc != 0
-        or testwebconsole is failed
-        or clusterinfor.rc != 0
-        or newproject.rc != 0
-        or phpw.rc != 0
-        or mysqlw.rc != 0
-        or testroute is failed
-      fail:
-        msg: "FAIL Smoke tests"
-      ignore_errors: false
-
 # Deploy Workloads
 - name: Step 005.2 - Deploy Infra and Student Workloads
   import_playbook: workloads.yml
@@ -224,35 +85,38 @@
       vars:
         INFRA_ID: "{{ r_infra_id.stdout }}"
 
-    - name: Wait for job to finish (1h max)
-      k8s_facts:
-        api_version: batch/v1
-        kind: Job
-        name: fio-test
-        namespace: fio-test
-      register: r_fio_test_job
-      retries: 60
-      delay: 60
-      until: r_fio_test_job.resources[0].status.conditions | json_query(fio_query) | bool
-      vars:
-        fio_query: >-
-          [?type=='Complete'].status[] | [0]
-        INFRA_ID: "{{ r_infra_id.stdout }}"
+    - name: Wait for job if defined (1h max)
+      when: test_deploy_runs is defined
+      block:
+      - name: Check on status of job
+        k8s_facts:
+          api_version: batch/v1
+          kind: Job
+          name: fio-test
+          namespace: fio-test
+        register: r_fio_test_job
+        retries: 60
+        delay: 60
+        until: r_fio_test_job.resources[0].status.conditions | json_query(fio_query) | bool
+        vars:
+          fio_query: >-
+            [?type=='Complete'].status[] | [0]
+          INFRA_ID: "{{ r_infra_id.stdout }}"
 
-    - name: Remove job
-      k8s:
-        name: fio-test
-        kind: Job
-        api_version: batch/v1
-        namespace: fio-test
-        state: absent
+      - name: Remove job
+        k8s:
+          name: fio-test
+          kind: Job
+          api_version: batch/v1
+          namespace: fio-test
+          state: absent
 
-    - name: Remove fio testing project
-      k8s:
-        name: fio-test
-        kind: Namespace
-        api_version: v1
-        state: absent
+      - name: Remove fio testing project
+        k8s:
+          name: fio-test
+          kind: Namespace
+          api_version: v1
+          state: absent
 
 - name: Step 005.5 Remove credentials from bastion
   hosts: bastions
@@ -309,23 +173,25 @@
   gather_facts: false
   become: false
   tasks:
-  - name: Print Student Information
-    when: install_student_user | bool
+  - name: Print Access Information
+    when:
+    - install_student_user | bool
+    - ocp4_cluster_show_access_user_info | bool
     block:
     - name: Store bastion hostname as a fact
       set_fact:
         bastion_hostname: "{{groups['bastions'].0 }}"
-    - name: print out user.info
-      debug:
+    - name: Print access user info
+      agnosticd_user_info:
         msg: "{{ item }}"
       loop:
-      - "user.info: You can access your bastion via SSH:"
-      - "user.info: ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix if cloud_provider == 'ec2' else '.'+ocp4_base_domain }}"
-      - "user.info: "
-      - "user.info: Make sure you use the username '{{ student_name }}' and the password '{{ hostvars[bastion_hostname]['student_password'] }}' when prompted."
-    - name: print out user.info
-      debug:
-        msg: "user.info: kubeadmin password {{ hostvars[bastion_hostname]['kubeadmin_password']['content'] | b64decode }}"
+      - "You can access your bastion via SSH:"
+      - "ssh {{ student_name }}@{{ hostvars[bastion_hostname].shortname }}.{{ guid }}{{ subdomain_base_suffix if cloud_provider == 'ec2' else '.'+ocp4_base_domain }}"
+      - ""
+      - "Make sure you use the username '{{ student_name }}' and the password '{{ hostvars[bastion_hostname]['student_password'] }}' when prompted."
+    - name: Print kubeadmin user info
+      agnosticd_user_info:
+        msg: "kubeadmin password {{ hostvars[bastion_hostname]['kubeadmin_password']['content'] | b64decode }}"
       when: cloud_provider == "azure" or cloud_provider == "gcp"
 
 - name: Step 005.7 Tell CloudForms we are done

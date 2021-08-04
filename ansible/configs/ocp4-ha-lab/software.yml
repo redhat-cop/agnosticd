@@ -1,270 +1,186 @@
 ---
-- name: Step 00xxxxx software
+- name: Step 004 - Software
   hosts: bastions
   gather_facts: false
-  become: false
+  become: true
   tasks:
-    - when: install_ocp4 | bool
-      tags:
-      - install_openshift
-      block:
-        - name: Get awscli bundle
-          get_url:
-            url: https://s3.amazonaws.com/aws-cli/awscli-bundle.zip
-            dest: /tmp/awscli-bundle.zip
+  - name: Debug ocp4-ha-lab software playbook
+    debug:
+      msg: "ocp4-ha-lab Software playbook"
 
-        - name: Unzip awscli-bundle.zip
-          unarchive:
-            src: /tmp/awscli-bundle.zip
-            dest: /tmp/
-            remote_src: yes
-
-        - name: Install awscli
-          command: /tmp/awscli-bundle/install -i /usr/local/aws -b /bin/aws
-          args:
-            creates: /usr/local/aws
-          become: yes
-
-        - name: cleanup archive and tmp files
-          file:
-            path: "{{ item }}"
-            state: absent
-          loop:
-            - /tmp/awscli-bundle
-            - /tmp/awscli-bundle.zip
-
-        - name: Create .aws directory
-          file:
-            path: ~/.aws
-            state: directory
-
-        - name: Add aws credentials
-          blockinfile:
-            path: ~/.aws/credentials
-            block: |-
-              [default]
-              aws_access_key_id = {{ hostvars.localhost.student_access_key_id }}
-              aws_secret_access_key = {{ hostvars.localhost.student_secret_access_key }}
-
-        - name: Install Packages
-          become: yes
-          package:
-            name:
-            - golang
-            - unzip
-#            - python2-boto3 # WK removing - don't think we actually need that one...
-
-        - name: Get the OpenShift Installer
-          become: yes
-          unarchive:
-            src: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp4_installer_version }}/openshift-install-linux-{{ ocp4_installer_version }}.tar.gz"
-            remote_src: yes
-            dest: /usr/bin
-            mode: 0755
-            owner: root
-            group: root
-
-        - name: Get the OpenShift CLI
-          become: yes
-          unarchive:
-            src: "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp4_installer_version }}/openshift-client-linux-{{ ocp4_installer_version }}.tar.gz"
-            remote_src: yes
-            dest: /usr/bin
-            mode: 0775
-            owner: root
-            group: root
-
-        - name: Generate SSH keys
-          shell: ssh-keygen -b 2048 -t rsa -f ~/.ssh/id_rsa -q -N ""
-          args:
-            creates: ~/.ssh/id_rsa
-
-        - name: Generate SSH pub key
-          shell: ssh-keygen -y -f ~/.ssh/id_rsa > ~/.ssh/id_rsa.pub
-          args:
-            creates: ~/.ssh/id_rsa.pub
-
-        - name: Slurp public key
-          slurp:
-            path: /home/{{ ansible_user }}/.ssh/id_rsa.pub
-          register: idrsapub
-
-        - name: Create cluster directory
-          file:
-            path: /home/{{ ansible_user }}/{{ cluster_name }}
-            state: directory
-
-        - name: Check if version specific install-config.j2 exists
-          stat:
-            path: files/install-config.yaml.{{ ocp4_installer_version }}.j2
-          register: rconfig
-          delegate_to: localhost
-
-        - name: Use version-specific template for install-config-yaml
-          set_fact:
-            install_config_template_path: files/install-config.yaml.{{ ocp4_installer_version }}.j2
-          when: rconfig.stat.exists
-
-        - name: Use default template for install-config-yaml
-          set_fact:
-            install_config_template_path: files/install-config.yaml.j2
-          when: not rconfig.stat.exists
-
-        - name: Generate config install-config.yaml
-          template:
-            src: "{{ install_config_template_path }}"
-            dest: /home/{{ ansible_user }}/{{ cluster_name }}/install-config.yaml
-
-        - name: Run the installer
-          tags:
-          - run_installer
-          command: openshift-install create cluster --dir=/home/{{ ansible_user }}/{{ cluster_name }}
-          async: "{{ 2 * 60 * 60 }}"
-
-        - name: Fetch kube config
-          fetch:
-            flat: yes
-            src: /home/{{ ansible_user }}/{{ cluster_name }}/auth/{{ item }}
-            dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_{{ item }}"
-          loop:
-            - kubeconfig
-            - kubeadmin-password
-
-        - name: Make sure .kube directory exists in home directory
-          file:
-            state: directory
-            path: "/home/{{ ansible_user }}/.kube"
-            owner: "{{ ansible_user }}"
-            mode: 0775
-
-        - name: Set up .kube/config
-          copy:
-            remote_src: yes
-            src: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
-            dest: "/home/{{ ansible_user }}/.kube/config"
-
-        - name: Get kubeadmin password
-          slurp:
-            path: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeadmin-password
-          register: kubeadminr
-
-        - name: Get console route
-          environment:
-            KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
-          command: oc get route -n openshift-console console -o json
-          register: routeconsole
-          retries: 10
-          delay: 30
-          until: routeconsole is succeeded
-          ignore_errors: yes
-
-        - name: Set webconsole address
-          set_fact:
-            webconsole: "http://{{ routeconsole.stdout | from_json | json_query('spec.host') }}"
-          when: routeconsole is succeeded
-
-        # sometimes the route is not ready, guess it
-        - name: Guess webconsole address
-          set_fact:
-            webconsole: "http://console-openshift-console.apps.{{ cluster_name }}.{{ guid }}.{{ subdomain_base }}"
-          when: routeconsole is failed
-
-        - name: Get API for command line
-          environment:
-            KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
-          command: oc whoami --show-server
-          register: r_showserver
-
-        - name: Openshift access user info messages
-          agnosticd_user_info:
-            msg: "{{ item }}"
-          loop:
-            - "Openshift Master Console: {{ webconsole }}"
-            - "Openshift API for command line 'oc' client: {{ r_showserver.stdout | trim }}"
-            - "Download oc client from https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp4_installer_version }}/openshift-client-linux-{{ ocp4_installer_version }}.tar.gz"
-
-        - name: Openshift access user data
-          agnosticd_user_info:
-            data:
-              openshift_console_url: "{{ webconsole }}"
-              openshift_api_url: "{{ r_showserver.stdout | trim }}"
-              openshift_client_download_url: "{{ ocp4_client_url }}"
-
-        - name: Output htpasswd
-          agnosticd_user_info:
-            msg: "This cluster has authentication enabled. You can use '{{ admin_user }}' with password '{{ admin_password }}' to access your cluster"
-            data:
-              openshift_admin_user: "{{ admin_user }}"
-              openshift_admin_password: "{{ admin_password }}"
-          when:
-            - admin_password is defined
-            - install_idm == "htpasswd"
-
-        - name: Output kubeadmin
-          agnosticd_user_info:
-            msg: "Kubeadmin user / password: kubeadmin / {{ kubeadminr.content | b64decode }}"
-            data:
-              openshift_kubeadmin_password: "{{ kubeadminr.content | b64decode }}"
-          when: >-
-            install_idm is not defined
-            or install_idm != "htpasswd"
-
-        - name: Print SSH warning
-          agnosticd_user_info:
-            msg: "{{ item }}"
-          loop:
-            - ""
-            - "You *CANNOT* SSH into this environment"
-          when: not install_student_user | bool
-
-- name: Step 00xxxxx software
-  hosts: localhost
+- name: Step 004.1 - Set up rootless podman
+  hosts: bastions,utility
   gather_facts: false
-  become: false
+  become: true
   tasks:
-    # NOT Pre-installed 
-    - when:
-        - not install_ocp4 | bool
-        - student_access_key_id is defined
-        - student_secret_access_key is defined
-      block:
-        - name: Print Student aws access as user.info
-          agnosticd_user_info:
-            msg: "{{ item }}"
-          loop:
-            - "Top level domain: {{ subdomain_base_suffix }}"
-            - ""
-            - "WARNING: with great power comes great responsibility. We monitor usage."
-            - "Your AWS programmatic access:"
-            - "aws_access_key_id = {{ student_access_key_id }}"
-            - "aws_secret_access_key = {{ student_secret_access_key }}"
+  - name: Install slirp4netns
+    package:
+      name: slirp4netns
 
-        - name: Set aws access user data
-          agnosticd_user_info:
-            data:
-              subdomain_base_suffix: "{{ subdomain_base_suffix }}"
-              aws_access_key_id: "{{ student_access_key_id }}"
-              aws_secret_access_key: "{{ student_secret_access_key }}"
+  - name: Update max_user_namespaces in sysctl
+    sysctl:
+      name: user.max_user_namespaces
+      value: "28633"
+      sysctl_file: /etc/sysctl.d/userns.conf
+      reload: true
 
-    - when:
-        - install_student_user | bool
-        - student_name is defined
-        - student_password is defined or hostvars[groups.bastions.0].student_password is defined
-      block:
-        - name: Print Student SSH access as user.info
-          agnosticd_user_info:
-            msg: "{{ item }}"
-          loop:
-            - ""
-            - "SSH Access: ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix }}"
-            - "SSH password: {{ student_password | default(hostvars[groups.bastions.0].student_password) }}"
-          when:
-            - install_student_user | bool
-            - student_name is defined
-            - student_password is defined or hostvars[groups.bastions.0].student_password is defined
+- name: Step 004.2 - Set up student resources
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+  - name: Set up student resources
+    when: install_student_resources | bool
+    block:
+    - name: Create resources directory
+      file:
+        path: "/home/{{ student_name }}/resources"
+        state: directory
+        owner: "{{ student_name }}"
+        group: users
+        mode: 0744
 
-        - name: User access data
-          agnosticd_user_info:
-            data:
-              student_ssh_command: "ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix }}"
-              student_ssh_password: "{{ student_password | default(hostvars[groups.bastions.0].student_password) }}"
+    - name: Add AWS template and pararameter files to resources directory
+      copy:
+        dest: "/home/{{ student_name }}/resources/{{ item }}"
+        src: "{{ item }}"
+        owner: "{{ student_name }}"
+        group: users
+        mode: 0664
+      loop:
+      - aws_upi_bootstrap_parameters.json.j2
+      - aws_upi_bootstrap_template.yaml
+      - aws_upi_control_plane_parameters.json.j2
+      - aws_upi_control_plane_template.yaml
+      - aws_upi_route53_parameters.json.j2
+      - aws_upi_route53_template.yaml
+      - aws_upi_sec_parameters.json.j2
+      - aws_upi_sec_template.yaml
+      - aws_upi_vpc_parameters.json
+      - aws_upi_vpc_template.yaml
+      - aws_upi_worker_parameters.json.j2
+      - aws_upi_worker_template.yaml
+      - process.yaml
+
+- name: Step 004.3 - Configure Utility VM
+  hosts: utility
+  gather_facts: false
+  become: true
+  tasks:
+  - name: Set up Utility VM
+    when: install_utilityvm | bool
+    block:
+    - name: Install httpd and NFS server on utility VM
+      package:
+        name:
+        - httpd
+        - nfs-utils
+
+    - name: Start and enable httpd on utilityVM
+      service:
+        name: httpd
+        state: started
+        enabled: true
+
+    - name: Create user volumes for NFS
+      shell: "mkdir -p /srv/nfs/user_vols/vol{1..{{user_vols}}}"
+
+    - name: Change permissions for user volumes
+      shell: "chmod -R 777 /srv/nfs"
+
+    - name: Ensure /etc/exports.d directory exists
+      file:
+        path: /etc/exports.d
+        state: directory
+        owner: root
+        group: root
+        mode: 775
+
+    - name: Create NFS exports file
+      file:
+        path: /etc/exports.d/{{ env_type }}-{{ guid }}.exports
+        state: touch
+        owner: root
+        group: root
+        mode: 664
+
+    - name: Configure NFS exports file
+      lineinfile:
+        dest: /etc/exports.d/{{ env_type }}-{{ guid }}.exports
+        line: '/srv/nfs {{ nfs_exports_config }}'
+        state: present
+
+    - name: Enable and start NFS server
+      service:
+        name: nfs-server
+        state: restarted
+        enabled: true
+
+    - name: Set up GUID environment variable for ec2-user
+      lineinfile:
+        state: present
+        path: /home/ec2-user/.bashrc
+        insertafter: EOF
+        line: "export GUID={{ guid }}"
+
+- name: Step 004.4 LE certs
+  hosts: bastions
+  gather_facts: false
+  become: true
+  vars:
+    _certbot_dns_provider: route53
+    _certbot_domain: "api.cluster-{{ guid }}{{ subdomain_base_suffix }}"
+    _certbot_wildcard_domain: "*.apps.cluster-{{ guid }}{{ subdomain_base_suffix }}"
+    _certbot_remote_dir: "/home/{{ student_name }}"
+    _certbot_remote_dir_owner: "{{ student_name }}"
+    _certbot_remote_dir_group: "users"
+    _certbot_install_dir: "/home/{{ student_name }}/certificates"
+    _certbot_install_dir_owner: "{{ student_name }}"
+    _certbot_production: true
+    _certbot_user: "{{ student_name }}"
+    _certbot_cache_archive_file: "{{ output_dir | default('/tmp') }}/{{ guid }}-certs.tar.gz"
+    _certbot_use_cache: false
+    use_python3: true
+  tasks:
+  - name: Request LE Certificates
+    when: install_certificates | bool
+    block:
+    - name: Create {{ _certbot_remote_dir }}/.aws directory
+      file:
+        state: directory
+        path: "{{ _certbot_remote_dir }}/.aws"
+        owner: "{{ _certbot_remote_dir_owner }}"
+        mode: 0700
+
+    - name: Write Route53 credentials into {{ _certbot_remote_dir }}/.aws/credentials
+      when: hostvars.localhost.route53user_access_key is defined
+      blockinfile:
+        dest: "{{ _certbot_remote_dir }}/.aws/credentials"
+        create: true
+        owner: "{{ _certbot_remote_dir_owner }}"
+        group: "{{ _certbot_remote_dir_group }}"
+        mode: 0600
+        content: |
+          [default]
+          # {{ hostvars.localhost.student_stack_user }}
+          aws_access_key_id={{ hostvars.localhost.student_access_key_id }}
+          aws_secret_access_key={{ hostvars.localhost.student_secret_access_key }}
+
+    - name: Import certbot role
+      import_role:
+        name: host-lets-encrypt-certs-certbot
+
+    - name: Remove credentials once LE certs complete
+      when: _certbot_setup_complete
+      file:
+        state: absent
+        path: "{{ _certbot_remote_dir }}/.aws"
+
+    - name: Copy the LE root certs into trusted bundle
+      copy:
+        dest: /etc/pki/ca-trust/source/anchors/le-chain.pem
+        src: /home/{{ student_name }}/certificates/chain.pem
+        remote_src: true
+
+    - name: Update CA trust
+      command: update-ca-trust

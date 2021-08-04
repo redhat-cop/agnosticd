@@ -1,54 +1,67 @@
+---
 - name: Install client and OpenShift Installer binaries
   import_tasks: install_installer.yml
+
+## Open the port for the api
+- name: OpenStack specific requirement - find network port id
+  when:
+  - cloud_provider == "osp"
+  - ocp_use_single_network | bool
+  import_tasks: osp_pre.yml
 
 - name: Generate install_config.yaml
   import_tasks: generate_install_config.yml
 
-# For OVN it is necessary to generate manifests and then change the manifests
-# For SDN this is not necessary. Regardless the installation will either generate
-# manifests if there aren't any (default) or use the updated ones (OVN)
-- name: Generate and patch Manifests for OVN
-  when: ocp4_network_type | default("OpenshiftSDN") is match("OVNKubernetes")
-  block:
-  - name: Run Installer to generate manifests
-    become: no
-    tags:
-    - run_installer
-    command: openshift-install create manifests --dir=/home/{{ ansible_user }}/{{ cluster_name }}
-
-  - name: Create manifests/cluster-network-03-config.yml for OVN
-    copy:
-      src: ./files/cluster-network-03-config.yml
-      dest: "/home/{{ ansible_user }}/{{ cluster_name }}/manifests/cluster-network-03-config.yml"
-      owner: "{{ ansible_user }}"
-      mode: 0660
-
 - name: Installation and getting the logs
+  tags:
+  - run_installer
   block:
+  - name: Create openshift-install manifests
+    include_tasks: create-manifests.yml
+
   - name: Run the installer
-    become: no
-    tags:
-      - run_installer
+    become: false
     command: openshift-install create cluster --dir=/home/{{ ansible_user }}/{{ cluster_name }}
     async: "{{ 2 * 60 * 60 }}"
-    ignore_errors: yes
-  - name: Retry OpenShift installation (wait-for install-complete)
-    command: openshift-install --dir=/home/{{ ansible_user }}/{{ cluster_name }} wait-for install-complete
+    poll: "{{ 0 if ocp4_ansible_managed_osp_external_network | bool else 15 }}"
+    register: r_openshift_install
+
+  - name: Setup OpenStack external network during install
+    when: ocp4_ansible_managed_osp_external_network | bool
+    include_tasks:
+      file: configure-osp-external-network-for-install.yml
 
   rescue:
-    - name: Restarting OpenStack nodes
-      when: cloud_provider == "osp"
-      shell: openstack server reboot --hard {{ item }}
-      with_lines: openstack server list | awk '/{{ cluster_name }}/ { print $2 };'
-      ignore_errors: yes
-    - pause:
-        minutes: 10
-        prompt: "Pausing whilst OpenStack nodes recover..."
-      when: cloud_provider == "osp"
-    - name: Retry OpenShift installation (wait-for bootstrap-complete)
-      command: openshift-install --dir=/home/{{ ansible_user }}/{{ cluster_name }} wait-for bootstrap-complete
-    - name: Retry OpenShift installation (wait-for install-complete)
-      command: openshift-install --dir=/home/{{ ansible_user }}/{{ cluster_name }} wait-for install-complete
+  - name: Run destroy to reset before retry
+    become: false
+    command: openshift-install destroy cluster --dir=/home/{{ ansible_user }}/{{ cluster_name }}
+
+  - name: Pause briefly for cloud provider cleanup to finish
+    pause:
+      minutes: 2
+
+  - name: Restore install config from backup copy
+    copy:
+      remote_src: true
+      src: /home/{{ ansible_user }}/{{ cluster_name }}/install-config.yaml.bak
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/install-config.yaml
+      owner: "{{ ansible_user }}"
+      mode: ug=rw,o=
+
+  - name: Recreate openshift-install manifests
+    include_tasks: create-manifests.yml
+
+  - name: Retry the installer
+    become: false
+    command: openshift-install create cluster --dir=/home/{{ ansible_user }}/{{ cluster_name }}
+    async: "{{ 2 * 60 * 60 }}"
+    poll: "{{ 0 if ocp4_ansible_managed_osp_external_network | bool else 15 }}"
+    register: r_openshift_install
+
+  - name: Setup OpenStack external network during install retry
+    when: ocp4_ansible_managed_osp_external_network | bool
+    include_tasks:
+      file: configure-osp-external-network-for-install.yml
 
   always:
   - name: Gzip Install log
@@ -61,7 +74,7 @@
     fetch:
       src: /home/{{ ansible_user }}/{{ cluster_name }}/.openshift_install.log.gz
       dest: "{{ output_dir }}/{{ env_type }}_{{ guid }}_log/"
-      flat: yes
+      flat: true
 
 # OpenStack does not have a way to add userTags via the install-config.yaml
 # https://bugzilla.redhat.com/show_bug.cgi?id=1868517
@@ -85,6 +98,8 @@
         guid: "{{ guid }}"
         env_type: "{{ env_type }}"
     loop: "{{ r_servers.openstack_servers }}"
+    loop_control:
+      label: "{{ item.name }}"
 
   - name: Add additional metadata to instances
     when: hostvars.localhost.cf_tags_final | default({}) | length > 0
@@ -92,15 +107,17 @@
       server: "{{ item.name }}"
       meta: "{{ hostvars.localhost.cf_tags_final | default({}) | to_json }}"
     loop: "{{ r_servers.openstack_servers }}"
+    loop_control:
+      label: "{{ item.name }}"
 
 - name: Fetch kube config
   fetch:
-    flat: yes
+    flat: true
     src: /home/{{ ansible_user }}/{{ cluster_name }}/auth/{{ item }}
     dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_{{ item }}"
   loop:
-    - kubeconfig
-    - kubeadmin-password
+  - kubeconfig
+  - kubeadmin-password
 
 - name: Make sure .kube directory exists in home directory
   file:
@@ -111,12 +128,12 @@
 
 - name: Set up .kube/config
   copy:
-    remote_src: yes
+    remote_src: true
     src: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
     dest: "/home/{{ ansible_user }}/.kube/config"
 
 - name: Make sure .kube directory exists in /root
-  become: yes
+  become: true
   file:
     state: directory
     path: /root/.kube
@@ -124,9 +141,9 @@
     mode: 0700
 
 - name: Set up .kube/config for root
-  become: yes
+  become: true
   copy:
-    remote_src: yes
+    remote_src: true
     src: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
     dest: /root/.kube/config
 
@@ -134,7 +151,7 @@
   when: install_student_user | bool
   block:
   - name: Make sure .kube directory exists in /home/{{ student_name }}
-    become: yes
+    become: true
     file:
       state: directory
       path: "/home/{{ student_name }}/.kube"
@@ -142,16 +159,16 @@
       mode: 0700
 
   - name: Copy /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig to /home/{{ student_name }}/.kube
-    become: yes
+    become: true
     copy:
       src: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
       dest: /home/{{ student_name }}/.kube/config
-      remote_src: yes
+      remote_src: true
       owner: "{{ student_name }}"
       mode: 0600
 
 - name: Create OpenShift Bash completion file
-  become: yes
+  become: true
   shell: oc completion bash >/etc/bash_completion.d/openshift
 
 - name: Gather and Print cluster info

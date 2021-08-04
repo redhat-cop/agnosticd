@@ -3,12 +3,21 @@
 
 # Implement your Workload deployment tasks here
 
-# Access for admin
 - name: Give access to opentlc-mgr
   shell: |
          oc adm policy add-cluster-role-to-user cluster-admin opentlc-mgr
 
-# Create projects for user
+- name: Create CatalogSource Index 4.7
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - redhat-operators-index.yaml
+  - community-operators-index.yaml
+
 - name: create projects for users userXX-{{ workshop_openshift_project_postfix }}
   include_tasks: create_project.yaml
   vars:
@@ -16,7 +25,13 @@
     name: "{{ item }}-{{ workshop_openshift_project_postfix }}"
   loop: "{{ users }}"
 
-# Deploy guides
+- name: create projects for users userXX-{{ workshop_openshift_project_postfix2 }}
+  include_tasks: create_project.yaml
+  vars:
+    user: "{{ item }}"
+    name: "{{ item }}-{{ workshop_openshift_project_postfix2 }}"
+  loop: "{{ users }}"
+
 - name: create guides project
   k8s:
     state: present
@@ -36,48 +51,92 @@
     namespace: guides
   register: r_guide_dc
 
-- name: deploy guide
-  when: r_guide_dc.resources | list | length == 0
-# yamllint disable rule:line-length
-  shell: >
-    oc new-app -n guides quay.io/jamesfalkner/workshopper --name=web
-    -e CHE_USER_PASSWORD='{{ workshop_che_user_password }}'
-    -e OPENSHIFT_USER_PASSWORD='{{ workshop_openshift_user_password }}'
-    -e MASTER_URL={{ master_url }}
-    -e CONSOLE_URL={{ console_url }}
-    -e CHE_URL=https://codeready-codeready.{{ route_subdomain }}
-    -e KEYCLOAK_URL=https://keycloak-codeready.{{ route_subdomain }}
-    -e ROUTE_SUBDOMAIN={{ route_subdomain }}
-    -e CONTENT_URL_PREFIX='https://raw.githubusercontent.com/RedHat-Middleware-Workshops/dg8-workshop/ocp-4.4/docs'
-    -e WORKSHOPS_URLS='https://raw.githubusercontent.com/RedHat-Middleware-Workshops/dg8-workshop/ocp-4.4/docs/{{ workshop_labs_url }}'
-    -e LOG_TO_STDOUT=true
-# yamllint enable rule:line-length
-
-- name: create the Route for guides
-  when: r_guide_dc.resources | list | length == 0
+- name: create guides project
+  when: num_users | int > 0
   k8s:
-    namespace: guides
     state: present
-    kind: Route
+    kind: Project
+    api_version: project.openshift.io/v1
     definition:
       metadata:
-        name: web
-        labels:
-          app: web
-      spec:
-        host: ''
-        to:
-          kind: Service
-          name: web
-          weight: 100
-        port:
-          targetPort: 8080-tcp
-  register: Route
+        name: "guides"
+        annotations:
+          openshift.io/description: ""
+          openshift.io/display-name: "Data Grid Workshop Guides"
+
+- name: install guides
+  include_tasks: install-guides.yaml
 
 - name: install username distribution
   include_tasks: install-username-distribution.yaml
 
-# Install CRW via operator
+- name: Create ServiceAccount infinispan-monitoring
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: infinispan-monitoring
+        namespace: default
+
+- name: create monitoring for users
+  include_tasks: install-monitoring.yaml
+  vars:
+    user: "{{ item }}"
+    projectname: "{{ item }}-cache"
+  loop: "{{ users }}"
+
+- name: create monitoring cluster role view binding
+  include_tasks: add-cluster-role-binding.yaml
+  vars:
+    user: "{{ item }}"
+    projectname: "{{ item }}-cache"
+  loop: "{{ users }}"
+
+- name: Create user monitoring config map
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: cluster-monitoring-config
+        namespace: openshift-monitoring
+      data:
+        config.yaml: |
+          enableUserWorkload: true
+
+- name: create datagrid for users in project cache
+  include_tasks: install-datagrid.yaml
+  vars:
+    user: "{{ item }}"
+    projectname: "{{ item }}-cache"
+  loop: "{{ users }}"
+
+- name: create datagrid for users in project cache2
+  include_tasks: install-datagrid.yaml
+  vars:
+    user: "{{ item }}"
+    projectname: "{{ item }}-cache2"
+  loop: "{{ users }}"
+
+- name: Look for serverless subscription
+  k8s_facts:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: serverless-operator
+    namespace: openshift-operators
+  register: r_serverless_sub
+
+- name: show existing serverless sub
+  debug:
+    msg: "existing serverless sub: {{ r_serverless_sub }}"
+
+- name: Create OpenShift Objects for Serverless (knative)
+  include_tasks: install-serverless.yaml
+
+#Install CRW via operator
 - name: see if codeready is installed
   k8s_facts:
     api_version: org.eclipse.che/v1
@@ -93,13 +152,6 @@
 - name: install codeready
   when: r_codeready_cr.resources | list | length == 0
   include_tasks: install-codeready.yaml
-
-- name: create datagrid for users
-  include_tasks: install-datagrid.yaml
-  vars:
-    user: "{{ item }}"
-    name: "{{ item }}-cache"
-  loop: "{{ users }}"
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete

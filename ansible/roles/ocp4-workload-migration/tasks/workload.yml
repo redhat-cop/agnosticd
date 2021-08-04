@@ -15,10 +15,70 @@
     state: "{{ mig_state }}"
     definition: "{{ lookup('template', 'mig-operator-operatorgroup.yml.j2' ) }}"
 
+- name: "Create custom CRD"
+  k8s:
+    state: "{{ mig_state }}"
+    definition: "{{ lookup('template', 'crd.yml.j2' ) }}"
+
 - name: "Set CAM Operator Subscription state to {{ mig_state }}"
   k8s:
     state: "{{ mig_state }}"
     definition: "{{ lookup('template', 'mig-operator-subscription-downstream.yml.j2' ) }}"
+
+- name: Waiting 30 seconds before checking install plan
+  pause:
+    seconds: 30
+
+- when: mig_state == 'present'
+  block:
+  - name: "Waiting for install plan to be created"
+    k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: InstallPlan
+      namespace: openshift-migration
+    register: mtc_install_plans
+    retries: 20
+    until: mtc_install_plans.get('resources', []) | length > 0
+
+  - name: Pause for 30 seconds for install plan to get ready for approval
+    pause:
+      seconds: 30
+
+  - set_fact:
+      mtc_approved_install_plan: "{{ mtc_install_plans.get('resources', [])[0]
+        | combine({'spec': {'approved': true}}, recursive=true) }}"
+
+  - name: "Approve install plan"
+    k8s:
+      state: present
+      definition: "{{ mtc_approved_install_plan }}"
+
+  rescue:
+  - name: We will try again, trying to rescue the block
+    pause:
+      seconds: 10
+
+  - name: "<rescue> Waiting for install plan to be created"
+    k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: InstallPlan
+      namespace: openshift-migration
+    register: mtc_install_plans
+    retries: 20
+    until: mtc_install_plans.get('resources', []) | length > 0
+
+  - name: "<rescue> Pause for 10 seconds in rescue block"
+    pause:
+      seconds: 10
+
+  - set_fact:
+      mtc_approved_install_plan: "{{ mtc_install_plans.get('resources', [])[0]
+        | combine({'spec': {'approved': true}}, recursive=true) }}"
+
+  - name: "<rescue> Approve install plan"
+    k8s:
+      state: present
+      definition: "{{ mtc_approved_install_plan }}"
 
 - name: "Wait for Migration CRDs to exist"
   k8s_info:
@@ -37,27 +97,19 @@
     state: "{{ mig_state }}"
     definition: "{{ lookup('template', 'controller-4.yml.j2' ) }}"
 
-- name: "Download lab scripts to bastion"
-  become: true
-  get_url:
-    url: "{{ item }}"
-    dest: "/home/{{ student_name }}/"
-  when: student_name is defined
+- name: "Download lab content to bastion"
+  include_tasks: "./download-content.yml"
   loop: "{{ mig_download_content }}"
-
-- name: Copy lab scripts to bastion
-  become: true
-  copy:
-    src: "{{ role_path }}/files/"
-    dest: "/home/{{ student_name }}/"
   when: student_name is defined
+  loop_control:
+    loop_var: "mig_download_content_item"
 
 - when: ocs_migstorage
   block:
   - name: Discovering NooBaa S3 endpoint
     k8s_info:
-      api_version: v1
-      kind: Service
+      api_version: route.openshift.io/v1
+      kind: Route
       name: s3
       namespace: "{{ ocs_migstorage_namespace }}"
     register: noobaa_s3_endpoint
@@ -65,15 +117,14 @@
     delay: 3
     until: noobaa_s3_endpoint.resources is defined and
            noobaa_s3_endpoint.resources[0] is defined and
-           noobaa_s3_endpoint.resources[0].status.loadBalancer is defined and
-           noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress is defined
+           noobaa_s3_endpoint.resources[0].status.ingress is defined
 
   - set_fact:
-      noobaa_endpoint: "{{ noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress[0].ip }}"
-    when: noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress[0].ip is defined
+      noobaa_endpoint: "{{ noobaa_s3_endpoint.resources[0].status.ingress[0].host }}"
+    when: noobaa_s3_endpoint.resources[0].status.ingress[0].host is defined
 
   - set_fact:
-      noobaa_endpoint: "{{ noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress[0].hostname }}"
+      noobaa_endpoint: "{{ noobaa_s3_endpoint.resources[0].status.ingress[0].hostname }}"
     when: noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress[0].hostname is defined
 
   - name: Get MCG PV Pool secret
@@ -115,6 +166,15 @@
       definition: "{{ lookup('template', 'mig_storage.yml.j2') }}"
     vars:
       noobaa_s3_url: "{{ noobaa_s3_endpoint_proto }}://{{ noobaa_endpoint }}/"
+
+- when: ocp4_workload_migration_cluster_admins | length > 0
+  block:
+  - name: Create cluster-admins group
+    k8s:
+      definition: "{{ lookup('template', 'cluster-admins.group.yaml.j2') }}"
+  - name: Create cluster-admins group cluster role binding
+    k8s:
+      definition: "{{ lookup('file', 'cluster-admins-group.clusterrolebinding.yaml') }}"
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
