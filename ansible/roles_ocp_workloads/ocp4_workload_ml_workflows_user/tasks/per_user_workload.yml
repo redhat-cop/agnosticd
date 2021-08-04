@@ -1,0 +1,108 @@
+---
+# Implement your Workload deployment tasks here
+- set_fact:
+    user_name: "{{ ocp_username }}"
+
+- set_fact:
+    user_project: "s2s-{{ guid }}-project"
+
+
+- debug:
+    msg: "Deploying ML Workflows workshop materials to preexisting project {{ user_project }}"
+
+- name: "Make sure project {{ user_project }} is there"
+  k8s:
+    state: present
+    name: "{{ user_project }}"
+    kind: Project
+    api_version: project.openshift.io/v1
+
+- name: Create the project resources in {{ user_project }}
+  k8s:
+    state: present
+    namespace: "{{ user_project }}"
+    definition: "{{ lookup('template', item) }}"
+  loop:
+    - custom-notebook-imagestream.yaml.j2
+    - pipeline-s2i-imagestream.yaml.j2
+    - pipeline-imagestream.yaml.j2
+    - pipeline-buildconfig.yaml.j2
+    - pipeline-deploymentconfig.yaml.j2
+    - pipeline-service.yaml.j2
+  when: use_openshift_build
+
+- name: Create OpenShift Pipeline in {{ user_project }}
+  k8s:
+    state: present
+    namespace: "{{ user_project }}"
+    definition: "{{ lookup('template', item) }}"
+  loop:
+    - pipeline-s2i-imagestream.yaml.j2
+    - pipeline-resource-source.yaml.j2
+    - pipeline-resource-image.yaml.j2
+    - pipeline-task-definition.yaml.j2
+    - pipeline-definition.yaml.j2
+  when: use_openshift_pipelines
+  vars:
+    namespace: "{{ user_project }}"
+
+- name: Wait for jupyterhub DeploymentConfig
+  k8s_info:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    namespace: "{{ user_project }}"
+    name: jupyterhub
+  register: r_jupyterhub_k8s_info
+  retries: 10
+  delay: 5
+  until: r_jupyterhub_k8s_info.resources | length > 0
+
+- name: Stop Jupyterhub
+  k8s:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    namespace: "{{ user_project }}"
+    name: jupyterhub
+    merge_type: merge
+    definition:
+      spec:
+        replicas: 0
+
+- name: Restart Jupyterhub
+  k8s:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    namespace: "{{ user_project }}"
+    name: jupyterhub
+    merge_type: merge
+    definition:
+      spec:
+        replicas: 1
+
+- name: Get Jupyterhub route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: jupyterhub
+    namespace: "{{ user_project }}"
+  register: r_jupyter_route
+
+- name: Get Web Console route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: openshift-console
+    name: console
+  register: r_console_route
+
+- name: Save user data
+  agnosticd_user_info:
+    data:
+      web_console_url: "https://{{ r_console_route.resources[0].spec.host }}"
+      jupyter_url: "{{ r_jupyter_route.resources[0].spec.host }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

@@ -1,0 +1,152 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+# Implement your workload deployment tasks here
+# -------------------------------------------------------------------------
+
+- name: Add user {{ ocp_username}} to groups "{{ ocp4_workload_rhtr_xraylab_user_groups }}"
+  when: ocp4_workload_rhtr_xraylab_user_groups | default([]) | length > 0
+  command: "oc adm groups add-users {{ item }} {{ ocp_username }}"
+  loop: "{{ ocp4_workload_rhtr_xraylab_user_groups }}"
+
+- name: Create ClusterResourceQuota
+  when: ocp4_workload_rhtr_xraylab_user_create_quota | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/cluster_resource_quota.yaml.j2' ) | from_yaml }}"
+
+- name: Set up user permissions to view common projects
+  when: ocp4_workload_rhtr_xraylab_user_project_permissions | default([]) | length > 0
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/rolebinding.yaml.j2') | from_yaml }}"
+  vars:
+    _ocp4_workload_rhtr_xraylab_user_project: "{{ item.project }}"
+    _ocp4_workload_rhtr_xraylab_user_role: "{{ item.role }}"
+    _ocp4_workload_rhtr_xraylab_user_name: "{{ ocp_username }}"
+  loop: "{{ ocp4_workload_rhtr_xraylab_user_project_permissions }}"
+  loop_control:
+    label: "{{ item.project }} - {{ item.role }}"
+
+- name: Set up user projects
+  when: ocp4_workload_rhtr_xraylab_user_projects | length > 0
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/user-project.yaml.j2') | from_yaml }}"
+  loop: "{{ ocp4_workload_rhtr_xraylab_user_projects }}"
+
+- name: Set up user permissions to user projects
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/rolebinding.yaml.j2') | from_yaml }}"
+  vars:
+    _ocp4_workload_rhtr_xraylab_user_project: "{{ item }}"
+    _ocp4_workload_rhtr_xraylab_user_role: admin
+    _ocp4_workload_rhtr_xraylab_user_name: "{{ ocp_username }}"
+  loop: "{{ ocp4_workload_rhtr_xraylab_user_projects }}"
+
+- name: Set up bookbag service account permissions to user projects
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/rolebinding.yaml.j2') | from_yaml }}"
+  vars:
+    _ocp4_workload_rhtr_xraylab_user_project: "{{ item }}"
+    _ocp4_workload_rhtr_xraylab_user_role: admin
+    _ocp4_workload_rhtr_xraylab_user_name: "system:serviceaccount:bookbag-{{ guid }}:bookbag"
+  loop: "{{ ocp4_workload_rhtr_xraylab_user_projects }}"
+
+- name: Create Limit Ranges for user projects
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/limitrange.yaml.j2') | from_yaml }}"
+  loop: "{{ ocp4_workload_rhtr_xraylab_user_projects }}"
+
+- name: Wait for Limit ranges to be created
+  k8s_info:
+    api_version: v1
+    kind: LimitRange
+    name: core-resource-limits
+    namespace: "{{ item }}"
+  register: limit_range
+  retries: 30
+  delay: 5
+  until: limit_range|length > 0
+  loop: "{{ ocp4_workload_rhtr_xraylab_user_projects }}"
+  ignore_errors: false
+
+- name: "Create OperatorGroup in Xraylab user project"
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'general/operator_group.yaml.j2') }}"
+  vars:
+    namespace: "xraylab-{{ guid }}"
+
+- name: Install Grafana operator
+  import_tasks: ./grafana-operator.yaml
+  become: false
+  vars:
+    namespace: "xraylab-{{ guid }}"
+  when: (ACTION == "create" or ACTION == "provision") and ocp4_workload_rhtr_xraylab_install_grafana_operator
+
+- name: Create S3 user
+  shell: >
+    oc exec -n openshift-storage
+    $(oc get pods -n openshift-storage | grep rook-ceph-tools | grep Running | awk '{print $1}')
+    -- radosgw-admin user create --uid="xraylab-{{ guid }}" --display-name="xraylab-{{ guid }}"
+  register: user_create_output
+
+- name: Register AWS_KEY
+  set_fact:
+    S3_access_key: "{{ user_create_output.stdout | from_json | json_query('keys[0].access_key')}}"
+    S3_secret_key: "{{ user_create_output.stdout | from_json | json_query('keys[0].secret_key')}}"
+
+- name: "Create JupyterHub ConfigMap in ODH user project"
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'odh_base_nb_cm.yaml.j2') }}"
+  vars:
+    namespace: "odh-{{ guid }}"
+
+- name: Get Web Console route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: openshift-console
+    name: console
+  register: r_console_route
+
+- name: Get API server URL
+  k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: r_api_url
+
+- name: Print user info
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - "{{ ocp_username }}, which is your OpenTLC User ID, has been setup on the shared lab environment."
+  - "Use this OpenTLC User ID and password to log into your environment."
+  - "You have access to the following projects: {{ ocp4_workload_rhtr_xraylab_user_projects }}"
+  - "Your Object Store access key is: {{ S3_access_key }}"
+  - "Your Object Store secret key is: {{ S3_secret_key }}"
+
+- name: Save user data
+  agnosticd_user_info:
+    data:
+      web_console_url: "https://{{ r_console_route.resources[0].spec.host }}"
+      api_url: "{{ r_api_url.resources[0].status.apiServerURL }}"
+      login_command: "oc login -u {{ ocp_username }} {{ r_api_url.resources[0].status.apiServerURL }}"
+      project_name: "{{ ocp4_workload_rhtr_xraylab_user_projects }}"
+      S3_access_key: "{{ S3_access_key }}"
+      S3_secret_key: "{{ S3_secret_key }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
