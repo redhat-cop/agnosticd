@@ -1,0 +1,138 @@
+---
+
+- name: Create ACS namespace
+  kubernetes.core.k8s:
+    name: "{{ ocp4_dso_acs_project_name }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+
+- name: Create ACS Central password
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'acs-password.yml.j2') }}"
+
+- name: Install ACS Operator
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'acs-subs.yml.j2') }}"
+
+- name: Wait for ACS CRD to exist
+  k8s_facts:
+    api_version: "apiextensions.k8s.io/v1beta1"
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop: "{{ ocp4_dso_acs_expected_crds }}"
+  register: crds
+  until: crds.resources|length > 0
+  retries: 30
+  delay: 10
+
+- name: Create ACS Central
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'central.yml.j2') }}"
+
+- name: Get central route
+  kubernetes.core.k8s_info:
+    kind: Route
+    api_version: route.openshift.io/v1
+    namespace: "{{ ocp4_dso_acs_project_name }}"
+    name: central
+  register: r_stackrox_central_route
+  retries: 10
+  delay: 20
+  until:
+    - r_stackrox_central_route.resources[0].spec.host is defined
+
+- name: Store central route as a fact
+  set_fact:
+# yamllint disable-line rule:line-length
+    f_stackrox_central_addr: "{{ r_stackrox_central_route.resources[0].spec.host }}"
+
+- name: Wait for Central availability
+  uri:
+    url: "https://{{ f_stackrox_central_addr }}/v1/ping"
+    method: GET
+    user: admin
+    password: "{{ ocp4_dso_acs_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  register: result
+  until: result.status == 200
+  retries: 15
+  delay: 20
+
+## ACS Secured Cluster Installation
+- name: Get cluster init bundle
+  uri:
+    url: "https://{{ f_stackrox_central_addr }}/v1/cluster-init/init-bundles"
+# yamllint disable-line rule:line-length
+    body: "{ \"name\": \"prod-{{ lookup('password', '/dev/null chars=ascii_lowercase,digits length=8') }}\"}"
+    method: POST
+    user: admin
+    password: "{{ ocp4_dso_acs_password }}"
+    body_format: json
+    force_basic_auth: true
+    validate_certs: false
+  register: r_stackrox_cluster_init_response
+
+- name: Store cluster init bundle as a fact
+  set_fact:
+# yamllint disable-line rule:line-length
+    f_stackrox_bundle: "{{ r_stackrox_cluster_init_response.json.kubectlBundle | b64decode }}"
+
+- name: Create init-bundle secrets
+  kubernetes.core.k8s:
+    namespace: "{{ ocp4_dso_acs_project_name }}"
+    state: present
+    definition: "{{ f_stackrox_bundle }}"
+
+- name: Install Sensor on OpenShift Container Platform
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'securedcluster.yml.j2') }}"
+
+- name: Wait for ready sensor
+  kubernetes.core.k8s_info:
+    name: sensor
+    kind: Deployment
+    api_version: apps/v1
+    namespace: "{{ ocp4_dso_acs_project_name }}"
+  register: r_stackrox_sensor_deployment
+  until:
+# yamllint disable-line rule:line-length
+    - r_stackrox_sensor_deployment.resources[0].status.readyReplicas is defined
+# yamllint disable-line rule:line-length
+    - r_stackrox_sensor_deployment.resources[0].status.readyReplicas | int >= 1
+  delay: 20
+  retries: 15
+
+- name: Determine number of collectors
+  kubernetes.core.k8s_info:
+    name: collector
+    kind: DaemonSet
+    api_version: apps/v1
+    namespace: "{{ ocp4_dso_acs_project_name }}"
+  register: r_stackrox_collector_daemonset
+# yamllint disable-line rule:line-length
+  until: r_stackrox_collector_daemonset.resources[0].status.desiredNumberScheduled is defined
+
+- name: Wait for collectors
+  kubernetes.core.k8s_info:
+    name: collector
+    kind: DaemonSet
+    api_version: apps/v1
+    namespace: "{{ ocp4_dso_acs_project_name }}"
+  register: r_stackrox_collector_daemonset
+  until:
+    - r_stackrox_collector_daemonset.resources[0].status.numberReady is defined
+# yamllint disable-line rule:line-length
+    - r_stackrox_collector_daemonset.resources[0].status.numberReady | int == r_stackrox_collector_daemonset.resources[0].status.desiredNumberScheduled | int
+  delay: 20
+  retries: 15
+
+- name: Create ACS Console Link
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'acs-console-link.yml.j2') }}"
