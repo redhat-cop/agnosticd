@@ -1,0 +1,190 @@
+---
+- name: Setting up workload for user {{ ocp_username }}
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Install Quay Operator
+  when: ocp4_workload_quay_operator_install_operator | bool
+  block:
+  # Quay needs OpenShift Container Storage (Noobaa in particular)
+  # Check that the correct storage class exists on the cluster
+  - name: Retrieve Bucket Class
+    k8s_info:
+      api_version: noobaa.io/v1alpha1
+      kind: BucketClass
+      namespace: openshift-storage
+    register: r_bucket_class
+
+  - name: Assert that there is a Bucket Storage Class
+    assert:
+      that:
+      - r_bucket_class.resources | length == 1
+      fail_msg: Quay must be installed on a cluster with OpenShift Container Storage configured - and a Bucket Class deployed.
+
+  - name: Set Operator Namespace (Global)
+    when: ocp4_workload_quay_operator_install_global | bool
+    set_fact:
+      _ocp4_workload_quay_operator_namespace: openshift-operators
+      _ocp4_workload_quay_operator_managed_namespace: []
+
+  - name: Set Operator Namespace (Namespaced)
+    when: not ocp4_workload_quay_operator_install_global | bool
+    set_fact:
+      _ocp4_workload_quay_operator_namespace: "{{ ocp4_workload_quay_operator_operator_namespace }}"
+      _ocp4_workload_quay_operator_managed_namespace:
+      - "{{ ocp4_workload_quay_operator_operator_namespace }}"
+
+  - name: Install Operator
+    include_role:
+      name: install_operator
+    vars:
+      install_operator_action: install
+      install_operator_name: quay-operator
+      install_operator_namespace: "{{ _ocp4_workload_quay_operator_namespace }}"
+      install_operator_manage_namespaces: "{{ _ocp4_workload_quay_operator_managed_namespace }} "
+      install_operator_channel: "{{ ocp4_workload_quay_operator_channel }}"
+      install_operator_catalog: redhat-operators
+      install_operator_packagemanifest_name: quay-operator
+      install_operator_automatic_install_plan_approval: "{{ ocp4_workload_quay_operator_automatic_install_plan_approval }}"
+      install_operator_csv_nameprefix: "quay-operator"
+      install_operator_starting_csv: "{{ ocp4_workload_quay_operator_starting_csv }}"
+      install_operator_catalogsource_setup: "{{ ocp4_workload_quay_operator_use_catalog_snapshot }}"
+      install_operator_catalogsource_name: "{{ ocp4_workload_quay_operator_catalogsource_name }}"
+      install_operator_catalogsource_namespace: "{{ _ocp4_workload_quay_operator_namespace }}"
+      install_operator_catalogsource_image: "{{ ocp4_workload_quay_operator_catalog_snapshot_image | default('') }}"
+      install_operator_catalogsource_image_tag: "{{ ocp4_workload_pipelines_catalog_snapshot_image_tag }}"
+
+- name: Install QuayRegistry
+  when: ocp4_workload_quay_operator_install_quay | bool
+  block:
+  # Set up SSL Certificates for Quay
+  - name: Use provided key file
+    when: ocp4_workload_quay_operator_ssl_key | default("") | length > 0
+    set_fact:
+      _ocp4_workload_quay_operator_ssl_key: ocp4_workload_quay_operator_ssl_key
+
+  - name: Otherwise check if key file exist on bastion VM
+    become: true
+    become_user: root
+    when: ocp4_workload_quay_operator_ssl_key | default("") | length == 0
+    block:
+    - name: Check for Key file on Bastion
+      stat:
+        path: "/home/{{ ansible_user }}/certificates/privkey.pem"
+      register: r_ssl_key
+    - name: Read Key file from Bastion
+      when: r_ssl_key.stat.exists
+      slurp:
+        src: "/home/{{ ansible_user }}/certificates/privkey.pem"
+      register: _quay_ssl_key_file
+    - name: Set _ocp4_workload_quay_operator_ssl_key
+      when: r_ssl_key.stat.exists
+      set_fact:
+        _ocp4_workload_quay_operator_ssl_key: "{{ _quay_ssl_key_file['content'] }}"
+
+  - name: Use provided certificate file
+    when: ocp4_workload_quay_operator_ssl_certificate | default("") | length > 0
+    set_fact:
+      _ocp4_workload_quay_operator_ssl_certificate: ocp4_workload_quay_operator_ssl_certificate
+
+  - name: Otherwise check if certificate file exist on bastion VM
+    become: true
+    become_user: root
+    when: ocp4_workload_quay_operator_ssl_certificate | default("") | length == 0
+    block:
+    - name: Check for Certificate file on Bastion
+      stat:
+        path: "/home/{{ ansible_user }}/certificates/fullchain.pem"
+      register: r_ssl_cert
+    - name: Read Certificate file from Bastion
+      when: r_ssl_cert.stat.exists
+      slurp:
+        src: "/home/{{ ansible_user }}/certificates/fullchain.pem"
+      register: _quay_ssl_cert_file
+    - name: Set _ocp4_workload_quay_operator_ssl_certificate
+      when: r_ssl_cert.stat.exists
+      set_fact:
+        _ocp4_workload_quay_operator_ssl_certificate: "{{ _quay_ssl_cert_file['content'] }}"
+
+  - name: Determine Cluster Base Domain for Quay Route
+    k8s_info:
+      api_version: config.openshift.io/v1
+      kind: Ingress
+      name: cluster
+    register: r_ingress_config
+    failed_when: r_ingress_config.resources | length < 1
+
+  - name: Use Provided Quay route hostname
+    when: ocp4_workload_quay_operator_route | default("") | length > 0
+    set_fact:
+      _ocp4_workload_quay_operator_quay_route: "{{ ocp4_workload_quay_operator_route }}"
+
+  - name: Otherwise use quay-{{guid}}.basedomain for the Quay route hostname
+    when: ocp4_workload_quay_operator_route | default("") | length == 0
+    set_fact:
+      _ocp4_workload_quay_operator_quay_route: "quay-{{ guid }}.{{ r_ingress_config.resources[0].spec.domain }}"
+
+  - name: Set config.yaml data
+    set_fact:
+      _ocp4_workload_quay_operator_config_yaml: |
+        REGISTRY_TITLE: Red Hat Product Demo System Quay
+        SERVER_HOSTNAME: {{ _ocp4_workload_quay_operator_quay_route }}
+
+  - name: Create Quay Operator Resources
+    k8s:
+      state: present
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - quay_namespace.yaml.j2
+    - config_bundle_secret.yaml.j2
+    - quay_registry.yaml.j2
+
+  - name: Wait for Quay Registry to be available
+    k8s_info:
+      api_version: quay.redhat.com/v1
+      kind: QuayRegistry
+      name: "{{ ocp4_workload_quay_operator_name }}"
+      namespace: "{{ ocp4_workload_quay_operator_operator_namespace }}"
+    register: r_quay_registry
+    until:
+    - r_quay_registry.resources[0].status.conditions[0].type is defined
+    - r_quay_registry.resources[0].status.conditions[0].type is match "Available"
+    - r_quay_registry.resources[0].status.conditions[0].status is defined
+    - r_quay_registry.resources[0].status.conditions[0].status is match "True"
+    retries: 120
+    delay: 10
+
+  - name: Get Quay Hostname
+    k8s_info:
+      api_version: route.openshift.io/v1
+      kind: Route
+      name: "{{ ocp4_workload_quay_operator_name }}-quay"
+      namespace: "{{ ocp4_workload_quay_operator_operator_namespace }}"
+    register: r_quay_route
+
+  - name: Get Quay Config Editor credentials secret
+    k8s_info:
+      api_version: v1
+      kind: Secret
+      name: "{{ r_quay_registry.resources[0].status.configEditorCredentialsSecret }}"
+      namespace: "{{ ocp4_workload_quay_operator_operator_namespace }}"
+    register: r_config_editor_secret
+
+  - name: Print student user info
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - ""
+    - "Red Hat Quay is available at https://{{ r_quay_route.resources[0].spec.host }}"
+    # Quay Operator 3.5.1 has a bug where it doesn't report the correct
+    # registryEndpoint.
+    # - "Red Hat Quay is available at {{ r_quay_registry.resources[0].status.registryEndpoint }}"
+    - "Red Hat Quay Config is available at {{ r_quay_registry.resources[0].status.configEditorEndpoint }}"
+    - "- Config User: quayconfig"
+    - "- Config Password: {{ r_config_editor_secret.resources[0].data.password | b64decode }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

@@ -1,64 +1,138 @@
 ---
 apiVersion: v1
 metadata:
-  name: {{ guid }}
-baseDomain: {{ ocp4_base_domain | default(guid + subdomain_base_suffix) }}
+  name: {{ cluster_name | to_json }}
+baseDomain: {{ ocp4_base_domain | to_json }}
+fips: {{ ocp4_fips_enable | bool | to_json }}
 controlPlane:
   name: master
   hyperthreading: Enabled
   platform:
-{% if cloud_provider == 'ec2'| d(false) | bool %}
-    ImageId: {{ custom_image.image_id }}
+{% if cloud_provider == 'ec2' %}
+{%   if custom_image is defined and custom_image.image_id is defined %}
+    ImageId: {{ custom_image.image_id | to_json }}
+{%   endif %}
     aws:
-      type: {{ master_instance_type }}
+      type: {{ master_instance_type | to_json }}
+{%   if openshift_controlplane_aws_zones_odcr | default([]) | length > 0 %}
+      zones: {{ openshift_controlplane_aws_zones_odcr | unique | to_json }}
+{%   endif %}
       rootVolume:
-        type: {{ master_storage_type }}
+        type: {{ master_storage_type | to_json }}
+{%   if master_storage_type in ['io1', 'io2'] %}
+        iops: {{ master_storage_iops | default(host_ocp4_installer_master_storage_iops) | int | to_json }}
+{%   endif %}
+{% endif %}
+{% if cloud_provider == 'azure' %}
+    azure:
+      type: {{ master_instance_type | to_json }}
+{% endif %}
+{% if cloud_provider == 'gcp' %}
+    gcp:
+      type: {{ master_instance_type | to_json }}
 {% endif %}
 {% if cloud_provider == 'osp' %}
     openstack:
-      type: {{ master_instance_type }}
+      type: {{ master_instance_type | to_json }}
+{%   if master_storage_type is defined and master_storage_size is defined%}
+      rootVolume:
+        type: {{ master_storage_type | to_json }}
+        size: {{ master_storage_size | to_json }}
+{%   endif %}
 {% endif %}
-  replicas: {{ master_instance_count }}
+  replicas: {{ master_instance_count | to_json }}
 compute:
 - name: worker
   hyperthreading: Enabled
   platform:
-{% if cloud_provider == 'ec2'| d(false) | bool %}
-    ImageId: {{ custom_image.image_id }}
+{% if cloud_provider == 'ec2' %}
+{%   if custom_image is defined and custom_image.image_id is defined %}
+    ImageId: {{ custom_image.image_id | to_json }}
+{%   endif %}
     aws:
-      type: {{ worker_instance_type }}
+      type: {{ worker_instance_type | to_json }}
       rootVolume:
-        type: {{ worker_storage_type }}
+        type: {{ worker_storage_type | to_json }}
+{%   if openshift_machineset_aws_zones | default([]) | length > 0 %}
+      zones: {{ openshift_machineset_aws_zones | to_json }}
+{%   elif openshift_machineset_aws_zones_odcr | default([]) | length > 0 %}
+      zones: {{ openshift_machineset_aws_zones_odcr | unique | to_json }}
+{%   endif %}
+{% endif %}
+{% if cloud_provider == 'azure' %}
+    azure:
+      type: {{ worker_instance_type | to_json }}
+{% endif %}
+{% if cloud_provider == 'gcp' %}
+    gcp:
+      type: {{ worker_instance_type | to_json }}
 {% endif %}
 {% if cloud_provider == 'osp' %}
     openstack:
-      type: {{ worker_instance_type }}
+      type: {{ worker_instance_type | to_json }}
+{%   if worker_storage_type is defined and worker_storage_size is defined %}
+      rootVolume:
+        type: {{ worker_storage_type | to_json }}
+        size: {{ worker_storage_size | to_json }}
+{%   endif %}
 {% endif %}
-  replicas: {{ worker_instance_count }}
+  replicas: {{ worker_instance_count | int }}
 networking:
   clusterNetwork:
-  - cidr: 10.128.0.0/14
+  - cidr: {{ ocp_cluster_cidr | default('10.128.0.0/14') }}
     hostPrefix: 23
-  machineCIDR: 10.0.0.0/16
+  machineCIDR: {{ ocp4_machine_cidr | default('10.0.0.0/16') | to_json }}
   serviceNetwork:
-  - 172.30.0.0/16
+  - {{ ocp_service_network | default('172.30.0.0/16') }}
+{% if ocp4_network_type | default("OpenshiftSDN") is match("OVNKubernetes") %}
+  networkType: OVNKubernetes
+{% else %}
   networkType: OpenshiftSDN
+{% endif %}
 platform:
-{% if cloud_provider == 'ec2'| d(false) | bool %}
+{% if cloud_provider == 'ec2' %}
   aws:
-    region: {{ aws_region_final | d(aws_region) }}
-    userTags: {{ hostvars.localhost.cf_tags_final | d({}) | to_json }}
+    region: {{ aws_region_final | default(aws_region) | to_json }}
+    userTags: {{ hostvars.localhost.cf_tags_final | default({}) | to_json }}
+{% endif %}
+{% if cloud_provider == 'azure' %}
+  azure:
+    region: {{ azure_region | to_json }}
+    baseDomainResourceGroupName: {{ az_dnszone_resource_group | to_json }}
+    userTags: {{ hostvars.localhost.cf_tags_final | default({}) | to_json }}
+{% endif %}
+{% if cloud_provider == 'gcp' %}
+  gcp:
+    region: {{ gcp_region | to_json }}
+    ProjectID: {{ gcp_project_id | to_json }}
+    userTags: {{ hostvars.localhost.cf_tags_final | default({}) | to_json }}
 {% endif %}
 {% if cloud_provider == 'osp' %}
   openstack:
-    cloud: {{ osp_project_name }}
-    computeFlavor: 4c16g30d
-    externalNetwork: external
-    lbFloatingIP: {{ hostvars.localhost.ocp_api_fip }}
-    octaviaSupport: "1"
+    cloud: {{ osp_cloud_name | to_json }}
+{%   if ocp_use_single_network | bool %}
+    machinesSubnet: "{{ internal_network_subnet_id }}"
+{%   endif %}
+    computeFlavor: {{ worker_instance_type | to_json }}
+{%   if not ocp4_ansible_managed_osp_external_network | bool %}
+    externalNetwork: {{ provider_network | default('external') | to_json }}
+    lbFloatingIP: {{ hostvars.localhost.ocp_api_fip | to_json }}
+{%     if ocp4_installer_version is version_compare('4.6.0', '>=') %}
+    ingressFloatingIP: {{ hostvars.localhost.ocp_ingress_fip | to_json }}
+{%     endif %}
+{%   endif %}
+{%   if ocp4_installer_version is version_compare('4.6.0', '<') %}
+    octaviaSupport: {{ osp_octavia_support | default(true) | bool | to_json }}
     region: ""
-    trunkSupport: "0"
+    trunkSupport: {{ osp_trunk_support | default(true) | bool | to_json }}
+{%   endif %}
+{%   if rhcos_image_name is defined %}
+    clusterOSImage: {{ rhcos_image_name | to_json }}
+{%   endif %}
 {% endif %}
-pullSecret: '{{ ocp4_pull_secret |  replace("'",'"') }}'
-sshKey: |
-  {{ idrsapub.content | b64decode }}
+{# ocp4_pull_secret may be either a dict (mapping) or a JSON string.       #}
+{# The install-config.yaml needs an quoted JSON string for the pullSecret. #}
+{# Passing a json string through to_json gives us the quoted string.       #}
+{# To get to the quoted JSON string from a mapping we call to_json twice.  #}
+pullSecret: {{ ocp4_pull_secret | to_json | to_json if ocp4_pull_secret is mapping else ocp4_pull_secret | to_json }}
+sshKey: {{ idrsapub.content | b64decode | to_json }}

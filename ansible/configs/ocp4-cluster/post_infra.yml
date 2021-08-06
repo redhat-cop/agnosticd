@@ -1,50 +1,74 @@
-- name: Step 002 Post Infrastructure
+---
+- name: Step 002 - Post Infrastructure
   hosts: localhost
   connection: local
   become: false
+  gather_facts: false
   tags:
   - step002
   - post_infrastructure
-  environment:
-    OS_AUTH_URL: "{{ osp_auth_url }}"
-    OS_USERNAME: "{{ osp_auth_username }}"
-    OS_PASSWORD: "{{ osp_auth_password }}"
-    OS_PROJECT_NAME: "{{ osp_project_name }}"
-    OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
-    OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
   tasks:
-  - name: Create DNS entries for OpenShift FIPs
-    debug:
-      msg: Currently using {{ osp_cluster_dns_zone }} on server {{ osp_cluster_dns_server }}
-    when: openshift_fip_provision
+  - name: OpenStack Post Infrastructure
+    when: cloud_provider is match("osp")
+    environment:
+      OS_AUTH_URL: "{{ osp_auth_url }}"
+      OS_USERNAME: "{{ osp_auth_username }}"
+      OS_PASSWORD: "{{ osp_auth_password }}"
+      OS_PROJECT_NAME: "{{ osp_project_name }}"
+      OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+      OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+    block:
+    - name: OpenShift Floating IPs on OpenStack
+      include_role:
+        name: ocp-infra-osp-fip
 
-  - set_fact:
-      ocp_api_fip: "{{ hot_outputs | json_query(query) }}"
-    vars:
-      query: "outputs[?@.output_key=='ocp_api_fip'].output_value|[0]"
-    when: openshift_fip_provision
+  - name: GCP Post Infrastructure
+    when: cloud_provider is match("gcp")
+    block:
+    - name: Create secret for SSH Key
+      include_role:
+        name: infra-gcp-ssh-key
 
-  - set_fact:
-      ocp_ingress_fip: "{{ hot_outputs | json_query(query) }}"
-    vars:
-      query: "outputs[?@.output_key=='ocp_ingress_fip'].output_value|[0]"
-    when: openshift_fip_provision
+  - name: EC2 Post Infrastructure
+    when: cloud_provider is match("ec2")
+    block:
+    - name: get Route53User credentials from stack outputs
+      set_fact:
+        route53user: "{{ cloudformation_out_final.stack_outputs.Route53User }}"
+        route53user_access_key: "{{ cloudformation_out_final.stack_outputs.Route53UserAccessKey }}"
+        route53user_secret_access_key: "{{ cloudformation_out_final.stack_outputs.Route53UserSecretAccessKey }}"
+      when:
+      - cloudformation_out_final is defined
+      - cloudformation_out_final.stack_outputs.Route53UserAccessKey is defined
+      - cloudformation_out_final.stack_outputs.Route53UserSecretAccessKey is defined
 
-  - name: Add DNS entry for OpenShift API and ingress
-    nsupdate:
-      server: "{{ osp_cluster_dns_server }}"
-      zone: "{{ osp_cluster_dns_zone }}"
-      record: "{{ item.dns }}.{{ guid }}"
-      type: A
-      ttl: 5
-      value: "{{ item.name }}"
-      key_name: "{{ ddns_key_name }}"
-      key_secret: "{{ ddns_key_secret }}"
-    loop:
-      - name: "{{ ocp_api_fip }}"
-        dns: "api"
-      - name: "{{ ocp_ingress_fip }}"
-        dns: "*.apps"
-    loop_control:
-      label: item.name
-    when: openshift_fip_provision
+  - name: Azure Post Infrastructure
+    when: cloud_provider is match("azure")
+    block:
+    - name: Store SSH Key in shared keyvault
+      include_role:
+        name: infra-azure-ssh-key
+
+    - name: Set FQDN for the bastion VM
+      when: item.name is match('bastion')
+      set_fact:
+        rhel_remote_host: "{{item.fqdns|d(item.publicIps)|d('')}}"
+      with_items: "{{vm_list}}"
+    - name: Set FQDN for each Windows VM
+      set_fact:
+        windows_remote_hosts: ""
+    - name: Set FQDN for each Windows VM
+      when: item.name is match ('vmwin*')
+      set_fact:
+        windows_remote_hosts: "{{item.fqdns|d(item.publicIps)|d('')}},{{windows_remote_hosts}}"
+      with_items: "{{vm_list}}"
+
+    - name: Print Host Information
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+      - "Remote User: {{ remote_user }}"
+      - "RHEL Bastion Host: {{ rhel_remote_host }}"
+      - "Windows Host(s): {{ windows_remote_hosts }}"
+      - "Windows Password: {{ windows_password }}"
+      when: ocp4_cluster_show_access_user_info | bool

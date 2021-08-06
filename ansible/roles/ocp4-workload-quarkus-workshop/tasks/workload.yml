@@ -2,26 +2,41 @@
 ---
 # Implement your Workload deployment tasks here
 
-# Nuke quotas
-- name: TODO - need to replace with proper quotas
-  shell: |
-         oc delete userquota/default
-  ignore_errors: true
-
 # Access for admin
 - name: Give access to opentlc-mgr
   shell: |
          oc adm policy add-cluster-role-to-user cluster-admin opentlc-mgr
 
+- name: create module list
+  set_fact:
+    modules: "{{ module_type.split(';') | map('trim') | list }}"
+
+- name: Selected Modules
+  debug:
+    msg: "selected modules list: {{ modules }}"
+
+- name: Create CatalogSource Index 4.7
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - redhat-operators-index.yaml
+  - community-operators-index.yaml
+
 # Create projects for user
 - name: create projects for users
   include_tasks: create_project.yaml
   vars:
-    user: "{{ item }}"
-  with_list: "{{ users }}"
+    t_project_name: "{{ t_user }}-project"
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: t_user
 
-# Deploy guides
 - name: create guides project
+  when: num_users | int > 0
   k8s:
     state: present
     kind: Project
@@ -33,348 +48,79 @@
           openshift.io/description: ""
           openshift.io/display-name: "Quarkus Workshop Guides"
 
-- name: deploy guides
-  shell: >
-    oc new-app -n guides quay.io/osevg/workshopper --name=web
-    -e CHE_USER_NAME='{{ workshop_che_user_name}}'
-    -e CHE_USER_PASSWORD='{{ workshop_che_user_password }}'
-    -e OPENSHIFT_USER_NAME='{{ workshop_openshift_user_name }}'
-    -e OPENSHIFT_USER_PASSWORD='{{ workshop_openshift_user_password }}'
-    -e MASTER_URL={{ master_url }}
-    -e CONSOLE_URL={{ console_url }}
-    -e CHE_URL=http://codeready-che.{{ route_subdomain }}
-    -e KEYCLOAK_URL=http://keycloak-che.{{ route_subdomain }}
-    -e ROUTE_SUBDOMAIN={{ route_subdomain }}
-    -e CONTENT_URL_PREFIX='https://raw.githubusercontent.com/RedHatWorkshops/quarkus-workshop/master/docs/'
-    -e WORKSHOPS_URLS='https://raw.githubusercontent.com/RedHatWorkshops/quarkus-workshop/master/docs/{{ workshop_labs_url }}'
-    -e LOG_TO_STDOUT=true
-  ignore_errors: true
+- name: install guides
+  when: num_users | int > 0
+  include_tasks: install-guides.yaml
+  vars:
+    guide: "{{ item }}"
+  loop: "{{ modules }}"
 
-- name: create the Route for guides
-  k8s:
-    namespace: guides
-    state: present
-    kind: Route
-    definition:
-      metadata:
-        name: web
-        labels:
-          app: web
-      spec:
-        host: ''
-        to:
-          kind: Service
-          name: web
-          weight: 100
-        port:
-          targetPort: 8080-tcp
-  register: Route
+- name: install username distribution
+  when: num_users | int > 0
+  include_tasks: install-username-distribution.yaml
 
-# Install Che via operator
-- name: Create OpenShift Objects for Che
-  k8s:
-    state: present
-    merge_type:
-    - strategic-merge
-    - merge
-    definition: "{{ lookup('file', item ) | from_yaml }}"
-  loop:
-  - ./files/codeready_namespace.yaml
-  - ./files/codeready_operatorgroup.yaml
-  - ./files/codeready_catalog_source.yaml
-  - ./files/codeready_subscription.yaml
-
-- name: Wait for CodeReady CRD
+- name: search for rhsso
   k8s_facts:
-    api_version: apiextensions.k8s.io/v1beta1
-    kind: CustomResourceDefinition
-    name: checlusters.org.eclipse.che
-  register: r_codeready_crd
-  retries: 200
-  delay: 10
-  ignore_errors: yes
-  until: r_codeready_crd.resources | list | length == 1
+    kind: DeploymentConfig
+    name: rhsso
+    namespace: rhsso
+  register: r_rhsso_dc
 
-- name: Notify user if CodeReady deployment failed
-  when: not r_codeready_crd.resources | list | length == 1
-  debug:
-    msg: "user.info: *** CodeReady operator could not be installed ***"
+- name: install rhsso
+  when: r_rhsso_dc.resources | list | length == 0
+  include_tasks: install-rhsso.yaml
 
-- name: Look for CodeReady CR
+
+# Install CRW via operator
+- name: see if codeready is installed
   k8s_facts:
+    api_version: org.eclipse.che/v1
     kind: CheCluster
-    namespace: che
-    name: codeready
+    name: codeready-workspaces
+    namespace: codeready
   register: r_codeready_cr
 
-- name: show cr
+- name: show codeready cr
   debug:
-    msg: "existing codeready cr: {{ r_codeready_cr }}"
+    msg: "existing codeready project: {{ r_codeready_cr }}"
 
-- name: Create OpenShift Objects for CodeReady if not existing
+- name: install codeready
   when: r_codeready_cr.resources | list | length == 0
-  k8s:
-    state: present
-    merge_type:
-    - strategic-merge
-    - merge
-    definition: "{{ lookup('file', item ) | from_yaml }}"
-  loop:
-  - ./files/codeready.yaml
+  include_tasks: install-codeready.yaml
 
-- name: wait for CRW to be running
-  uri:
-    url: http://codeready-che.{{ route_subdomain }}/dashboard/
-  register: result
-  until: result.status == 200
-  retries: "120"
-  delay: "15"
-  tags: eclipse-che
-
-- name: Search for CodeReady ConfigMap
+  # Install  AMQ Streams for all workspaces
+- name: Look for amq subscription
   k8s_facts:
-    kind: ConfigMap
-    namespace: che
-    name: custom
-  register: codeready_cm
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: amq-streams
+    namespace: openshift-operators
+  register: r_amq_sub
 
-- name: show cm object
+- name: show existing amq sub
   debug:
-    msg: "Codeready Configmap: {{ codeready_cm }}"
+    msg: "existing amq sub: {{ r_amq_sub }}"
 
-# Workaround for PVC problem
-- name: Alternative to volumeBindingMode=WaitForFirstConsumer
-  when: (codeready_cm.resources[0].data.CHE_INFRA_KUBERNETES_PVC_WAIT__BOUND is undefined) or (codeready_cm.resources[0].data.CHE_INFRA_KUBERNETES_PVC_WAIT__BOUND == true)
-  k8s:
-    state: present
-    merge_type:
-      - strategic-merge
-      - merge
-    definition: "{{ lookup('file', './files/cm-custom-codeready.yaml' ) | from_yaml }}"
+- name: Create OpenShift Objects for Kafka (amq streams)
+  when: r_amq_sub.resources | list | length == 0
+  include_tasks: install-amqstreams.yaml
 
-- name: Search for CodeReady Pod
+  # Install  Jaeger for all workspaces
+- name: Look for jaeger subscription
   k8s_facts:
-    kind: Pod
-    namespace: che
-    label_selectors:
-    - app = codeready
-    - component = codeready
-  register: codeready_pod
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: jaeger-product
+    namespace: openshift-operators
+  register: r_jaeger_sub
 
-- name: Restart CodeReady Pod
-  when: (codeready_cm.resources[0].data.CHE_INFRA_KUBERNETES_PVC_WAIT__BOUND is undefined) or (codeready_cm.resources[0].data.CHE_INFRA_KUBERNETES_PVC_WAIT__BOUND == true)
-  k8s:
-    state: absent
-    api_version: v1
-    kind: Pod
-    name: "{{ codeready_pod.resources[0].metadata.name }}"
-    namespace: che
-
-- name: wait for CRW to be running after PVC workaround
-  when: (codeready_cm.resources[0].data.CHE_INFRA_KUBERNETES_PVC_WAIT__BOUND is undefined) or (codeready_cm.resources[0].data.CHE_INFRA_KUBERNETES_PVC_WAIT__BOUND == true)
-  uri:
-    url: http://codeready-che.{{ route_subdomain }}/dashboard/
-  register: result
-  until: result.status == 200
-  retries: "120"
-  delay: "15"
-  tags: eclipse-che
-
-# get ingress host
-- name: Get ingress host
-  k8s_facts:
-    api_version: v1
-    kind: Service
-    name: router-default
-    namespace: openshift-ingress
-  register: r_router_default
-
-- name: Show ingress object
+- name: show existing jaeger sub
   debug:
-    msg: "Ingress object: {{ r_router_default }}"
+    msg: "existing jaeger sub: {{ r_jaeger_sub }}"
 
-- name: Show ingress host name
-  debug:
-    msg: "Ingress hostname: {{ r_router_default.resources[0].status.loadBalancer.ingress[0].hostname }}"
-
-# Fix AWS ELB connection timeout
-- name: Get ELB name
-  become_user: ec2-user
-  shell: |
-    sudo -u ec2-user aws elb describe-load-balancers --region {{ aws_region }} | jq  '.LoadBalancerDescriptions |
-      map(select( .DNSName == "{{ r_router_default.resources[0].status.loadBalancer.ingress[0].hostname }}"))' |
-      jq -r '.[0].LoadBalancerName'
-  register: lbname
-
-- name: Show load balancer name
-  debug:
-    msg: "Load balancer name: {{ lbname.stdout }}"
-
-- name: Fix load balancer
-  become_user: ec2-user
-  shell: |
-    sudo -u ec2-user aws elb modify-load-balancer-attributes --region {{ aws_region }} --load-balancer-name {{ lbname.stdout }} --load-balancer-attributes "{\"ConnectionSettings\":{\"IdleTimeout\":300}}"
-
-# add keycloak realm
-- name: Get SSO username
-  shell: |
-    oc get deployment keycloak -n che -o=jsonpath={'.spec.template.spec.containers[0].env[?(@.name=="SSO_ADMIN_USERNAME")].value'}
-  register: sso_admin_username
-
-- name: Get SSO password
-  shell: |
-    oc get deployment keycloak -n che -o=jsonpath={'.spec.template.spec.containers[0].env[?(@.name=="SSO_ADMIN_PASSWORD")].value'}
-  register: sso_admin_password
-
-- name: Print SSO connection info
-  debug:
-    msg: "url: http://keycloak-che.{{ route_subdomain }} username: {{ sso_admin_username.stdout }} password: {{ sso_admin_password.stdout }}"
-
-- name: Get SSO admin token
-  uri:
-    url: http://keycloak-che.{{ route_subdomain }}/auth/realms/master/protocol/openid-connect/token
-    method: POST
-    body:
-      username: "{{ sso_admin_username.stdout }}"
-      password: "{{ sso_admin_password.stdout }}"
-      grant_type: "password"
-      client_id: "admin-cli"
-    body_format: form-urlencoded
-    status_code: 200,201,204
-  register: sso_admin_token
-
-- name: Import realm
-  uri:
-    url: http://keycloak-che.{{ route_subdomain }}/auth/admin/realms
-    method: POST
-    body_format: json
-    headers:
-      Content-Type: application/json
-      Authorization: "Bearer {{ sso_admin_token.json.access_token }}"
-    body: "{{ lookup('file', './files/quarkus-realm.json') }}"
-    ## accept 409 Conflict in case realm exists
-    status_code: 200,201,204,409
-
-# Add users to Che
-- name: Add users to che
-  include_tasks: add_che_user.yaml
-  vars:
-    user: "{{ item }}"
-  with_list: "{{ users }}"
-
-# Import stack definition
-- name: Get Che admin token
-  uri:
-    url: http://keycloak-che.{{ route_subdomain }}/auth/realms/codeready/protocol/openid-connect/token
-    method: POST
-    body:
-      username: admin
-      password: admin
-      grant_type: "password"
-      client_id: "admin-cli"
-    body_format: form-urlencoded
-    status_code: 200,201,204
-  register: che_admin_token
-
-- name: Import stack definition
-  uri:
-    url: http://codeready-che.{{ route_subdomain }}/api/stack
-    method: POST
-    headers:
-      Content-Type: application/json
-      Authorization: "Bearer {{ che_admin_token.json.access_token }}"
-    body: "{{ lookup('file', './files/stack.json') }}"
-    body_format: json
-    ## accept 409 in case it already exists
-    status_code: 201,409
-
-# Get stack definition
-- name: Get stack definitions
-  uri:
-    url: http://codeready-che.{{ route_subdomain }}/api/stack
-    method: GET
-    headers:
-      Authorization: "Bearer {{ che_admin_token.json.access_token }}"
-    status_code: 200
-  register: stack_definitions
-
-- name: Set Stack permissions
-  uri:
-    url: http://codeready-che.{{ route_subdomain }}/api/permissions
-    method: POST
-    headers:
-      Content-Type: application/json
-      Authorization: "Bearer {{ che_admin_token.json.access_token }}"
-    body:
-      userId: "*"
-      domainId: "stack"
-      instanceId: "{{ item }}"
-      actions: ["read", "search"]
-    body_format: json
-    status_code: 204
-  with_list: "{{ stack_definitions | json_query('json[*].id') }}"
-
-# Adjust che limits
-- name: Delete default limitrange
-  shell: |
-    oc delete limitrange che-core-resource-limits -n che
-  ignore_errors: true
-
-- name: Create a new limitrange
-  template:
-    src: ./templates/che-limitrange.j2
-    dest: /tmp/che-limitrange.yaml
-- shell: |
-    oc create -f /tmp/che-limitrange.yaml -n che
-
-- name: Import stack imagestream
-  k8s:
-    state: present
-    merge_type:
-    - strategic-merge
-    - merge
-    definition: "{{ lookup('template', item ) | from_yaml }}"
-  loop:
-  - ./templates/stack.imagestream.j2
-
-- name: Wait for ImageStream definition
-  k8s_facts:
-    kind: ImageStream
-    name: quarkus-stack
-    namespace: openshift
-  register: r_imagestream_d
-  retries: 200
-  delay: 10
-  ignore_errors: yes
-  until: r_imagestream_d.resources | list | length == 1
-
-- name: print imagestream
-  debug:
-    msg: "imagestream: {{ r_imagestream_d }}"
-
-- name: import imagestream
-  shell: |
-    oc import-image --all quarkus-stack -n openshift
-
-- name: Pre-create user workspaces
-  include_tasks: create_che_workspace.yaml
-  vars:
-    user: "{{ item }}"
-  with_list: "{{ users }}"
-
-
-  # Install Strimzi operator for all workspaces
-  # Install Che via operator
-- name: Create OpenShift Objects for Strimzi
-  k8s:
-    state: present
-    merge_type:
-    - strategic-merge
-    - merge
-    definition: "{{ lookup('file', item ) | from_yaml }}"
-  loop:
-  - ./files/strimzi_catalog_source.yaml
-  - ./files/strimzi_subscription.yaml
+- name: Create OpenShift Objects for Jaeger
+  when: r_jaeger_sub.resources | list | length == 0
+  include_tasks: install-jaeger.yaml
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete

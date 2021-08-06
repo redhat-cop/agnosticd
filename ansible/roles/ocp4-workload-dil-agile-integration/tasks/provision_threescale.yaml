@@ -1,0 +1,123 @@
+---
+- name: Evaluate {{ threescale_project }} namespace if not exists 
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ threescale_project }}'
+    state: present
+
+- name: Evaluate 3scale Operator Group
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-operatorgroup.yaml.j2') }}"
+
+- name: Evaluate 3scale Subscription
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-subscription.yaml.j2') }}"
+
+- name: Wait for 3scale operator to install
+  k8s_info:
+    api_version: apiextensions.k8s.io/v1beta1
+    kind: CustomResourceDefinition
+    name: apimanagers.apps.3scale.net
+  register: crd_threescale
+  until: crd_threescale.resources | list | length == 1
+  retries: 10
+  delay: 30
+
+- name: Deploy 3scale RWO storage
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-storage.yaml.j2') }}"
+
+- name: Deploy 3scale API Manager
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-apimanager.yaml.j2') }}"
+
+
+# wait to APIManager resource creation
+- name: Wait for 3scale pods to be ready
+  k8s_facts:
+    api_version: v1
+    kind: DeploymentConfig
+    namespace: "{{ threescale_project }}"
+    name: apicast-production
+  register: r_dc
+  until:
+    - r_dc is defined
+    - r_dc.resources is defined
+    - r_dc.resources | list | length > 0
+    - r_dc.resources[0].status is defined
+    - r_dc.resources[0].status.readyReplicas is defined
+    - r_dc.resources[0].status.readyReplicas | int >= 1
+  retries: 60
+  delay: 15
+
+  # Wait for 3scale Master Route to be created
+
+- name: Wait for 3scale Master to be running
+  uri:
+    url: https://master.{{ route_subdomain }}
+    status_code: '200'
+  register: result
+  until: result.status == 200
+  retries: 90
+  delay: 30
+
+
+- name: Provision tenants
+  include_tasks: user_tenant.yaml
+  loop: "{{ range(1, num_users|int + 1, 1)|list }}"
+  when:
+    - num_users|int > 0
+
+- name: Provision 3scale OAuthClient
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-oauthclient.yaml.j2') }}"
+
+
+- name: Provision 3scale ConfigMap
+  k8s:
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: system
+        namespace: '{{ threescale_project }}'
+      data:
+        service_discovery.yml: |
+          production:
+            enabled: true
+            authentication_method: oauth
+            oauth_server_type: builtin
+            client_id: '3scale'
+            client_secret: '{{ ocp4_workload_dil_agile_integration_oauthclient_secret }}'   
+
+- name: Bounce system-app       
+  command: "oc rollout latest dc/system-app -n {{ threescale_project }}"
+  register: system_app_bounced
+
+- name: Bounce system-sidekiq        
+  command: "oc rollout latest dc/system-sidekiq -n {{ threescale_project }}"
+  register: system_sidekiq_bounced
+
+# wait to system-app resource creation
+- name: Wait for 3scale pods to be ready
+  k8s_facts:
+    api_version: v1
+    kind: DeploymentConfig
+    namespace: "{{ threescale_project }}"
+    name: system-app
+  register: r_dc
+  until:
+    - r_dc is defined
+    - r_dc.resources is defined
+    - r_dc.resources | list | length > 0
+    - r_dc.resources[0].status is defined
+    - r_dc.resources[0].status.readyReplicas is defined
+    - r_dc.resources[0].status.readyReplicas | int >= 1
+  retries: 60
+  delay: 15  

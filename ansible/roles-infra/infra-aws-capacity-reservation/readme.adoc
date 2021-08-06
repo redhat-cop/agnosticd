@@ -1,0 +1,162 @@
+This role implements link:https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-reservations.html[on-demand capacity reservation] in agnosticd.
+
+== Core role `agnosticd_aws_capacity_reservation` ==
+
+The goal of the role is to provide a way to make sure the capacity is reserved in the early stages of agnosticd (pre_infra), instead of failing later when it tries to create the instances.
+
+
+input:
+
+[source,yaml]
+.In agnosticv
+----
+# credentials must be set
+aws_access_key_id: ...
+aws_secret_access_key: ...
+agnosticd_aws_capacity_reservation_region:  # <1>
+  - us-east-1
+  - us-east-2
+
+# Must the zones all be distinct ?
+agnosticd_aws_capacity_reservation_distinct: false # <2>
+
+agnosticd_aws_capacity_reservations:
+  az1:
+    - instance_count: 1
+      instance_platform: Linux/UNIX # <3>
+      instance_type: t3a.medium
+    - instance_count: 2
+      instance_platform: Linux/UNIX
+      instance_type: m5a.4xlarge
+  az2:
+    - instance_count: 3
+      instance_platform: Linux/UNIX
+      instance_type: m5a.2xlarge
+----
+<1> for mono-region provisioning, here we can use `aws_region` passed from cloudforms:
++
+----
+regions:
+- "{{ aws_region }}"
+----
+<2> When set to true, the module will always pick distinct zones.
+<3> For Red Hat Entreprise Linux, use `Red Hat Enterprise Linux`, for RHEL *GOLD* images, use `Linux/UNIX`. For more info, please see link:https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-reservations.html#capacity-reservations-platforms[upstream documentation].
+
+WARNING: reservation groups are requested alphabetically. In the above example, az1 comes first, then az2.  That is important and to be taken into consideration if you set `agnosticd_aws_capacity_reservation_distinct` to `true` because you can easily run out of Availability Zones and increase provision failures. Unless mandatory, it is not recommended to use distinct zones.
+
+Ideally, `agnosticd_aws_capacity_reservations` variable should be configured in `default_vars_ec2.yaml` directly in the config or as `pre_infra` step in the config. For ex:
+[source,yaml]
+.input as part of `default_vars_ec2.yaml`
+----
+agnosticd_aws_capacity_reservation_regions:
+  - "{{ aws_region }}"
+agnosticd_aws_capacity_reservations:
+  az1:
+    - instance_count: 1
+      instance_platform: Linux/UNIX
+      instance_type: "{{ bastion_instance_type }}"
+    - instance_count: "{{ worker_instance_count }}"
+      instance_platform: Linux/UNIX
+      instance_type: "{{ worker_instance_type }}"
+  az2:
+    - instance_count: "{{ master_instance_count }}"
+      instance_platform: Linux/UNIX
+      instance_type: "{{ master_instance_type }}"
+----
+
+WARNING: Make sure not to pass `aws_region` as extra-vars if you set several regions in `agnosticd_aws_capacity_reservation_regions`. If it's set as extra-vars, it will take precedence regardless of what's set by the role and provision will fail.
+
+The role sets the following variables, that can be used in later stages in agnosticd:
+
+.output
+[source,yaml]
+----
+aws_region: us-east-1
+
+agnosticd_aws_capacity_reservation_results:
+  region: us-east-1
+  reservations:
+    az1:
+      availability_zone: us-east-1a
+      reservations_ids:
+        - cr-03ede0234dabf424e
+        - cr-08daa70b36405528d
+    az2:
+      availability_zone: us-east-1b
+      reservations_ids:
+        - cr-07d8ae35483fe8c98
+----
+
+az1 and az2 keys must be chosen carefully and must make sense in the agnosticd config which must support the use of the `agnosticd_aws_capacity_reservation_results` dictionary.
+:
+
+NOTE: az1 and az2 found by the role are not necessarly different, they can be the same. The goal of the role is to provide capacity. Later we could add an option to ensure it's spread across AZs and that all the AZ are different. But that's not part of initial implementation.
+
+If there is only one AZ key in the `agnosticd_aws_capacity_reservations` dictionary (all instances are in the same availability zone), then the role also automatically sets the variable `aws_availability_zone`:
+
+[source,yaml]
+.Output with only one AZ
+----
+agnosticd_aws_capacity_reservation_results:
+  region: us-east-1
+  single_availability_zone: us-east-1a
+  reservations:
+    az1:
+      availability_zone: us-east-1a
+      reservations_ids:
+        - cr-03ede0234dabf424e
+        - cr-08daa70b36405528d
+
+aws_region: us-east-1
+aws_availability_zone: us-east-1a
+----
+
+=== How ? ===
+
+The role iterates on all the regions asked, and then for each reservation group, tries to create the capacity reservations in the available AZs.
+
+NOTE: During that process, if a reservation for an instance type fails, the role deletes previous capacity reservations made on that AZ for the other instances types and continues with the next AZ on the list, until an AZ that can host all instances types of the reservation group is found. The role rely on an action plugin, link:../../action_plugins/agnosticd_odcr.py[agnosticd_odcr.py]. The logic is implemented there in python since those kinds of task are difficult to approach and hard to maintain in ansible.
+
+The capacity reservation is created with a *TTL of 1h*. That should give plenty of time for agnosticd to create the infra.
+
+When several instance types are under the same AZ group, only an AZ that can host all of them will be selected.
+
+WARNING: Keep in mind that if `aws_region` or `aws_availability_zone` are defined as extra-vars (agnosticV or simply passed to ansible), then the role does not override them, and provision is likely to fail if they differ.
+
+[source,yaml]
+.reservation properties
+----
+  - instance_count: Integer
+    instance_match_criteria: open | targeted # <1>
+    instance_platform: String # (usually  Linux/UNIX)
+    instance_type: String  # ex: m5a.4xlarge
+    tenancy: default | dedicated # <2>
+----
+<1> default: open, in case of targeted, the revervation IDs must be used in the config
+<2>  shared or dedicated hardware. You probably want to keep the default. For more info see https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/dedicated-instance.html
+
+For more info, see link:https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-capacityreservation.html#cfn-ec2-capacityreservation-tagspecifications[AWS doc].
+
+When `instance_match_criteria` is set to `targeted`, the agnosticd config must support it and the ids must be used in the config, otherwise the reservation will not be used by the instances.
+
+=== Should i use open or targeted ? ===
+
+When you're in sandboxes, you can use `open`, and should not really care about `targeted`, as the only thing running in the sandbox will be the current provision.
+
+When in a shared account (ex: GPTE prod account 'gpe'), `targeted` should be used, otherwise there is no guarantee which instances will be part of the reservation. Already running instances could match the criteria of the reservation.
+
+At first we would probably use this feature only as `open`, in AWS sandboxes.
+
+WARNING: If you use `targeted`, keep in mind to adjust the TTL properly. Instances targeting a capacity reservation cannot be easily stopped/started. The instances can no longer launch if the target capacity reservation has expired or was canceled.
+
+[source,yaml]
+----
+agnosticd_aws_capacity_reservation_ttl: 1h
+----
+
+=== When ? ===
+
+The role would be executed if:
+
+* `agnosticd_aws_capacity_reservations` is defined and not empty
+* `agnosticd_aws_capacity_reservation_enable` is true (default is true)

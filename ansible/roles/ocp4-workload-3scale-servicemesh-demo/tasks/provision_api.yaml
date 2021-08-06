@@ -1,0 +1,318 @@
+---
+- name: Retrieve 3scale Admin URL and token from 
+  k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "system-seed"
+    namespace: "{{ threescale_project }}"
+  register: _3scale_secret
+  retries: 3
+  delay: 5
+  until:
+    - _3scale_secret.resources is defined
+    - _3scale_secret.resources | length | int > 0
+    - _3scale_secret.resources[0].data is defined
+    - _3scale_secret.resources[0].data.TENANT_NAME is defined
+
+- name: Setting 3scale tenant parameters - provider key and admin url
+  set_fact:
+    _tenant_provider_key: "{{ _3scale_secret.resources[0].data.ADMIN_ACCESS_TOKEN | b64decode }}"
+    _tenant_admin_url: "https://{{ _3scale_secret.resources[0].data.TENANT_NAME | b64decode }}-admin.{{route_subdomain}}"
+
+- name: Setting the _tenant_basic_auth_token param
+  set_fact:
+    _tenant_basic_auth_token: "Basic {{ (':' + _tenant_provider_key) | b64encode }}"
+
+- name: Create Provider Account secret
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-provider-account.yaml.j2') }}" 
+  vars:
+    adminURL: '{{ _tenant_admin_url }}'
+    token: '{{ _tenant_provider_key }}'
+
+- name: Create BookInfo Backend
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-bookinfo-backend.yaml.j2') }}" 
+
+
+- name: Wait to synchronize the  Backend CRD with 3scale
+  k8s_info:
+    api_version: capabilities.3scale.net/v1beta1
+    kind: Backend
+    name: "bookinfo-istio-backend"
+    namespace: "{{ threescale_project }}"
+  register: _wait_backend
+  retries: 8
+  delay: 15
+  until:
+  - _wait_backend.resources is defined
+  - _wait_backend.resources | length | int > 0
+  - _wait_backend.resources[0].status is defined
+  - _wait_backend.resources[0].status.conditions is defined
+  - ( _wait_backend.resources[0].status | to_json | from_json |
+    json_query('conditions[?type == `Synced`].status') | join ) == "True"
+
+- name: Create BookInfo API Product
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-bookinfo-product.yaml.j2') }}"    
+
+
+- name: Wait to synchronize the  Product CRD with 3scale
+  k8s_info:
+    api_version: capabilities.3scale.net/v1beta1
+    kind: Product
+    name: "bookinfo-api-product"
+    namespace: "{{ threescale_project }}"
+  register: _wait_product
+  retries: 8
+  delay: 15
+  until:
+  - _wait_product.resources is defined
+  - _wait_product.resources | length | int > 0
+  - _wait_product.resources[0].status is defined
+  - _wait_product.resources[0].status.conditions is defined
+  - ( _wait_product.resources[0].status | to_json | from_json |
+    json_query('conditions[?type == `Synced`].status') | join ) == "True"    
+
+- name: Extract Product Id from Product CRD
+  set_fact:
+    _bookinfo_api_product_id: '{{_wait_product.resources[0].status.productId }}'
+
+# Create Applications for each Service
+- name: Get the Developer account id
+  uri:
+    method: GET
+    url: "{{_tenant_admin_url}}/admin/api/accounts.xml"
+    headers:
+      Authorization: "{{ _tenant_basic_auth_token }}"
+    return_content: true
+    status_code: 200
+  register: _tenant_account_list
+  until: _tenant_account_list is defined
+
+- name: Extract Developer Account ID
+  xml:
+    xmlstring: "{{_tenant_account_list.content}}"
+    xpath: //accounts/account[1]/id
+    content: text
+  register: _tenant_developer_id_parse
+
+
+- name: Set _tenant_developer_id
+  set_fact: _tenant_developer_id={{ _tenant_developer_id_parse.matches[0].id }}  
+
+
+- name: Get BookInfo API Basic Application Plan 
+  uri:
+    method: GET
+    url: "{{_tenant_admin_url}}/admin/api/services/{{_bookinfo_api_product_id}}/application_plans.xml"
+    headers:
+      Authorization: "{{ _tenant_basic_auth_token }}"
+    return_content: true
+    status_code: 200
+  register: _3scale_app_plan_list
+  until: _3scale_app_plan_list is defined
+
+- name: Extract BookInfo Basic Application Plan ID
+  xml:
+    xmlstring: "{{_3scale_app_plan_list.content}}"
+    xpath: //plans/plan/id
+    content: text
+  register: _bookinfo_application_plan_id_parse 
+
+- name: Set _bookinfo_application_plan_id
+  set_fact: _bookinfo_application_plan_id={{ _bookinfo_application_plan_id_parse.matches[0].id }}  
+
+
+
+- name: Debug API & Account Ids
+  debug:
+    msg:
+    - "BookInfo API Product id: {{ _bookinfo_api_product_id }}" 
+    - "Developer Account id: {{ _tenant_developer_id }}"
+    - "BookInfo API Basic Application Plan id: {{ _bookinfo_application_plan_id }}"
+
+
+
+- name: Create BookInfo API Basic Application for Developer Account 
+  uri:
+    method: POST
+    url: "{{_tenant_admin_url}}/admin/api/accounts/{{_tenant_developer_id}}/applications.xml"
+    headers:
+      Authorization: "{{ _tenant_basic_auth_token }}"
+    return_content: true
+    body_format: form-urlencoded
+    body:
+    - [ plan_id, "{{_bookinfo_application_plan_id}}" ]
+    - [ name, "BookInfo Basic App" ]
+    - [ description, "BookInfo basic Application" ]
+    - [ user_key, "{{ocp4_workload_3scale_servicemesh_demo_api_user_key}}" ]    
+    status_code: 201
+  register: _3scale_app_create_response
+  until: _3scale_app_create_response is defined
+
+- name: Promote BookInfo API to Staging 
+  uri:
+    method: POST
+    url: "{{_tenant_admin_url}}/admin/api/services/{{_bookinfo_api_product_id}}/proxy/deploy.xml"
+    headers:
+      Authorization: "{{ _tenant_basic_auth_token }}"
+    return_content: true
+    status_code: 201
+  register: _3scale_proxy_deploy_response
+  until: _3scale_proxy_deploy_response is defined  
+
+
+# Create 3scale Mixer Adapter Custom Resources & BookInfo Istio API in 3scale
+- name: Create BookInfo Istio Product
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-bookinfo-istio-product.yaml.j2') }}"      
+
+- name: Wait to synchronize the  Product Istio CRD with 3scale
+  k8s_info:
+    api_version: capabilities.3scale.net/v1beta1
+    kind: Product
+    name: "bookinfo-istio-product"
+    namespace: "{{ threescale_project }}"
+  register: _wait_istio_product
+  retries: 8
+  delay: 15
+  until:
+  - _wait_istio_product.resources is defined
+  - _wait_istio_product.resources | length | int > 0
+  - _wait_istio_product.resources[0].status is defined
+  - _wait_istio_product.resources[0].status.conditions is defined
+  - ( _wait_istio_product.resources[0].status | to_json | from_json |
+    json_query('conditions[?type == `Synced`].status') | join ) == "True"    
+
+- name: Extract Product Id from Product CRD
+  set_fact:
+    _bookinfo_istio_product_id: '{{_wait_istio_product.resources[0].status.productId }}'
+
+
+- name: Get BookInfo Istio API Basic Application Plan 
+  uri:
+    method: GET
+    url: "{{_tenant_admin_url}}/admin/api/services/{{_bookinfo_istio_product_id}}/application_plans.xml"
+    headers:
+      Authorization: "{{ _tenant_basic_auth_token }}"
+    return_content: true
+    status_code: 200
+  register: _3scale_istio_app_plan_list
+  until: _3scale_istio_app_plan_list is defined
+
+- name: Extract BookInfo Istio Basic Application Plan ID
+  xml:
+    xmlstring: "{{_3scale_istio_app_plan_list.content}}"
+    xpath: //plans/plan/id
+    content: text
+  register: _bookinfo_istio_application_plan_id_parse   
+
+- name: Set _bookinfo_istio_application_plan_id
+  set_fact: _bookinfo_istio_application_plan_id={{ _bookinfo_istio_application_plan_id_parse.matches[0].id }}  
+
+- name: Update BookInfo Istio API deployment to Istio 
+  uri:
+    method: PUT
+    url: "{{_tenant_admin_url}}/admin/api/services/{{_bookinfo_istio_product_id}}.xml"
+    headers:
+      Authorization: "{{ _tenant_basic_auth_token }}"
+    return_content: true
+    body_format: form-urlencoded
+    body:
+    - [ deployment_option, service_mesh_istio ]
+    status_code: 200
+  register: _3scale_istio_product_update_response
+  until: _3scale_istio_product_update_response is defined
+
+- name: Create BookInfo Istio API Basic Application for Developer Account 
+  uri:
+    method: POST
+    url: "{{_tenant_admin_url}}/admin/api/accounts/{{_tenant_developer_id}}/applications.xml"
+    headers:
+      Authorization: "{{ _tenant_basic_auth_token }}"
+    return_content: true
+    body_format: form-urlencoded
+    body:
+    - [ plan_id, "{{_bookinfo_istio_application_plan_id}}" ]
+    - [ name, "BookInfo Istio Basic App" ]
+    - [ description, "BookInfo Istio basic Application" ]
+    - [ user_key, "{{ocp4_workload_3scale_servicemesh_demo_istio_user_key}}" ]    
+    status_code: 201
+  register: _3scale_istio_app_create_response
+  until: _3scale_istio_app_create_response is defined
+
+- name: Promote BookInfo Istio API to Production 
+  uri:
+    method: POST
+    url: "{{_tenant_admin_url}}/admin/api/services/{{_bookinfo_istio_product_id}}/proxy/deploy.xml"
+    headers:
+      Authorization: "{{ _tenant_basic_auth_token }}"
+    return_content: true
+    status_code: 201
+  register: _3scale_proxy_istio_deploy_response
+  until: _3scale_proxy_istio_deploy_response is defined  
+
+# Provision 3scale Istio Adapter Resources in Istio Namespace
+- name: Provision 3scale Handler
+  k8s:
+    state: present
+    definition:
+      apiVersion: config.istio.io/v1alpha2
+      kind: handler
+      metadata:
+        name: 'threescale'
+        namespace: '{{ ossm_project }}'
+      spec:
+        adapter: threescale
+        connection:
+          address: "threescale-istio-adapter:3333"
+        params:
+          access_token: "{{ _tenant_provider_key }}"
+          system_url: "{{ _tenant_admin_url }}"
+
+- name: Provision 3scale Instance
+  k8s:
+    state: present
+    definition:
+      apiVersion: config.istio.io/v1alpha2
+      kind: instance
+      metadata:
+        name: 'threescale'
+        namespace: '{{ ossm_project }}'
+      spec:
+        params:
+          action:
+            method: request.method | "get"
+            path: request.url_path
+            service: destination.labels["service-mesh.3scale.net/service-id"] | ""
+          subject:
+            client_id: 'request.auth.claims["azp"] | ""'
+            properties:
+              app_id: 'request.query_params["app_id"] | request.headers["app-id"] | ""'
+              app_key: 'request.query_params["app_key"] | request.headers["app-key"] | ""'
+            user: 'request.query_params["user_key"] | request.headers["x-user-key"] | ""'
+        template: threescale-authorization
+
+- name: Provision 3scale Rule
+  k8s:
+    state: present
+    definition:
+      apiVersion: config.istio.io/v1alpha2
+      kind: rule
+      metadata:
+        name: 'threescale'
+        namespace: '{{ ossm_project }}'
+      spec:
+        actions:
+        - handler: 'threescale'
+          instances:
+          - 'threescale'
+        match: |-
+          context.reporter.kind == "inbound" &&
+          destination.labels["service-mesh.3scale.net/credentials"] == "threescale" &&
+          destination.labels["service-mesh.3scale.net/authentication-method"] == ""

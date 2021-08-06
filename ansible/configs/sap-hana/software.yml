@@ -8,7 +8,7 @@
         msg: "Software tasks Started"
 
 - name: Ensure NFS Server is installed, SAP Software Device Mounted and Ansible Installed
-  hosts: bastion
+  hosts: bastions
   become: True
   gather_facts: True
   tasks:
@@ -21,42 +21,21 @@
     - name: Mount up device by UUID
       mount:
         path: /nfs
-        src: /dev/vdb
+        src: "/dev/{{ sap_software_device }}"
         fstype: xfs
         state: present
 
     - name: 'Ensure required packages are installed'
       package:
-        name: '{{ item }}'
+        name: nfs-utils
         state: installed
-      with_items:
-      - nfs-utils
-      - firewalld
-
-    - name: 'Ensure firewalld is running'
-      service:
-        name: firewalld
-        state: started
-        enabled: yes
-
-    - name: 'Open Firewall for NFS use'
-      firewalld:
-        port: "{{ item }}"
-        permanent: yes
-        state: enabled
-        immediate: yes
-      with_items:
-      - 111/tcp
-      - 111/udp
-      - 2049/tcp
-      - 2049/udp
 
     - name: "Ensure export file contains the directory to be shared"
       lineinfile:
         path: /etc/exports
         state: present
         regexp: "^/nfs"
-        line: "/nfs *(insecure,rw,root_squash,no_wdelay,sync)"
+        line: "/nfs *(insecure,rw,no_root_squash,no_wdelay,sync)"
 
     - name: 'Ensure nfs-server is restarted and running'
       service:
@@ -64,10 +43,73 @@
         state: restarted
         enabled: yes
 
-    - name: Ensure Ansible is installed
+    - name: Ensure additional packages are installed
       yum:
-        name: ansible
+        name:
+          - ansible
+          - java-1.8.0-openjdk
+          - rhel-system-roles-sap
         state: latest
+
+    - name: Ensure /nfs directory is owned by '{{ remote_user }}'
+      file:
+        path: /nfs
+        state: directory
+        owner: "{{ remote_user }}"
+
+    - name: Ensure SAP software is not present for external (non Red Hatters) requesters
+      file:
+        state: absent
+        path: "{{ item }}"
+      loop:
+        - '/nfs/HANA_installation/'
+        - '/nfs/S4HANA_installation/'
+        - '/nfs/SAPCAR/'
+        - '/nfs/SAPHOSTAGENT/'
+      when: not rh_internal
+
+- name: Ensure NFS share is mounted in HANA and S/4HANA Hosts
+  hosts: hanas:s4hanas
+  become: True
+  gather_facts: True
+  tasks:
+
+    - name: Ensure additional packages are installed
+      yum:
+        name:
+          - rpcbind
+          - nfs-utils
+        state: latest
+
+    - name: Ensure Software directory exists
+      file:
+        path: "/software"
+        state: directory
+
+    - name: Ensure NFS share is mounted
+      mount:
+        path: "/software"
+        src: "{{ bastion_hostname }}:/nfs"
+        fstype: nfs4
+        opts: "rw,bg,hard,_netdev"
+        state: mounted
+
+- name: Add short and fqdn resolution for every host
+  hosts: hanas:s4hanas
+  become: true
+  gather_facts: true
+  tasks:
+
+    - name: Add HANA and S4HANA hosts info to /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        state: present
+        line: "{{ hostvars[item].ansible_default_ipv4.address }}    {{ hostvars[item].ansible_hostname }}.example.com    {{ hostvars[item].ansible_hostname }}"
+      when:
+        - cloud_provider is match("osp")
+      with_items:
+        - "{{ groups['hanas'] }}"
+        - "{{ groups['s4hanas'] }}"
 
 - name: Deploy Ansible Tower
   hosts: towers
@@ -79,6 +121,11 @@
     - name: Ensure Python3 package is installed and alternatives for python updated
       shell: >
         yum install -y python3 && alternatives --set python /usr/bin/python3
+
+    - name: Ensure EPEL GPG is installed
+      rpm_key:
+        state: present
+        key: "{{ ansible_tower_epel_gpg_download_url }}"
 
     - name: Install Anisble Tower
       include_role:

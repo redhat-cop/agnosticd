@@ -277,13 +277,21 @@ class AADSyntaxCheck(Command):
 
         search_results = recursive_search(yaml_contents, 'when')
         for item in search_results:
-            if isinstance(item, str):
-                if '{{' in item or '{%' in item:
-                    failed_items.append(item)
-            else:
-                for sub_item in item:
-                    if '{{' in sub_item or '{%' in sub_item:
-                        failed_items.append(sub_item)
+            try:
+                if isinstance(item, str):
+                    if '{{' in item or '{%' in item:
+                        failed_items.append(item)
+                if isinstance(item, bool):
+                    continue
+                else:
+                    for sub_item in item:
+                        if '{{' in sub_item or '{%' in sub_item:
+                            failed_items.append(sub_item)
+            except:
+                print('{}Error: Type of \'when\' not recognized'
+                    '  File: {}'.format(self.FAIL, yaml_file))
+                print('  Found: "{}"'.format(item))
+                test_result = True
 
         if len(failed_items) > 0:
             print('{}Error: Usage of Jinja2 templating delimiters in when '
