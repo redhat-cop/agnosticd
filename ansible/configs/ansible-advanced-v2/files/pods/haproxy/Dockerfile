@@ -5,4 +5,5 @@ RUN yum install -y haproxy
 RUN systemctl enable haproxy
 EXPOSE 8443
 EXPOSE 8080
+EXPOSE 8929
 CMD [ "/sbin/init" ]

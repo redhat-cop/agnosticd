@@ -1,13 +1,5 @@
 ---
 
-# TODO: Remove, rework after Ansible Automation Platform 2 ships
-# ansible 2.10 or higher required,
-
-- name: Remove yum/dnf installed ansible
-  dnf:
-    name: ansible
-    state: absent
-
 - name: Ensure yum/dnf pre-requisites in place
   package:
     name: "{{ deploy_automationcontroller_dnf_packages }}"
@@ -20,13 +12,15 @@
   get_url:
     url: "{{ deploy_automationcontroller_installer_url }}"
     dest: /tmp/automationcontroller.tar.gz
+    username: "{{ deploy_automationcontroller_asset_username | default(omit) }}"
+    password: "{{ deploy_automationcontroller_asset_password | default(omit) }}"
 
-- name: Create installer directory for Ansible controller
+- name: Create installer directory for automation controller
   file:
     path: /tmp/automationcontroller_installer
     state: directory
 
-- name: Extract Ansible controller installer tar.gz
+- name: Extract automation controller installer tar.gz
   unarchive:
     src: /tmp/automationcontroller.tar.gz
     dest: /tmp/automationcontroller_installer
@@ -35,23 +29,12 @@
       - '--strip-components=1'
       - '--show-stored-names'
 
-
-# World's ugliest short term hack for fixing broken installer for clustering
-# dest: '/etc/systemd/system/automation-controller.service'
-
-- name: Short term hack to fix Automation controller remote_src issue
-  lineinfile:
-    path: /tmp/automationcontroller_installer/collections/ansible_collections/ansible/automation_platform_installer/roles/automationcontroller/tasks/tasks.yml
-    insertafter: ".*src: '/lib/systemd/system/automation-controller.service'"
-    state: present
-    line: "    remote_src: true"
-
-- name: Create template based inventory file for Ansible controller install
+- name: Create template based inventory file for automation controller install
   template:
     src: automationcontroller_inventory.j2
     dest: /tmp/automationcontroller_installer/inventory
 
-- name: Run the Automation Controller installer
+- name: Run the automation controller installer
   shell: "source /opt/venvs/venv_automationcontroller_install/bin/activate; ./setup.sh"
   args:
     chdir: /tmp/automationcontroller_installer
@@ -62,7 +45,7 @@
 
 - name: Wait for Ansible controller to be up
   uri:
-    url: "https://{{groups['automationcontroller'][0] }}/api/v2/ping/"
+    url: "https://{{ groups['automationcontroller'][0] }}/api/v2/ping/"
     method: GET
     user: "{{ deploy_automationcontroller_admin_user }}"
     password: "{{ deploy_automationcontroller_admin_password }}"
@@ -75,27 +58,63 @@
   retries: 60
   delay: 10
 
-- name: Display Ansible controller /api/v2/ping results
+- name: Display automation controller /api/v2/ping results
   debug:
     msg: '{{ r_automationcontroller_ping.json }}'
 
-- name: License Ansible controller via manifest block
+- name: Subscribe automation controller via manifest block
+  when: deploy_automationcontroller_subscribe | default(true) | bool
   block:
 
-    - name: Load manifest into register
+    - name: Fetch remote automation controller manifest
+      when:
+        - deploy_automationcontroller_manifest_url is defined
+        - deploy_automationcontroller_manifest_url | length > 0
+        - deploy_automationcontroller_manifest_path is not defined
+      block:
+
+        - name: Fetch automation controller manifest
+          get_url:
+            url: "{{ deploy_automationcontroller_manifest_url }}"
+            dest: /tmp/automationcontroller_manifest.zip
+            username: "{{ deploy_automationcontroller_asset_username | default(omit) }}"
+            password: "{{ deploy_automationcontroller_asset_password | default(omit) }}"
+
+        - name: Load automation controller manifest into register for injection
+          slurp:
+            src: /tmp/automationcontroller_manifest.zip
+          register: r_automationcontroller_manifest_remote
+
+        - name: Remove automation controller manifest from installer host
+          file:
+            path: /tmp/automationcontroller_manifest.zip
+            state: absent
+
+    - name: Fetch local automation controller manifest
+      when:
+        - deploy_automationcontroller_manifest_path is defined
+        - deploy_automationcontroller_manifest_path | length > 0
       local_action:
         module: slurp
         src: "{{ deploy_automationcontroller_manifest_path }}"
-      register: r_automationcontroller_manifest_file
+      register: r_automationcontroller_manifest_local
       become: false
 
-    - name: Insert Ansible controller License via manifest
+    - name: Inject automation controller license via manifest
       uri:
         url: "https://{{groups['automationcontroller'][0] }}/api/v2/config/"
         method: POST
         user: "{{ deploy_automationcontroller_admin_user | default('admin') }}"
         password: "{{ deploy_automationcontroller_admin_password }}"
-        body: '{ "eula_accepted": true, "manifest": "{{ r_automationcontroller_manifest_file.content }}" }'
+        body: >
+          {
+            "eula_accepted": true,
+            "manifest":
+            "{{
+              r_automationcontroller_manifest_local.content |
+              default(r_automationcontroller_manifest_remote.content)
+            }}"
+          }
         body_format: json
         validate_certs: false
         force_basic_auth: true
