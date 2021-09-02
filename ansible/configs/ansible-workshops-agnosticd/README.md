@@ -23,4 +23,4 @@ To generate an `offline_token`, go to https://access.redhat.com/management/api a
 
 ### Sync status with ansible/workshops
 
-Includes changes up to and including `ansible/workshops#bf22a28295b78cd444e718067631eb53e000df52`.
+Includes changes up to and including `ansible/workshops#6b2823e861b8af370bc3d97f0f670426cc43ce77`.
