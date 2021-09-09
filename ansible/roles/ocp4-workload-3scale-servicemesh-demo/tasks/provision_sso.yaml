@@ -1,0 +1,73 @@
+---
+# Use the SSO Operator to Install SSO
+
+- name: Evaluate {{sso_project }} namespace if not exists 
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ sso_project }}'
+    state: present
+
+- name: deploy templates and imagestreams to openshift namespace
+  command: oc replace --force -n openshift -f -
+  args:
+    stdin: "{{ lookup('file', item) }}"
+  loop:
+    - ./files/rhsso-template.yaml
+    - ./files/rhsso-imagestream.yaml
+
+- name: deploy rhsso
+  shell: >
+    oc process -n openshift quarkus-sso74
+    -p APPLICATION_NAME=rhsso
+    -p SSO_ADMIN_USERNAME={{ocp4_workload_3scale_servicemesh_demo_rhsso_admin_user_name}}
+    -p SSO_ADMIN_PASSWORD={{ocp4_workload_3scale_servicemesh_demo_rhsso_admin_password}}
+    -p MEMORY_LIMIT=2Gi
+    | oc create -n {{ sso_project }} -f -
+
+- name: wait for rhsso to be ready
+  k8s_facts:
+    api_version: v1
+    kind: Pod
+    namespace: '{{ sso_project }}'
+    label_selectors:
+      - application = rhsso
+      - deploymentconfig = rhsso
+    field_selectors:
+      - status.phase=Running
+  register: r_rhsso_pod
+  retries: 120
+  delay: 10
+  until: r_rhsso_pod.resources | list | length == 1
+
+
+- name: Get rhsso admin token
+  uri:
+    url: 'https://secure-rhsso-{{ sso_project }}.{{ route_subdomain }}/auth/realms/master/protocol/openid-connect/token'
+    validate_certs: false
+    method: POST
+    body:
+      username: "{{ocp4_workload_3scale_servicemesh_demo_rhsso_admin_user_name}}"
+      password: "{{ocp4_workload_3scale_servicemesh_demo_rhsso_admin_password}}"
+      grant_type: "password"
+      client_id: "admin-cli"
+    body_format: form-urlencoded
+    status_code: 200,201,204
+  register: rhsso_admin_token
+  retries: 120
+  delay: 10
+  until: rhsso_admin_token.status in [200, 201, 204]
+
+
+- name: Create Threescale Realm
+  uri: 
+    url: 'https://secure-rhsso-{{sso_project}}.{{route_subdomain}}/auth/admin/realms'
+    method: POST
+    body_format: json
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer {{rhsso_admin_token.json.access_token}}"
+    body: "{{ lookup('file', 'threescale-realm.json') }}"
+    return_content: yes
+    validate_certs: no
+    status_code: 201
