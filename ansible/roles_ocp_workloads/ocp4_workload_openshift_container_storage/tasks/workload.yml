@@ -1,0 +1,108 @@
+---
+- name: Setting up workload
+  debug:
+    msg: "Setting up OpenShift Data Foundation"
+
+- name: Discovering worker nodes
+  k8s_info:
+    api_version: v1
+    kind: Node
+    label_selectors:
+      - node-role.kubernetes.io/worker
+  register: worker_nodes
+
+- fail:
+    msg: "Less than 3 worker nodes detected. Cannot install Ceph..."
+  when: worker_nodes.resources | length < 3
+
+- set_fact:
+    ceph_worker_nodes: "{{ worker_nodes | json_query('resources[*].metadata.name') }}"  # yamllint disable-line rule:line-length
+
+- name: "Adding Ceph labels to worker nodes"
+  shell: "oc label nodes --overwrite {{ item }} cluster.ocs.openshift.io/openshift-storage=''"  # yamllint disable-line rule:line-length
+  loop: "{{ ceph_worker_nodes }}"
+
+- name: Set state
+  set_fact:
+    state: present
+  when: not ocp4_workload_openshift_container_storage_ocs_operator_workload_destroy|bool  # yamllint disable-line rule:line-length
+
+- name: Set state
+  set_fact:
+    state: absent
+  when: ocp4_workload_openshift_container_storage_ocs_operator_workload_destroy|bool  # yamllint disable-line rule:line-length
+
+- name: Install Operator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: "{{ ocp4_workload_openshift_container_storage_ocs_operator_name }}"  # yamllint disable-line rule:line-length
+    install_operator_namespace: openshift-storage
+    install_operator_catalog: redhat-operators
+    install_operator_channel: "{{ ocp4_workload_openshift_container_storage_ocs_channel }}"  # yamllint disable-line rule:line-length
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_openshift_container_storage_ocs_automatic_install_plan_approval | default(true) }}"  # yamllint disable-line rule:line-length
+    install_operator_manage_namespaces:
+      - openshift-storage
+    install_operator_catalogsource_setup: "{{ ocp4_workload_openshift_container_storage_ocs_catalogsource_setup | default(false)}}"  # yamllint disable-line rule:line-length
+    install_operator_catalogsource_name: "{{ ocp4_workload_openshift_container_storage_ocs_catalogsource_name | default('') }}"  # yamllint disable-line rule:line-length
+    install_operator_catalogsource_image: "{{ ocp4_workload_openshift_container_storage_ocs_catalogsource_image | default('') }}"  # yamllint disable-line rule:line-length
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_openshift_container_storage_ocs_catalogsource_image_tag | default('') }}"  # yamllint disable-line rule:line-length
+
+- name: "Wait for Storage CRD's to exist"
+  when: not ocp4_workload_openshift_container_storage_ocs_operator_workload_destroy|bool  # yamllint disable-line rule:line-length
+  kubernetes.core.k8s_info:
+    api_version: "apiextensions.k8s.io/v1"
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+    wait: true
+    wait_condition:
+      reason: InitialNamesAccepted
+      status: 'True'
+      type: Established
+    wait_sleep: 5
+    wait_timeout: 120
+  loop: "{{ ocp4_workload_openshift_container_storage_ocs_expected_crds }}"
+
+- name: "Create OCS Storage cluster"
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'storage/storagecluster.yaml.j2') }}"
+
+- name: "Wait for OCS Cluster to deploy"
+  when: not ocp4_workload_openshift_container_storage_ocs_operator_workload_destroy|bool  # yamllint disable-line rule:line-length
+  kubernetes.core.k8s_info:
+    api_version: "ocs.openshift.io/v1"
+    kind: StorageCluster
+    name: ocs-storagecluster
+    wait: true
+    wait_condition:
+      reason: ReconcileCompleted
+      status: 'True'
+      type: Available
+    wait_sleep: 10
+    wait_timeout: 360
+
+- name: "Create ObjectStore"
+  when: ocp4_workload_openshift_container_storage_ocs_install_rgw
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'storage/rgw_objectstore.yaml.j2') }}"
+
+- name: "Create StorageClass"
+  when: ocp4_workload_openshift_container_storage_ocs_install_rgw
+  k8s:
+    state: "{{ state }}"
+    definition: "{{ lookup('template', 'storage/rgw_storageclass.yaml.j2') }}"
+
+- name: "Deploy Ceph Toolbox"
+  when: ocp4_workload_openshift_container_storage_ocs_install_toolbox
+  k8s:
+    definition: "{{ lookup('template', 'storage/toolbox.yaml.j2') }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
