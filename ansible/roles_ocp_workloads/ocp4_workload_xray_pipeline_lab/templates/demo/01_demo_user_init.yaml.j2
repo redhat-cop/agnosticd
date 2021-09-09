@@ -1,0 +1,118 @@
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: bucket-init
+  namespace: '{{ namespace }}'
+data:
+  bucket-init.py: |
+    import os
+    import boto3
+    import json
+    import botocore
+    import argparse
+
+    namespace = '{{ namespace }}'
+    bucket_base_name = '{{ namespace }}'
+    aws_access_key_id = os.environ['AWS_ACCESS_KEY_ID']
+    aws_secret_access_key = os.environ['AWS_SECRET_ACCESS_KEY']
+    endpoint_url = 'http://rook-ceph-rgw-ocs-storagecluster-cephobjectstore.openshift-storage.svc.cluster.local'
+
+    s3 = boto3.client('s3',
+                    endpoint_url = endpoint_url,
+                    aws_access_key_id = aws_access_key_id,
+                    aws_secret_access_key = aws_secret_access_key,
+                    region_name = 'default',
+                    config=botocore.client.Config(signature_version = 's3'))
+
+    sns = boto3.client('sns', 
+                    endpoint_url = endpoint_url, 
+                    aws_access_key_id = aws_access_key_id,
+                    aws_secret_access_key= aws_secret_access_key,
+                    region_name='default', 
+                    config=botocore.client.Config(signature_version = 's3'))
+
+    def create_bucket(bucket_name):
+        result = s3.create_bucket(Bucket=bucket_name)
+        return result
+
+    create_bucket(bucket_base_name)
+    create_bucket(bucket_base_name+'-processed')
+    create_bucket(bucket_base_name+'-anonymized')
+
+    for bucket in s3.list_buckets()['Buckets']:
+        bucket_policy = {
+                        "Version":"2012-10-17",
+                        "Statement":[
+                            {
+                            "Sid":"AddPerm",
+                            "Effect":"Allow",
+                            "Principal": "*",
+                            "Action":["s3:GetObject"],
+                            "Resource":["arn:aws:s3:::{0}/*".format(bucket['Name'])]
+                            }
+                        ]
+                        }
+        bucket_policy = json.dumps(bucket_policy)
+        s3.put_bucket_policy(Bucket=bucket['Name'], Policy=bucket_policy)
+
+    attributes = {}
+    attributes['push-endpoint'] = 'kafka://my-cluster-kafka-bootstrap.'+namespace+':9092'
+    attributes['kafka-ack-level'] = 'broker'
+
+    def create_topic(topic):
+        topic_arn = sns.create_topic(Name=topic, Attributes=attributes)['TopicArn']
+        return topic_arn
+
+    create_topic('xray-images')
+
+    bucket_notifications_configuration = {
+                "TopicConfigurations": [
+                    {
+                        "Id": 'xray-images',
+                        "TopicArn": 'arn:aws:sns:s3a::xray-images',
+                        "Events": ["s3:ObjectCreated:*"]
+                    }
+                ]
+            }
+
+    s3.put_bucket_notification_configuration(Bucket = bucket_base_name,
+            NotificationConfiguration=bucket_notifications_configuration)
+---
+kind: Job
+apiVersion: batch/v1
+metadata:
+  name: demo-user-init
+  namespace: '{{ namespace }}'
+spec:
+  selector: {}
+  template:
+    metadata:
+      name: bucket-init
+    spec:
+      containers:
+        - name: bucket-init
+          image: quay.io/thoth-station/s2i-generic-data-science-notebook:v0.0.4
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: s3-secret-bck
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: s3-secret-bck
+                  key: AWS_SECRET_ACCESS_KEY
+          volumeMounts:
+            - mountPath: /opt/app-root/src/bucket-init.py
+              name: bucket-init
+              subPath: bucket-init.py
+          command:
+            - python
+            - '/opt/app-root/src/bucket-init.py'
+      volumes:
+        - name: bucket-init
+          configMap:
+            name: bucket-init
+      restartPolicy: Never
