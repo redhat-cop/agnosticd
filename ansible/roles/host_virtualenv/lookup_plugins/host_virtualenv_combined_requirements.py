@@ -47,7 +47,7 @@ class LookupModule(LookupBase):
                 self.__add_requirement(line, requirements)
 
     def __add_requirement(self, reqspec, requirements):
-        m = re.match(r'^(-?)([\w\-.]+)(,?(<|>|<=|>=|==|!=|~=)[0-9.]*\*?)*$', reqspec)
+        m = re.match(r'^(-?)([\w\-.]+)(,?(<|>|<=|>=|==|!=|~=)[a-z0-9.]*\*?)*$', reqspec)
         if m:
             exclude, name, versionspec = (m.group(1), m.group(2), m.group(3))
             if exclude == '-':

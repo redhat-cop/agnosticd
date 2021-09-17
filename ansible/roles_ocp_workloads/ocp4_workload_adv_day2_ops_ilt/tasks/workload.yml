@@ -1,0 +1,128 @@
+---
+# additional_fips must be set up in the AgnosticV config like this:
+# additional_fips:
+#   ocp_api_fip:
+#     description: "API {{ cluster_name }}.{{ ocp4_base_domain }}"
+#     network: "{{ provider_network }}"
+#   ocp_ingress_fip:
+#     description: "Ingress {{ cluster_name }}.{{ ocp4_base_domain }}"
+#     network: "{{ provider_network }}"
+#   ocp_managed_api_fip:
+#     description: "API {{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_domain }}"
+#     network: "{{ provider_network }}"
+#   ocp_managed_ingress_fip:
+#     description: "Ingress {{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_domain }}"
+#     network: "{{ provider_network }}"
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Check that OpenStack variables are provided
+  assert:
+    that:
+    - osp_auth_url             | default('') | length > 0
+    - osp_project_name         | default('') | length > 0
+    - osp_auth_project_domain  | default('') | length > 0
+    - osp_auth_user_domain     | default('') | length > 0
+    quiet: true
+    fail_msg: "OpenStack variables need to be provided."
+
+- name: Check that AWS credentials are provided
+  assert:
+    that:
+    - ocp4_workload_adv_dey2_ops_ilt_aws_key | default('') | length > 0
+    - ocp4_workload_adv_dey2_ops_ilt_aws_secret_key | default('') | length > 0
+    quiet: true
+    fail_msg: "AWS Credentials need to be provided."
+
+- name: Get Floating IP for Managed API
+  environment:
+    OS_AUTH_URL: "{{ osp_auth_url }}"
+    OS_USERNAME: "{{ hostvars.localhost.osp_auth_username_member }}"
+    OS_PASSWORD: "{{ hostvars.localhost.osp_auth_password_member }}"
+    OS_PROJECT_NAME: "{{ osp_project_name }}"
+    OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+    OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+  openstack.cloud.floating_ip_info:
+    description: "API {{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+  register: r_fip_api
+
+- name: Get Floating IP for managed Ingress
+  environment:
+    OS_AUTH_URL: "{{ osp_auth_url }}"
+    OS_USERNAME: "{{ hostvars.localhost.osp_auth_username_member }}"
+    OS_PASSWORD: "{{ hostvars.localhost.osp_auth_password_member }}"
+    OS_PROJECT_NAME: "{{ osp_project_name }}"
+    OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+    OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+  openstack.cloud.floating_ip_info:
+    description: "Ingress {{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+  register: r_fip_ingress
+
+- name: Set FIP variables
+  set_fact:
+    managed_ip_api: "{{ r_fip_api.floating_ips[0].floating_ip_address }}"
+    managed_ip_ingress: "{{ r_fip_ingress.floating_ips[0].floating_ip_address }}"
+
+- name: Print Managed FIPs
+  debug:
+    msg:
+    - "API FIP for Managed Cluster:     {{ managed_ip_api }}"
+    - "Ingress FIP for Managed Cluster: {{ managed_ip_ingress }}"
+
+- name: AWS Generate CloudFormation Template
+  template:
+    src: cloudformation.yaml.j2
+    dest: "/tmp/cloudformation-{{ guid }}.yaml"
+
+- name: Launch CloudFormation template to create Route53 entries
+  amazon.aws.cloudformation:
+    aws_access_key: "{{ ocp4_workload_adv_dey2_ops_ilt_aws_key }}"
+    aws_secret_key: "{{ ocp4_workload_adv_dey2_ops_ilt_aws_secret_key }}"
+    stack_name: "{{ guid }}-m-route53"
+    template: "/tmp/cloudformation-{{ guid }}.yaml"
+    state: "present"
+    region: "{{ aws_region_loop | default(aws_region) | default(region) | default('us-east-1')}}"
+    # rollback is unreliable, it can make this task hang forever.
+    disable_rollback: true
+  register: r_cloudformation_out
+  until: >-
+    r_cloudformation_out is succeeded
+    and (
+      'output' in r_cloudformation_out
+      and r_cloudformation_out.output in ["Stack CREATE complete", "Stack is already up-to-date."]
+    )
+  retries: 3
+  delay: 30
+
+- name: get Route53User credentials from cloudformation stack outputs
+  set_fact:
+    route53user: "{{ r_cloudformation_out.stack_outputs.Route53User }}"
+    route53user_access_key: "{{ r_cloudformation_out.stack_outputs.Route53UserAccessKey }}"
+    route53user_secret_access_key: "{{ r_cloudformation_out.stack_outputs.Route53UserSecretAccessKey }}"
+  when:
+  - r_cloudformation_out is defined
+  - r_cloudformation_out.stack_outputs.Route53UserAccessKey is defined
+  - r_cloudformation_out.stack_outputs.Route53UserSecretAccessKey is defined
+
+- name: Print student information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "You will need the following information to create your managed OpenShift Cluster:"
+  - "  - API IP Address:     {{ managed_ip_api     }}, DNS: api.{{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+  - "  - Ingress IP Address: {{ managed_ip_ingress }}, DNS: *.apps.{{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+  - ""
+  - "The following Credentials can be used to update Route53 entries:"
+  - "  - Route53 User:              {{ route53user }}"
+  - "  - Route53 Access Key:        {{ route53user_access_key }}"
+  - "  - Route53 Secret Access Key: {{ route53user_secret_access_key }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
