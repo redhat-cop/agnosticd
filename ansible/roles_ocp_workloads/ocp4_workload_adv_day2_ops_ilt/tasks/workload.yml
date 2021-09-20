@@ -1,4 +1,5 @@
 ---
+# For `cloud_provider: osp`:
 # additional_fips must be set up in the AgnosticV config like this:
 # additional_fips:
 #   ocp_api_fip:
@@ -18,16 +19,6 @@
   debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
-- name: Check that OpenStack variables are provided
-  assert:
-    that:
-    - osp_auth_url             | default('') | length > 0
-    - osp_project_name         | default('') | length > 0
-    - osp_auth_project_domain  | default('') | length > 0
-    - osp_auth_user_domain     | default('') | length > 0
-    quiet: true
-    fail_msg: "OpenStack variables need to be provided."
-
 - name: Check that AWS credentials are provided
   assert:
     that:
@@ -36,40 +27,72 @@
     quiet: true
     fail_msg: "AWS Credentials need to be provided."
 
-- name: Get Floating IP for Managed API
-  environment:
-    OS_AUTH_URL: "{{ osp_auth_url }}"
-    OS_USERNAME: "{{ hostvars.localhost.osp_auth_username_member }}"
-    OS_PASSWORD: "{{ hostvars.localhost.osp_auth_password_member }}"
-    OS_PROJECT_NAME: "{{ osp_project_name }}"
-    OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
-    OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
-  openstack.cloud.floating_ip_info:
-    description: "API {{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
-  register: r_fip_api
+- name: Retrieve FIPs from OpenStack
+  when: cloud_provider is match("osp")
+  block:
+  - name: Check that OpenStack variables are provided
+    assert:
+      that:
+      - osp_auth_url             | default('') | length > 0
+      - osp_project_name         | default('') | length > 0
+      - osp_auth_project_domain  | default('') | length > 0
+      - osp_auth_user_domain     | default('') | length > 0
+      quiet: true
+      fail_msg: "OpenStack variables need to be provided."
 
-- name: Get Floating IP for managed Ingress
-  environment:
-    OS_AUTH_URL: "{{ osp_auth_url }}"
-    OS_USERNAME: "{{ hostvars.localhost.osp_auth_username_member }}"
-    OS_PASSWORD: "{{ hostvars.localhost.osp_auth_password_member }}"
-    OS_PROJECT_NAME: "{{ osp_project_name }}"
-    OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
-    OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
-  openstack.cloud.floating_ip_info:
-    description: "Ingress {{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
-  register: r_fip_ingress
+  - name: Get Floating IP for Managed API
+    environment:
+      OS_AUTH_URL: "{{ osp_auth_url }}"
+      OS_USERNAME: "{{ hostvars.localhost.osp_auth_username_member }}"
+      OS_PASSWORD: "{{ hostvars.localhost.osp_auth_password_member }}"
+      OS_PROJECT_NAME: "{{ osp_project_name }}"
+      OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+      OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+    openstack.cloud.floating_ip_info:
+      description: "API {{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+    register: r_fip_api
 
-- name: Set FIP variables
-  set_fact:
-    managed_ip_api: "{{ r_fip_api.floating_ips[0].floating_ip_address }}"
-    managed_ip_ingress: "{{ r_fip_ingress.floating_ips[0].floating_ip_address }}"
+  - name: Get Floating IP for managed Ingress
+    environment:
+      OS_AUTH_URL: "{{ osp_auth_url }}"
+      OS_USERNAME: "{{ hostvars.localhost.osp_auth_username_member }}"
+      OS_PASSWORD: "{{ hostvars.localhost.osp_auth_password_member }}"
+      OS_PROJECT_NAME: "{{ osp_project_name }}"
+      OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+      OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+    openstack.cloud.floating_ip_info:
+      description: "Ingress {{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+    register: r_fip_ingress
 
-- name: Print Managed FIPs
+  - name: Set IP variables
+    set_fact:
+      managed_ip_api: "{{ r_fip_api.floating_ips[0].floating_ip_address }}"
+      managed_ip_ingress: "{{ r_fip_ingress.floating_ips[0].floating_ip_address }}"
+
+
+- name: Create EIPs in AWS
+  when: cloud_provider is match("ec2")
+  block:
+  - name: Allocate a new elastic IP for managed cluster API
+    ec2_eip:
+      state: present
+    register: r_eip_api
+
+  - name: Allocate a new elastic IP for managed cluster ingress
+    ec2_eip:
+      state: present
+    register: r_eip_ingress
+
+  - name: Set IP variables
+    set_fact:
+      managed_ip_api: "{{ r_eip_api.public_ip }}"
+      managed_ip_ingress: "{{ r_eip_ingress.public_ip }}"
+
+- name: Print Managed Cluster IP Addresses
   debug:
     msg:
-    - "API FIP for Managed Cluster:     {{ managed_ip_api }}"
-    - "Ingress FIP for Managed Cluster: {{ managed_ip_ingress }}"
+    - "API IP Address for Managed Cluster:     {{ managed_ip_api }}"
+    - "Ingress IP Address for Managed Cluster: {{ managed_ip_ingress }}"
 
 - name: AWS Generate CloudFormation Template
   template:
@@ -80,7 +103,7 @@
   amazon.aws.cloudformation:
     aws_access_key: "{{ ocp4_workload_adv_dey2_ops_ilt_aws_key }}"
     aws_secret_key: "{{ ocp4_workload_adv_dey2_ops_ilt_aws_secret_key }}"
-    stack_name: "{{ guid }}-m-route53"
+    stack_name: "{{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}-route53"
     template: "/tmp/cloudformation-{{ guid }}.yaml"
     state: "present"
     region: "{{ aws_region_loop | default(aws_region) | default(region) | default('us-east-1')}}"
@@ -112,8 +135,8 @@
   loop:
   - ""
   - "You will need the following information to create your managed OpenShift Cluster:"
-  - "  - API IP Address:     {{ managed_ip_api     }}, DNS: api.{{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
-  - "  - Ingress IP Address: {{ managed_ip_ingress }}, DNS: *.apps.{{ guid }}-m.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+  - "  - API IP Address:     {{ managed_ip_api     }}, DNS: api.{{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+  - "  - Ingress IP Address: {{ managed_ip_ingress }}, DNS: *.apps.{{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
   - ""
   - "The following Credentials can be used to update Route53 entries:"
   - "  - Route53 User:              {{ route53user }}"
