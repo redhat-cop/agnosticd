@@ -6,19 +6,19 @@ FROM registry.redhat.io/codeready-workspaces/plugin-java11-rhel8:latest
 
 ENV MANDREL_VERSION=20.3.1.2-Final
 ENV QUARKUS_VERSION=1.11.6.Final-redhat-00001
-ENV TKN_VERSION=0.15.0
-ENV KN_VERSION=0.19.1
-ENV OC_VERSION=4.7
+ENV TKN_VERSION=0.19.1
+ENV KN_VERSION=0.22.0
+ENV OC_VERSION=4.8
 ENV GRAALVM_HOME="/usr/local/mandrel-java11-${MANDREL_VERSION}"
 ENV PATH="/usr/local/maven/apache-maven-${MVN_VERSION}/bin:${PATH}"
 
 USER root
 
-RUN wget -O /tmp/oc.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/ocp/4.7.2/openshift-client-linux-4.7.2.tar.gz && cd /usr/bin && tar -xvzf /tmp/oc.tar.gz && chmod a+x /usr/bin/oc && rm -f /tmp/oc.tar.gz
+RUN wget -O /tmp/oc.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OC_VERSION}.3/openshift-client-linux-${OC_VERSION}.3.tar.gz && cd /usr/bin && sudo tar -xvzf /tmp/oc.tar.gz && sudo chmod a+x /usr/bin/oc && rm -f /tmp/oc.tar.gz
 
-RUN wget -O /tmp/kn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/serverless/${KN_VERSION}/kn-linux-amd64-${KN_VERSION}.tar.gz && cd /usr/bin && tar -xvzf /tmp/kn.tar.gz ./kn && chmod a+x kn && rm -f /tmp/kn.tar.gz
+RUN wget -O /tmp/kn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/serverless/${KN_VERSION}/kn-linux-amd64.tar.gz && cd /usr/bin && sudo tar -xvzf /tmp/kn.tar.gz && sudo chmod a+x kn && rm -f /tmp/kn.tar.gz
 
-RUN wget -O /tmp/kn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/serverless/0.11.0/kn-linux-amd64-0.11.0.tar.gz && cd /usr/bin && tar -xvzf /tmp/kn.tar.gz ./kn && chmod a+x kn && rm -f /tmp/kn.tar.gz
+RUN wget -O /tmp/tkn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/pipeline/${TKN_VERSION}/tkn-linux-amd64-${TKN_VERSION}.tar.gz && cd /usr/bin && sudo tar -xvzf /tmp/tkn.tar.gz && sudo chmod a+x tkn && rm -f /tmp/tkn.tar.gz
 
 RUN wget -O /tmp/tkn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/pipeline/${TKN_VERSION}/tkn-linux-amd64-${TKN_VERSION}.tar.gz && cd /usr/bin && tar -xvzf /tmp/tkn.tar.gz && chmod a+x tkn && rm -f /tmp/tkn.tar.gz
 
