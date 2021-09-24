@@ -1,0 +1,224 @@
+---
+# For `cloud_provider: osp`:
+# additional_fips must be set up in the AgnosticV config like this:
+# additional_fips:
+#   ocp_api_fip:
+#     description: "API {{ cluster_name }}.{{ ocp4_base_domain }}"
+#     network: "{{ provider_network }}"
+#   ocp_ingress_fip:
+#     description: "Ingress {{ cluster_name }}.{{ ocp4_base_domain }}"
+#     network: "{{ provider_network }}"
+#   ocp_managed_api_fip:
+#     description: "API {{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}.{{ ocp4_workload_adv_day2_ops_ilt_aws_domain }}"
+#     network: "{{ provider_network }}"
+#   ocp_managed_ingress_fip:
+#     description: "Ingress {{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}.{{ ocp4_workload_adv_day2_ops_ilt_aws_domain }}"
+#     network: "{{ provider_network }}"
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Check that AWS credentials are provided
+  assert:
+    that:
+    - ocp4_workload_adv_dey2_ops_ilt_aws_key | default('') | length > 0
+    - ocp4_workload_adv_dey2_ops_ilt_aws_secret_key | default('') | length > 0
+    quiet: true
+    fail_msg: "AWS Credentials need to be provided."
+
+- name: Retrieve FIPs from OpenStack
+  when: cloud_provider is match("osp")
+  block:
+  - name: Check that OpenStack variables are provided
+    assert:
+      that:
+      - osp_auth_url             | default('') | length > 0
+      - osp_project_name         | default('') | length > 0
+      - osp_auth_project_domain  | default('') | length > 0
+      - osp_auth_user_domain     | default('') | length > 0
+      quiet: true
+      fail_msg: "OpenStack variables need to be provided."
+
+  - name: Get Floating IP for Managed API
+    environment:
+      OS_AUTH_URL: "{{ osp_auth_url }}"
+      OS_USERNAME: "{{ hostvars.localhost.osp_auth_username_member }}"
+      OS_PASSWORD: "{{ hostvars.localhost.osp_auth_password_member }}"
+      OS_PROJECT_NAME: "{{ osp_project_name }}"
+      OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+      OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+    openstack.cloud.floating_ip_info:
+      description: "API {{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+    register: r_fip_api
+
+  - name: Get Floating IP for managed Ingress
+    environment:
+      OS_AUTH_URL: "{{ osp_auth_url }}"
+      OS_USERNAME: "{{ hostvars.localhost.osp_auth_username_member }}"
+      OS_PASSWORD: "{{ hostvars.localhost.osp_auth_password_member }}"
+      OS_PROJECT_NAME: "{{ osp_project_name }}"
+      OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+      OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+    openstack.cloud.floating_ip_info:
+      description: "Ingress {{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+    register: r_fip_ingress
+
+  - name: Set IP variables
+    set_fact:
+      managed_ip_api: "{{ r_fip_api.floating_ips[0].floating_ip_address }}"
+      managed_ip_ingress: "{{ r_fip_ingress.floating_ips[0].floating_ip_address }}"
+
+- name: Create EIPs in AWS
+  when: cloud_provider is match("ec2")
+  block:
+  - name: Allocate a new elastic IP for managed cluster API
+    ec2_eip:
+      state: present
+    register: r_eip_api
+
+  - name: Allocate a new elastic IP for managed cluster ingress
+    ec2_eip:
+      state: present
+    register: r_eip_ingress
+
+  - name: Set IP variables
+    set_fact:
+      managed_ip_api: "{{ r_eip_api.public_ip }}"
+      managed_ip_ingress: "{{ r_eip_ingress.public_ip }}"
+
+- name: Print Managed Cluster IP Addresses
+  debug:
+    msg:
+    - "API IP Address for Managed Cluster:     {{ managed_ip_api }}"
+    - "Ingress IP Address for Managed Cluster: {{ managed_ip_ingress }}"
+
+- name: AWS Generate CloudFormation Template
+  template:
+    src: cloudformation.yaml.j2
+    dest: "/tmp/cloudformation-{{ guid }}.yaml"
+
+- name: Launch CloudFormation template to create Route53 entries
+  amazon.aws.cloudformation:
+    aws_access_key: "{{ ocp4_workload_adv_dey2_ops_ilt_aws_key }}"
+    aws_secret_key: "{{ ocp4_workload_adv_dey2_ops_ilt_aws_secret_key }}"
+    stack_name: "route53-{{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}"
+    template: "/tmp/cloudformation-{{ guid }}.yaml"
+    state: "present"
+    region: "{{ aws_region_loop | default(aws_region) | default(region) | default('us-east-1')}}"
+    # rollback is unreliable, it can make this task hang forever.
+    disable_rollback: true
+  register: r_cloudformation_out
+  until: >-
+    r_cloudformation_out is succeeded
+    and (
+      'output' in r_cloudformation_out
+      and r_cloudformation_out.output in ["Stack CREATE complete", "Stack is already up-to-date."]
+    )
+  retries: 3
+  delay: 30
+
+- name: Get Route53User credentials from cloudformation stack outputs
+  set_fact:
+    route53user: "{{ r_cloudformation_out.stack_outputs.Route53User }}"
+    route53user_access_key: "{{ r_cloudformation_out.stack_outputs.Route53UserAccessKey }}"
+    route53user_secret_access_key: "{{ r_cloudformation_out.stack_outputs.Route53UserSecretAccessKey }}"
+
+- name: Configure bastion VM
+  become: true
+  block:
+  - name: Add environment variables for students
+    lineinfile:
+      path: "~{{ student_name }}/.bashrc"
+      regexp: "^export {{ item.name }}"
+      line: "export {{ item.name }}={{ item.value }}"
+    loop:
+    - name: MANAGED_API_IP
+      value: "{{ managed_ip_api }}"
+    - name: MANAGED_INGRESS_IP
+      value: "{{ managed_ip_ingress }}"
+    - name: MANAGED_DNS_ZONE
+      value: "{{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+    - name: MANAGED_GUID
+      value: "{{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}"
+    - name: ROUTE53_USER
+      value: "{{ route53user }}"
+    - name: ROUTE53_ACCESS_KEY
+      value: "{{ route53user_access_key }}"
+    - name: ROUTE53_SECRET_ACCESS_KEY
+      value: "{{ route53user_secret_access_key }}"
+    loop_control:
+      label: "{{ item.name }}"
+
+  - name: Download OpenShift Helm
+    get_url:
+      url: >-
+        {{ ocp4_workload_adv_day2_ops_ilt_tool_root_url }}/helm/{{
+        ocp4_workload_adv_day2_ops_ilt_helm_version }}/helm-linux-amd64
+      dest: /usr/local/bin/helm
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Bash completions - helm
+    shell: /usr/local/bin/helm completion bash >/etc/bash_completion.d/helm
+    args:
+      creates: /etc/bash_completion.d/helm
+
+  - name: Download kustomize
+    unarchive:
+      src: >-
+        https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F{{
+        ocp4_workload_adv_day2_ops_ilt_kustomize_version }}/kustomize_{{
+        ocp4_workload_adv_day2_ops_ilt_kustomize_version }}_linux_amd64.tar.gz
+      remote_src: true
+      dest: /usr/local/bin
+      owner: root
+      group: root
+      mode: 0755
+    args:
+      creates: /usr/local/bin/kustomize"
+
+  - name: Bash completions - kustomize
+    blockinfile:
+      dest: "~{{ student_name }}/.bashrc"
+      insertafter: EOF
+      marker: "# <!-- {mark} ANSIBLE MANAGED BLOCK (kustomize) -->"
+      block: |
+        source <(kustomize completion bash)
+
+- name: Print student information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "You will need the following information to create your managed OpenShift Cluster:"
+  - "  - GUID for your managed cluster: {{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}"
+  - "  - API IP Address:     {{ managed_ip_api     }}"
+  - "  - API DNS: api.{{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+  - "  - Ingress IP Address: {{ managed_ip_ingress }}"
+  - "  - Ingress DNS: *.apps.{{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+  - ""
+  - "The following Credentials can be used to update Route53 entries:"
+  - "  - Route53 User:              {{ route53user }}"
+  - "  - Route53 Access Key:        {{ route53user_access_key }}"
+  - "  - Route53 Secret Access Key: {{ route53user_secret_access_key }}"
+
+- name: Save user data
+  agnosticd_user_info:
+    data:
+      managed_ip_api: "{{ managed_ip_api }}"
+      managed_dns_api: "api.{{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+      managed_ip_ingress: "{{ managed_ip_ingress }}"
+      managed_dns_ingress: "*.apps.{{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}.{{ ocp4_workload_adv_day2_ops_ilt_aws_base_domain }}"
+      managed_guid: "{{ ocp4_workload_adv_day2_ops_ilt_managed_guid }}"
+      route53_user: "{{ route53user }}"
+      route53_access_key: "{{ route53user_access_key }}"
+      route53_secret_access_key: "{{ route53user_secret_access_key }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
