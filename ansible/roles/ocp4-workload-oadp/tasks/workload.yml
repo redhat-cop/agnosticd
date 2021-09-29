@@ -20,9 +20,9 @@
     state: "{{ oadp_state }}"
     definition: "{{ lookup('template', 'oadp-operator-subscription-community-operator.yml.j2' ) }}"
 
-- name: Waiting 30 seconds before checking install plan
-  pause:
-    seconds: 30
+# - name: Waiting 30 seconds before checking install plan
+#   pause:
+#     seconds: 30
 
 - when: oadp_state == 'present'
   block:
@@ -36,62 +36,58 @@
     delay: 5
     until: oadp_install_plans.get('resources', []) | length > 0
 
-  - name: Pause for 30 seconds for install plan to get ready for approval
-    pause:
-      seconds: 30
+# Don't need this when using auto approval
+#   - name: Pause for 30 seconds for install plan to get ready for approval
+#     pause:
+#       seconds: 30
 
-  - set_fact:
-      oadp_approved_install_plan: "{{ oadp_install_plans.get('resources', [])[0]
-        | combine({'spec': {'approved': true}}, recursive=true) }}"
+#   - set_fact:
+#       oadp_approved_install_plan: "{{ oadp_install_plans.get('resources', [])[0]
+#         | combine({'spec': {'approved': true}}, recursive=true) }}"
 
-  - name: "Approve install plan"
-    k8s:
-      state: present
-      definition: "{{ oadp_approved_install_plan }}"
+#   - name: "Approve install plan"
+#     k8s:
+#       state: present
+#       definition: "{{ oadp_approved_install_plan }}"
 
-  rescue:
-  - name: We will try again, trying to rescue the block
-    pause:
-      seconds: 10
+  # rescue:
+  # - name: We will try again, trying to rescue the block
+  #   pause:
+  #     seconds: 10
 
-  - name: "<rescue> Waiting for install plan to be created"
-    k8s_info:
-      api_version: operators.coreos.com/v1alpha1
-      kind: InstallPlan
-      namespace: "{{ oadp_namespace }}"
-    register: oadp_install_plans
-    retries: 20
-    until: oadp_install_plans.get('resources', []) | length > 0
+  # - name: "<rescue> Waiting for install plan to be created"
+  #   k8s_info:
+  #     api_version: operators.coreos.com/v1alpha1
+  #     kind: InstallPlan
+  #     namespace: "{{ oadp_namespace }}"
+  #   register: oadp_install_plans
+  #   retries: 20
+  #   until: oadp_install_plans.get('resources', []) | length > 0
 
-  - name: "<rescue> Pause for 10 seconds in rescue block"
-    pause:
-      seconds: 10
+# Don't need this when using auto approval
+#   - name: "<rescue> Pause for 10 seconds in rescue block"
+#     pause:
+#       seconds: 10
 
-  - set_fact:
-      oadp_approved_install_plan: "{{ oadp_install_plans.get('resources', [])[0]
-        | combine({'spec': {'approved': true}}, recursive=true) }}"
+#   - set_fact:
+#       oadp_approved_install_plan: "{{ oadp_install_plans.get('resources', [])[0]
+#         | combine({'spec': {'approved': true}}, recursive=true) }}"
+#   - name: "<rescue> Approve install plan"
+#     k8s:
+#       state: present
+#       definition: "{{ oadp_approved_install_plan }}"
 
-  - name: "<rescue> Approve install plan"
-    k8s:
-      state: present
-      definition: "{{ oadp_approved_install_plan }}"
-
-# - name: "Wait for OADP CRDs to exist"
-#   k8s_info:
-#     api_version: "apiextensions.k8s.io/v1beta1"
-#     kind: CustomResourceDefinition
-#     name: "{{ item }}"
-#   loop: "{{ oadp_expected_crds }}"
-#   register: crds
-#   until: crds.resources | length > 0
-#   retries: 30
-#   delay: 10
-#   when: not oadp_destroy | bool
-
-# - name: "Setoadp_state }}"
-#   k8s:
-#     state: "{{ oadp_state }}"
-#     definition: "{{ lookup('template', 'controller-4.yml.j2' ) }}"
+- name: "Wait for OADP CRDs to exist"
+  k8s_info:
+    api_version: "apiextensions.k8s.io/v1beta1"
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop: "{{ oadp_expected_crds }}"
+  register: crds
+  until: crds.resources | length > 0
+  retries: 30
+  delay: 10
+  when: not oadp_destroy | bool
 
 - name: "Download lab content to bastion"
   include_tasks: "./download-content.yml"
@@ -100,6 +96,7 @@
   loop_control:
     loop_var: "mig_download_content_item"
 
+# Discover NooBaa S3 storage and install Velero CR if enabled ocs_migstorage
 - when: ocs_migstorage
   block:
   - name: Discovering NooBaa S3 endpoint
@@ -125,6 +122,10 @@
       noobaa_endpoint: "{{ noobaa_s3_endpoint.resources[0].status.ingress[0].hostname }}"
     when: noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress[0].hostname is defined
 
+  - name: register noobaa s3 url
+    set_fact:
+      noobaa_s3_url: "{{ noobaa_s3_endpoint_proto }}://{{ noobaa_endpoint }}/"
+
   - name: Get MCG PV Pool secret
     k8s_info:
       api_version: v1
@@ -136,10 +137,17 @@
     delay: 3
     until: ocs_secret.resources | length > 0
 
-  - set_fact:
+  - name: Decoding noobaa secret
+    set_fact:
       noobaa_s3_access_key_id: "{{ ocs_secret.resources[0].data.AWS_ACCESS_KEY_ID | b64decode }}"
       noobaa_s3_secret_access_key: "{{ ocs_secret.resources[0].data.AWS_SECRET_ACCESS_KEY | b64decode }}"
 
+  - name: Registering noobaa cloud secret data string
+    set_fact:
+      cloud_credentials_data_string: |
+        [default]
+        aws_access_key_id={{ noobaa_s3_access_key_id }}
+        aws_secret_access_key={{ noobaa_s3_secret_access_key }}
   # - name: Discovering NooBaa CA Bundle
   #   shell: "{{ item }}"
   #   loop:
@@ -160,10 +168,13 @@
 
   - name: Creating cloud-credential opaque secrets
     k8s:
-      state: present
+      state: "{{ oadp_state }}"
       definition: "{{ lookup('template', 'cloud-credentials.yml.j2') }}"
-    vars:
-      noobaa_s3_url: "{{ noobaa_s3_endpoint_proto }}://{{ noobaa_endpoint }}/"
+
+  - name: Creating velero CR with Noobaa S3
+    k8s:
+      state: "{{ oadp_state }}"
+      definition: "{{ lookup('template', 'velero.yml.j2') }}"
 
 # - when: ocp4_workload_cluster_admins is defined and ocp4_workload_cluster_admins | length > 0
 #   block:
