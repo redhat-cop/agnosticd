@@ -20,21 +20,16 @@
     state: "{{ oadp_state }}"
     definition: "{{ lookup('template', 'oadp-operator-subscription-community-operator.yml.j2' ) }}"
 
-# - name: Waiting 30 seconds before checking install plan
-#   pause:
-#     seconds: 30
-
-- when: oadp_state == 'present'
-  block:
-  - name: "Waiting for install plan to be created"
-    k8s_info:
-      api_version: operators.coreos.com/v1alpha1
-      kind: InstallPlan
-      namespace: "{{ oadp_namespace }}"
-    register: oadp_install_plans
-    retries: 20
-    delay: 5
-    until: oadp_install_plans.get('resources', []) | length > 0
+- name: "Waiting for install plan to be created"
+  when: oadp_state == 'present'
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ oadp_namespace }}"
+  register: oadp_install_plans
+  retries: 20
+  delay: 5
+  until: oadp_install_plans.get('resources', []) | length > 0
 
 # Don't need this when using auto approval
 #   - name: Pause for 30 seconds for install plan to get ready for approval
@@ -87,7 +82,7 @@
   until: crds.resources | length > 0
   retries: 30
   delay: 10
-  when: not (oadp_destroy is defined) or not oadp_destroy
+  when: oadp_state == 'present'
 
 - name: "Download lab content to bastion"
   include_tasks: "./download-content.yml"
@@ -97,84 +92,98 @@
     loop_var: "mig_download_content_item"
 
 # Discover NooBaa S3 storage and install Velero CR if enabled ocs_migstorage
-- when: ocs_migstorage and not (oadp_destroy is defined) or not oadp_destroy
+- when: ocs_migstorage and oadp_state == 'present'
   block:
-  - name: Discovering NooBaa S3 endpoint
-    k8s_info:
-      api_version: route.openshift.io/v1
-      kind: Route
-      name: s3
-      namespace: "{{ ocs_namespace }}"
-    register: noobaa_s3_endpoint
-    retries: 10
-    delay: 3
-    until: noobaa_s3_endpoint.resources is defined and
-           noobaa_s3_endpoint.resources[0] is defined and
-           noobaa_s3_endpoint.resources[0].status.ingress is defined
+    - name: Discovering NooBaa S3 endpoint
+      k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: s3
+        namespace: "{{ ocs_namespace }}"
+      register: noobaa_s3_endpoint
+      retries: 10
+      delay: 3
+      until: noobaa_s3_endpoint.resources is defined and
+             noobaa_s3_endpoint.resources[0] is defined and
+             noobaa_s3_endpoint.resources[0].status.ingress is defined
 
-  - name: Set Fact NooBaa S3 Endpoint Host
-    set_fact:
-      noobaa_endpoint: "{{ noobaa_s3_endpoint.resources[0].status.ingress[0].host }}"
-    when: noobaa_s3_endpoint.resources[0].status.ingress[0].host is defined
+    - name: Set Fact NooBaa S3 Endpoint Host
+      set_fact:
+        noobaa_endpoint: "{{ noobaa_s3_endpoint.resources[0].status.ingress[0].host }}"
+      when: noobaa_s3_endpoint.resources[0].status.ingress[0].host is defined
 
-  - name: Set Fact NooBaa S3 Endpoint Hostname
-    set_fact:
-      noobaa_endpoint: "{{ noobaa_s3_endpoint.resources[0].status.ingress[0].hostname }}"
-    when: noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress[0].hostname is defined
+    - name: Set Fact NooBaa S3 Endpoint Hostname
+      set_fact:
+        noobaa_endpoint: "{{ noobaa_s3_endpoint.resources[0].status.ingress[0].hostname }}"
+      when: noobaa_s3_endpoint.resources[0].status.loadBalancer.ingress[0].hostname is defined
 
-  - name: register noobaa s3 url
-    set_fact:
-      noobaa_s3_url: "{{ noobaa_s3_endpoint_proto }}://{{ noobaa_endpoint }}/"
+    - name: If using http then use internalDNS address for endpoint
+      when: noobaa_s3_endpoint_proto == 'http'
+      block:
+        - name: Get NooBaa Object
+          k8s_info:
+            kind: NooBaa
+            api_version: noobaa.io/v1alpha1
+            name: noobaa
+            namespace: "{{ ocs_namespace }}"
+          register: noobaa_obj
+        - name: set endpoint to internalDNS
+          set_fact:
+            noobaa_endpoint: "{{ noobaa_obj.resources[0].status.endpoints.virtualHosts[0] }}"
+          when: noobaa_obj.resources[0].status.endpoints.virtualHosts[0] is defined
+    - name: register noobaa s3 url
+      set_fact:
+        noobaa_s3_url: "{{ noobaa_s3_endpoint_proto }}://{{ noobaa_endpoint }}/"
 
-  - name: Get MCG PV Pool secret
-    k8s_info:
-      api_version: v1
-      kind: Secret
-      name: "{{ ocs_mcg_pv_pool_bucket_name }}"
-      namespace: "{{ ocs_namespace }}"
-    register: ocs_secret
-    retries: 20
-    delay: 3
-    until: ocs_secret.resources | length > 0
+    - name: Get MCG PV Pool secret
+      k8s_info:
+        api_version: v1
+        kind: Secret
+        name: "{{ ocs_mcg_pv_pool_bucket_name }}"
+        namespace: "{{ ocs_namespace }}"
+      register: ocs_secret
+      retries: 20
+      delay: 3
+      until: ocs_secret.resources | length > 0
 
-  - name: Decoding noobaa secret
-    set_fact:
-      noobaa_s3_access_key_id: "{{ ocs_secret.resources[0].data.AWS_ACCESS_KEY_ID | b64decode }}"
-      noobaa_s3_secret_access_key: "{{ ocs_secret.resources[0].data.AWS_SECRET_ACCESS_KEY | b64decode }}"
+    - name: Decoding noobaa secret
+      set_fact:
+        noobaa_s3_access_key_id: "{{ ocs_secret.resources[0].data.AWS_ACCESS_KEY_ID | b64decode }}"
+        noobaa_s3_secret_access_key: "{{ ocs_secret.resources[0].data.AWS_SECRET_ACCESS_KEY | b64decode }}"
 
-  - name: Registering noobaa cloud secret data string
-    set_fact:
-      cloud_credentials_data_string: |
-        [default]
-        aws_access_key_id={{ noobaa_s3_access_key_id }}
-        aws_secret_access_key={{ noobaa_s3_secret_access_key }}
-  # - name: Discovering NooBaa CA Bundle
-  #   shell: "{{ item }}"
-  #   loop:
-  #   - >-
-  #     openssl s_client -showcerts -verify 5 -connect {{ noobaa_endpoint }}:443 < /dev/null
-  #     | awk '/BEGIN/,/END/{ if(/BEGIN/){a++}; out="cert"a".crt"; print >out}'
-  #     && for cert in *.crt; do newname=$(openssl x509 -noout -subject -in $cert
-  #     | sed -n 's/^.*CN=\(.*\)$/\1/; s/[ ,.*]/_/g; s/__/_/g; s/^_//g;p').pem;
-  #     mv $cert $newname; done;
-  #   - cat *.pem
-  #   - rm *.pem
-  #   register: noobaa_ca_bundle_raw
-  #   when: noobaa_s3_endpoint_proto == 'https'
+    - name: Registering noobaa cloud secret data string
+      set_fact:
+        cloud_credentials_data_string: |
+          [default]
+          aws_access_key_id={{ noobaa_s3_access_key_id }}
+          aws_secret_access_key={{ noobaa_s3_secret_access_key }}
+    # - name: Discovering NooBaa CA Bundle
+    #   shell: "{{ item }}"
+    #   loop:
+    #   - >-
+    #     openssl s_client -showcerts -verify 5 -connect {{ noobaa_endpoint }}:443 < /dev/null
+    #     | awk '/BEGIN/,/END/{ if(/BEGIN/){a++}; out="cert"a".crt"; print >out}'
+    #     && for cert in *.crt; do newname=$(openssl x509 -noout -subject -in $cert
+    #     | sed -n 's/^.*CN=\(.*\)$/\1/; s/[ ,.*]/_/g; s/__/_/g; s/^_//g;p').pem;
+    #     mv $cert $newname; done;
+    #   - cat *.pem
+    #   - rm *.pem
+    #   register: noobaa_ca_bundle_raw
+    #   when: noobaa_s3_endpoint_proto == 'https'
 
-  # - set_fact:
-  #     noobaa_ca_bundle: "{{ noobaa_ca_bundle_raw.results[1].stdout }}"
-  #   when: noobaa_s3_endpoint_proto == 'https'
+    # - set_fact:
+    #     noobaa_ca_bundle: "{{ noobaa_ca_bundle_raw.results[1].stdout }}"
+    #   when: noobaa_s3_endpoint_proto == 'https'
 
-  - name: Creating cloud-credential opaque secrets
-    k8s:
-      state: "{{ oadp_state }}"
-      definition: "{{ lookup('template', 'cloud-credentials.yml.j2') }}"
+    - name: Creating cloud-credential opaque secrets
+      k8s:
+        state: "{{ oadp_state }}"
+        definition: "{{ lookup('template', 'cloud-credentials.yml.j2') }}"
 
-  - name: Creating velero CR with Noobaa S3
-    k8s:
-      state: "{{ oadp_state }}"
-      definition: "{{ lookup('template', 'velero.yml.j2') }}"
+    - name: Creating velero CR with Noobaa S3
+      k8s:
+        state: "{{ oadp_state }}"
+        definition: "{{ lookup('template', 'velero.yml.j2') }}"
 
 # - when: ocp4_workload_cluster_admins is defined and ocp4_workload_cluster_admins | length > 0
 #   block:
