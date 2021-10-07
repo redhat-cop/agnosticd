@@ -1,0 +1,192 @@
+---
+# Implement your Post Workload deployment tasks here
+
+#Argo CD
+- name: Wait for Argo CD to start
+  k8s:
+    api_version: v1
+    kind: Deployment
+    name: argocd-server
+    namespace: argocd
+  register: argocd_deployment
+  until:
+    - argocd_deployment.result is defined
+  retries: 30
+  delay: 120
+  changed_when: false
+- name: Wait for the Argo CD to be ready
+  k8s:
+    api_version: v1
+    kind: Deployment
+    name: argocd-server
+    namespace: argocd
+  register: argocd_deployment
+  until:
+    - argocd_deployment.result.status.readyReplicas is defined
+    - argocd_deployment.result.status.readyReplicas == 1
+  retries: 50
+  delay: 10
+  changed_when: false
+- name: create Argo CD Application
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', './templates/argocd_application.j2' ) | from_yaml }}"
+  loop: "{{ range(1,((user_count | int) + 1)) | list }}"
+
+#ServiceMesh
+- name: Wait for Istio to start
+  k8s:
+    api_version: v1
+    kind: Deployment
+    name: istiod-basic
+    namespace: istio-system
+  register: istio_deployment
+  until:
+    - istio_deployment.result is defined
+  retries: 50
+  delay: 120
+  changed_when: false
+- name: Wait for the Istio to be ready
+  k8s:
+    api_version: v1
+    kind: Deployment
+    name: istiod-basic
+    namespace: istio-system
+  register: istio_deployment
+  until:
+    - istio_deployment.result.status.readyReplicas is defined
+    - istio_deployment.result.status.readyReplicas == 1
+  retries: 50
+  delay: 10
+  changed_when: false
+
+# Check Installation
+- name: Check Workshop Infrastructure
+  block:
+    - name: "[workshop-infra] Reading deployments"
+      k8s_facts:
+        api_version: v1
+        kind: Deployment
+        namespace: "workshop-infra"
+      register: workshop_infra_verify_dc
+
+    - name: "[workshop-infra] Found deployments"
+      fail:
+        msg: "[workshop-infra] no deployments found"
+      when: workshop_infra_verify_dc is not defined
+
+    - name: "[workshop-infra] Checking deployments"
+      fail:
+        msg: "[workshop-infra] Some/all deployments are not ready"
+      when: item.replicas is not defined or item.readyReplicas is not defined  or item.replicas != item.readyReplicas
+      loop: "{{ workshop_infra_verify_dc|json_query('resources[*].status') }}"
+
+- name: Check CodeReadyWorkspaces
+  block:
+    - name: "[workspaces] Reading deployments"
+      k8s_facts:
+        api_version: v1
+        kind: Deployment
+        namespace: workspaces
+        label_selectors:
+          - app = codeready
+      register: crw_verify_dc
+
+    - name: "[workspaces] Found deployments"
+      fail:
+        msg: "[workspaces] no deployments found"
+      when: crw_verify_dc is not defined
+
+    - name: "[workspaces] Checking deployments"
+      fail:
+        msg: "[workspaces] Some/all deployments are not ready"
+      when: item.replicas is not defined or item.readyReplicas is not defined  or item.replicas != item.readyReplicas
+      loop: "{{ crw_verify_dc|json_query('resources[*].status') }}"
+
+- name: Check Istio
+  block:
+    - name: "[istio-system] Reading deployments"
+      k8s_facts:
+        api_version: v1
+        kind: Deployment
+        namespace: istio-system
+        label_selectors:
+          - app = sidecarInjectorWebhook
+      register: istio_verify_dc
+
+    - name: "[istio-system] Found deployments"
+      fail:
+        msg: "[istio-system] no deployments found"
+      when: istio_verify_dc is not defined
+
+    - name: "[istio-system] Checking deployments"
+      fail:
+        msg: "[istio-system] Some/all deployments are not ready"
+      when: item.replicas is not defined or item.readyReplicas is not defined  or item.replicas != item.readyReplicas
+      loop: "{{ istio_verify_dc|json_query('resources[*].status') }}"
+
+- name: Check Argo CD
+  block:
+    - name: "[argo cd] Reading deployments"
+      k8s_facts:
+        api_version: v1
+        kind: Deployment
+        namespace: argocd
+      register: argocd_verify_dc
+
+    - name: "[argo cd] Found deployments"
+      fail:
+        msg: "[argo cd] no deployments found"
+      when: argocd_verify_dc is not defined
+
+    - name: "[argo cd] Checking deployments"
+      fail:
+        msg: "[argocd] Some/all deployments are not ready"
+      when: item.replicas is not defined or item.readyReplicas is not defined  or item.replicas != item.readyReplicas
+      loop: "{{ argocd_verify_dc|json_query('resources[*].status') }}"
+
+- name: lab data for user info
+  agnosticd_user_info:
+    user: "{{ item }}"
+    data:
+      APPS_HOSTNAME_SUFFIX: "{{ route_subdomain }}"
+      USER_ID: >-
+        {{ item | regex_replace('^user(.*)$', '\1') }}
+      OPENSHIFT_PASSWORD: "{{ workshop_openshift.user_password }}"
+      WORKSHOP_GIT_REPO: "{{ workshop_source.giturl }}"
+      WORKSHOP_GIT_REF: "{{ workshop_source.gitbranch }}"
+  loop: "{{ users }}"
+
+- name: output workshop info
+  agnosticd_user_info:
+    msg:
+      - ""
+      - "Chaos Engineering on OpenShift Workshop provisioned for {{ user_count }} user(s)"
+      - ""
+      - "User Assignement Portal: https://portal-workshop-infra.{{ route_subdomain }}"
+      - ""
+      - "You should share the User Assignement Portal URL (or a shortlink for it) with attendees to self-assign a user."
+      - "It is all they will need to get started!"
+      - ""
+      - "OpenShift credentials for attendees: '{{ workshop_openshift.user_name }}' / '{{ workshop_openshift.user_password }}'"
+      - ""
+      - "OpenShift Console: {{ console_url }}"
+      - "Cluster admin login with '{{ ocp_username }}' / '{{ workshop_openshift.admin_password }}'"
+      - ""
+      - "OpenShift/Kubernetes API (use with oc login): {{ master_url }}"
+      - ""
+      - "CodeReady Console: https://codeready-workspaces.{{ route_subdomain }}"
+      - "Admin login with 'admin' / 'admin'"
+      - ""
+      - "NOTE: Workspaces in CodeReady are provisioned asynchronously and may not"
+      - "be accessible until rollout finishes shortly."
+  when: not silent|bool
+
+# Leave this as the last task in the playbook.
+- name: post_workload tasks complete
+  debug:
+    msg: "Post-Workload Tasks completed successfully."
+  when: not silent|bool

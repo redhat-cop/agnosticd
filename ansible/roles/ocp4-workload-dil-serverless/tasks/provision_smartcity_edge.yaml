@@ -1,0 +1,126 @@
+---
+
+- name: "Create {{ smartcity_edge_s3_bucket }} object bucket claim"
+  k8s:
+    state: present
+    namespace: "{{ user }}-{{ smartcity_edge_project }}"
+    resource_definition: "{{ lookup('template', 'object-bucket-claim.yaml.j2') }}"
+  vars:
+    object_bucket_claim_name: "{{ user }}-{{ smartcity_edge_s3_bucket }}"
+
+- name: "Wait until {{ smartcity_edge_s3_bucket }} bucket is bound"
+  k8s_info:
+    api_version: objectbucket.io/v1alpha1
+    kind: ObjectBucketClaim
+    namespace: "{{ user }}-{{ smartcity_edge_project }}"
+    name: "{{ user }}-{{ smartcity_edge_s3_bucket }}"
+  register: r_s3_bucket_claim
+  retries: 60
+  delay: 10
+  until:
+   - r_s3_bucket_claim.resources is defined
+   - r_s3_bucket_claim.resources | length | int > 0
+   - r_s3_bucket_claim.resources[0].status.phase is defined
+   - r_s3_bucket_claim.resources[0].status.phase == "Bound"
+
+- name: "Create job for image-loader"
+  k8s:
+    state: present
+    namespace: "{{ user }}-{{ smartcity_edge_project }}"
+    definition: "{{ lookup('template', 'image-loader-job.yaml.j2') }}"
+  vars:
+    smartcity_edge_s3_bucket_configmap: "{{ user }}-{{ smartcity_edge_s3_bucket }}"
+    smartcity_edge_s3_bucket_secret: "{{ user }}-{{ smartcity_edge_s3_bucket }}"
+
+- name: "Create {{ kafka_cluster }} kafka cluster"
+  k8s:
+    state: present
+    namespace: "{{ user }}-{{ smartcity_edge_project }}"
+    definition: "{{ lookup('template', 'kafka-smartcity-edge.yaml.j2' ) }}"
+   
+- name: "Wait until kafka-cluster-entity-operator is active"
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: "{{ user }}-{{ smartcity_edge_project }}"
+    name: "{{ entity_operator_deployment }}"
+  register: r_kafka_cluster_entity_operator
+  retries: 90
+  delay: 30
+  until:
+  - r_kafka_cluster_entity_operator.resources is defined
+  - r_kafka_cluster_entity_operator.resources | length | int > 0
+  - r_kafka_cluster_entity_operator.resources[0].status.availableReplicas is defined
+  - r_kafka_cluster_entity_operator.resources[0].status.availableReplicas | int == r_kafka_cluster_entity_operator.resources[0].spec.replicas | int
+
+- name: Create topics
+  include_tasks: provision_topic.yml
+  with_items:
+    - "{{ kafka_topics }}"
+  loop_control:
+    loop_var: topic
+  vars:
+    topic_kafka_cluster: "{{ kafka_cluster }}"
+    kafka_cluster_namespace: "{{ user }}-{{ smartcity_edge_project }}"
+
+- name: "Create openshift resources for image generator application"
+  k8s:
+    state: present
+    namespace: "{{ user }}-{{ smartcity_edge_project }}"
+    definition: "{{ lookup('template', item ) }}"
+  loop:
+    - "image-generator-service-account.yaml.j2"
+    - "image-generator-configmap.yaml.j2"
+    - "image-generator-deployment.yaml.j2"
+  vars:
+    image_generator_application: image-generator
+    image_generator_service_account: image-generator
+    image_generator_configmap: image-generator
+    kafka_bootstrap_servers: "{{ kafka_cluster }}-kafka-bootstrap.{{ user }}-{{ smartcity_edge_project }}.svc:9092"
+    kafka_topic_images: images
+    image_generator_s3_path_style_access: 'true'
+    image_generator_interval_seconds: 2
+    smartcity_edge_s3_bucket_configmap: "{{ user }}-{{ smartcity_edge_s3_bucket }}"
+    smartcity_edge_s3_bucket_secret: "{{ user }}-{{ smartcity_edge_s3_bucket }}"
+    image_generator_resources_requests_cpu: 100m
+    image_generator_resources_requests_memory: 100Mi
+    image_generator_resources_limits_cpu: 200m
+    image_generator_resources_limits_memory: 256Mi
+
+- name: "Create openshift resources for lpr service application"
+  k8s:
+    state: present
+    namespace: "{{ user }}-{{ smartcity_edge_project }}"
+    definition: "{{ lookup('template', item ) }}"
+  loop:
+    - "lpr-service-service-account.yaml.j2"
+    - "lpr-service-deployment.yaml.j2"
+    - "lpr-service-service.yaml.j2"
+  vars:
+    lpr_service_service_account: lpr-service
+
+- name: "Create openshift resources for image processor application"
+  k8s:
+    state: present
+    namespace: "{{ user }}-{{ smartcity_edge_project }}"
+    definition: "{{ lookup('template', item ) }}"
+  loop:
+    - "image-processor-service-account.yaml.j2"
+    - "image-processor-configmap.yaml.j2"
+    - "image-processor-deployment.yaml.j2"
+  vars:
+    image_processor_application: image-processor
+    image_processor_service_account: image-processor
+    image_processor_configmap: image-processor
+    kafka_bootstrap_servers: "{{ kafka_cluster }}-kafka-bootstrap.{{ user }}-{{ smartcity_edge_project }}.svc:9092"
+    kafka_topic_images: images
+    kafka_topic_toll_station_events: toll-station-events
+    image_processor_s3_path_style_access: 'true'
+    smartcity_edge_s3_bucket_configmap: "{{ user }}-{{ smartcity_edge_s3_bucket }}"
+    smartcity_edge_s3_bucket_secret: "{{ user }}-{{ smartcity_edge_s3_bucket }}"
+    image_processor_toll_station: station-a210
+    image_processor_license_plate_service: http://{{ lpr_service_application }}.{{ user }}-{{ smartcity_edge_project }}.svc:8080
+    image_processor_resources_requests_cpu: 100m
+    image_processor_resources_requests_memory: 100Mi
+    image_processor_resources_limits_cpu: 200m
+    image_processor_resources_limits_memory: 256Mi

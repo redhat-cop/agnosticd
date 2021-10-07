@@ -86,7 +86,7 @@ do_ansible_syntax() {
     env_type=$(egrep ^env_type: ${i}|cut -d' ' -f 2)
 
     # Ansible Workshops AKA as Linklight needs to be downloaded
-    if [ "${env_type}" = linklight ] || [ "${env_type}" = ansible-workshops ]; then
+    if [ "${env_type}" = linklight ] || [ "${env_type}" = ansible-workshops ] || [ "${env_type}" = aap2-ansible-workshops ]; then
         if [ ! -d ${ansible_path}/workdir/${env_type} ]; then
             set +e
 
