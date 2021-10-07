@@ -1,0 +1,191 @@
+---
+- name: Setting up Prisma Cloud workload for user
+  debug:
+    msg: "Setting up Prisma Cloud workload for user ocp_username = {{ ocp_username }}"
+
+# Prisma Cloud tasks
+# -------------------------------------------------------------------------
+
+- name: Create the Prisma Cloud installation directory
+  file:
+    path: ~{{ansible_user}}/twistlock
+    state: directory
+
+- name: Download and extract the Prisma Cloud setup files
+  become: true
+  unarchive:
+    src: "{{ ocp4_workload_prisma_setup_files_url }}"
+    dest: ~{{ansible_user}}/twistlock
+    remote_src: true
+    owner: "{{ ansible_user }}"
+    group: users
+
+- name: Create OpenShift Objects for Prisma Cloud
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+    - prisma_project.j2
+    - prisma_pvc.j2
+
+- name: Generate a deployment YAML file for Console
+  command: >-
+    ~{{ansible_user}}/twistlock/linux/twistcli console export openshift
+    --persistent-volume-labels "app-volume=twistlock-console"
+    --service-type ClusterIP --registry-token {{ ocp4_workload_prisma_registry_token }}
+    --namespace {{ ocp4_workload_prisma_project }}
+  args:
+    chdir: ~{{ansible_user}}/twistlock
+
+- name: Deploy the console to the cluster
+  command: >-
+    oc create -f ~{{ansible_user}}/twistlock/twistlock_console.yaml
+  ignore_errors: true
+
+- name: Deploy Prisma Cloud route
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'prisma_route.j2' ) | from_yaml }}"
+
+# Grab the cluster host of the twistlock-console route
+- name: Get twistlock-console route host
+  command: oc get route twistlock-console -n twistlock -o=jsonpath='{.spec.host}'
+  register: twistlock_console
+
+# Wait for the Console deployment to complete
+- name: Wait for Console start up
+  uri:
+    url: "https://{{ twistlock_console.stdout }}/api/v1/_ping"
+    method: GET
+    validate_certs: false
+    body_format: json
+    status_code: 200
+  register: result
+  until: result.status == 200 and ('status' in result)
+  retries: 20
+  delay: 10
+
+- name: Set random password for prisma admin
+  set_fact:
+    prisma_pwd: "{{ lookup('password', '/dev/null length=18 chars=ascii_letters,digits,hexdigits,@,#,$,%,^,*,') }}"
+
+# Create the first administrator account from the supplied variables
+- name: Create admin user
+  uri:
+    url: "https://{{ twistlock_console.stdout }}/api/v1/signup"
+    method: POST
+    body:
+      username: "{{ ocp4_workload_prisma_admin_user }}"
+      password: "{{ prisma_pwd }}"
+    force_basic_auth: false
+    body_format: json
+    validate_certs: false
+    status_code: 200,400
+# We are ignoring errors here in case this task is being run again & user already exists
+
+# License the Console
+- name: License the Console
+  uri:
+    url: "https://{{ twistlock_console.stdout }}/api/v1/settings/license"
+    method: POST
+    user: "{{ ocp4_workload_prisma_admin_user }}"
+    password: "{{prisma_pwd}}"
+    body:
+      key: "{{ocp4_workload_prisma_license_key}}"
+    force_basic_auth: true
+    body_format: json
+    validate_certs: false
+    status_code: 200,400
+
+# Generate Defenders daemonSet for K8s cluster
+- name: Defenders - Deploy - DaemonSet - Get Defender yaml
+  uri:
+    url: "https://{{ twistlock_console.stdout }}/api/v1/defenders/daemonset.yaml"
+    method: POST
+    body:
+      consoleAddr: "twistlock-console"
+      namespace: "{{ ocp4_workload_prisma_project }}"
+      orchestration: "openshift"
+      image: ""
+      privileged: false
+      serviceAccounts: true
+      istio: false
+      collectPodLabels: true
+      cri: true
+      selinux: true
+    user: "{{ ocp4_workload_prisma_admin_user }}"
+    password: "{{ prisma_pwd }}"
+    dest: ~{{ansible_user}}/twistlock/defender-ds.yaml
+    mode: 0755
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    status_code: 200
+  register: result
+  until: result.status == 200
+  retries: 10
+  delay: 10
+
+# Deploy Defenders
+- name: Install Defender daemonset YAML
+  command: 'oc apply -f ~{{ansible_user}}/twistlock/defender-ds.yaml'
+
+- name: Create Sock Shop project
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'sockshop_project.j2' ) | from_yaml }}"
+
+- name: Copy sockshop.yml file
+  copy:
+    src: "./files/sockshop.yml"
+    dest: "~{{ansible_user}}/twistlock/sockshop.yaml"
+    owner: "{{ ansible_user }}"
+
+# Deploy Sock Shop
+- name: Deploy Sock Shop
+  k8s:
+    state: present
+    namespace: "{{ ocp4_workload_prisma_sockshop_project }}"
+    src: "~{{ansible_user}}/twistlock/sockshop.yaml"
+
+#- name: Deploy Sock Shop
+#  command: >-
+#    oc apply -f "~{{ansible_user}}/twistlock/sockshop.yaml"
+#    -n "{{ ocp4_workload_prisma_sockshop_project }}"
+
+# Expose Sock Shop to the world
+- name: Deploy Sock Shop Cloud route
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'sockshop_route.j2' ) | from_yaml }}"
+
+# Check defender availability
+- name: Await Defender availability by querying the OpenShift API
+  k8s_info:
+    api_version: v1
+    kind: DaemonSet
+    namespace: "{{ ocp4_workload_prisma_project }}"
+    name: "twistlock-defender-ds"
+  register: r_twistlock_defender_daemonset
+  retries: 30
+  delay: 30
+  until:
+    - r_twistlock_defender_daemonset.resources | length | int > 0
+    - r_twistlock_defender_daemonset.resources[0].status.desiredNumberScheduled is defined
+    - >-
+      r_twistlock_defender_daemonset.resources[0].status.numberReady |
+      int == r_twistlock_defender_daemonset.resources[0].status.desiredNumberScheduled | int
+
+- name: Provide Prisma Admin creds to RHPDS deployer
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+    - "Prisma Cloud Compute admin user: {{ ocp4_workload_prisma_admin_user}}"
+    - "Prisma Cloud Compute admin password: {{ prisma_pwd }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
