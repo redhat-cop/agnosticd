@@ -1,0 +1,137 @@
+---
+- name: Setting up Snyk workload for user
+  debug:
+    msg: "Setting up Snyk workload for user ocp_username = {{ ocp_username }}"
+
+# Snyk tasks
+# -------------------------------------------------------------------------
+
+
+- name: Collect only facts returned by network
+  ansible.builtin.setup:
+    gather_subset:
+      - network
+
+- name: Get all available facts
+  ansible.builtin.debug:
+    var: ansible_facts.nodename
+
+- name: Create OpenShift Objects for Snyk Operator
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+    - project.j2
+    - secret.j2
+    - operatorgroup.j2
+    - subscription.j2
+
+- name: Wait until InstallPlan is created
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ ocp4_workload_snyk_project }}"
+  register: r_install_plans
+  vars:
+    _query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'snyk-operator')]
+  retries: 30
+  delay: 5
+  until:
+    - r_install_plans.resources | length > 0
+    - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+- name: Get Installed CSV
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: snyk-operator
+    namespace: "{{ ocp4_workload_snyk_project }}"
+  register: r_subscription
+  retries: 30
+  delay: 5
+  until:
+    - r_subscription.resources[0].status.currentCSV is defined
+    - r_subscription.resources[0].status.currentCSV | length > 0
+
+- name: Wait until CSV is Installed
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: "{{ ocp4_workload_snyk_project }}"
+  register: r_csv
+  retries: 15
+  delay: 5
+  until:
+    - r_csv.resources[0].status.phase is defined
+    - r_csv.resources[0].status.phase | length > 0
+    - r_csv.resources[0].status.phase == "Succeeded"
+
+- name: Deploy Snyk Monitor instance
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'snykmonitor.j2' ) | from_yaml }}"
+
+- name: Create lab user demo projects
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: 'user{{ item }}'
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Deploy Goof mongo db in each user project
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'goof-db.j2' ) | from_yaml }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Deploy Goof mongo db Service in each user project
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'goof-db-service.j2' ) | from_yaml }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Deploy Goof app in each user project
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'goof-deployment.j2' ) | from_yaml }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Deploy Goof Service in each user project
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'goof-service.j2' ) | from_yaml }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Deploy Goof route in each user project
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'goof-route.j2' ) | from_yaml }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: Await Snyk Monitor availability by querying the OpenShift API
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: "{{ ocp4_workload_snyk_project }}"
+    name: "snyk-monitor"
+  register: r_snyk_monitor_deployment
+  retries: 30
+  delay: 30
+  until:
+    - r_snyk_monitor_deployment.resources | length | int > 0
+    - r_snyk_monitor_deployment.resources[0].status.readyReplicas is defined
+    - >-
+      r_snyk_monitor_deployment.resources[0].status.readyReplicas |
+      int == r_snyk_monitor_deployment.resources[0].spec.replicas | int
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

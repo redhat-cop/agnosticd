@@ -1,16 +1,26 @@
 #!/bin/bash
 
 usage() {
+    echo "$0 [TAGNAME]"
+    echo "   or"
     echo "$0 [CONFIG] [STAGE]"
     echo
-    echo "CONFIG: ALL | ocp-workshop | ocp-demo-lab | ans-tower-lab | ..."
-    echo "STAGE: test | prod | rhte"
+    echo "TAGNAME: any tag without the version. Usually same as CONFIG-STAGE."
+    echo "CONFIG: ocp-workshop | ocp-demo-lab | ans-tower-lab | ..."
+    echo "STAGE: test | prod | rhte | ..."
+    echo
+    echo "ex:"
+    echo "$0 ocp4-workshop-prod"
+    echo "  will increment the version to ocp4-workshop-prod-1.24 if 1.23 exists."
 }
 
-if [ -z "${1}" ] || [ -z "${2}" ]; then
+if [ -z "${1}" ]; then
     usage
     exit 1
 fi
+
+config=$1
+stage=$2
 
 set -u -o pipefail
 
@@ -30,45 +40,54 @@ prompt_continue() {
     fi
 }
 
-configs=$1
-stage=$2
-
-if [ "${configs}" = "ALL" ]; then
-    configs=$(ls ${ORIG}/../ansible/configs)
-fi
-
 git log -1
 echo
 echo "About to tag this commit."
 prompt_continue || exit 0
 
-for config in ${configs}; do
+if [ -z "${stage}" ]; then
+    tagname="${config}"
+else
     tagname="${config}-${stage}"
-    if echo "${tagname}" | grep -q -e '-prod-prod' -e '-test-test'; then
+    if echo "${tagname}" | grep -q -e "-${stage}-${stage}"; then
         echo
-        echo "ERROR: ${tagname} has 'prod' or 'test' twice, please use prod only in the second parameter."
+        echo "ERROR: ${tagname} has '${stage}' twice, please use ${stage} only once."
         echo
         exit 1
     fi
-    last=$(git tag -l|grep ^${tagname} |sort -V|tail -n 1|egrep -o '[0-9]+\.[0-9]+$')
-    if [ -z "${last}" ]; then
-        echo "INFO: no version found for ${config}, skipping"
+fi
+last=$(git tag -l|egrep "^${tagname}-[0-9]+" |sort -V|tail -n 1)
+if [ -n "${last}" ]; then
+    echo "Found tag ${last}"
+fi
+
+last_version=$(echo "${last}"|egrep -o '[0-9]+\.[0-9]+\.[0-9]+$')
+if [ -z "${last_version}" ]; then
+    last_version=$(echo "${last}"|egrep -o '[0-9]+\.[0-9]+$')
+    if [ -z "${last_version}" ]; then
+        echo "INFO: no version found for ${tagname}, skipping"
         echo "Do you want to create it ?"
-        prompt_continue || continue
+        prompt_continue || exit 0
 
         next_tag=${tagname}-0.1
     else
-        major=$(echo $last|egrep -o '^[0-9]+')
-        minor=$(echo $last|egrep -o '[0-9]+$')
+        major=$(echo $last_version|egrep -o '^[0-9]+')
+        minor=$(echo $last_version|egrep -o '[0-9]+$')
         next_tag=${tagname}-${major}.$(( minor + 1))
     fi
+else
+    # Semantic versioning
+    major=$(echo $last_version|cut -f1 -d.)
+    minor=$(echo $last_version|cut -f2 -d.)
+    patch=$(echo $last_version|cut -f3 -d.)
+    next_tag=${tagname}-${major}.${minor}.$(( patch + 1))
+fi
 
-    echo "will now perform 'git tag ${next_tag}'"
-    prompt_continue || continue
+echo "will now perform 'git tag ${next_tag}'"
+prompt_continue || exit 0
 
-    git tag ${next_tag}
+git tag ${next_tag}
 
-    echo "will now perform 'git push origin ${next_tag}"
-    prompt_continue || continue
-    git push origin ${next_tag}
-done
+echo "will now perform 'git push origin ${next_tag}"
+prompt_continue || exit 0
+git push origin ${next_tag}
