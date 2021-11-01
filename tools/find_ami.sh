@@ -43,6 +43,9 @@ do
     echo -n "  RHEL81GOLD: "
     search_last_image 309956199498 'RHEL-8.1*x86_64*Access*' false
 
+    echo -n "  RHEL79GOLD: "
+    search_last_image 309956199498 'RHEL-7.9*x86_64*Access*' false
+
     echo -n "  RHEL77GOLD: "
     search_last_image 309956199498 'RHEL-7.7*x86_64*Access*' false
 
