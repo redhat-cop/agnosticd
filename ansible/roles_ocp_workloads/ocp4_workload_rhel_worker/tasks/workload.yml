@@ -1,0 +1,341 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    verbosity: 3
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+# is there already a RHEL_worker?
+#
+- name: Are there already RHEL_workers?
+  ec2_instance_info:
+    aws_region: "{{ aws_region }}"
+    filters:
+      "tag:type": "RHEL_worker"
+      "tag:guid": "{{ guid }}"
+      instance-state-name: [ "running" ]
+  register: __RHEL_workers
+
+- name: Create RHEL workers if there arent enough
+  when: __RHEL_workers.instances | length < ocp4_workload_rhel_worker_exact_count
+  block:
+  - name: Find AMI to launch
+    ec2_ami_info:
+      aws_region: "{{ aws_region }}"
+      owners: 309956199498
+      filters:
+        name: "{{ ocp4_workload_rhel_worker_ami_name }}"
+    register: __rhel_ami
+
+  - name: "Get Control Plane Instances for cluster {{ cluster_name }}"
+    ec2_instance_info:
+      aws_region: "{{ aws_region }}"
+      filters:
+        "tag:Name": "*master*"
+        "tag:guid": "{{ guid }}"
+    register: __control_plane
+
+  - name: Add Control plane Instances to Inventory
+    add_host:
+      name: "{{ item.private_dns_name }}"
+      groups: control_plane
+    loop: "{{ __control_plane.instances }}"
+    when: __control_plane.instances[0] is defined
+
+  - name: Get Cluster VPC ID
+    set_fact:
+      cluster_vpc: "{{ __control_plane.instances[0].vpc_id }}"
+      # chop off the last character
+      cluster_region: "{{ __control_plane.instances[0].placement.availability_zone| regex_replace('.$') }}"
+    when: __control_plane.instances[0] is defined
+
+  - name: Get ansible_user ssh pubkey file for upload to AWS
+    ansible.builtin.slurp:
+      src: "/home/{{ ansible_user }}/.ssh/id_rsa.pub"
+    register: __id_rsa_pub
+
+  - name: Use which key?
+    when: ocp4_worload_rhel_worker_use_backdoor_key | default(false) | bool
+    set_fact:
+      __instance_key_name: "opentlc_admin_backdoor"
+
+  - name: Get ansible_user ssh pubkey file for upload to AWS
+    when: not ocp4_worload_rhel_worker_use_backdoor_key | default(false) | bool
+    block:
+      - name: Set bastion local key name
+        set_fact:
+          __instance_key_name: "{{ guid }}-cluster-key"
+
+      - name: Get bastion local key data
+        ansible.builtin.slurp:
+          src: "/home/{{ ansible_user }}/.ssh/id_rsa.pub"
+        register: __id_rsa_pub
+
+      - name: "Put the Cluster Public Key in AWS for RHEL_worker {{ __bastion_local_key_name }}"
+        ec2_key:
+          region: "{{ aws_region }}"
+          name: "{{ __instance_key_name }}"
+          key_material: "{{ __id_rsa_pub['content'] | b64decode }}"
+
+  - name: get vpc_subnet_id
+    ec2_vpc_subnet_info:
+      region: "{{ aws_region }}"
+      filters:
+        vpc-id: "{{ cluster_vpc }}"
+        # public
+        cidr-block: "10.0.0.0/*"
+        # private
+        #cidr-block: "192.168.0.0/*"
+    register: ec2_vpc_subnet_ids
+
+  - name: short subnet cidr
+    set_fact:
+      ocp_network_subnet_cidr: "{{ ec2_vpc_subnet_ids.subnets[0].cidr_block }}"
+
+  - name: Create IAM role based on trust policy
+    register: __rhel_worker_access_role
+    # aws iam create-role --role-name rhel-worker-access-role --assume-role-policy-document file://ec2-role-trust-policy.json
+    iam_role:
+      name: rhel-worker-access-role
+      assume_role_policy_document: "{{ lookup('file','./files/ec2-role-trust-policy.json') }}"
+      create_instance_profile: true
+      description: IAM Role for RHEL Worker trust policy
+      state: present
+        # `create_instance_profile: true` does the following:
+        # aws iam create-instance-profile --instance-profile-name rhel-worker-profile
+        # aws iam add-role-to-instance-profile --instance-profile-name rhel-worker-profile --role-name rhel-worker-access-role
+
+  - name: Create IAM access policy
+    # vim ec2-role-access-policy.json
+    # aws iam put-role-policy --role-name rhel-worker-access-role --policy-name rhel-worker-permissions-policy --policy-document file://ec2-role-access-policy.json
+    iam_policy:
+      state: present
+      iam_type: role
+      iam_name: rhel-worker-access-role
+      policy_name: rhel-worker-permissions-policy
+      policy_json: "{{ lookup('file', './files/ec2-role-access-policy.json') }}"
+
+  - name: Create RHEL Worker security group
+    register: sg_RHEL_worker
+    ec2_group:
+      region: "{{ aws_region }}"
+      name: "RHEL_worker-{{ cluster_name }}"
+      description: RHEL_worker security group
+      tags:
+        type: RHEL_worker
+      vpc_id: "{{ cluster_vpc }}"
+      rules:
+        - proto: udp
+          ports: 632
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          ports: 22
+          rule_desc: "SSH"
+          cidr_ip: 0.0.0.0/0
+        - proto: udp
+          ports: 5353
+          rule_desc: "mDNS"
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          ports: 80
+          rule_desc: "Ingress HTTP"
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          ports: 443
+          rule_desc: "Ingress HTTPS"
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          ports: 1936
+          rule_desc: "router stats"
+          cidr_ip: 0.0.0.0/0
+        - proto: udp
+          ports: 4789
+          rule_desc: "VXLAN"
+          cidr_ip: 0.0.0.0/0
+        - proto: udp
+          ports: 6081
+          rule_desc: "Geneve"
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          ports: 9000-9999
+          rule_desc: "Worker ingress internal (tcp)"
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          ports: 10250
+          rule_desc: "master ingress kubelet secure"
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          ports: 30000-32767
+          rule_desc: "worker ingress services (tcp)"
+          cidr_ip: 0.0.0.0/0
+        - proto: udp
+          ports: 30000-32767
+          rule_desc: "worker ingress services (udp)"
+          cidr_ip: 0.0.0.0/0
+
+  - name: set a fact for the instance tags
+    set_fact:
+      instance_tags: >-
+        {
+          "type": "RHEL_worker",
+          "guid": "{{ guid }}",
+          "cluster_name": "{{ cluster_name }}",
+          "kubernetes.io/cluster/{{ cluster_name }}": "{{ ocp4_workload_rhel_worker_ownership }}"
+        }
+
+  - name: Launch EC2 RHEL_worker instance
+    ec2:
+      region: "{{ aws_region }}"
+      key_name: "opentlc_admin_backdoor"
+      vpc_subnet_id: "{{ ec2_vpc_subnet_ids.subnets[0].subnet_id }}"
+      instance_type: m5.4xlarge
+      group_id: "{{ sg_RHEL_worker.group_id }}"
+      image: "{{ __rhel_ami.images[0].image_id }}"
+      assign_public_ip: true
+      exact_count: "{{ ocp4_workload_rhel_worker_exact_count }}"
+      count_tag: "{{ instance_tags }}"
+      instance_tags: "{{ instance_tags }}"
+      instance_profile_name: "rhel-worker-access-role"
+      wait: true
+    register: __new_RHEL
+
+- name: "add/replace __new_RHEL to __RHEL_workers"
+  when: __new_RHEL.instances[0] is defined
+  set_fact:
+    __RHEL_workers: "{{ __new_RHEL }}"
+
+- name: debug RHEL_workers
+  debug:
+    verbosity: 3
+    var: __RHEL_workers
+
+- name: Convenience fact for the first RHEL_worker_name
+  set_fact:
+    RHEL_worker_name: "{{ __RHEL_workers.instances[0].public_dns_name }}"
+
+      #- name: Add RHEL_worker instance public IP to host group
+      #  add_host:
+      #    name: "{{ RHEL_worker_ip }}"
+      #    groups:
+      #    - RHEL_worker
+
+- name: Add new __RHEL_workers instance to host RHEL_workers host group
+  add_host:
+    hostname: "{{ RHEL_worker_name }}"
+    groupname: RHEL_workers
+
+  #- name: Associate IAM Instance Profile to RHEL Workers
+  #   66  aws ec2 describe-instances | less
+  #   67  i-0d3a0d0149ea2ae94
+  #   the following already done at instance creation time
+  #   68  aws ec2 associate-iam-instance-profile --instance-id i-0d3a0d0149ea2ae94 --iam-instance-profile Name="rhel-worker-policy"
+  #- name: make sure they have the tagz
+  #   74  aws ec2 create-tags --resources i-0d3a0d0149ea2ae94 --tags Key=kubernetes.io/cluster/cluster-wgm7b,Value=shared
+
+- name: Wait for SSH to come up on the new RHEL_worker
+  delegate_to: "{{ item.public_dns_name }}"
+  loop: "{{ __RHEL_workers.instances }}"
+  wait_for_connection:
+    delay: 10
+    timeout: 320
+
+# add RHEL_worker to inventory
+- name: Print RHEL_worker information
+  debug:
+   verbosity: 3
+   msg: "{{ hostvars | to_nice_yaml }}"
+
+     #- name: do things to new host
+     #  delegate_to: "{{ RHEL_worker_name }}"
+     #  become: true
+     #  command: systemctl disable --now firewalld.service
+
+- name: Run setup if gather_facts hasn't been run
+  setup:
+    gather_subset: min
+  when: ansible_date_time is not defined
+
+- name: set subs hostname
+  set_fact:
+    set_repositories_subscription_hostname_rando: "{{ RHEL_worker_name }}-{{ ansible_date_time.iso8601_basic | lower }}"
+
+- name: debug the subs hostname
+  debug:
+    verbosity: 3
+    var: set_repositories_subscription_hostname_rando
+
+      #- name: run set-repositories on new host
+      #  delegate_to: "{{ RHEL_worker_name }}"
+      #  ansible.builtin.setup:
+      #  delegate_facts: True
+      #  become: true
+      #
+- name: Setup RHEL Repositories on the RHEL Worker
+  include_role:
+    name: set-repositories
+    apply:
+        delegate_to: "{{ item.public_dns_name }}"
+        delegate_facts: True
+        become: true
+        vars:
+          set_repositories_subscription_hostname: "{{ item.public_dns_name }}-{{ ansible_date_time.iso8601_basic | lower }}"
+  loop: "{{ __RHEL_workers.instances }}"
+
+    #- name: Setup RHEL Repositories on the RHEL Worker
+    #  delegate_to: "{{ RHEL_worker_name }}"
+    #  delegate_facts: True
+    #  become: true
+    #  import_role:
+    #    name: set-repositories
+    #  vars:
+
+- name: Add tmux to RHEL_workers
+  delegate_to: "{{ item.public_dns_name }}"
+  loop: "{{ __RHEL_workers.instances }}"
+  delegate_facts: True
+  become: true
+  package:
+    state: present
+    name: tmux
+
+# prep the bastion with openshift-ansible
+- name: set openshift-ansible path
+  set_fact:
+    openshift_ansible_path: "/home/{{ ansible_user }}/openshift-ansible/"
+
+- name: clone the openshift-ansible repo
+  git:
+    repo: 'https://github.com/openshift/openshift-ansible'
+    version: release-4.9
+    dest: "{{ openshift_ansible_path }}"
+    depth: 1
+
+- name: put the RHEL workers names in a file
+  lineinfile:
+    path: ~/RHEL_workers.txt
+    line: "{{ item.public_dns_name }}"
+    create: true
+  loop: "{{ __RHEL_workers.instances }}"
+
+    # cd openshift-ansible
+    # virtualenv venv
+    # source venv/bin/activate
+    # pip install -r requirements.txt
+    # which ansible # ensure that this is from the virtualenv
+    # cd ~/openshift-ansible
+    # cp inventory/hosts-* inventory/hosts
+    # cat ~/RHEL_workers >> openshift-ansible/inventory/hosts
+    # vi inventory/hosts # remove the detritus
+    #   ansible-playbook -vvvvv -i inventory/hosts playbooks/scaleup.yml
+    #   76  oc get csr
+    #   83  oc adm certificate approve csr-pr95z
+    #   92  oc get nodes
+    #   93  oc describe nodes |grep rhel
+    #   94  oc get pods -A
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
