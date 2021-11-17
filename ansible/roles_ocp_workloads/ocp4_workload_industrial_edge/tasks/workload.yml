@@ -204,37 +204,51 @@
       state: absent
     loop:
     - "~{{ ansible_user }}/values-secret.yaml"
+    - "~{{ ansible_user }}/common"
     - "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
 
-  - name: Shallow clone the industrial-edge repository
+  - name: Clone the industrial-edge repositories
     command:
       chdir: "~{{ ansible_user }}"
-      cmd: |
-        git clone
-        {{ gitea_repo_org_url }}/industrial-edge
+      cmd: git clone {{ gitea_repo_org_url }}/{{ item }}
+    loop:
+    - industrial-edge
+    - common
 
-  - name: Cleanup non-existent submodules
+  - name: Cleanup submodules
     file:
       state: absent
       path: "{{ item }}"
     loop:
     - "{{ ocp4_workload_industrial_edge_repo_root_dir }}/common"
     - "{{ ocp4_workload_industrial_edge_repo_root_dir }}/.gitmodules"
+    - "~{{ ansible_user }}/common/.git"
 
-  - name: Setup the common submodule
+  - name: Commit changes to the industrial-edge repository
     command:
       chdir: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
       cmd: >-
-        git submodule add
-        --force
-        https://gitea.apps.cluster-wkied.wkied.example.opentlc.com/lab-user/common
-        common
+        git commit -a -m 'Remove common submodule.'
 
-  - name: Sync submodules
+  - name: Push all changes back to the industrial-edge repository
     command:
       chdir: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
       cmd: >-
-        git submodule sync --recursive
+        git push https://{{ ocp4_workload_industrial_edge_gitea_user
+        }}:{{ ocp4_workload_industrial_edge_gitea_password
+        }}@{{ gitea_repo_org_url | urlsplit('hostname')
+        }}/{{ ocp4_workload_industrial_edge_gitea_user }}/industrial-edge
+
+  - name: Move common repository into industrial-edge repo
+    copy:
+      remote_src: True
+      src: "~{{ ansible_user }}/common"
+      dest: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
+
+  - name: Add common to the repo
+    command:
+      chdir: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
+      cmd: git add common
 
   - name: Set up values-global.yaml file
     template:
@@ -256,7 +270,7 @@
     command:
       chdir: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
       cmd: >-
-        git commit -a -m 'Update values-global.yaml and common submodule.'
+        git commit -a -m 'Update values-global.yaml and re-add flattened common submodule.'
 
   - name: Push all changes back to the industrial-edge repository
     command:
@@ -337,9 +351,23 @@
     retries: 50
     delay: 10
     until:
+    - r_pipeline_controller_deployment.resources is defined
     - r_pipeline_controller_deployment.resources | length | int > 0
     - r_pipeline_controller_deployment.resources[0].status.readyReplicas is defined
     - r_pipeline_controller_deployment.resources[0].status.readyReplicas | int == r_pipeline_controller_deployment.resources[0].spec.replicas | int
+
+  - name: Wait until pipeline 'seed' exists
+    k8s_info:
+      api_version: tekton.dev/v1beta1
+      kind: Pipeline
+      namespace: manuela-ci
+      name: seed
+    register: r_seed_pipeline
+    retries: 100
+    delay: 10
+    until:
+    - r_seed_pipeline.resources is defined
+    - r_seed_pipeline.resources | length | int > 0
 
   - name: Create seed pipeline run
     kubernetes.core.k8s:
