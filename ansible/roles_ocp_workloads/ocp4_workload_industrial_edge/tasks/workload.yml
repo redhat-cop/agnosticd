@@ -50,14 +50,11 @@
   set_fact:
     ocp4_workload_industrial_edge_full_domain: "{{ r_dns.resources[0].spec.baseDomain }}"
 
-- name: Split cluster-{{ guid }} off the domain
-  ansible.builtin.shell:
-    cmd: "echo {{ ocp4_workload_industrial_edge_full_domain }} | cut -d. -f2- "
-  register: r_cmd
-
-- name: Set variable
+# Remove cluster-{{ guid }} from the domain
+- name: Set ocp4_workload_industrial_edge_base_domain variable
   set_fact:
-    ocp4_workload_industrial_edge_base_domain: "{{ r_cmd.stdout }}"
+    ocp4_workload_industrial_edge_base_domain: >-
+      "{{ ocp4_workload_industrial_edge_full_domain | regex_replace('^([^.])+.','', ignorecase=True) }}"
 
 # Get cluster apps domain
 - name: Get cluster Ingress config
@@ -297,101 +294,152 @@
         }}@{{ ocp4_workload_industrial_edge_gitea_account_url | urlsplit('hostname')
         }}/{{ ocp4_workload_industrial_edge_gitea_user }}/industrial-edge
 
+- name: Delete common repository
+  when: ocp4_workload_industrial_edge_delete_common | bool
+  ansible.builtin.uri:
+    url: >-
+      https://{{ ocp4_workload_industrial_edge_gitea_server_hostname 
+      }}/api/v1/repos/{{ ocp4_workload_industrial_edge_gitea_user 
+      }}/common
+    method: DELETE
+    status_code: 204
+    user: "{{ ocp4_workload_industrial_edge_gitea_user }}"
+    password: "{{ ocp4_workload_industrial_edge_gitea_password }}"
+    force_basic_auth: True
+    validate_certs: False
+
 #############################################################################
 # Deploy Helm Chart for bootstrapping
 #############################################################################
 
-  - name: Deploy Industrial Edge Demo Helm Chart
-    kubernetes.core.helm:
-      name: industrial-edge
-      chart_ref: >-
-        {{ ocp4_workload_industrial_edge_repo_root_dir }}/common/install
-      release_namespace: helm-charts
-      create_namespace: True
-      values:
-        main:
-          git:
-            repoURL: "{{ ocp4_workload_industrial_edge_gitea_account_url }}/industrial-edge"
-            revision: "{{ ocp4_workload_industrial_edge_main_tag }}"
-          options:
-            bootstrap: 1
-      values_files:
-      - "/home/{{ansible_user}}/values-secret.yaml"
-      - "{{ ocp4_workload_industrial_edge_repo_root_dir }}/values-global.yaml"
+- name: Deploy Industrial Edge Demo Helm Chart
+  kubernetes.core.helm:
+    name: industrial-edge
+    chart_ref: >-
+      {{ ocp4_workload_industrial_edge_repo_root_dir }}/common/install
+    release_namespace: helm-charts
+    create_namespace: True
+    values:
+      main:
+        git:
+          repoURL: "{{ ocp4_workload_industrial_edge_gitea_account_url }}/industrial-edge"
+          revision: "{{ ocp4_workload_industrial_edge_main_tag }}"
+        options:
+          bootstrap: 1
+    values_files:
+    - "/home/{{ansible_user}}/values-secret.yaml"
+    - "{{ ocp4_workload_industrial_edge_repo_root_dir }}/values-global.yaml"
 
-  - name: Wait for secret datacenter-gitops-cluster to exist
-    kubernetes.core.k8s_info:
-      api_version: v1
-      kind: Secret
-      name: datacenter-gitops-cluster
-      namespace: industrial-edge-datacenter
-    register: r_secret_datacenter_gitops_cluster
-    until:
-    - r_secret_datacenter_gitops_cluster.resources | length > 0
-    delay: 10
-    retries: 40
-  
-  - name: Save Datacenter ArgoCD admin password
-    command:
-      cmd: >-
-        oc extract secret/datacenter-gitops-cluster
-        -n industrial-edge-datacenter --to=-
-    register: r_admin_password
-    until:
-      r_admin_password.stdout | length > 0
-    delay: 10
-    retries: 10
+- name: Wait for secret datacenter-gitops-cluster to exist
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: datacenter-gitops-cluster
+    namespace: industrial-edge-datacenter
+  register: r_secret_datacenter_gitops_cluster
+  until:
+  - r_secret_datacenter_gitops_cluster.resources | length > 0
+  delay: 10
+  retries: 40
 
-  - name: Print Datacenter ArgoCD admin password
-    debug:
-      msg: "Datacenter ArgoCD Admin Password: {{ r_admin_password.stdout }}"
+- name: Save Datacenter ArgoCD admin password
+  command:
+    cmd: >-
+      oc extract secret/datacenter-gitops-cluster
+      -n industrial-edge-datacenter --to=-
+  register: r_datacenter_admin_password
+  until:
+    r_datacenter_admin_password.stdout | length > 0
+  delay: 10
+  retries: 10
 
-  - name: Set ArgoCD Secret in manuala-ci namespace
-    kubernetes.core.k8s:
-      api_version: v1
-      kind: Secret
-      name: argocd-env
-      namespace: manuela-ci
-      resource_definition:
-        stringData:
-          ARGOCD_USER: admin
-          ARGOCD_PASSWORD: "{{ r_admin_password.stdout }}"
- 
-  - name: Wait until Pipelines Pods are ready
-    k8s_info:
-      api_version: v1
-      kind: Deployment
-      namespace: openshift-pipelines
-      name: tekton-pipelines-controller
-    register: r_pipeline_controller_deployment
-    delay: 10
-    retries: 40
-    until:
-    - r_pipeline_controller_deployment.resources is defined
-    - r_pipeline_controller_deployment.resources | length | int > 0
-    - r_pipeline_controller_deployment.resources[0].status.readyReplicas is defined
-    - r_pipeline_controller_deployment.resources[0].status.readyReplicas | int == r_pipeline_controller_deployment.resources[0].spec.replicas | int
+- name: Print Datacenter ArgoCD admin password
+  debug:
+    msg: "Datacenter ArgoCD Admin Password: {{ r_datacenter_admin_password.stdout }}"
 
-  - name: Wait until pipeline 'seed' exists
-    k8s_info:
-      api_version: tekton.dev/v1beta1
-      kind: Pipeline
-      namespace: manuela-ci
-      name: seed
-    register: r_seed_pipeline
-    delay: 10
-    retries: 40
-    until:
-    - r_seed_pipeline.resources is defined
-    - r_seed_pipeline.resources | length | int > 0
+- name: Set ArgoCD Secret in manuala-ci namespace
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Secret
+    name: argocd-env
+    namespace: manuela-ci
+    resource_definition:
+      stringData:
+        ARGOCD_USER: admin
+        ARGOCD_PASSWORD: "{{ r_datacenter_admin_password.stdout }}"
 
-  - name: Create seed pipeline run
-    kubernetes.core.k8s:
-      state: present
-      name: seed-run-agnosticd
-      src: >-
-        {{ ocp4_workload_industrial_edge_repo_root_dir
-        }}/charts/datacenter/pipelines/extra/seed-run.yaml
+- name: Wait until Pipelines Pods are ready
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: openshift-pipelines
+    name: tekton-pipelines-controller
+  register: r_pipeline_controller_deployment
+  delay: 10
+  retries: 40
+  until:
+  - r_pipeline_controller_deployment.resources is defined
+  - r_pipeline_controller_deployment.resources | length | int > 0
+  - r_pipeline_controller_deployment.resources[0].status.readyReplicas is defined
+  - r_pipeline_controller_deployment.resources[0].status.readyReplicas | int == r_pipeline_controller_deployment.resources[0].spec.replicas | int
+
+- name: Wait until pipeline 'seed' exists
+  k8s_info:
+    api_version: tekton.dev/v1beta1
+    kind: Pipeline
+    namespace: manuela-ci
+    name: seed
+  register: r_seed_pipeline
+  delay: 10
+  retries: 40
+  until:
+  - r_seed_pipeline.resources is defined
+  - r_seed_pipeline.resources | length | int > 0
+
+- name: Create seed pipeline run
+  kubernetes.core.k8s:
+    state: present
+    name: seed-run-agnosticd
+    src: >-
+      {{ ocp4_workload_industrial_edge_repo_root_dir
+      }}/charts/datacenter/pipelines/extra/seed-run.yaml
+
+#############################################################################
+# Print User Information
+#############################################################################
+
+- name: Print user information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Industrial Edge Validated Pattern:"
+  - "----------------------------------"
+  - ""
+  - "ArgoCD deployments:"
+  - "- ArgoCD URL (OpenShift GitOps): https://openshift-gitops-server-openshift-gitops.{{ ocp4_workload_industrial_edge_apps_domain }}"
+  - "  Use OpenShift credentials (admin) to log into the OpenShift GitOps ArgoCD instance."
+  - "- ArgoCD URL (Data Center): https://datacenter-gitops-server-industrial-edge-datacenter.{{ ocp4_workload_industrial_edge_apps_domain }}"
+  - "  ArgoCD Admin Password (Data Center): {{ r_datacenter_admin_password.stdout }}"
+  - ""
+  - "Repositories:"
+  - "- Industrial Edge GitOps Repository URL: {{ ocp4_workload_industrial_edge_gitea_account_url }}/industrial-edge"
+  - "- MANUela Dev Repository URL: {{ ocp4_workload_industrial_edge_gitea_account_url }}/manuela-dev"
+  - ""
+  - "Deployed Applications:"
+  - "- Line Dashboard URL: http://line-dashboard-manuela-tst-all.{{ ocp4_workload_industrial_edge_apps_domain }}/sensors"
+  - ""
+
+- name: Save user data
+  agnosticd_user_info:
+    data:
+      argocd_gitops_url: "https://openshift-gitops-server-openshift-gitops.{{ ocp4_workload_industrial_edge_apps_domain }}"
+      argocd_datacenter_url: "https://datacenter-gitops-server-industrial-edge-datacenter.{{ ocp4_workload_industrial_edge_apps_domain }}"
+      argocd_datacenter_user: admin
+      argocd_datacenter_password: "{{ r_datacenter_admin_password.stdout }}"
+      repo_industrial_edge: "{{ ocp4_workload_industrial_edge_gitea_account_url }}/industrial-edge"
+      repo_manuela_dev: "{{ ocp4_workload_industrial_edge_gitea_account_url }}/manuela-dev"
+      line_dashboard_url: "http://line-dashboard-manuela-tst-all.{{ ocp4_workload_industrial_edge_apps_domain }}/sensors"
 
 # Leave this as the last task in the playbook.
 # --------------------------------------------
