@@ -217,6 +217,8 @@ def image_to_ec2_filters(image):
 
     if 'architecture' in image:
         filters['architecture'] = image['architecture']
+    else:
+        filters['architecture'] = 'x86_64'
 
     if 'name' in image:
         filters['name'] = image['name']
