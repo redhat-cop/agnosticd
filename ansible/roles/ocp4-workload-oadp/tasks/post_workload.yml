@@ -1,0 +1,100 @@
+---
+# Implement your Post Workload deployment tasks here
+# Leave these as the last tasks in the playbook
+
+- agnosticd_user_info:
+    data:
+      ocp4_guid: "{{ guid }}"
+      ocp4_domain: "{{ guid }}{{ subdomain_base_suffix }}"
+      ocp4_ssh_user: "{{ student_name }}"
+      ocp4_password: "{{ student_password }}"
+      ocp4_bastion: "{{ hostvars[groups.bastions.0].ansible_hostname }}.{{ guid }}{{ subdomain_base_suffix }}"
+  when:
+  - student_name is defined
+  - groups.bastions is defined
+
+- set_fact:
+    ansible_hostname: "{{ hostvars[groups.bastions.0].ansible_hostname }}"
+  when: groups.bastions is defined
+
+- name: Disable ansible virtualenv to install sshpass package
+  # RHEL8 uses a 3.8 python interpreter which does not have a dnf python module needed
+  # to run the installation of required packages from within current virtualenv. Need to switch
+  # to the python3 RHEL8 interpreter to avoid errors. Not switching for older RHELs.
+  set_fact:
+    ansible_python_interpreter: /usr/bin/python3
+    __save_ansible_python_interpreter: "{{ ansible_python_interpreter }}"
+  when: hostvars[groups.bastions.0].ansible_distribution_major_version is version('8', '>=')
+
+- name: "Install Ansible - needed for bookbag deployment from bastion"
+  become: true
+  package:
+    name:
+    - ansible
+    state: latest
+
+- name: Reenable ansible virtualenv
+  set_fact:
+    ansible_python_interpreter: "{{ __save_ansible_python_interpreter }}"
+  when: hostvars[groups.bastions.0].ansible_distribution_major_version is version('8', '>=')
+
+- name: Get oadp lab bookbag
+  when: student_name is defined
+  block:
+  - name: "Saving OCP4 cluster info for bookbag deployment"
+    copy:
+      owner: "{{ student_name }}"
+      content: |
+        [OCP4]
+        guid={{ guid }}
+        domain={{ subdomain_base_suffix }}
+        student_name={{ student_name }}
+        bastion={{ hostvars[groups.bastions.0].ansible_hostname }}.{{ guid }}{{ subdomain_base_suffix }}
+      dest: "/home/{{ student_name }}/cluster.info"
+    become: true
+
+  - name: Get Konveyor lab git
+    git:
+      repo: "{{ bookbag_repo }}"
+      dest: "{{ bookbag_dir }}"
+    become: true
+    become_user: "{{ student_name }}"
+
+  - name: Create project
+    k8s:
+      state: present
+      definition:
+        kind: Project
+        apiVersion: project.openshift.io/v1
+        metadata:
+          name: lab-instructions
+
+  - name: deploy sample apps
+    loop: "{{ pre_deploy_sample_apps }}"
+    k8s:
+      state: present
+      definition: "{{ lookup('url', item, split_lines=False) }}"
+    register: results
+
+  - debug:
+      var: results
+
+# For deployment onto a dedicated cluster (as part of the
+# cluster deployment) set workload_shared_deployment to False
+# This is the default so it does not have to be set explicitely
+- name: post_workload tasks complete
+  debug:
+    msg: "Post-Workload tasks completed successfully."
+  when:
+  - not silent | bool
+  - not workload_shared_deployment | default(false) | bool
+
+# For RHPDS deployment (onto a shared cluster) set
+# workload_shared_deployment to True
+# (in the deploy script or AgnosticV configuration)
+- name: post_workload tasks complete
+  debug:
+    msg: "Post-Software checks completed successfully"
+  when:
+  - not silent | bool
+  - workload_shared_deployment | default(false) | bool

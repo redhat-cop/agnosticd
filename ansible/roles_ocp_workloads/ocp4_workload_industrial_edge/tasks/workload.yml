@@ -1,0 +1,459 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+#############################################################################
+# Initial setup
+#############################################################################
+
+- name: Set current date and time
+  setup:
+    gather_subset:
+    - min
+
+- name: Check if Helm is already installed
+  ansible.builtin.stat:
+    path: /usr/bin/helm
+  register: r_helm
+
+- name: Setup Helm
+  when: not r_helm.stat.exists
+  become: true
+  block:
+  # Must be /usr/bin/helm for the kubernetes.core.helm module to find the executable
+  - name: Download OpenShift Helm
+    get_url:
+      url: >-
+        {{ ocp4_workload_industrial_edge_installer_root_url }}/helm/{{
+        ocp4_workload_industrial_edge_helm_version }}/helm-linux-amd64
+      dest: /usr/bin/helm
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Set up bash completion for Helm
+    shell: >-
+      /usr/bin/helm completion bash >/etc/bash_completion.d/helm
+    args:
+      creates: /etc/bash_completion.d/helm
+
+# Get Cluster Base Domain
+- name: Get cluster DNS configuration
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: DNS
+    name: cluster
+  register: r_dns
+
+- name: Set ocp4_workload_industrial_edge_full_domain variable
+  set_fact:
+    ocp4_workload_industrial_edge_full_domain: "{{ r_dns.resources[0].spec.baseDomain }}"
+
+# Remove cluster-{{ guid }} from the domain
+- name: Set ocp4_workload_industrial_edge_base_domain variable
+  set_fact:
+    ocp4_workload_industrial_edge_base_domain: >-
+      "{{ ocp4_workload_industrial_edge_full_domain.split('.', 1)[1] }}"
+
+# Get cluster apps domain
+- name: Get cluster Ingress config
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: r_ingress
+
+- name: Set ocp4_workload_industrial_edge_apps_domain variable
+  set_fact:
+    ocp4_workload_industrial_edge_apps_domain: "{{ r_ingress.resources[0].spec.domain }}"
+
+#############################################################################
+# Set up OpenShift image registry
+#############################################################################
+
+- name: Set the URL for the exposed image registry URL to registry.{{ ocp4_workload_industrial_edge_apps_domain }}
+  set_fact:
+    ocp4_workload_industrial_edge_registry_hostname: >-
+       registry.{{ ocp4_workload_industrial_edge_apps_domain }}
+
+- name: Expose the OpenShift internal registry
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: imageregistry.operator.openshift.io/v1
+      kind: Config
+      metadata:
+        name: cluster
+      spec:
+        defaultRoute: false
+        routes:
+        - name: registry
+          hostname: "{{ ocp4_workload_industrial_edge_registry_hostname }}"
+
+- name: Enable anonymous image pulls from the internal registry
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: image-puller
+      subjects:
+      - kind: Group
+        apiGroup: rbac.authorization.k8s.io
+        name: system:unauthenticated
+      - kind: Group
+        apiGroup: rbac.authorization.k8s.io
+        name: system:authenticated
+      roleRef:
+        kind: ClusterRole
+        apiGroup: rbac.authorization.k8s.io
+        name: system:image-puller
+
+#############################################################################
+# Gitea Setup
+#############################################################################
+
+- name: Get the Gitea route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: route
+    name: gitea
+    namespace: gitea
+  register: r_gitea_route
+
+- name: Set the Gitea server hostname variable
+  set_fact:
+    ocp4_workload_industrial_edge_gitea_server_hostname: >-
+      {{ r_gitea_route.resources[0].spec.host }}
+
+- name: Set variables for Gitea server URL including account
+  set_fact:
+    ocp4_workload_industrial_edge_gitea_account_url: >-
+      https://{{ ocp4_workload_industrial_edge_gitea_server_hostname }}/{{ ocp4_workload_industrial_edge_gitea_user }}
+
+- name: Delete existing Gitea token if it exists
+  ansible.builtin.uri:
+    url: >-
+      https://{{ ocp4_workload_industrial_edge_gitea_server_hostname
+      }}/api/v1/users/{{ ocp4_workload_industrial_edge_gitea_user
+      }}/tokens/industrial-edge
+    method: DELETE
+    status_code: [204, 404, 422]
+    user: "{{ ocp4_workload_industrial_edge_gitea_user }}"
+    password: "{{ ocp4_workload_industrial_edge_gitea_password }}"
+    force_basic_auth: true
+    validate_certs: false
+
+# Get Token for Gitea user
+# curl -XPOST -H "Content-Type: application/json"  -k -d '{"name":"industrial-edge"}'
+#      -u ${GITEA_USER}:openshift ${GITEA_URL}/api/v1/users/lab-user/tokens
+- name: Set up a Gitea token
+  ansible.builtin.uri:
+    url: >-
+      https://{{ ocp4_workload_industrial_edge_gitea_server_hostname
+      }}/api/v1/users/{{ ocp4_workload_industrial_edge_gitea_user }}/tokens
+    method: POST
+    body: "{{ body }}"
+    body_format: json
+    status_code: 201
+    user: "{{ ocp4_workload_industrial_edge_gitea_user }}"
+    password: "{{ ocp4_workload_industrial_edge_gitea_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  vars:
+    body: >-
+      {
+        "name": "industrial-edge"
+      }
+  register: r_gitea_token
+
+- name: Set Gitea token variable
+  set_fact:
+    ocp4_workload_industrial_edge_gitea_token: "{{ r_gitea_token.json.sha1 }}"
+
+- name: Print Gitea token
+  debug:
+    msg: "Using Gitea token: {{ ocp4_workload_industrial_edge_gitea_token }}"
+
+#############################################################################
+# Gitea Repository Setup
+# Do all repository stuff as {{ ansible_user }}
+#############################################################################
+- name: Setup repositories
+  become: true
+  become_user: "{{ ansible_user }}"
+  block:
+  # git config --global credential.helper store
+  - name: Set the git credential store
+    community.general.git_config:
+      scope: global
+      name: credential.helper
+      value: store
+
+  # git config --global user.name "lab-user"
+  - name: Set the git config user name
+    community.general.git_config:
+      scope: global
+      name: user.name
+      value: "{{ ocp4_workload_industrial_edge_gitea_user_name }}"
+
+  # git config --global user.email you@example.com
+  - name: Set the git config email
+    community.general.git_config:
+      scope: global
+      name: user.email
+      value: "{{ ocp4_workload_industrial_edge_gitea_user_email }}"
+
+  - name: Ensure previous ~/values-secret.yaml is absent
+    file:
+      path: "~{{ ansible_user }}/values-secret.yaml"
+      state: absent
+
+  - name: Ensure previous ~/common is absent
+    file:
+      path: "~{{ ansible_user }}/common"
+      state: absent
+
+  - name: Ensure previous repo root dir is absent
+    file:
+      path: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
+      state: absent
+
+  - name: Clone the industrial-edge repositories
+    ansible.builtin.git:
+      dest: "~{{ ansible_user }}/{{ item.repo }}"
+      repo: "{{ ocp4_workload_industrial_edge_gitea_account_url }}/{{ item.repo }}"
+      version: "{{ item.tag }}"
+      clone: true
+      recursive: false
+    loop:
+    - repo: industrial-edge
+      tag: "{{ ocp4_workload_industrial_edge_main_tag }}"
+    - repo: common
+      tag: "{{ ocp4_workload_industrial_edge_common_tag }}"
+
+  - name: Cleanup submodules
+    file:
+      state: absent
+      path: "{{ item }}"
+    loop:
+    - "{{ ocp4_workload_industrial_edge_repo_root_dir }}/common"
+    - "{{ ocp4_workload_industrial_edge_repo_root_dir }}/.gitmodules"
+
+  - name: Cleanup ~/common/.git
+    file:
+      state: absent
+      path: "~{{ ansible_user }}/common/.git"
+
+  - name: Commit changes to the industrial-edge repository
+    command:
+      chdir: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
+      cmd: >-
+        git commit -a -m 'Remove common submodule.'
+
+  - name: Push all changes back to the industrial-edge repository
+    command:
+      chdir: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
+      cmd: >-
+        git push https://{{ ocp4_workload_industrial_edge_gitea_user
+        }}:{{ ocp4_workload_industrial_edge_gitea_password
+        }}@{{ ocp4_workload_industrial_edge_gitea_account_url | urlsplit('hostname')
+        }}/{{ ocp4_workload_industrial_edge_gitea_user }}/industrial-edge
+
+  - name: Move common repository into industrial-edge repo
+    copy:
+      remote_src: true
+      src: "~{{ ansible_user }}/common"
+      dest: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
+
+  - name: Add common to the repo
+    command:
+      chdir: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
+      cmd: git add common
+
+  - name: Set up values-global.yaml file
+    template:
+      src: values-global.yaml.j2
+      dest: "{{ ocp4_workload_industrial_edge_repo_root_dir }}/values-global.yaml"
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+      mode: 0664
+
+  - name: Set up values-secret.yaml file
+    template:
+      src: values-secret.yaml.j2
+      dest: "~{{ansible_user}}/values-secret.yaml"
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+      mode: 0664
+
+  - name: Commit changes to the industrial-edge repository
+    command:
+      chdir: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
+      cmd: >-
+        git commit -a -m 'Update values-global.yaml and re-add flattened common submodule.'
+
+  - name: Push all changes back to the industrial-edge repository
+    command:
+      chdir: "{{ ocp4_workload_industrial_edge_repo_root_dir }}"
+      cmd: >-
+        git push https://{{ ocp4_workload_industrial_edge_gitea_user
+        }}:{{ ocp4_workload_industrial_edge_gitea_password
+        }}@{{ ocp4_workload_industrial_edge_gitea_account_url | urlsplit('hostname')
+        }}/{{ ocp4_workload_industrial_edge_gitea_user }}/industrial-edge
+
+- name: Delete common repository
+  when: ocp4_workload_industrial_edge_delete_common | bool
+  ansible.builtin.uri:
+    url: >-
+      https://{{ ocp4_workload_industrial_edge_gitea_server_hostname
+      }}/api/v1/repos/{{ ocp4_workload_industrial_edge_gitea_user
+      }}/common
+    method: DELETE
+    status_code: 204
+    user: "{{ ocp4_workload_industrial_edge_gitea_user }}"
+    password: "{{ ocp4_workload_industrial_edge_gitea_password }}"
+    force_basic_auth: true
+    validate_certs: false
+
+#############################################################################
+# Deploy Helm Chart for bootstrapping
+#############################################################################
+
+- name: Deploy Industrial Edge Demo Helm Chart
+  kubernetes.core.helm:
+    name: industrial-edge
+    chart_ref: >-
+      {{ ocp4_workload_industrial_edge_repo_root_dir }}/common/install
+    release_namespace: helm-charts
+    create_namespace: true
+    values:
+      main:
+        git:
+          repoURL: "{{ ocp4_workload_industrial_edge_gitea_account_url }}/industrial-edge"
+          revision: "{{ ocp4_workload_industrial_edge_main_tag }}"
+        options:
+          bootstrap: 1
+    values_files:
+    - "/home/{{ansible_user}}/values-secret.yaml"
+    - "{{ ocp4_workload_industrial_edge_repo_root_dir }}/values-global.yaml"
+
+- name: Wait for secret datacenter-gitops-cluster to exist
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: datacenter-gitops-cluster
+    namespace: industrial-edge-datacenter
+  register: r_secret_datacenter_gitops_cluster
+  until:
+  - r_secret_datacenter_gitops_cluster.resources | length > 0
+  delay: 10
+  retries: 40
+
+- name: Save Datacenter ArgoCD admin password
+  command:
+    cmd: >-
+      oc extract secret/datacenter-gitops-cluster
+      -n industrial-edge-datacenter --to=-
+  register: r_datacenter_admin_password
+  until:
+    r_datacenter_admin_password.stdout | length > 0
+  delay: 10
+  retries: 10
+
+- name: Print Datacenter ArgoCD admin password
+  debug:
+    msg: "Datacenter ArgoCD Admin Password: {{ r_datacenter_admin_password.stdout }}"
+
+- name: Set ArgoCD Secret in manuala-ci namespace
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Secret
+    name: argocd-env
+    namespace: manuela-ci
+    resource_definition:
+      stringData:
+        ARGOCD_USERNAME: admin
+        ARGOCD_PASSWORD: "{{ r_datacenter_admin_password.stdout }}"
+
+- name: Wait until Pipelines Pods are ready
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: openshift-pipelines
+    name: tekton-pipelines-controller
+  register: r_pipeline_controller_deployment
+  delay: 10
+  retries: 40
+  until:
+  - r_pipeline_controller_deployment.resources is defined
+  - r_pipeline_controller_deployment.resources | length | int > 0
+  - r_pipeline_controller_deployment.resources[0].status.readyReplicas is defined
+  - r_pipeline_controller_deployment.resources[0].status.readyReplicas | int == r_pipeline_controller_deployment.resources[0].spec.replicas | int
+
+- name: Wait until pipeline 'seed' exists
+  k8s_info:
+    api_version: tekton.dev/v1beta1
+    kind: Pipeline
+    namespace: manuela-ci
+    name: seed
+  register: r_seed_pipeline
+  delay: 10
+  retries: 40
+  until:
+  - r_seed_pipeline.resources is defined
+  - r_seed_pipeline.resources | length | int > 0
+
+- name: Create seed pipeline run
+  kubernetes.core.k8s:
+    state: present
+    name: seed-run-agnosticd
+    src: >-
+      {{ ocp4_workload_industrial_edge_repo_root_dir
+      }}/charts/datacenter/pipelines/extra/seed-run.yaml
+
+#############################################################################
+# Print User Information
+#############################################################################
+
+- name: Print user information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Industrial Edge Validated Pattern:"
+  - "----------------------------------"
+  - ""
+  - "ArgoCD deployments:"
+  - "- ArgoCD URL (OpenShift GitOps): https://openshift-gitops-server-openshift-gitops.{{ ocp4_workload_industrial_edge_apps_domain }}"
+  - "  Use OpenShift credentials (admin) to log into the OpenShift GitOps ArgoCD instance."
+  - "- ArgoCD URL (Data Center): https://datacenter-gitops-server-industrial-edge-datacenter.{{ ocp4_workload_industrial_edge_apps_domain }}"
+  - "  ArgoCD Admin Password (Data Center): {{ r_datacenter_admin_password.stdout }}"
+  - ""
+  - "Repositories:"
+  - "- Industrial Edge GitOps Repository URL: {{ ocp4_workload_industrial_edge_gitea_account_url }}/industrial-edge"
+  - "- MANUela Dev Repository URL: {{ ocp4_workload_industrial_edge_gitea_account_url }}/manuela-dev"
+  - ""
+  - "Deployed Applications:"
+  - "- Line Dashboard URL: http://line-dashboard-manuela-tst-all.{{ ocp4_workload_industrial_edge_apps_domain }}/sensors"
+  - ""
+
+- name: Save user data
+  agnosticd_user_info:
+    data:
+      argocd_gitops_url: "https://openshift-gitops-server-openshift-gitops.{{ ocp4_workload_industrial_edge_apps_domain }}"
+      argocd_datacenter_url: "https://datacenter-gitops-server-industrial-edge-datacenter.{{ ocp4_workload_industrial_edge_apps_domain }}"
+      argocd_datacenter_user: admin
+      argocd_datacenter_password: "{{ r_datacenter_admin_password.stdout }}"
+      repo_industrial_edge: "{{ ocp4_workload_industrial_edge_gitea_account_url }}/industrial-edge"
+      repo_manuela_dev: "{{ ocp4_workload_industrial_edge_gitea_account_url }}/manuela-dev"
+      line_dashboard_url: "http://line-dashboard-manuela-tst-all.{{ ocp4_workload_industrial_edge_apps_domain }}/sensors"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

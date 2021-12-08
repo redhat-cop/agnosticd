@@ -5,63 +5,91 @@
   debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
+#####################################################################
+# Common pre installation configuration
+#####################################################################
+
 - name: Ensure the namespace exists
-  k8s:
-    state: present
+  kubernetes.core.k8s:
     api_version: v1
     kind: Namespace
     name: "{{ ocp4_workload_sealed_secrets_namespace }}"
+    state: present
 
-- name: Download OpenShift Helm
-  become: true
-  get_url:
-    url: "{{ ocp4_workload_sealed_secrets_helm_url }}"
-    dest: /usr/local/bin/helm-sealed-secrets
-    owner: root
-    group: root
-    mode: 0775
+#####################################################################
+# Deploy Sealed Secrets Helm chart
+#####################################################################
 
-- name: Add Bitnami-Labs Helm Repository
-  environment:
-    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
-    HELM_CACHE_HOME: "/home/{{ ansible_user }}/.helm_sealed_secrets/cache"
-    HELM_CONFIG_HOME: "/home/{{ ansible_user }}/.helm_sealed_secrets/config"
-    HELM_DATA_HOME: "/home/{{ ansible_user }}/.helm_sealed_secrets/data"
-  become: true
-  become_user: "{{ ansible_user }}"
-  command: >-
-    /usr/local/bin/helm-sealed-secrets repo add bitnami-labs https://bitnami-labs.github.io/sealed-secrets/
+- name: Install Sealed Secrets controller via Helm chart
+  when: ocp4_workload_sealed_secrets_deploy_using_helm | bool
+  block:
+  - name: Download OpenShift Helm
+    become: true
+    get_url:
+      url: "{{ ocp4_workload_sealed_secrets_helm_url }}"
+      dest: /usr/bin/helm
+      owner: root
+      group: root
+      mode: 0775
 
-- name: Update Helm Repos
-  environment:
-    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
-    HELM_CACHE_HOME: "/home/{{ ansible_user }}/.helm_sealed_secrets/cache"
-    HELM_CONFIG_HOME: "/home/{{ ansible_user }}/.helm_sealed_secrets/config"
-    HELM_DATA_HOME: "/home/{{ ansible_user }}/.helm_sealed_secrets/data"
-  become: true
-  become_user: "{{ ansible_user }}"
-  command: /usr/local/bin/helm-sealed-secrets repo update
+  - name: Add Sealed Secrets chart repository
+    kubernetes.core.helm_repository:
+      name: sealed-secrets
+      repo_url: https://bitnami-labs.github.io/sealed-secrets
 
-- name: Install Sealed Secrets Helm Chart
-  environment:
-    KUBECONFIG: "/home/{{ ansible_user }}/.kube/config"
-    HELM_CACHE_HOME: "/home/{{ ansible_user }}/.helm_sealed_secrets/cache"
-    HELM_CONFIG_HOME: "/home/{{ ansible_user }}/.helm_sealed_secrets/config"
-    HELM_DATA_HOME: "/home/{{ ansible_user }}/.helm_sealed_secrets/data"
-  become: true
-  become_user: "{{ ansible_user }}"
-  command: >-
-    /usr/local/bin/helm-sealed-secrets install {{ ocp4_workload_sealed_secrets_name }} bitnami-labs/sealed-secrets
-      --version {{ ocp4_workload_sealed_secrets_helm_chart_version }}
-      --set namespace={{ ocp4_workload_sealed_secrets_namespace }}
-      --set 'commandArgs[0]=--update-status'
-      --set crd.keep=false
-      --set securityContext.runAsUser=
-      --set securityContext.fsGroup=
+  - name: Deploy Sealed Secrets Helm chart
+    kubernetes.core.helm:
+      name: "{{ ocp4_workload_sealed_secrets_name }}"
+      chart_ref: sealed-secrets/sealed-secrets
+      release_namespace: "{{ ocp4_workload_sealed_secrets_namespace }}"
+      create_namespace: false
+      values:
+        version: "{{ ocp4_workload_sealed_secrets_helm_chart_version }}"
+        commandArgs: ['--update-status']
+        crd:
+          keep: false
+        securityContext:
+          runAsUser: ""
+          fsGroup: ""
 
-- name: Deploy Sealed Secrets User ClusterRole
+#####################################################################
+# Deploy Sealed Secrets controller YAML
+#####################################################################
+
+- name: Install Sealed Secrets controller via YAML
+  when: not ocp4_workload_sealed_secrets_deploy_using_helm | bool
+  block:
+  - name: Set up sealed-secrets directory
+    file:
+      state: directory
+      path: /tmp/sealed-secrets
+      owner: "{{ ansible_user }}"
+      mode: 0755
+
+  - name: Copy kustomization.yaml file to bastion
+    template:
+      src: kustomization.yaml.j2
+      dest: /tmp/sealed-secrets/kustomization.yaml
+      owner: "{{ ansible_user }}"
+      mode: 0664
+
+  - name: Install sealed secrets controller
+    command:
+      chdir: /tmp/sealed-secrets
+      cmd: oc apply -k .
+
+  - name: Remove sealed-secrets directory
+    file:
+      state: absent
+      path: /tmp/sealed-secrets
+
+#####################################################################
+# Common post installation configuration
+#####################################################################
+
+- name: Deploy Sealed Secrets user ClusterRole
   when: ocp4_workload_sealed_secrets_deploy_admin_role | bool
-  k8s:
+  kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('file', 'clusterrole-sealed-secrets-user.yaml' ) | from_yaml }}"
 

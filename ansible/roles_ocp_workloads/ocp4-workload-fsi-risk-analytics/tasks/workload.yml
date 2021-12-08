@@ -1,0 +1,245 @@
+---
+
+- name: Setting up the workspace for FSI risk analytics
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_workload_fsi_risk_analytics_ocp_username }}"
+
+- name: define project
+  set_fact:
+    RISK_PROJECT: risk
+
+- name: Creating project "risk"
+  k8s:
+    state: present
+    kind: Project
+    api_version: project.openshift.io/v1
+    definition:
+      metadata:
+        name: risk
+
+#Kafka Setup
+- name: Install Cluster operator
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/amq-operator-group.yaml
+
+- name: Install Kafka Cluster Subscription
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/amq-streams-subs.yaml
+
+- name: Install RHPAM Cluster Subscription
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/rhpam-subs.yaml
+
+
+- name: Install Elastic Cluster Subscription
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/elastic-subs.yaml
+
+
+- name: Install Kafka cluster
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/amq-cluster.yaml
+
+- name: Install Kafdrop
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/kafdrop4.yml
+
+
+- name: Install RHPAM cluster
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/rhpam-kie-app.yaml
+
+
+- name: Install elastic cluster
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/elastic-cluster.yaml
+
+- name: Install kibana cluster
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/kibana-cluster.yaml
+
+- name: Install Camelk Cluster Subscription
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/camel-k-subs-risk.yaml
+
+- name: Create data grid NS
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/datagrid-ns.yaml
+
+- name: Create data grid secret
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/datagrid-secret.yaml
+
+- name: Create infinispan cluster
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/data-grid-group.yaml
+
+- name: Install Camelk Cluster Subscription
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/camel-k-subs.yaml
+
+
+- name: Create data grid subscription
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/datagrid-subs.yaml
+
+
+- name: Create the cache
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/datagrid-cache.yaml
+
+- pause:
+    minutes: 2
+
+- name: Data grid password
+  shell: "echo $(oc -n rh-data-grid get secret market-data-generated-operator-secret -o=jsonpath='{.data.password}' | base64 --decode)"
+  register: datagridpass
+
+- name: Config map for properties
+  shell: "oc -n rh-data-grid create configmap my-config --from-literal=application.properties=operator={{datagridpass.stdout}}"
+
+
+- name: Create the cache
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/data-grid-load.yaml
+
+
+- name: Wait for nodes to be ready
+  shell: "oc -n rh-data-grid get integration/cache-hydrate"
+  register: nodes
+  until:
+    - '" Running "  in nodes.stdout'
+  retries: 15
+  delay: 40
+
+
+- name: Data grid route
+  shell: "echo $(oc -n rh-data-grid get routes cache-hydrate -o jsonpath='{.spec.host}')"
+  register: hydrateroute
+
+- pause:
+    minutes: 1
+
+- name: create market data cache
+  uri:
+    url: "http://{{hydrateroute.stdout}}/createmarketcache"
+    method: POST
+
+
+- name: Post ticker symbols
+  uri:
+    url: "http://{{hydrateroute.stdout}}/postTicker"
+    method: POST
+    status_code: 204
+
+- name: Var calc ns
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/var-calc-ns.yaml
+
+
+- name: Var calc deployment
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/var-calc-deployment.yaml
+
+
+- name: Var calc service
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/var-calc-service.yaml
+
+
+- name: Var wrapper ns
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/var-wrapper-ns.yaml
+
+
+- name: Var wrapper deployment
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/var-wrapper-deployment.yaml
+
+
+- name: Var wrapper service
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/var-wrapper-service.yaml
+
+
+- name: Cert for elastic
+  shell: "oc -n risk extract secret/elasticsearch-sample-es-http-certs-internal --keys=ca.crt --to=- > /tmp/{{guid}}/ca.crt"
+
+- name: Install the latest version of Apache
+  shell: "yum install -y java-11-openjdk-headless"
+  become: true
+
+ #using the java cert module throws a static analyzer issuue with keystore_create - expecting it to be true/false
+- name: Import SSL certificate from google.com to a given cacerts keystore
+  java_cert:
+    cert_path: /tmp/{{guid}}/ca.crt
+    keystore_path: /tmp/{{guid}}/trust.jks
+    keystore_create: true
+    keystore_pass: changeit
+    state: present
+    cert_alias: elastic
+
+- name: Create elastic cert secret
+  shell: "oc -n risk create secret generic trust --from-file=/tmp/{{guid}}/trust.jks"
+
+- name: Elastic password
+  shell: "echo $(oc -n risk get secret elasticsearch-sample-es-elastic-user -o=jsonpath='{.data.elastic}' | base64 --decode)"
+  register: elasticpass
+
+
+- name: Config map for properties (elastic)
+  shell: "oc -n risk create configmap elastic-config --from-literal=application.properties=operator={{elasticpass.stdout}}"
+
+- name: Elastic connector
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/process-elastic.yaml
+
+- name: Risk officer UI
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/risk-officer-ui.yaml
+
+
+- name: Management UI
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/management-ui.yaml
+
+- name: Risk UI route
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/risk-route.yaml
+
+- name: Management UI route
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/mgmt-route.yaml
+
+- name: Kibana route
+  k8s:
+    state: present
+    src: /tmp/{{guid}}/kibana-route.yaml
