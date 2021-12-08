@@ -228,6 +228,39 @@ def image_to_ec2_filters(image):
 
     return dict_sanitize_boto3_filter(filters)
 
+def agnosticd_get_all_images(image, predefined, done=None):
+    '''Cascade and list images (and fallback images) from an image
+    or a list of images'''
+
+    function_name = "agnosticd_get_all_images"
+    if done is None:
+        done = {}
+
+    # str can be links to another images or list of images
+    if isinstance(image, str):
+        if image in predefined:
+            # Detect infinite loops
+            if image in done:
+                raise AnsibleFilterError(
+                    '%s: Loop detected in image definitions: %s' %(function_name, done))
+
+            done[image] = True
+            # call again by resolving the image defined in predefined
+            return agnosticd_get_all_images(predefined[image], predefined, done)
+
+        # No match, return no image (backward-compatible)
+        return []
+
+    if isinstance(image, dict):
+        return [image]
+
+    if isinstance(image, list):
+        result = []
+        for _image in image:
+            result.extend(agnosticd_get_all_images(_image, predefined, done))
+
+        return result
+
 class FilterModule(object):
     ''' AgnosticD core jinja2 filters '''
 
@@ -238,4 +271,5 @@ class FilterModule(object):
             'dict_to_equinix_metal_tags': dict_to_equinix_metal_tags,
             'equinix_metal_tags_to_dict': equinix_metal_tags_to_dict,
             'image_to_ec2_filters': image_to_ec2_filters,
+            'agnosticd_get_all_images': agnosticd_get_all_images,
         }
