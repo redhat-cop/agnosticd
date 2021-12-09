@@ -6,16 +6,28 @@
     verbosity: 3
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
-# is there already a RHEL_worker?
-#
 - name: Are there already RHEL_workers?
   ec2_instance_info:
     aws_region: "{{ aws_region }}"
     filters:
       "tag:type": "RHEL_worker"
       "tag:guid": "{{ guid }}"
-      instance-state-name: [ "running" ]
+      instance-state-name: ["running"]
   register: __RHEL_workers
+
+- name: add RHEL_Workers to the inventory
+  add_host:
+    hostname: "{{ item.public_dns_name }}"
+    key_name: "{{ item.key_name }}"
+    ansible_user: "ec2-user"
+    remote_user: "ec2-user"
+    groups: [RHEL_Workers]
+    private_dns_name: "{{ item.private_dns_name }}"
+    private_ip: "{{ item.private_ip_address }}"
+    public_dns_name: "{{ item.public_dns_name }}"
+    public_ip: "{{ item.public_ip_address }}"
+    tags: "{{ item.tags }}"
+  loop: "{{ __RHEL_workers.instances }}"
 
 - name: Create RHEL workers if there arent enough
   when: __RHEL_workers.instances | length < ocp4_workload_rhel_worker_exact_count
@@ -58,7 +70,7 @@
         # public
         cidr-block: "10.0.0.0/*"
         # private
-        #cidr-block: "192.168.0.0/*"
+        # cidr-block: "192.168.0.0/*"
     register: ec2_vpc_subnet_ids
 
   - name: short subnet cidr
@@ -67,24 +79,14 @@
 
   - name: Create IAM role based on trust policy
     register: __rhel_worker_access_role
-    # aws iam create-role --role-name rhel-worker-access-role \
-    # --assume-role-policy-document file://ec2-role-trust-policy.json
     iam_role:
       name: rhel-worker-access-role
       assume_role_policy_document: "{{ lookup('file','./files/ec2-role-trust-policy.json') }}"
       create_instance_profile: true
       description: IAM Role for RHEL Worker trust policy
       state: present
-        # `create_instance_profile: true` does the following:
-        # aws iam create-instance-profile --instance-profile-name rhel-worker-profile
-        # aws iam add-role-to-instance-profile --instance-profile-name rhel-worker-profile
-        # --role-name rhel-worker-access-role
 
   - name: Create IAM access policy
-    # vim ec2-role-access-policy.json
-    # aws iam put-role-policy --role-name rhel-worker-access-role \
-    # --policy-name rhel-worker-permissions-policy
-    # --policy-document file://ec2-role-access-policy.json
     iam_policy:
       state: present
       iam_type: role
@@ -171,7 +173,8 @@
       assign_public_ip: true
       exact_count: "{{ ocp4_workload_rhel_worker_exact_count }}"
       count_tag: "{{ instance_tags }}"
-      # instance_tags: "{{ instance_tags | combine(hostvars.localhost.cloud_tags_final) }}"
+      # instance_tags: "{{ instance_tags }}"
+      instance_tags: "{{ instance_tags | combine(hostvars.localhost.cloud_tags_final) }}"
       instance_profile_name: "rhel-worker-access-role"
       wait: true
     register: __new_RHEL
@@ -179,9 +182,17 @@
   - name: add new ec2 hosts to inventory
     add_host:
       hostname: "{{ item.public_dns_name }}"
+      key_name: "{{ item.key_name }}"
       ansible_user: "ec2-user"
       remote_user: "ec2-user"
-      key_name: "opentlc_admin_backdoor"
+      groups: [RHEL_Workers]
+      dns_name: "{{ item.dns_name }}"
+      private_dns_name: "{{ item.private_dns_name }}"
+      private_ip: "{{ item.private_ip }}"
+      public_dns_name: "{{ item.public_dns_name }}"
+      public_ip: "{{ item.public_ip }}"
+      region: "{{ item.region }}"
+      tags: "{{ item.tags }}"
     loop: "{{ __new_RHEL.instances }}"
 
   - name: Wait for SSH to come up
@@ -193,7 +204,6 @@
 
     # new instances create done
 
-
 - name: Print inventory information
   debug:
     # verbosity: 3
@@ -204,24 +214,31 @@
     gather_subset: min
   when: ansible_date_time is not defined
 
+- name: debug
+  loop: "{{ groups['RHEL_Workers'] }}"
+  loop_control:
+    loop_var: __rw_debug
+  debug:
+    msg: "RHEL_Workers: {{ __rw_debug }}"
+
 - name: satellite - Setup RHEL Repositories on the RHEL Worker
-  loop: "{{ __RHEL_workers.instances }}"
+  loop: "{{ groups['RHEL_Workers'] }}"
   loop_control:
     loop_var: __rw_sat
   include_role:
     name: set-repositories
     apply:
-      delegate_to: "{{ __rw_sat.public_dns_name }}"
+      delegate_to: "{{ __rw_sat }}"
       delegate_facts: true
       become: true
       vars:
-        set_repositories_subscription_hostname: "{{ __rw_sat.public_dns_name }}-{{ ansible_date_time.iso8601_basic | lower }}"
+        set_repositories_subscription_hostname: "{{ __rw_sat }}-{{ ansible_date_time.iso8601_basic | lower }}"
 
 - name: Add tmux to RHEL_workers
-  loop: "{{ __RHEL_workers.instances }}"
+  loop: "{{ groups['RHEL_Workers'] }}"
   loop_control:
     loop_var: __rw_rpm
-  delegate_to: "{{ __rw_rpm.public_dns_name }}"
+  delegate_to: "{{ __rw_rpm }}"
   delegate_facts: true
   become: true
   package:
@@ -241,12 +258,12 @@
     depth: 1
 
 - name: put the RHEL workers names in a file
-  loop: "{{ __RHEL_workers.instances }}"
+  loop: "{{ groups['RHEL_Workers'] }}"
   loop_control:
     loop_var: __rw_file
   lineinfile:
     path: ~/RHEL_workers.txt
-    line: "{{ __rw_file.public_dns_name }}"
+    line: "{{ __rw_file }}"
     create: true
 
 # Leave this as the last task in the playbook.
