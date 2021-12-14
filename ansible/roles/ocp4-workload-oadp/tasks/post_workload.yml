@@ -17,48 +17,23 @@
     ansible_hostname: "{{ hostvars[groups.bastions.0].ansible_hostname }}"
   when: groups.bastions is defined
 
-- name: Disable ansible virtualenv to install sshpass package
-  # RHEL8 uses a 3.8 python interpreter which does not have a dnf python module needed
-  # to run the installation of required packages from within current virtualenv. Need to switch
-  # to the python3 RHEL8 interpreter to avoid errors. Not switching for older RHELs.
-  set_fact:
-    ansible_python_interpreter: /usr/bin/python3
-    __save_ansible_python_interpreter: "{{ ansible_python_interpreter }}"
-  when: hostvars[groups.bastions.0].ansible_distribution_major_version is version('8', '>=')
-
-- name: "Install Ansible - needed for bookbag deployment from bastion"
-  become: true
-  package:
-    name:
-    - ansible
-    state: latest
-
-- name: Reenable ansible virtualenv
-  set_fact:
-    ansible_python_interpreter: "{{ __save_ansible_python_interpreter }}"
-  when: hostvars[groups.bastions.0].ansible_distribution_major_version is version('8', '>=')
-
 - name: Get oadp lab bookbag
-  when: student_name is defined
   block:
-  - name: "Saving OCP4 cluster info for bookbag deployment"
-    copy:
-      owner: "{{ student_name }}"
-      content: |
-        [OCP4]
-        guid={{ guid }}
-        domain={{ subdomain_base_suffix }}
-        student_name={{ student_name }}
-        bastion={{ hostvars[groups.bastions.0].ansible_hostname }}.{{ guid }}{{ subdomain_base_suffix }}
-      dest: "/home/{{ student_name }}/cluster.info"
-    become: true
-
   - name: Get Konveyor lab git
     git:
       repo: "{{ bookbag_repo }}"
       dest: "{{ bookbag_dir }}"
-    become: true
-    become_user: "{{ student_name }}"
+      version: master
+  - name: create .aws dir
+    file:
+      state: directory
+      path: "{{ bookbag_dir }}/{{ bookbag_build_dir }}/.aws"
+      mode: "777"
+  - name: create .aws/credentials file to noobaa s3
+    copy:
+      content: "{{ cloud_credentials_data_string }}"
+      dest: "{{ bookbag_dir }}/{{ bookbag_build_dir }}/.aws/credentials"
+      mode: 777
 
   - name: Create project
     k8s:
@@ -68,6 +43,42 @@
         apiVersion: project.openshift.io/v1
         metadata:
           name: lab-instructions
+  - name: Discovering Console URL
+    k8s_info:
+      api_version: route.openshift.io/v1
+      kind: Route
+      name: console
+      namespace: openshift-console
+    register: openshiftconsole_results
+  - command: oc whoami --show-server
+    register: api_url_results
+  - set_fact:
+      console_url: "{{ openshiftconsole_results.resources[0].status.ingress[0].host }}"
+  - set_fact:
+      apps_url: "{{ console_url | regex_replace('console-openshift-console.','') }}"
+  - set_fact:
+      ocp4_info:
+        apps_url: "{{ apps_url | default('appsurl') }}"
+      # yamllint disable-line rule:line-length
+        cluster_admin_user: "{{ cluster_admin_user | default(ocp4_workload_oadp_cluster_admin) | default('kubeadmin') }}"
+        api_url: "{{ api_url_results.stdout }}"
+        ocp4_password: "{{ student_password | default('undefined')}}"
+  - name: "Building bookbag image"
+    shell: "{{ item }}"
+    args:
+      chdir: "{{ bookbag_dir }}/{{ bookbag_build_dir }}"
+    loop:
+    - "oc project lab-instructions"
+    - "oc process -f build-template.yaml -p GIT_REPO='{{ bookbag_repo }}' | oc apply -f -"
+    - "oc start-build bookbag --follow --from-dir={{ bookbag_dir }}"
+  - name: "Deploying bookbag image"
+    shell: "oc process -f deploy-template.yaml -p WORKSHOP_VARS='{{ ocp4_info | to_json }}' | oc apply -f -"
+    args:
+      chdir: "{{ bookbag_dir }}/{{ bookbag_build_dir }}"
+
+  - agnosticd_user_info:
+      data:
+        bookbag_route: output.stdout
 
   - name: deploy sample apps
     loop: "{{ pre_deploy_sample_apps }}"
@@ -78,6 +89,19 @@
 
   - debug:
       var: results
+
+  - name: "Read bookbag route"
+    shell: "oc get route -n lab-instructions bookbag
+      -o go-template='{{ '{{' }} .spec.host {{ '}}' }}{{ '{{' }} println {{ '}}' }}'"
+    register: output
+
+  - agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - ""
+    - "Your Bookbag Lab instructions are located at:"
+    - " {{ output.stdout }}"
+    - ""
 
 # For deployment onto a dedicated cluster (as part of the
 # cluster deployment) set workload_shared_deployment to False
