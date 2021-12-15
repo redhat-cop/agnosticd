@@ -11,40 +11,53 @@
           openshift.io/description: ""
           openshift.io/display-name: "Red Hat Single Sign-On"
 
-- name: deploy templates and imagestreams to openshift namespace
-  command: oc replace --force -n openshift -f -
-  args:
-    stdin: "{{ lookup('file', item) }}"
+# deploy rhsso operator
+- name: Create operator subscription for RH-SSO
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
   loop:
-    - ./files/rhsso-template.yaml
+  - ./files/rhsso_operatorgroup.yaml
+  - ./files/rhsso_subscription.yaml
 
-- name: deploy rhsso
-  shell: >
-    oc process -n openshift quarkus-sso74
-    -p APPLICATION_NAME=rhsso
-    -p SSO_ADMIN_USERNAME={{workshop_rhsso_admin_user_name}}
-    -p SSO_ADMIN_PASSWORD={{workshop_rhsso_admin_password}}
-    -p MEMORY_LIMIT=2Gi
-    | oc create -n rhsso -f -
-
-- name: wait for rhsso to be ready
+# wait for RHSSO CRD
+- name: Wait for RHSSO CRD
   k8s_facts:
-    api_version: v1
-    kind: Pod
-    namespace: rhsso
-    label_selectors:
-      - application = rhsso
-      - deploymentconfig = rhsso
-    field_selectors:
-      - status.phase=Running
-  register: r_rhsso_pod
-  retries: 120
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: keycloaks.keycloak.org
+  register: r_rhsso_crd
+  retries: 200
   delay: 10
-  until: r_rhsso_pod.resources | list | length == 1
+  until: r_rhsso_crd.resources | list | length == 1
+
+- name: Create a secret for RHSSO CR
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/rhsso-credential.yaml
+
+# deploy rhsso CR
+- name: Create CR for RHSSO
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/rhsso_cr.yaml
 
 - name: Get SSO admin token
   uri:
-    url: https://secure-rhsso-rhsso.{{ route_subdomain }}/auth/realms/master/protocol/openid-connect/token
+    url: https://keycloak-rhsso.{{ route_subdomain }}/auth/realms/master/protocol/openid-connect/token
     validate_certs: false
     method: POST
     body:
@@ -61,7 +74,7 @@
 
 - name: Import realm
   uri:
-    url: https://secure-rhsso-rhsso.{{ route_subdomain }}/auth/admin/realms
+    url: https://keycloak-rhsso.{{ route_subdomain }}/auth/admin/realms
     validate_certs: false
     method: POST
     body_format: json
@@ -75,20 +88,3 @@
   retries: 120
   delay: 10
   until: result is succeeded
-
-- name: Increase rhsso access token lifespans
-  uri:
-    url: https://secure-rhsso-rhsso.{{ route_subdomain }}/auth/admin/realms/quarkus
-    validate_certs: false
-    method: PUT
-    headers:
-      Content-Type: application/json
-      Authorization: "Bearer {{ rhsso_admin_token.json.access_token }}"
-    body:
-      accessTokenLifespan: 28800
-      accessTokenLifespanForImplicitFlow: 28800
-      actionTokenGeneratedByUserLifespan: 28800
-      ssoSessionIdleTimeout: 28800
-      ssoSessionMaxLifespan: 28800
-    body_format: json
-    status_code: 204
