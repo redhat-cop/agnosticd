@@ -1,0 +1,80 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  annotations:
+    tekton.dev/pipelines.minVersion: 0.12.1
+    tekton.dev/tags: git
+  name: git-update-deployment
+  namespace: {{ ocp4_admin_project }}
+  labels:
+    app.kubernetes.io/version: '0.1'
+    operator.tekton.dev/provider-type: community
+spec:
+  description: This Task can be used to update image digest in a Git repo using kustomize
+  params:
+    - name: GIT_REPOSITORY
+      type: string
+    - name: GIT_USERNAME
+      type: string
+    - name: GIT_PASSWORD
+      type: string
+    - name: CURRENT_IMAGE
+      type: string
+    - name: NEW_IMAGE
+      type: string
+    - name: NEW_DIGEST
+      type: string
+    - name: KUSTOMIZATION_PATH
+      type: string
+  workspaces:
+    - description: The workspace consisting of maven project.
+      name: workspace
+
+  results:
+    - name: commit
+      description: The commit SHA
+
+  steps:
+    - name: git-clone
+      image: quay.io/rcarrata/git:v2.26.2
+      workingDir: $(workspaces.workspace.path)
+      script: |
+        rm -rf git-update-digest-workdir
+        git clone $(params.GIT_REPOSITORY) git-update-digest-workdir
+
+    - name: update-digest
+      image: k8s.gcr.io/kustomize/kustomize:v3.8.7
+      workingDir: $(workspaces.workspace.path)
+      script: |
+        cd git-update-digest-workdir/$(params.KUSTOMIZATION_PATH)
+        /app/kustomize edit set image $(params.CURRENT_IMAGE)=$(params.NEW_IMAGE)@$(params.NEW_DIGEST)
+
+        echo "##########################"
+        echo "### kustomization.yaml ###"
+        echo "##########################"
+        cat kustomization.yaml
+
+    - name: git-commit
+      image: quay.io/rcarrata/git:v2.26.2
+      workingDir: $(workspaces.workspace.path)
+      script: |
+        cd git-update-digest-workdir
+        git config user.email "tekton-pipelines-ci@redhat.com"
+        git config user.name "tekton-pipelines-ci"
+
+        git status
+        git add $(params.KUSTOMIZATION_PATH)/kustomization.yaml
+        # git commit -m "[$(context.pipelineRun.name)] Image digest updated"
+        git commit -m "[ci] Image digest updated"
+
+        git remote add auth-origin $(echo $(params.GIT_REPOSITORY) | sed -E "s#http://(.*)#http://$(params.GIT_USERNAME):$(params.GIT_PASSWORD)@\1#g")
+        git push auth-origin master
+
+        RESULT_SHA="$(git rev-parse HEAD | tr -d '\n')"
+        EXIT_CODE="$?"
+        if [ "$EXIT_CODE" != 0 ]
+        then
+          exit $EXIT_CODE
+        fi
+        # Make sure we don't add a trailing newline to the result!
+        echo -n "$RESULT_SHA" > $(results.commit.path)

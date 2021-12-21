@@ -1,0 +1,173 @@
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: xraylabdb
+  namespace: {{ namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: ocs-storagecluster-ceph-rbd
+  volumeMode: Filesystem
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: xraylabdb-init
+  namespace: {{ namespace }}
+data:
+  90-init-data.sh: |
+    init_database() {
+        local thisdir
+        local init_data_file
+        thisdir=$(dirname ${BASH_SOURCE[0]})
+ 
+        init_data_file=$(readlink -f ${thisdir}/../mysql-data/schema.sql)
+        log_info "Initializing the database schema from file ${init_data_file}..."
+        mysql $mysql_flags ${MYSQL_DATABASE} < ${init_data_file}
+ 
+        init_data_file=$(readlink -f ${thisdir}/../mysql-data/import.sql)
+        log_info "Initializing the database data from file ${init_data_file}..."
+        mysql $mysql_flags ${MYSQL_DATABASE} < ${init_data_file}
+    }
+
+    if ! [ -v MYSQL_RUNNING_AS_SLAVE ] && $MYSQL_DATADIR_FIRST_INIT ; then
+        init_database
+    fi
+
+  import.sql: >-
+    INSERT INTO `images_uploaded` (`time`,`name`) SELECT CURRENT_TIMESTAMP(), '';
+    INSERT INTO `images_processed` (`time`,`name`,`model`,`label`) SELECT CURRENT_TIMESTAMP(), '', '','';
+    INSERT INTO `images_anonymized` (`time`,`name`) SELECT CURRENT_TIMESTAMP(), '';
+
+  schema.sql: >-
+    DROP TABLE IF EXISTS `images_uploaded`;
+    DROP TABLE IF EXISTS `images_processed`;
+    DROP TABLE IF EXISTS `images_anonymized`;
+
+    CREATE TABLE `images_uploaded` (`time` TIMESTAMP, `name` VARCHAR(255));
+    CREATE TABLE `images_processed` (`time` TIMESTAMP, `name` VARCHAR(255), `model` VARCHAR(10), `label` VARCHAR(20));
+    CREATE TABLE `images_anonymized` (`time` TIMESTAMP, `name` VARCHAR(255));
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: xraylabdb
+  namespace: {{ namespace }}
+  labels:
+    app: xraylabdb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/instance: database
+    app.kubernetes.io/name: xraylab-db
+    app.kubernetes.io/part-of: xraylab
+    app.openshift.io/runtime: mariadb
+spec:
+  strategy:
+    type: Recreate
+    recreateParams:
+      timeoutSeconds: 600
+    resources: {}
+    activeDeadlineSeconds: 21600
+  replicas: 1
+  selector:
+    matchLabels:
+       app: xraylabdb
+  template:
+    metadata:
+      labels:
+        app: xraylabdb
+      annotations:
+        alpha.image.policy.openshift.io/resolve-names: '*'
+    spec:
+      containers:
+        - name: xraylabdb
+          resources:
+            limits:
+              memory: 512Mi
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - '-i'
+                - '-c'
+                - >-
+                  MYSQL_PWD="$MYSQL_PASSWORD" mysql -h 127.0.0.1 -u $MYSQL_USER
+                  -D $MYSQL_DATABASE -e 'SELECT 1'
+            initialDelaySeconds: 5
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          terminationMessagePath: /dev/termination-log
+          livenessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          env:
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: database-user
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: database-password
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: database-root-password
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: db-secret
+                  key: database-db
+          ports:
+            - containerPort: 3306
+              protocol: TCP
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - mountPath: /var/lib/mysql/data
+              name: xraylabdb-data
+            - mountPath: /opt/app-root/src/mysql-init/90-init-data.sh
+              name: xraylabdb-init
+              subPath: 90-init-data.sh
+            - mountPath: /opt/app-root/src/mysql-data/import.sql
+              name: xraylabdb-init
+              subPath: import.sql
+            - mountPath: /opt/app-root/src/mysql-data/schema.sql
+              name: xraylabdb-init
+              subPath: schema.sql
+          terminationMessagePolicy: File
+          image: registry.redhat.io/rhel8/mariadb-103:1
+      volumes:
+        - name: xraylabdb-data
+          persistentVolumeClaim:
+            claimName: xraylabdb
+        - name: xraylabdb-init
+          configMap:
+            name: xraylabdb-init
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: xraylabdb
+  namespace: {{ namespace }}
+spec:
+  ports:
+    - name: mariadb
+      protocol: TCP
+      port: 3306
+      targetPort: 3306
+  selector:
+    app: xraylabdb
+

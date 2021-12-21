@@ -1,0 +1,255 @@
+---
+- name: Set up bastion
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Generate user password if not defined
+      set_fact:
+        rosa_user_password: >-
+          {{ lookup('password', '/dev/null length={{ rosavm_user_password_length }} chars=ascii_letters,digits') }}
+
+    - name: Create user with password
+      become: true
+      user:
+        state: present
+        name: "{{ rosavm_user_name }}"
+        password: "{{ rosa_user_password | password_hash( 'sha512' ) }}"
+        password_lock: true
+        comment: ROSA User
+        group: users
+        groups: "{{ 'wheel' if rosavm_user_enable_sudo | bool else '' }}"
+        shell: /bin/bash
+
+    - name: Enable password authentication
+      become: true
+      lineinfile:
+        line: PasswordAuthentication yes
+        regexp: '^ *PasswordAuthentication'
+        path: /etc/ssh/sshd_config
+
+    - name: Restart sshd
+      become: true
+      service:
+        name: sshd
+        state: restarted
+
+    - name: Print User Info for Password authentication
+      debug:
+        msg: "{{ item }}"
+      loop:
+        - "user.info: ssh_command: ssh {{ rosavm_user_name }}@rosavm.{{ subdomain_base }}"
+        - "user.info: password: {{ rosa_user_password }}"
+
+    - name: Add User Info for Password authentication to user_data.yaml
+      agnosticd_user_info:
+        user: "{{ rosavm_user_name }}"
+        data:
+          ssh_command: "ssh {{ rosavm_user_name }}@rosavm.{{ subdomain_base }}"
+          password: "{{ rosa_user_password }}"
+
+- name: Step 00xxxxx software
+  hosts: bastions
+  gather_facts: false
+  become: false
+  environment:
+    AWS_DEFAULT_REGION: "{{ aws_region }}"
+  tasks:
+    - tags:
+        - install_awscli
+      block:
+        - name: Get awscli bundle
+          get_url:
+            url: https://s3.amazonaws.com/aws-cli/awscli-bundle.zip
+            dest: /tmp/awscli-bundle.zip
+        - name: Unzip awscli-bundle.zip
+          unarchive:
+            src: /tmp/awscli-bundle.zip
+            dest: /tmp/
+            remote_src: true
+        - name: Install awscli
+          command: /tmp/awscli-bundle/install -i /usr/local/aws -b /bin/aws
+          args:
+            creates: /usr/local/aws
+          become: true
+        - name: cleanup archive and tmp files
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/awscli-bundle
+            - /tmp/awscli-bundle.zip
+
+    - tags:
+        - create_aws_dir
+      block:
+        - name: Create .aws directory
+          file:
+            path: ~/.aws
+            state: directory
+
+    - tags:
+        - create_aws_creds
+      block:
+        - name: Add aws credentials
+          blockinfile:
+            path: ~/.aws/credentials
+            create: yes
+            mode: 0600
+            block: |-
+              [default]
+              aws_access_key_id={{ hostvars.localhost.rosa_access_key_id }}
+              aws_secret_access_key={{ hostvars.localhost.rosa_secret_access_key }}
+
+    - tags:
+        - create_aws_config
+      block:
+        - name: Add aws config
+          blockinfile:
+            path: ~/.aws/config
+            create: yes
+            mode: 0600
+            block: |-
+              [default]
+              region={{ aws_region }}
+
+    - tags:
+        - install_rosacli
+      block:
+        - name: Get ROSA CLI
+          get_url:
+            url: "{{ rosa_installer_url }}"
+            dest: /tmp/rosa-linux.tar.gz
+        - name: Unzip rosa-linux.tar.gz
+          unarchive:
+            src: /tmp/rosa-linux.tar.gz
+            dest: /usr/local/bin/
+            remote_src: true
+          become: true
+        - name: cleanup archive file
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/rosa-linux.tar.gz
+
+    - tags:
+        - verify_rosa_installer
+      block:
+        - set_fact:
+            rosa_token: "{{ gpte_rosa_token }}"
+          when: rosa_token == ""
+        - name: Log into ROSA
+          command: "/usr/local/bin/rosa login --token {{ rosa_token }}"
+        - name: Init AWS account for ROSA
+          command: "/usr/local/bin/rosa init"
+        - name: Verify permissions for ROSA
+          command: "/usr/local/bin/rosa verify permissions"
+        - name: Verify quota for ROSA
+          command: "/usr/local/bin/rosa verify quota"
+
+    - tags:
+        - run_rosa_installer
+      block:
+        - name: Create ROSA Cluster
+          command: "/usr/local/bin/rosa create cluster --cluster-name={{ rosa_cluster_name }}"
+
+    - tags:
+        - wait_rosa_installer
+      block:
+        - name: Wait 5 minutes for the ROSA installer to start
+          pause:
+            minutes: 5
+        - name: Check for ROSA installer completion
+          shell: "/usr/local/bin/rosa describe cluster -c {{ rosa_cluster_name }} |grep ^State:|awk '{print $2}'"
+          register: rosa_installer_status
+          until: rosa_installer_status.stdout.find("ready") != -1
+          retries: 60
+          delay: 60
+
+    - tags:
+        - get_rosa_console_url
+      block:
+        - name: Get ROSA Console URL
+          shell: "/usr/local/bin/rosa describe cluster -c {{ rosa_cluster_name }} |grep '^Console URL:'|awk '{print $3}'"
+          register: rosa_console_url
+
+    - tags:
+        - create_rosa_admin
+      block:
+        - name: Create ROSA admin user
+          shell: "/usr/local/bin/rosa create admin --cluster={{ rosa_cluster_name }} |grep 'oc login' | awk '{print $7}'"
+          register: rosa_admin_result
+        - name: Create .config/ocm directory in rosa user homedir
+          become: true
+          file:
+            path: "~{{ rosavm_user_name }}/.config/ocm"
+            owner: "{{ rosavm_user_name }}"
+            state: directory
+        - name: Copy ROSA token to ec2 user dir
+          become: true
+          ansible.builtin.copy:
+            src: /home/ec2-user/.config/ocm/ocm.json
+            dest: "~{{ rosavm_user_name }}/.config/ocm/ocm.json"
+            owner: "{{ rosavm_user_name }}"
+            mode: '0600'
+            remote_src: true
+        - name: Create .aws directory in rosa user homedir
+          become: true
+          file:
+            path: "~{{ rosavm_user_name }}/.aws"
+            owner: "{{ rosavm_user_name }}"
+            state: directory
+        - name: Copy AWS credentials to rosa user dir
+          become: true
+          ansible.builtin.copy:
+            src: /home/ec2-user/.aws/credentials
+            dest: "~{{ rosavm_user_name }}/.aws/credentials"
+            owner: "{{ rosavm_user_name }}"
+            remote_src: true
+        - name: Copy AWS config to rosa user dir
+          become: true
+          ansible.builtin.copy:
+            src: /home/ec2-user/.aws/config
+            dest: "~{{ rosavm_user_name }}/.aws/config"
+            owner: "{{ rosavm_user_name }}"
+            remote_src: true
+
+    - when:
+        - rosa_admin_result is defined
+        - rosa_console_url is defined
+      block:
+        - name: Print ROSA admin credentials as user.info
+          agnosticd_user_info:
+            msg: "{{ item }}"
+          loop:
+            - "WARNING: with great power comes great responsibility. We monitor usage."
+            - "Your AWS programmatic access is preconfigured in ~/.aws/credentials"
+            - "Your AWS credentials are:"
+            - ""
+            - "AWS_ACCESS_KEY_ID: {{ hostvars.localhost.rosa_access_key_id }}"
+            - "AWS_SECRET_ACCESS_KEY: {{ hostvars.localhost.rosa_secret_access_key }}"
+            - "** Plase be very careful to not expose AWS credentials in GIT repos or anywhere else that could be public! **"
+            - ""
+            - >-
+              {% if sandbox_enable_ui | default(true) | bool %}
+              Web Console Access: https://{{ sandbox_account_id }}.signin.aws.amazon.com/console
+              {% endif %}
+            - >-
+              {% if sandbox_enable_ui | default(true) | bool %}
+              Web Console Credentials: {{ hostvars.localhost.rosa_console_user_name }} / {{ hostvars.localhost.rosa_console_password }}
+              {% endif %}
+            - ""
+            - "OpenShift console URL: {{ rosa_console_url.stdout }}"
+            - ""
+            - "OpenShift admin user: cluster-admin"
+            - "cluster-admin password: {{ rosa_admin_result.stdout }}"
+            - ""
+            - "NOTE: The ROSA CLI is at /usr/local/bin/rosa and should be in your path. There is no need to sudo or use root."
+            - ""
+            - "Your ROSA environment consists of:"
+            - ""
+            - "3 m5.2xlarge master nodes"
+            - "2 m5.xlarge worker nodes"
+            - "2 r5.xlarge infra nodes"
+            - "1 t2.small bastion"
