@@ -42,7 +42,7 @@ DOCUMENTATION = """
             required: False
             type: bool
             default: False
-          all_in_one:
+          single_zone:
             description: If true, force all the zones to be the same. If false, do best-effort.
             required: False
             type: bool
@@ -195,7 +195,7 @@ def inject_reservation(l, *reservations):
 
 
 def regroup_reservations(reservations):
-    """Used when all_in_one is True. Regroup all the zones into one, named 'az1'."""
+    """Used when single_zone is True. Regroup all the zones into one, named 'az1'."""
 
     reservations = deepcopy(reservations)
     result = []
@@ -536,7 +536,7 @@ class ActionModule(ActionBase):
         'aws_secret_access_key',
         'ttl',
         'distinct',
-        'all_in_one',
+        'single_zone',
         'state'
     ))
     def run(self, tmp=None, task_vars=None):
@@ -562,16 +562,16 @@ class ActionModule(ActionBase):
             result['error'] = 'distinct must be a boolean'
             return result
 
-        all_in_one = self._task.args.get('all_in_one', False)
-        if isinstance(all_in_one, six.string_types):
-            if all_in_one.lower() in ['true', 'y', 'yes']:
-                all_in_one = True
-            if all_in_one.lower() in ['false', 'n', 'no']:
-                all_in_one = False
+        single_zone = self._task.args.get('single_zone', False)
+        if isinstance(single_zone, six.string_types):
+            if single_zone.lower() in ['true', 'y', 'yes']:
+                single_zone = True
+            if single_zone.lower() in ['false', 'n', 'no']:
+                single_zone = False
 
-        if not isinstance(all_in_one, bool):
+        if not isinstance(single_zone, bool):
             result['failed'] = True
-            result['error'] = 'all_in_one must be a boolean'
+            result['error'] = 'single_zone must be a boolean'
             return result
 
         state = self._task.args.get('state', 'present')
@@ -618,7 +618,7 @@ class ActionModule(ActionBase):
 
         for region in regions:
             try:
-                if all_in_one == True:
+                if single_zone == True:
                     display.display("Grouping all reservations in a single AZ")
                     reservations = regroup_reservations(reservations)
 
