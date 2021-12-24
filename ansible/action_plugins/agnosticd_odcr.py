@@ -616,6 +616,7 @@ class ActionModule(ActionBase):
         display.v("regions: %s" % regions)
         display.v("ttl: %s" % ttl)
 
+        virtual_zones = reservations.keys()
         for region in regions:
             try:
                 if single_zone == True:
@@ -632,6 +633,15 @@ class ActionModule(ActionBase):
                 if len(result['reservations']) == 1:
                     for k in list(result['reservations']):
                         result['single_availability_zone'] = result['reservations'][k]['availability_zone']
+
+                    # Propagate the zone to the virtual zones
+                    # so it's transparent for the config
+                    if single_zone == True:
+                        for k in virtual_zones:
+                            if k != 'az1':
+                                result['reservations'][k] = {
+                                    "availability_zone": result['single_availability_zone']
+                                }
 
                 result['region'] = region
                 break
