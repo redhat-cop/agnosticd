@@ -183,9 +183,6 @@ def inject_reservation(l, *reservations):
             if reservation_match(r, reservation):
                 r['instance_count'] = int(r['instance_count']) + int(reservation['instance_count'])
                 break
-            else:
-                continue
-            break
         else:
             # only executed if the inner loop did NOT break
             # no match, add the reservation to the list
