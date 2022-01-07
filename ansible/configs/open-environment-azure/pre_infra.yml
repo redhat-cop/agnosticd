@@ -1,0 +1,132 @@
+---
+- name: Step 000 Pre Infrastructure
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+    - step001
+    - pre_infrastructure
+  tasks:
+    - debug:
+        msg: "Step 000 Pre Infrastructure"
+
+- name: Check if user and subscription exists in Active Directory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AZURE_CLIENT_ID: "{{ azure_service_principal }}"
+    AZURE_TENANT: "{{ azure_tenant }}"
+    AZURE_SECRET: "{{ azure_password }}"
+    AZURE_SUBSCRIPTION_ID: "{{ azure_subscription_id }}"
+    AZURE_CONFIG_DIR: "{{ output_dir }}/.azure-{{ project_tag }}"
+    PATH: '{{ output_dir }}:/bin:/usr/bin:/usr/local/bin'
+  tasks:
+    - name: Check if email is *@redhat.com
+      fail:
+        msg: User is not a Red Hat associate
+      when: '"@redhat.com" not in email'
+    - name: Initialize azureProfile.json
+      command: /usr/bin/az login --service-principal -u {{ azure_service_principal }} -p {{ azure_password }} --tenant {{ azure_tenant }}
+    - set_fact: upn="{{ email | replace('@redhat.com','_redhat.com#EXT#@prutledgopentlc.onmicrosoft.com') }}"
+    - name: Checking if user is in Active Directory
+      register: azuserc
+      azure.azcollection.azure_rm_aduser_info:
+        auth_source: cli
+        user_principal_name: "{{ upn }}"
+        tenant: "{{ azure_tenant }}"
+      ignore_errors: true
+    #- name: Show azuserc dictionary
+    #  debug:
+    #    msg: "{{ item.key }}: {{ item.value }}"
+    #  with_dict: "{{ azuserc }}"
+    - name: Create user block
+      block:
+        - name: Get OAuth Token
+          ansible.builtin.uri:
+            url: "https://login.microsoftonline.com/{{ azure_tenant }}/oauth2/v2.0/token"
+            method: POST
+            headers:
+              Content-Type: application/x-www-form-urlencoded
+            body:
+              grant_type: "client_credentials"
+              client_id: "{{ azure_service_principal }}"
+              scope: "https://graph.microsoft.com/.default"
+              client_secret: "{{ azure_password }}"
+            body_format: form-urlencoded
+            validate_certs: true
+          register: authtoken
+        #- name: Show authtoken dictionary
+        #  debug:
+        #    msg: "{{ item.key }}: {{ item.value }}"
+        #  with_dict: "{{ authtoken }}"
+        - name: Invite user to org
+          ansible.builtin.uri:
+            url: https://graph.microsoft.com/v1.0/invitations
+            method: POST
+            headers:
+              Content-type: application/json
+              Authorization: "Bearer {{ authtoken.json.access_token }}"
+            status_code: 201
+            body_format: json
+            body:
+              invitedUserEmailAddress: "{{ email }}"
+              inviteRedirectUrl: "https://portal.azure.com"
+              sendInvitationMessage: true
+              invitedUserDisplayName: "OpenEnv_User_{{ email }}"
+        - name: Print Open Environment Information
+          agnosticd_user_info:
+            msg: "{{ item }}"
+          loop:
+            - "An invitation has been sent to your redhat.com inbox.  You will need to accept the invitation."
+        - name: Wait 60 seconds for Azure to create user
+          ansible.builtin.wait_for:
+            timeout: 60
+      when: azuserc is failed and "'does not exist or one of its queried reference-property objects are not present.' in azuserc.msg"
+    - name: Get user from Active Directory
+      register: azuser
+      azure.azcollection.azure_rm_aduser_info:
+        auth_source: cli
+        user_principal_name: "{{ upn }}"
+        tenant: "{{ azure_tenant }}"
+    - name: Create OPEN environment resource group
+      azure.azcollection.azure_rm_resourcegroup:
+        subscription_id: "{{ azure_subscription_id }}"
+        name: "openenv-{{ guid }}"
+        location: eastus
+        state: present
+        tags:
+          guid: "{{ guid }}"
+          delete: never
+    - name: Get resource group info
+      register: azrg
+      azure.azcollection.azure_rm_resourcegroup_info:
+        name: "openenv-{{ guid }}"
+        auth_source: cli
+        tenant: "{{ azure_tenant }}"
+    #- name: Show azrg dictionary
+    #  debug:
+    #    msg: "{{ item.key }}: {{ item.value }}"
+    #  with_dict: "{{ azrg }}"
+    #- name: Show azuser dictionary
+    #  debug:
+    #    msg: "{{ item.key }}: {{ item.value }}"
+    #  with_dict: "{{ azuser }}"
+    - name: Get Role Definition for Contributor
+      azure.azcollection.azure_rm_roledefinition_info:
+        scope: "{{ azrg['resourcegroups'][0].id }}"
+        role_name: Contributor
+      register: azrd
+    #- name: Show azrd dictionary
+    #  debug:
+    #    msg: "{{ item.key }}: {{ item.value }}"
+    #  with_dict: "{{ azrd }}"
+    - name: Create a role assignment
+      azure.azcollection.azure_rm_roleassignment:
+        #name: "openenv-assignment-{{ guid }}"
+        scope: "{{ azrg['resourcegroups'][0].id }}"
+        assignee_object_id: "{{ azuser['ad_users'][0].object_id }}"
+        role_definition_id:
+          "{{ azrd['roledefinitions'][0].id }}"
