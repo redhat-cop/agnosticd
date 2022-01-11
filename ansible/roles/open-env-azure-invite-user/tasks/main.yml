@@ -1,0 +1,61 @@
+---
+
+- name: Check if email is *@redhat.com
+  fail:
+    msg: User is not a Red Hat associate
+  when: '"@redhat.com" not in email'
+- name: Initialize azureProfile.json
+  command: >
+    /usr/bin/az login --service-principal -u {{ azure_service_principal }}
+    -p {{ azure_password }} --tenant {{ azure_tenant }}
+- set_fact:
+    upn: "{{ email|replace('@redhat.com','_redhat.com#EXT#@prutledgopentlc.onmicrosoft.com') }}"
+- name: Checking if user is in Active Directory
+  register: azuserc
+  azure.azcollection.azure_rm_aduser_info:
+    auth_source: cli
+    user_principal_name: "{{ upn }}"
+    tenant: "{{ azure_tenant }}"
+  ignore_errors: true
+- name: Create user block
+  when:
+    - azuserc is failed
+    - "'does not exist or one of its queried reference-property objects are not present.' in azuserc.msg"
+  block:
+    - name: Get OAuth Token
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ azure_tenant }}/oauth2/v2.0/token"
+        method: POST
+        headers:
+          Content-Type: application/x-www-form-urlencoded
+        body:
+          grant_type: "client_credentials"
+          client_id: "{{ azure_service_principal }}"
+          scope: "https://graph.microsoft.com/.default"
+          client_secret: "{{ azure_password }}"
+        body_format: form-urlencoded
+        validate_certs: true
+      register: authtoken
+    - name: Invite user to org
+      ansible.builtin.uri:
+        url: https://graph.microsoft.com/v1.0/invitations
+        method: POST
+        headers:
+          Content-type: application/json
+          Authorization: "Bearer {{ authtoken.json.access_token }}"
+        status_code: 201
+        body_format: json
+        body:
+          invitedUserEmailAddress: "{{ email }}"
+          inviteRedirectUrl: "https://portal.azure.com"
+          sendInvitationMessage: true
+          invitedUserDisplayName: "OpenEnv_User_{{ email }}"
+    - name: Print Open Environment Information
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+        - "An invitation has been sent to your redhat.com inbox."
+        - "You will need to accept the invitation."
+    - name: Wait 60 seconds for Azure to create user
+      ansible.builtin.wait_for:
+        timeout: 60
