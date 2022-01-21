@@ -1,6 +1,15 @@
 ---
+- name: Get Nodes in order to check status
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+  register: r_get_nodes
+  retries: 10
+  delay: 30
+  until: r_get_nodes is succeeded
+
 - name: Get CertificateSigningRequests that need to be approved
-  k8s_info:
+  kubernetes.core.k8s_info:
     api_version: certificates.k8s.io/v1beta1
     kind: CertificateSigningRequest
   register: r_csrs
@@ -10,12 +19,26 @@
 
 - name: Approve CerrtificateSigningRequests
   vars:
+    __min_heartbeat: >-
+      {{ '%FT%TZ' | strftime(now(utc=True).timestamp() - 600) }}
+    # Consider node NotReady if Ready condition explicitly has status not true or last heartbeat is too long ago
+    __nodes_not_ready_query: >-
+      [?status.conditions[?type=='Ready' && (status != 'True' || lastHeartbeatTime < '{{ __min_heartbeat }}')]].metadata.name
+    __nodes_not_ready: >-
+      {{ r_get_nodes.resources | default([]) | to_json | from_json
+       | json_query(__nodes_not_ready_query)
+      }}
     __unsigned_csr_names: >-
       {{ r_csrs.resources | default([]) | to_json | from_json
        | json_query("[?status.conditions[?type=='Approved' && status=='True']==`null`].metadata.name")
       }}
-  when: __unsigned_csr_names | length > 0
+  when: __unsigned_csr_names | length > 0 or __nodes_not_ready | length > 0
   block:
+  - name: Report Nodes NotReady
+    debug:
+      msg: "Nodes NotReady: {{ __nodes_not_ready | join(', ') }}"
+    when: __nodes_not_ready | length > 0
+
   - name: Approve all pending CertificateSigningRequests
     loop: "{{ __unsigned_csr_names | default([]) }}"
     command: "oc adm certificate approve {{ item }}"
