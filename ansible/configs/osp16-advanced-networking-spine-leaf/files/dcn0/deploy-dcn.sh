@@ -14,4 +14,5 @@ time openstack overcloud deploy \
      -e ~/containers-prepare-parameter.yaml \
      -e network-environment.yaml \
      -e network-environment-dcn.yaml \
+     -e ips-from-pool-all.yaml \
      -e overrides.yaml

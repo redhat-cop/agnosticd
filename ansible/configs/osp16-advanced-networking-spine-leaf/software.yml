@@ -29,6 +29,33 @@
         state: restarted
         enabled: true
 
+
+    - name: Install kernel-modules-extra
+      yum:
+        name: "kernel-modules-extra-{{ansible_kernel}}"
+        state: present
+
+    - name: Enable module sch_netem
+      modprobe:
+        name: sch_netem
+        state: present
+
+    - name: Install iproute-tc
+      yum: 
+        name: iproute-tc
+        state: present
+
+    - name: Creates a cron for TC latency
+      cron:
+        name: "eth4 20ms latency"
+        special_time: reboot
+        job: "/sbin/tc qdisc add dev eth4 root netem delay 20ms"
+
+    - name: Run the command  for tc
+      command: /sbin/tc qdisc add dev eth4 root netem delay 20ms
+
+
+
 - name: Install overcloud
   hosts: undercloud
   become: true
@@ -36,7 +63,7 @@
   tags: build
   tasks:
     - name: Configure and install overcloud
-      when: purpose == "development" or osp_copy_vm_disk_to_image_task or osp_copy_volume_to_image_task
+      when: deployed_version_lab|default(False) and (purpose == "development" or osp_copy_vm_disk_to_image_task or osp_copy_volume_to_image_task)
       block:
       - name: Copy files to /home/stack
         synchronize:
@@ -50,6 +77,11 @@
           - templates/
           - dcn0/
 
+      - name: Change owner and group of the files
+        command: sudo chown -R stack:stack .
+        args:
+         chdir: /home/stack/
+
       - name: Adding routes for 192.0.{3,4,100}.0/24
         become_user: root
         copy:
@@ -58,6 +90,7 @@
             192.0.3.0/24 via 192.0.2.254 dev br-ctlplane  
             192.0.4.0/24 via 192.0.2.254 dev br-ctlplane  
             192.0.100.0/24 via 192.0.2.254 dev br-ctlplane  
+            172.20.100.0/24 via 192.0.2.253 dev br-ctlplane
 
       - name: Restart network service
         become_user: root
@@ -137,6 +170,11 @@
         until: job_result.finished
         retries: 600
 
+      - name: Discover nodes on the cell
+        shell: source ~/stackrc && TRIPLEO_PLAN_NAME=overcloud ANSIBLE_HOST_KEY_CHECKING=False ansible -i /usr/bin/tripleo-ansible-inventory nova_api[0] -b -a "/usr/bin/podman exec -it nova_api nova-manage cell_v2 discover_hosts --by-service --verbose"
+        args:
+         chdir: /home/stack/
+
 
 
 - name: Configure httpd
@@ -151,15 +189,17 @@
       template:
         src: httpd/horizon.conf
         dest: /etc/httpd/conf.d/horizon.conf
+
+    - name: Allow SELinux to httpd to bind to port 6080
+      shell: semanage port -m -t http_port_t -p tcp 6080
+    - name: Allow SELinux rule to allow httpd to connect network 
+      shell: setsebool -P httpd_can_network_connect 1
         
     - name: Start and enable httpd
       service:
         name: httpd
         state: restarted
         enabled: yes
-
-    - name: Allow SELinux rule to allow httpd to connect network 
-      shell: setsebool -P httpd_can_network_connect 1
 
 - name: Software flight-check
   hosts: localhost
