@@ -12,7 +12,7 @@ set -eu
     # DONE 244 ansible2.9-python3.6-2021-01-22
 
 
-REPO=default-route-openshift-image-registry.apps.ocp-us-west-2.infra.open.redhat.com
+REPO=image-registry.apps-dev.open.redhat.com
 for venv in \
     azure_open_envs-ansible2.9-python3.6-2022-01-10 \
     equinix_metal-ansible2.9-python3.6-2021-11-03 \
@@ -27,5 +27,5 @@ for venv in \
     md5sum requirements.txt
     ansible-builder build -v 3 -c . --tag ee-${venv}
     echo "Pushing ${venv}"
-    podman push ee-${venv} $REPO/agnosticd-images/ee-${venv}
+    podman push ee-${venv} $REPO/agnosticd/ee-${venv}
 done
