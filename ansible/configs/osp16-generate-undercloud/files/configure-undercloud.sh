@@ -1,7 +1,6 @@
 #!/bin/sh -x
 cd /home/stack/
 openstack tripleo container image prepare default   --local-push-destination   --output-env-file containers-prepare-parameter.yaml
-sed -i "s/tag: '16.2'/tag: '16.2.1'/" containers-prepare-parameter.yaml
 cat >>containers-prepare-parameter.yaml <<EOF
   ContainerImageRegistryCredentials:
     registry.redhat.io:
