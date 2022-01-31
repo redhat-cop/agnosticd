@@ -11,35 +11,33 @@
 # This has now been fixed.
 # To prevent breaking existing deployments the following three
 # steps map the old variables to the new ones and print a warning
-- name: Print warning if old variables are defined
-  debug:
-    msg: "{{ item }}"
-  loop:
-  - "*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*"
-  - "Variable names have changed. Please use "
-  - "ocp4_workload_gitea_operator_migrate_repositories and"
-  - "ocp4_workload_gitea_operator_repositories_list instead of"
-  - "the old variable names!!"
-  - "*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*"
+- name: Fix old variables
+  when: 
+  - ocp4_workload_gitea_migrate_repositories is defined or ocp4_workload_gitea_repositories_list is defined
+  block:
+  - name: Print warning if old variables are defined
+    debug:
+      msg: "{{ item }}"
+    loop:
+    - "*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*"
+    - "Variable names have changed. Please use "
+    - "ocp4_workload_gitea_operator_migrate_repositories and"
+    - "ocp4_workload_gitea_operator_repositories_list instead of"
+    - "the old variable names!!"
+    - "*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*!*"
 
-- name: Check if old flag variable has been passed and set new variable
-  when: ocp4_workload_gitea_migrate_repositories is defined
-  set_fact:
-    ocp4_workload_gitea_operator_migrate_repositories: "{{ ocp4_workload_gitea_migrate_repositories }}"
+  - name: Check if old flag variable has been passed and set new variable
+    when: ocp4_workload_gitea_migrate_repositories is defined
+    set_fact:
+      ocp4_workload_gitea_operator_migrate_repositories: "{{ ocp4_workload_gitea_migrate_repositories }}"
 
-- name: Check if old repos list variable has been passed and set new variable
-  when: ocp4_workload_gitea_repositories_list is defined
-  set_fact:
-    ocp4_workload_gitea_operator_repositories_list: "{{ ocp4_workload_gitea_repositories_list }}"
+  - name: Check if old repos list variable has been passed and set new variable
+    when: ocp4_workload_gitea_repositories_list is defined
+    set_fact:
+      ocp4_workload_gitea_operator_repositories_list: "{{ ocp4_workload_gitea_repositories_list }}"
 
-- name: Print variables
-  debug:
-    msg: "{{ item }}"
-  loop:
-  - "Migrate: {{ ocp4_workload_gitea_operator_migrate_repositories }}"
-  - "List: {{ ocp4_workload_gitea_operator_repositories_list }}"
 #####################################################################
-# Check valid tags for the Gitea Image
+# Sanity Checks
 #####################################################################
 
 - name: Check Gitea tag
@@ -48,6 +46,25 @@
     - ocp4_workload_gitea_operator_gitea_image_tag is not match('latest')
     - ocp4_workload_gitea_operator_gitea_image_tag is version_compare('1.14.2', '>=')
     fail_msg: "Gitea image tag must not be set to 'latest' and must be no older than 1.14.2. Please specify the image version explicitely."
+
+- name: Check Gitea catalog image tag
+  assert:
+    that:
+    - ocp4_workload_gitea_operator_catalog_image_tag is not match('latest')
+    - ocp4_workload_gitea_operator_catalog_image_tag is version_compare('v1.3.0', '>=')
+    fail_msg: "Gitea catalog image tag must not be set to 'latest' and must be no older than v1.3.0. Please specify the image catalog version explicitely."
+
+- name: Check that users are created when repositories to be migrated
+  when: ocp4_workload_gitea_operator_migrate_repositories | bool
+  assert:
+    that:
+    - ocp4_workload_gitea_operator_create_users | bool
+    - ocp4_workload_gitea_operator_user_number | default(0) > 0
+    fail_msg: "Migrating repositories requires more than one user to be created."
+
+#####################################################################
+# Install Gitea Operator
+#####################################################################
 
 - name: Install Gitea operator
   include_role:
@@ -65,11 +82,15 @@
     install_operator_catalogsource_image: "{{ ocp4_workload_gitea_operator_catalog_image }}"
     install_operator_catalogsource_image_tag: "{{ ocp4_workload_gitea_operator_catalog_image_tag }}"
 
+#####################################################################
+# Deploy Gitea
+#####################################################################
+
 - name: Deploy default Gitea instance
   when: ocp4_workload_gitea_operator_deploy_gitea_instance | bool
   block:
   - name: Ensure Gitea namespace exists
-    k8s:
+    kubernetes.core.k8s:
       state: present
       api_version: v1
       kind: Namespace
@@ -79,7 +100,7 @@
     when: ocp4_workload_gitea_operator_gitea_hostname | default("") | length > 0
     block:
     - name: Determine Wildcard Domain
-      k8s_info:
+      kubernetes.core.k8s_info:
         api_version: operator.openshift.io/v1
         kind: IngressController
         name: default
@@ -93,12 +114,12 @@
              r_ingress_controller.resources[0].status.domain }}
 
   - name: Create Gitea instance
-    k8s:
+    kubernetes.core.k8s:
       state: present
       definition: "{{ lookup('template', 'gitea.yaml.j2' ) | from_yaml }}"
 
   - name: Wait for Gitea route to be available
-    k8s_info:
+    kubernetes.core.k8s_info:
       api_version: gpte.opentlc.com/v1
       kind: Gitea
       name: "{{ ocp4_workload_gitea_operator_name }}"
@@ -112,76 +133,87 @@
     set_fact:
       _ocp4_workload_gitea_operator_gitea_route: "{{ r_gitea.resources[0].status.giteaRoute }}"
 
-  - name: Wait for Gitea admin password to be set
-    when: ocp4_workload_gitea_operator_create_admin | bool
-    k8s_info:
-      api_version: gpte.opentlc.com/v1
-      kind: Gitea
-      name: "{{ ocp4_workload_gitea_operator_name }}"
-      namespace: "{{ ocp4_workload_gitea_operator_project }}"
-    register: r_gitea_admin_password
-    until: r_gitea_admin_password.resources[0].status.adminPassword is defined
-    retries: 10
-    delay: 5
-
-  - name: Set up users in Gitea
-    when: ocp4_workload_gitea_operator_create_users | bool
-    block:
-    - name: Set variables to use while creating users
-      set_fact:
-        _ocp4_workload_gitea_operator_admin_password: "{{ r_gitea_admin_password.resources[0].status.adminPassword | default('') }}"
-
-    - name: Create the users in Gitea
-      include_tasks: create_user.yml
-      loop: "{{ range(1, ocp4_workload_gitea_operator_user_number | int + 1) | list }}"
-
-    - name: Migrate the repositories for the Gitea users
-      include_tasks: migrate_repos.yml
-      loop: >-
-        {{
-        ( range(1, ocp4_workload_gitea_operator_user_number | int + 1) | list )
-        | product(ocp4_workload_gitea_operator_repositories_list)
-        | list
-        }}
-
   - name: Print the Gitea route
     agnosticd_user_info:
       msg: "You can access Gitea via the URL {{ _ocp4_workload_gitea_operator_gitea_route }}"
 
-  - name: Print admin credentials if admin was created
+  - name: Wait for Gitea admin password to be set
     when: ocp4_workload_gitea_operator_create_admin | bool
-    agnosticd_user_info:
-      msg: "{{ item }}"
-    loop:
-    - "The Gitea admin username is '{{ ocp4_workload_gitea_operator_admin_user }}'."
-    - "The Gitea admin password is '{{ _ocp4_workload_gitea_operator_admin_password }}'."
+    block:
+    - name: Wait for Gitea admin password to be set
+      kubernetes.core.k8s_info:
+        api_version: gpte.opentlc.com/v1
+        kind: Gitea
+        name: "{{ ocp4_workload_gitea_operator_name }}"
+        namespace: "{{ ocp4_workload_gitea_operator_project }}"
+      register: r_gitea_admin_password
+      until:
+      - r_gitea_admin_password.resources[0].status.adminSetupComplete is defined
+      - r_gitea_admin_password.resources[0].status.adminSetupComplete | bool
+      retries: 30
+      delay: 5
 
-  - name: Print the user details if multiple users were created
-    when:
-    - ocp4_workload_gitea_operator_create_users | bool
-    - ocp4_workload_gitea_operator_user_number | int > 1
-    agnosticd_user_info:
-      msg: >-
-        Gitea users were created, from {{ ocp4_workload_gitea_operator_generate_user_format | format(1) }} to
-        {{ ocp4_workload_gitea_operator_generate_user_format | format(ocp4_workload_gitea_operator_user_number | int) }} with the password
-        '{{ ocp4_workload_gitea_operator_user_password }}'
+    - name: Print admin credentials if admin was created
+      when: ocp4_workload_gitea_operator_create_admin | bool
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+      - "The Gitea admin username is '{{ ocp4_workload_gitea_operator_admin_user }}'."
+      - "The Gitea admin password is '{{ r_gitea_admin_password.resources[0].status.adminPassword }}'."
 
-  - name: Print the user details if a single user was created
-    when:
-    - ocp4_workload_gitea_operator_create_users | bool
-    - ocp4_workload_gitea_operator_user_number | int == 1
-    agnosticd_user_info:
-      msg: >-
-        A Gitea user '{{ ocp4_workload_gitea_operator_generate_user_format }}' was created, with the password
-        '{{ ocp4_workload_gitea_operator_user_password }}'
+  - name: Wait for Gitea user setup to be complete
+    when: ocp4_workload_gitea_operator_create_users | bool
+    block:
+    - name: Wait for Gitea users to be set up
+      kubernetes.core.k8s_info:
+        api_version: gpte.opentlc.com/v1
+        kind: Gitea
+        name: "{{ ocp4_workload_gitea_operator_name }}"
+        namespace: "{{ ocp4_workload_gitea_operator_project }}"
+      register: r_gitea_user_setup_complete
+      until:
+      - r_gitea_user_setup_complete.resources[0].status.userSetupComplete is defined
+      - r_gitea_user_setup_complete.resources[0].status.userSetupComplete | bool
+      retries: 30
+      delay: 5
 
-  - name: Print the repositories that were migrated if any were migrated
-    when: ocp4_workload_gitea_operator_migrate_repositories | bool
-    agnosticd_user_info:
-      msg: "{{ item }}"
-    loop:
-    - "The following repositories were migrated for the created users:"
-    - "{{ ocp4_workload_gitea_operator_repositories_list | join(', ', attribute='repo') }}"
+    - name: Print the user details if multiple users were created
+      when: ocp4_workload_gitea_operator_user_number | int > 1
+      agnosticd_user_info:
+        msg: >-
+          Gitea users were created, from {{ ocp4_workload_gitea_operator_generate_user_format | format(1) }} to
+          {{ ocp4_workload_gitea_operator_generate_user_format | format(ocp4_workload_gitea_operator_user_number | int) }} with the password
+          '{{ r_gitea_user_setup_complete.resources[0].status.userPassword }}'
+
+    - name: Print the user details if a single user was created
+      when: ocp4_workload_gitea_operator_user_number | int == 1
+      agnosticd_user_info:
+        msg: >-
+          A Gitea user '{{ ocp4_workload_gitea_operator_generate_user_format }}' was created, with the password
+          '{{ r_gitea_user_setup_complete.resources[0].status.userPassword }}'
+
+    - name: Wait for repository migration to be complete
+      when: ocp4_workload_gitea_operator_migrate_repositories | bool
+      block:
+      - name: Wait for Gitea repository migration to be complete
+        kubernetes.core.k8s_info:
+          api_version: gpte.opentlc.com/v1
+          kind: Gitea
+          name: "{{ ocp4_workload_gitea_operator_name }}"
+          namespace: "{{ ocp4_workload_gitea_operator_project }}"
+        register: r_gitea_repo_setup_complete
+        until:
+        - r_gitea_repo_setup_complete.resources[0].status.repoMigrationComplete is defined
+        - r_gitea_repo_setup_complete.resources[0].status.repoMigrationComplete | bool
+        retries: 30
+        delay: 5
+
+      - name: Print the repositories that were migrated
+        agnosticd_user_info:
+          msg: "{{ item }}"
+        loop:
+        - "The following repositories were migrated for the created users:"
+        - "{{ ocp4_workload_gitea_operator_repositories_list | join(', ', attribute='repo') }}"
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
