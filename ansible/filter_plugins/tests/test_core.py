@@ -67,7 +67,7 @@ def test_ec2_tags_to_equinix_metal_tags():
     ]
 
     for tc in testcases:
-        assert(core.ec2_tags_to_equinix_metal_tags(tc[0]) == tc[1])
+        assert(sorted(core.ec2_tags_to_equinix_metal_tags(tc[0])) == tc[1])
 
     error_testcases = [
         [
@@ -119,8 +119,8 @@ def test_equinix_metal_tags_to_dict():
         [
             [
                 "AnsibleGroup=bastions",
-                "ostype=linux",
                 "ignoredvalue",
+                "ostype=linux",
             ],
             { "AnsibleGroup":"bastions",
               "ostype":"linux"},
@@ -128,8 +128,8 @@ def test_equinix_metal_tags_to_dict():
         [
             [
                 "AnsibleGroup=",
-                "ostype=linux",
                 "ignoredvalue",
+                "ostype=linux",
             ],
             { "AnsibleGroup":"",
               "ostype":"linux"},
@@ -272,8 +272,8 @@ def test_dict_to_equinix_metal_tags():
             },
             [
                 "AnsibleGroup=bastions",
+                "number=2",
                 "ostype=linux",
-                "number=2"
             ],
         ],
         [
@@ -283,7 +283,7 @@ def test_dict_to_equinix_metal_tags():
     ]
 
     for tc in testcases:
-        assert(core.dict_to_equinix_metal_tags(tc[0]) == tc[1])
+        assert(sorted(core.dict_to_equinix_metal_tags(tc[0])) == tc[1])
 
     error_testcases = [
         {"key": {}},
