@@ -94,6 +94,7 @@ from ansible.errors import AnsibleLookupError
 from ansible.plugins.lookup import LookupBase
 from ansible.utils.display import Display
 import json
+import os
 import requests
 import shutil
 import subprocess
@@ -123,7 +124,7 @@ class BitwardenCLI:
         # conflicts.
         if bitwardencli_appdata_dir:
             self.bitwardencli_appdata_dir = bitwardencli_appdata_dir
-        elif not self.bw_session:
+        elif not self.bw_session or (client_id and client_secret and master_password):
             display.vvv('Using temporary directory for BITWARDENCLI_APPDATA_DIR')
             self.tempdir = tempfile.TemporaryDirectory()
             self.bitwardencli_appdata_dir = self.tempdir.name
@@ -144,10 +145,19 @@ class BitwardenCLI:
         elif status['status'] != 'unlocked':
             raise AnsibleLookupError("Cannot handle Bitwarden status {}".format(status['status']))
 
-    def get_item(self, item_id):
-        bw_env = dict(BW_SESSION=self.bw_session)
+    def make_bw_env(self, **setenv):
+        bw_env = setenv.copy()
         if self.bitwardencli_appdata_dir:
             bw_env['BITWARDENCLI_APPDATA_DIR'] = self.bitwardencli_appdata_dir
+        else:
+            for envvar in ('HOME', 'APPDATA', 'XDG_CONFIG_HOME'):
+                if envvar in os.environ:
+                    bw_env[envvar] = os.environ[envvar]
+        return bw_env
+
+    def get_item(self, item_id):
+        display.vvv('Bitwarden get item {}'.format(item_id))
+        bw_env = self.make_bw_env(BW_SESSION=self.bw_session)
         bw_cmd = subprocess.run(
             [self.bw_cli, 'get', 'item', item_id],
             capture_output = True,
@@ -159,9 +169,7 @@ class BitwardenCLI:
 
     def login(self, client_id, client_secret):
         display.vvv('Bitwarden login with client_id {}'.format(client_id))
-        bw_env = dict(BW_CLIENTID=client_id, BW_CLIENTSECRET=client_secret)
-        if self.bitwardencli_appdata_dir:
-            bw_env['BITWARDENCLI_APPDATA_DIR'] = self.bitwardencli_appdata_dir
+        bw_env = self.make_bw_env(BW_CLIENTID=client_id, BW_CLIENTSECRET=client_secret)
         bw_cmd = subprocess.run(
             [self.bw_cli, 'login', '--apikey'],
             capture_output = True,
@@ -171,9 +179,7 @@ class BitwardenCLI:
             raise AnsibleLookupError("Bitwarden login failed: " + bw_cmd.stderr.decode('utf-8'))
 
     def status(self):
-        bw_env = dict()
-        if self.bitwardencli_appdata_dir:
-            bw_env['BITWARDENCLI_APPDATA_DIR'] = self.bitwardencli_appdata_dir
+        bw_env = self.make_bw_env()
         if self.bw_session:
             bw_env['BW_SESSION'] = self.bw_session
         bw_cmd = subprocess.run(
@@ -183,13 +189,12 @@ class BitwardenCLI:
         )
         if bw_cmd.returncode != 0:
             raise AnsibleLookupError("Bitwarden status failed: " + bw_cmd.stderr.decode('utf-8'))
+        display.vvv('Bitwarden status: ' + bw_cmd.stdout.decode('utf-8'))
         return json.loads(bw_cmd.stdout)
 
     def unlock(self, master_password):
         display.vvv('Bitwarden unlock')
-        bw_env = dict(BW_PASSWORD=master_password)
-        if self.bitwardencli_appdata_dir:
-            bw_env['BITWARDENCLI_APPDATA_DIR'] = self.bitwardencli_appdata_dir
+        bw_env = self.make_bw_env(BW_PASSWORD=master_password)
         bw_cmd = subprocess.run(
             [self.bw_cli, 'unlock', '--passwordenv', 'BW_PASSWORD', '--raw'],
             capture_output = True,
