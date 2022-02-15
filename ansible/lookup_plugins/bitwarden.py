@@ -126,6 +126,8 @@ class BitwardenCLI:
             display.vvv('Using temporary directory for BITWARDENCLI_APPDATA_DIR')
             self.tempdir = tempfile.TemporaryDirectory()
             self.bitwardencli_appdata_dir = self.tempdir.name
+        else:
+            self.bitwardencli_appdata_dir = None
 
         # Check Bitwarden status and login and unlock as needed
         status = self.status()
