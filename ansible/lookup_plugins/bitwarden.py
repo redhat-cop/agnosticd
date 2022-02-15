@@ -9,7 +9,8 @@ DOCUMENTATION = """
   version_added: "2.9"
   short_description: Read items from Bitwarden
   description:
-  - This lookup returns items fetched from Bitwarden
+  - This lookup returns items fetched from Bitwarden.
+  - This lookup my be called either with bitwarden already authenticated and the BW_SESSION environment variable set or by passing client_id, client_secret, and master_password to open a temporary session.
   options:
     _terms:
       description: Item ids to fetch
@@ -89,7 +90,7 @@ EXAMPLES="""
       }}
 """
 
-from ansible.errors import AnsibleError, AnsibleParserError
+from ansible.errors import AnsibleLookupError
 from ansible.plugins.lookup import LookupBase
 from ansible.utils.display import Display
 import json
@@ -133,15 +134,15 @@ class BitwardenCLI:
         status = self.status()
         if status['status'] == 'unauthenticated':
             if not client_id or not client_secret or not master_password:
-                raise AnsibleError("Bitwarden is unauthenticated and one of client_id, client_secret, or master_password were not provided")
+                raise AnsibleLookupError("Bitwarden is unauthenticated. Bitwarden CLI must be either pre-authenticated with the BW_SESSION environment variable set and all of client_id, client_secret, or master_password must be provided")
             self.login(client_id=client_id, client_secret=client_secret)
             self.bw_session = self.unlock(master_password=master_password)
         elif status['status'] == 'locked':
             if not master_password:
-                raise AnsibleError("Bitwarden is locked and master_password was not provided")
+                raise AnsibleLookupError("Bitwarden is locked. Bitwarden session in environment BW_SESSION must be unlocked or master_password must be provided.")
             self.bw_session = self.unlock(master_password=master_password)
         elif status['status'] != 'unlocked':
-            raise AnsibleError("Cannot handle Bitwarden status {}".format(status['status']))
+            raise AnsibleLookupError("Cannot handle Bitwarden status {}".format(status['status']))
 
     def get_item(self, item_id):
         bw_env = dict(BW_SESSION=self.bw_session)
@@ -153,7 +154,7 @@ class BitwardenCLI:
             env = bw_env,
         )
         if bw_cmd.returncode != 0:
-            raise AnsibleError("Failed to fetch item from Bitwarden: " + bw_cmd.stderr.decode('utf-8'))
+            raise AnsibleLookupError("Failed to fetch item from Bitwarden: " + bw_cmd.stderr.decode('utf-8'))
         return json.loads(bw_cmd.stdout)
 
     def login(self, client_id, client_secret):
@@ -167,7 +168,7 @@ class BitwardenCLI:
             env = bw_env,
         )
         if bw_cmd.returncode != 0:
-            raise AnsibleError("Bitwarden login failed: " + bw_cmd.stderr.decode('utf-8'))
+            raise AnsibleLookupError("Bitwarden login failed: " + bw_cmd.stderr.decode('utf-8'))
 
     def status(self):
         bw_env = dict()
@@ -181,7 +182,7 @@ class BitwardenCLI:
             env = bw_env,
         )
         if bw_cmd.returncode != 0:
-            raise AnsibleError("Bitwarden status failed: " + bw_cmd.stderr.decode('utf-8'))
+            raise AnsibleLookupError("Bitwarden status failed: " + bw_cmd.stderr.decode('utf-8'))
         return json.loads(bw_cmd.stdout)
 
     def unlock(self, master_password):
@@ -195,7 +196,7 @@ class BitwardenCLI:
             env = bw_env,
         )
         if bw_cmd.returncode != 0:
-            raise AnsibleError("Bitwarden unlock failed: " + bw_cmd.stderr.decode('utf-8'))
+            raise AnsibleLookupError("Bitwarden unlock failed: " + bw_cmd.stderr.decode('utf-8'))
         return bw_cmd.stdout.decode('utf-8')
 
 class LookupModule(LookupBase):
