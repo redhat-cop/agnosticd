@@ -1,0 +1,118 @@
+# The following is only appropriate when create generic tenants whose names are sequential
+# The following is skipped when creating a "named" tenant, ie; openbanking-dev  
+
+# Name of 3scale API administrator of the tenant
+- set_fact:
+    ocp4_workload_lpe_3scale_tenant_admin_id: "{{ ocp4_workload_lpe_3scale_tenant_admin_name_base }}"
+
+# Name of 3scale tenant organisation
+- set_fact:
+    ocp4_workload_lpe_3scale_org_name: "{{ocp4_workload_lpe_3scale_tenant_user_name_base}}-tenant"
+
+# Name of 3scale tenant namespace
+- set_fact:
+    ocp4_workload_lpe_3scale_tenant_gw_project: "{{ ocp4_workload_lpe_3scale_tenant_user_name_base }}-gw"
+
+# Name of 3scale tenant namespace display name
+- set_fact:
+    ocp4_workload_lpe_3scale_tenant_gw_projectDisplay: "{{ ocp4_workload_lpe_3scale_tenant_user_name_base }} APICast Gateways Project"
+
+# Set the tenant admin email
+- name: "{{ocp4_workload_lpe_3scale_org_name}}      1)  **********   TENANT CREATION  **********"
+  set_fact: 
+    ocp4_workload_lpe_3scale_tenant_admin_email: "{{ocp4_workload_lpe_3scale_admin_email_user}}@{{ocp4_workload_lpe_3scale_admin_email_domain}}"
+- debug: 
+    msg: "{{ocp4_workload_lpe_3scale_org_name}} ocp4_workload_lpe_3scale_tenant_admin_email = {{ocp4_workload_lpe_3scale_tenant_admin_email}}"
+
+# Wait for 3scale tenant to be created
+- name: "Create the {{ocp4_workload_lpe_3scale_org_name}} CRDs"
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/tenant-admin-secret.yml.j2
+  - ./templates/tenant.yml.j2
+
+# Routes are created after some delay. Wait here for routes to  be ready.
+- pause:
+    minutes: 1
+
+# Get the {{ ocp4_workload_lpe_3scale_org_name}} Admin URL
+- name: Get the {{ ocp4_workload_lpe_3scale_org_name}} Admin URL
+  shell: >
+    oc get secret "{{ ocp4_workload_lpe_3scale_org_name }}-tenant-secret"  -o json -n "{{ ocp4_workload_lpe_3scale_namespace }}" | jq -r .data.adminURL | base64 -d
+  register: tenant_admin_url_reg
+  ignore_errors: True
+
+# Get the {{ ocp4_workload_lpe_3scale_org_name}} Access Token
+- name: Get the {{ ocp4_workload_lpe_3scale_org_name}} Access Token
+  shell: >
+    oc get secret "{{ ocp4_workload_lpe_3scale_org_name }}-tenant-secret"  -o json -n "{{ ocp4_workload_lpe_3scale_namespace }}" | jq -r .data.token | base64 -d
+  register: tenant_access_token_reg
+  ignore_errors: True
+
+- set_fact:
+    tenant_admin_url: '{{tenant_admin_url_reg["stdout"]}}'
+
+- set_fact:
+    tenant_access_token: '{{tenant_access_token_reg["stdout"]}}'
+
+# create the tenant Gateway
+- block:
+    - name: "**********  {{  ocp4_workload_lpe_3scale_tenant_gw_project }} TENANT API GW  Provisioning **********"
+      command: "oc adm new-project {{ ocp4_workload_lpe_3scale_tenant_gw_project }} --description='{{ ocp4_workload_lpe_3scale_tenant_gw_projectDisplay }}'"
+      register: create_proj
+      failed_when: create_proj.stderr != ""  and 'already exists' not in create_proj.stderr
+
+    - set_fact:
+        ocp4_workload_lpe_3scale_portal_endpoint: "https://{{ tenant_access_token }}@{{ ocp4_workload_lpe_3scale_org_name }}-admin.{{ ocp4_workload_lpe_3scale_ocp_apps_domain }}"
+
+    - name: "Create threescale-portal-endpoint-stage secret in {{ ocp4_workload_lpe_3scale_tenant_gw_project }}"
+      shell: |
+        oc create secret generic apicast-configuration-url-secret-stage \
+            --from-literal=AdminPortalURL='{{ ocp4_workload_lpe_3scale_portal_endpoint }}'  \
+            -n  {{ ocp4_workload_lpe_3scale_tenant_gw_project }}
+      ignore_errors: True      
+
+
+    - name: "Create threescale-portal-endpoint-prod secret in {{ ocp4_workload_lpe_3scale_tenant_gw_project }}"
+      shell: |
+        oc create secret generic apicast-configuration-url-secret-prod \
+            --from-literal=AdminPortalURL='{{ ocp4_workload_lpe_3scale_portal_endpoint }}'  \
+            -n  {{ ocp4_workload_lpe_3scale_tenant_gw_project }}
+      ignore_errors: True      
+
+# Install 3scale API Cast operator in the tenant
+    - name: Install Operator
+      include_role:
+        name: install_operator
+      vars:
+        install_operator_action: install
+        install_operator_name: "{{ ocp4_workload_lpe_3scale_apicast_operator_package_name }}"
+        install_operator_namespace: "{{ ocp4_workload_lpe_3scale_tenant_gw_project }}"
+        install_operator_channel: "{{ ocp4_workload_lpe_3scale_apicast_current_channel | default('')}}"
+        install_operator_csv_nameprefix: "{{ ocp4_workload_lpe_3scale_apicast_operator_package_name }}"
+        install_operator_catalog: redhat-operators
+        install_operator_automatic_install_plan_approval: "true"
+        install_operator_starting_csv: "{{ ocp4_workload_lpe_3scale_apicast_current_csv | default('')}}"
+        install_operator_catalogsource_setup: "false"
+        install_operator_manage_namespaces: 
+        - "{{ ocp4_workload_lpe_3scale_tenant_gw_project }}"      
+
+# Create API cast gateway for the tenant
+    - name: "Create Stage & Prod APICast"  
+      k8s:
+        state: present
+        merge_type:
+        - strategic-merge
+        - merge
+        definition: "{{ lookup('template', item ) | from_yaml }}"
+        namespace: '{{ ocp4_workload_lpe_3scale_tenant_gw_project }}'
+      loop:
+      - ./templates/apicast-stage.yml.j2
+      - ./templates/apicast-prod.yml.j2    
+  when: ocp4_workload_lpe_3scale_create_gws_with_each_tenant|bool
+
