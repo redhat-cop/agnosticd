@@ -66,4 +66,4 @@ podman push ee-${venv}-public quay.io/redhat-pfe/agnosticd:ee-${venv}
 
 # Private
 REPO=image-registry.apps-dev.open.redhat.com
-podman push ee-${venv}-public $REPO/agnosticd/ee-${venv}
+podman push ee-${venv} $REPO/agnosticd/ee-${venv}
