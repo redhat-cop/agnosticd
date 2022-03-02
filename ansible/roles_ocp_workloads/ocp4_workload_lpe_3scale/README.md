@@ -1,7 +1,3 @@
-:scrollbar:
-:data-uri:
-:toc2:
-:linkattrs:
 
 = 3scale Latest Product Environment
 
@@ -30,12 +26,6 @@ An OCP 4 cluster is provisioned and this role is run using a cluster admin.
 This version of OpenShift should already be pre-installed before executing this ansible role.
 
 . Using a version of oc utility that corresponds to your target OCP cluster, ensure oc utility is already authenticated as the cluster-admin.
-
-. This ansible role requires installation of the lxml python module on target host executing this ansible. ie:
-+
------
-# dnf install python3-lxml
------
 
 
 ==== SMTP Providers
@@ -138,22 +128,19 @@ The OCP namespace for 3scale multi-tenant app will be owned by the admin user.
 -----
 
 # 3scale Multitenant API Manager & Tenants Provisoning
-$  ansible-playbook -i localhost, -c local ./configs/ocp-workloads/ocp-workload.yml \
-                    -e ocp_workload=ocp4-workload-3scale-s3 \
-                    -e ACTION=create \
-                    -e"api_manager_namespace=$api_manager_namespace" \
-                    -e"smtp_port=$smtp_port" \
-                    -e"smtp_authentication=$smtp_authentication" \
-                    -e"smtp_host=$smtp_host" \
-                    -e"smtp_userid=$smtp_userid" \
-                    -e"smtp_passwd=$smtp_passwd" \
-                    -e"smtp_domain=$smtp_domain" \
-                    -e"adminEmailUser=$adminEmailUser" \
-                    -e"adminEmailDomain=$adminEmailDomain" \
-                    -e"rht_service_token_user=$rht_service_token_user" \
-                    -e"rht_service_token_password=$rht_service_token_password" \
-                    -e"use_rwo_for_cms=$use_rwo_for_cms" \
-                    -e"number_of_tenants=$number_of_tenants"
+$  ansible-playbook ${VERBOSITY} -i ${TARGET_HOST}, ./ansible/configs/ocp-workloads/ocp-workload.yml \
+    -e"ansible_ssh_private_key_file=${ANSIBLE_USER_KEY_FILE}" \
+    -e"ansible_user=${ANSIBLE_USER}" \
+    -e"ocp_username=${OCP_USERNAME}" \
+    -e"ocp_workload=ocp4_workload_lpe_3scale" \
+    -e"subdomain_base_suffix=${BASE_DOMAIN}" \
+    -e"silent=False" \
+    -e"guid=${GUID}" \
+    -e"ACTION=create \
+    -e"become_override=False" \
+    -e"output_dir=$HOME/Development/agnosticd-output/${WORKLOAD}" \
+    -e"cloud_provider=${CLOUD_PROVIDER}" \
+    -e"target_host=bastion.${GUID}.${BASE_DOMAIN}"
 -----
 
 . After about 5 minutes, provisioning of the  API Manager should complete.
@@ -167,10 +154,19 @@ Run the remove workload with *ACTION=remove* in order to remove all of the proje
 +
 ----
 
-$ ansible-playbook -i localhost, -c local ./configs/ocp-workloads/ocp-workload.yml \
-                    -e ocp_workload=ocp4-workload-3scale-s3 \
-                    -e number_of_tenants=1
-                    -e ACTION=remove
+$ ansible-playbook ${VERBOSITY} -i ${TARGET_HOST}, ./ansible/configs/ocp-workloads/ocp-workload.yml \
+    -e"ansible_ssh_private_key_file=${ANSIBLE_USER_KEY_FILE}" \
+    -e"ansible_user=${ANSIBLE_USER}" \
+    -e"ocp_username=${OCP_USERNAME}" \
+    -e"ocp_workload=ocp4_workload_lpe_3scale" \
+    -e"subdomain_base_suffix=${BASE_DOMAIN}" \
+    -e"silent=False" \
+    -e"guid=${GUID}" \
+    -e"ACTION=remove \
+    -e"become_override=False" \
+    -e"output_dir=$HOME/Development/agnosticd-output/${WORKLOAD}" \
+    -e"cloud_provider=${CLOUD_PROVIDER}" \
+    -e"target_host=bastion.${GUID}.${BASE_DOMAIN}"
 
 ----
 

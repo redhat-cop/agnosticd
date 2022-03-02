@@ -23,7 +23,7 @@
 
 # Deploy 3scale API manager
 - name: Deploy 3scale API Manager (with Minio S3)
-  k8s:
+  kubernetes.core.k8s:
     state: present
     merge_type:
     - strategic-merge
@@ -35,7 +35,7 @@
 
 # Wait to APIManager resource creation
 - name: Wait for 3scale pods to be ready
-  k8s_facts:
+  kubernetes.core.k8s_info:
     api_version: v1
     kind: DeploymentConfig
     namespace: "{{ ocp4_workload_lpe_3scale_namespace }}"
@@ -52,50 +52,46 @@
   delay: 15
 
   # Get the Master Access Token
-- name: Get the Master Access Token
-  shell: >
-    oc get secret system-seed -o json -n "{{ ocp4_workload_lpe_3scale_namespace }}" | jq -r .data.MASTER_ACCESS_TOKEN | base64 -d
-  register: ocp4_workload_lpe_3scale_system_seed_master_token_stdout
-  ignore_errors: True
+- name: "Get the system seed"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ ocp4_workload_lpe_3scale_namespace }}"
+    name: system-seed
+  register: r_dc
+  until:
+    - r_dc is defined
+    - r_dc.resources is defined
+    - r_dc.resources | list | length > 0
+  retries: 60
+  delay: 15
 
-# Get the Master Password
-- name: Get the Master Password
-  shell: >
-    oc get secret system-seed -o json -n "{{ ocp4_workload_lpe_3scale_namespace }}" | jq -r .data.MASTER_PASSWORD | base64 -d
-  register: ocp4_workload_lpe_3scale_system_seed_master_password_stdout
-  ignore_errors: True
+- name: Get the Master token, Master password, Admin password
+  set_fact:
+    ocp4_workload_lpe_3scale_master_access_token: "{{ r_dc.resources[0].data.MASTER_ACCESS_TOKEN | b64decode }}"
+    ocp4_workload_lpe_3scale_master_password: "{{ r_dc.resources[0].data.MASTER_PASSWORD | b64decode }}"
+    ocp4_workload_lpe_3scale_admin_password: "{{ r_dc.resources[0].data.ADMIN_PASSWORD | b64decode }}"
 
-# Get the Provider Tenant Admin Password
-- name: Get the Provider Admin Password
-  shell: >
-    oc get secret system-seed -o json -n "{{ ocp4_workload_lpe_3scale_namespace }}" | jq -r .data.ADMIN_PASSWORD | base64 -d
-  register: ocp4_workload_lpe_3scale_system_seed_admin_password_stdout
-  ignore_errors: True
-
-- set_fact:
-    ocp4_workload_lpe_3scale_master_access_token: '{{ocp4_workload_lpe_3scale_system_seed_master_token_stdout["stdout"]}}'
-
-- set_fact:
-    ocp4_workload_lpe_3scale_master_password: '{{ocp4_workload_lpe_3scale_system_seed_master_password_stdout["stdout"]}}'
-
-- set_fact:
-    ocp4_workload_lpe_3scale_admin_password: '{{ocp4_workload_lpe_3scale_system_seed_admin_password_stdout["stdout"]}}'
-
-- set_fact:
+- name: Get Master API Host and Create tenant url
+  set_fact:
     ocp4_workload_lpe_3scale_master_api_host: "https://{{ ocp4_workload_lpe_3scale_master_access_token }}@master.{{ocp4_workload_lpe_3scale_ocp_apps_domain}}"
-
-- set_fact:
     ocp4_workload_lpe_3scale_create_tenant_url: "https://master.{{ocp4_workload_lpe_3scale_ocp_apps_domain}}/master/api/providers.xml"
 
-- name: Update notification email information
-  shell: oc set env dc/system-sidekiq NOTIFICATION_EMAIL={{ ocp4_workload_lpe_3scale_admin_email_user }}@{{ ocp4_workload_lpe_3scale_admin_email_domain }} -n "{{ ocp4_workload_lpe_3scale_namespace }}"
-
-- name: Update support email information
-  shell: oc set env dc/system-app SUPPORT_EMAIL={{ ocp4_workload_lpe_3scale_admin_email_user }}@{{ ocp4_workload_lpe_3scale_admin_email_domain }} -n "{{ ocp4_workload_lpe_3scale_namespace }}"
+- name: Patch deployment config to update email addresses
+  kubernetes.core.k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('template', './../templates/apimanager-dc-email-update.yml.j2' ) | from_yaml }}"
+  loop:
+  - "system-sidekiq"
+  - "system-app"
 
 # Start creating the default tenant
-- block:
+- name: Determine if the tenant should be created
+  when: ocp4_workload_lpe_3scale_create_tenant|bool
+  block:
   - name: "Tenant prep"
     include_tasks: 
       file: ./files/3scale_single_tenant.yml
-  when: ocp4_workload_lpe_3scale_create_tenant|bool
