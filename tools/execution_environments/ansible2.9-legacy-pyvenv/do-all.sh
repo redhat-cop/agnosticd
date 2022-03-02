@@ -37,7 +37,7 @@ for venv in \
     echo "Pushing ${venv}"
 
     # Public
-    podman push ee-${venv}-public quay.io/redhat-pfe/agnosticd:ee-${venv}
+    podman push ee-${venv}-public quay.io/agnosticd/ee-legacy:${venv}
 
     # Private (subscriptions)
     REPO=image-registry.apps-dev.open.redhat.com
@@ -62,7 +62,7 @@ ansible-builder build -v 3 -c . \
 
 echo "Pushing ${venv}"
 # Public
-podman push ee-${venv}-public quay.io/redhat-pfe/agnosticd:ee-${venv}
+podman push ee-${venv}-public quay.io/agnosticd/ee-legacy:${venv}
 
 # Private
 REPO=image-registry.apps-dev.open.redhat.com

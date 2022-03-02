@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -eu
-name=ee-multi-cloud
+name=ee-multicloud
 tag=$1
 
 if [ -z "${tag}" ]; then
@@ -17,4 +17,4 @@ ansible-builder build -v 3 -c . \
 
 echo "Pushing ${name}:${tag}"
 REPO=image-registry.apps-dev.open.redhat.com
-#podman push ${name}-supported:${tag} $REPO/agnosticd/${name}:${tag}
+#podman push ${name}:${tag} $REPO/agnosticd/${name}:${tag}
