@@ -41,7 +41,7 @@ for venv in \
 
     # Private (subscriptions)
     REPO=image-registry.apps-dev.open.redhat.com
-    #podman push ee-${venv} $REPO/agnosticd/ee-${venv}
+    podman push ee-${venv} $REPO/agnosticd/ee-${venv}
 done
 
 # only one ansible 2.11
@@ -66,4 +66,4 @@ podman push ee-${venv}-public quay.io/agnosticd/ee-legacy:${venv}
 
 # Private
 REPO=image-registry.apps-dev.open.redhat.com
-#podman push ee-${venv} $REPO/agnosticd/ee-${venv}
+podman push ee-${venv} $REPO/agnosticd/ee-${venv}
