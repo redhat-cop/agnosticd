@@ -17,4 +17,6 @@ ansible-builder build -v 3 -c . \
 
 echo "Pushing ${name}:${tag}"
 REPO=image-registry.apps-dev.open.redhat.com
-#podman push ${name}:${tag} $REPO/agnosticd/${name}:${tag}
+echo -n "Push to registry? [press enter to continue]"
+read
+podman push ${name}:${tag} $REPO/agnosticd/${name}:${tag}

@@ -17,4 +17,6 @@ ansible-builder build -v 3 -c . \
 
 echo "Pushing ${name}:${tag}"
 REPO=quay.io
+echo -n "Push to registry? [press enter to continue]"
+read
 podman push ${name}-public:${tag} $REPO/agnosticd/${name}:${tag}
