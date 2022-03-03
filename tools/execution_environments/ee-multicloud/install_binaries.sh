@@ -18,3 +18,11 @@ url="https://vault.bitwarden.com/download/?app=cli&platform=linux"
 curl -s -L "${url}" -o bw.zip
 unzip bw.zip
 install -t /usr/bin bw
+
+
+# AWS CLI
+
+aws_version=1.22.66
+curl "https://s3.amazonaws.com/aws-cli/awscli-bundle-${aws_version}.zip" -o "awscli-bundle.zip"
+unzip awscli-bundle.zip
+python3.6 ./awscli-bundle/install -i /usr/local/aws -b /usr/local/bin/aws
