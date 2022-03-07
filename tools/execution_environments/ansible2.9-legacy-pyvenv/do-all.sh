@@ -40,7 +40,7 @@ for venv in \
     podman push ee-${venv}-public quay.io/agnosticd/ee-legacy:${venv}
 
     # Private (subscriptions)
-    REPO=image-registry.apps-dev.open.redhat.com
+    REPO=image-registry.apps.open.redhat.com
     podman push ee-${venv} $REPO/agnosticd/ee-${venv}
 done
 
@@ -62,8 +62,18 @@ ansible-builder build -v 3 -c . \
 
 echo "Pushing ${venv}"
 # Public
+podman login quay.io
 podman push ee-${venv}-public quay.io/agnosticd/ee-legacy:${venv}
 
 # Private
-REPO=image-registry.apps-dev.open.redhat.com
-podman push ee-${venv} $REPO/agnosticd/ee-${venv}
+# image-registry.apps.open.redhat.com
+# Push to both active and passive cluster
+for REPO in \
+    default-route-openshift-image-registry.apps.ocp-us-west-2.infra.open.redhat.com \
+    #default-route-openshift-image-registry.apps.ocp-us-east-1.infra.open.redhat.com \
+    do;
+    echo
+    echo "Please login to $REPO"
+    podman login $REPO
+    podman push ee-${venv} $REPO/agnosticd/ee-${venv}
+done

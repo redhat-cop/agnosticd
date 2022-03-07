@@ -1,4 +1,5 @@
 #!/bin/sh
+set -ue
 
 cd /tmp
 
@@ -22,7 +23,8 @@ install -t /usr/bin bw
 
 # AWS CLI
 
-aws_version=1.22.66
-curl "https://s3.amazonaws.com/aws-cli/awscli-bundle-${aws_version}.zip" -o "awscli-bundle.zip"
-unzip awscli-bundle.zip
-python3.6 ./awscli-bundle/install -i /usr/local/aws -b /usr/local/bin/aws
+aws_version=2.4.23
+curl -s -L "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${aws_version}.zip" \
+    -o "awscliv2.zip"
+unzip awscliv2.zip
+./aws/install
