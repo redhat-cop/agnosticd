@@ -6,6 +6,9 @@ tag=$1
 
 echo "${name}:${tag} Private"
 
+echo "Login to registry.redhat.io:"
+podman login registry.redhat.io
+
 # Private (subscriptions)
 ansible-builder build -v 3 -c . \
     --tag ${name}:${tag}
