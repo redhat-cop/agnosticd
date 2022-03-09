@@ -11,12 +11,13 @@ fi
 
 echo "${name}:${tag} Public"
 
-# Private (subscriptions)
+# Public
 ansible-builder build -v 3 -c . \
     --tag ${name}-public:${tag}
 
 echo "Pushing ${name}:${tag}"
 REPO=quay.io
-echo -n "Push to registry? [press enter to continue]"
+echo -n "Push to registry $REPO ? [press enter to continue]"
 read
+podman login $REPO
 podman push ${name}-public:${tag} $REPO/agnosticd/${name}:${tag}
