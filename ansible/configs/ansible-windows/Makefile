@@ -1,4 +1,4 @@
-GUID=00
+GUID=win-00
 ENVTYPE=ansible-windows
 BASESUFFIX='.example.opentlc.com'
 CLOUDPROVIDER=ec2
@@ -8,7 +8,7 @@ KEYNAME=ocpkey
 SECRET=~/secrets/aws-gpte-windows.yml
 
 deploy:
-	ansible-playbook main.yml \
+	ansible-playbook ansible/main.yml \
 		-e "guid=$(GUID)" \
 		-e "env_type=$(ENVTYPE)" \
 		-e "key_name=$(KEYNAME)" \
@@ -21,7 +21,7 @@ deploy:
 		-e @$(SECRET)
 
 destroy:
-	ansible-playbook destroy.yml \
+	ansible-playbook ansible/destroy.yml \
 		-e "guid=$(GUID)" \
 		-e "env_type=$(ENVTYPE)" \
 		-e "key_name=$(KEYNAME)" \

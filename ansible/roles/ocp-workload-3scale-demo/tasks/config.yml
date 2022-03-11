@@ -23,12 +23,52 @@
     _sso_admin_user: '{{ _sso_credentials.resources[0].data.ADMIN_USERNAME | b64decode }}'
     _sso_admin_password: '{{ _sso_credentials.resources[0].data.ADMIN_PASSWORD | b64decode }}'
 
-- name: Get SSO token
-  shell: "curl --insecure -X POST 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/realms/master/protocol/openid-connect/token' \
-  -H 'Content-Type: application/x-www-form-urlencoded' -d 'username={{_sso_admin_user}}' -d 'password={{_sso_admin_password}}' -d 'grant_type=password' -d 'client_id=admin-cli'"
-  register: token_text
+- name: Get Admin Token from Keycloack
+  uri:
+    url: https://keycloak-{{ sso_project }}.{{ ocp_apps_domain }}/auth/realms/master/protocol/openid-connect/token
+    method: POST
+    body_format: form-urlencoded
+    body:
+    - [ 'client_id', 'admin-cli' ]
+    - [ 'username', '{{ _sso_admin_user }}' ]
+    - [ 'password', '{{ _sso_admin_password }}' ]
+    - [ 'grant_type', 'password' ]
+    status_code: '200'
+  register: token_result
 
-- set_fact: TKN={{ (token_text.stdout | from_json).access_token }}
+- name: Extract Admin Token from Keycloack from result
+  set_fact:
+    TKN: '{{token_result.json.access_token}}'
+
+- name: Increase Token Lifespan (60mins)
+  uri:
+    url: 'https://keycloak-{{ sso_project }}.{{ ocp_apps_domain }}/auth/admin/realms/master'
+    method: PUT
+    body: "{\"realm\":\"master\", \"accessTokenLifespan\":\"3600\"}"
+    body_format: json
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer {{ TKN }}"
+    return_content: yes
+    validate_certs: no
+    status_code: 204
+
+- name: Get Admin Token with Longer Lifespan
+  uri:
+    url: https://keycloak-{{ sso_project }}.{{ ocp_apps_domain }}/auth/realms/master/protocol/openid-connect/token
+    method: POST
+    body_format: form-urlencoded
+    body:
+    - [ 'client_id', 'admin-cli' ]
+    - [ 'username', '{{ _sso_admin_user }}' ]
+    - [ 'password', '{{ _sso_admin_password }}' ]
+    - [ 'grant_type', 'password' ]
+    status_code: '200'
+  register: token_result
+
+- name: Extract Admin Token with Longer Lifespan from Keycloack from result
+  set_fact:
+    TKN: '{{token_result.json.access_token}}'
 
 - debug: var=TKN
 
@@ -48,14 +88,14 @@
     body_format: json
     headers:
       Content-Type: "application/json"
-      Authorization: "Bearer {{TKN}}"
+      Authorization: "Bearer {{ TKN }}"
     return_content: yes
     validate_certs: no
     status_code: 201
 
 - name: Get id for client 'real-management'
   shell: "curl --insecure 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients' \
-  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{ TKN }}'"
   register: clients_text
 
 - set_fact: IdClient={{ (clients_text.stdout | from_json | json_query(query)) }}
@@ -66,7 +106,7 @@
 
 - name: Get id for service account '3scale-admin'
   shell: "curl --insecure 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients/1/service-account-user' \
-  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{ TKN }}'"
   register: users_text
 
 - set_fact: IdUser={{ (users_text.stdout | from_json).id }}
@@ -75,7 +115,7 @@
 
 - name: Get id for role 'manage-clients'
   shell: "curl --insecure 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/users/{{IdUser}}/role-mappings/clients/{{IdClient}}/available' \
-  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{ TKN }}'"
   register: roles_text
 
 - set_fact: IdRole={{ (roles_text.stdout | from_json | json_query(query)) }}
@@ -86,17 +126,25 @@
 
 - name: Add role 'manage-clients' to service account
   shell: "curl --insecure -X POST 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/users/{{IdUser}}/role-mappings/clients/{{IdClient}}' \
-  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}' -d '{{IdRole | to_json}}'"
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{ TKN }}' -d '{{IdRole | to_json}}'"
   register: outcome_text
 
 - name: Get client secret
   shell: "curl --insecure 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients/1/client-secret' \
-  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{TKN}}'"
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer {{ TKN }}'"
   register: secret_text
 
 - set_fact: client_secret={{ (secret_text.stdout | from_json).value }}
 
 - debug: var=client_secret
+
+- name: Get the admin password
+  shell: "oc get secret/system-seed --template='{% raw %}{{.data.ADMIN_PASSWORD}}{% endraw %}' -n {{ threescale_project }} | base64 -d"
+  register: pwd_text
+
+- set_fact: threescale_admin_password="{{ pwd_text.stdout }}"
+
+- debug: msg="admin_password is {{ threescale_admin_password }}"
 
 - name: Get the admin access_token
   shell: "oc get secret/system-seed --template='{% raw %}{{.data.ADMIN_ACCESS_TOKEN}}{% endraw %}' -n {{ threescale_project }} | base64 -d"
@@ -115,7 +163,7 @@
     body: "access_token={{access_token}}&username=john"
   register: wait_dev_account
   until: wait_dev_account is succeeded
-  retries: 10
+  retries: 30
   delay: 60
 
 - name: Create backend service
@@ -235,21 +283,12 @@
 
 - debug: var=create_app_result
 
-- name: Get SSO token
-  shell: "curl --insecure -X POST 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/realms/master/protocol/openid-connect/token' \
-  -H 'Content-Type: application/x-www-form-urlencoded' -d 'username={{_sso_admin_user}}' -d 'password={{_sso_admin_password}}' -d 'grant_type=password' -d 'client_id=admin-cli'"
-  register: token2_text
-
-- set_fact: TKN2={{ (token2_text.stdout | from_json).access_token }}
-
-- debug: var=TKN2
-
 - name: Get id for client 'accidentalert-ui'
   uri:
     url: 'https://keycloak-{{sso_project}}.{{ocp_apps_domain}}/auth/admin/realms/insurance/clients'
     return_content: yes
     headers:
-      Authorization: 'Bearer {{TKN2}}'
+      Authorization: 'Bearer {{ TKN }}'
     validate_certs: no
   register: client_text
   until: ("accidentalert-ui" in client_text.content)
@@ -269,7 +308,7 @@
     return_content: yes
     headers:
       Content-Type: "application/json"
-      Authorization: 'Bearer {{TKN2}}'
+      Authorization: 'Bearer {{ TKN }}'
     body: '{ "clientId": "accidentalert-ui", "publicClient" : "true" }'
     body_format: json
     validate_certs: no
