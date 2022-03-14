@@ -112,8 +112,8 @@ $ ocp4_workload_lpe_3scale_admin_email_user=<change me>            # e.g 3scalea
 $ ocp4_workload_lpe_3scale_admin_email_domain=<change me>          # e.g redhat.com
 
 $ create_tenants: True                  #   If tenant accounts need to be created as part of the provisioning. Default is `True`
-ocp4_workload_lpe_3scale_tenant_admin_name_base: api             #   Name of the Admin user in each tenant.
-ocp4_workload_lpe_3scale_tenant_user_name_base: tenant                #   Name of the OCP users in the cluster. Default is `tenant`.
+ocp4_workload_lpe_3scale_tenant_admin_name_base: tenant-admin             #   Name of the Admin user in each tenant.
+ocp4_workload_lpe_3scale_tenant_user_name_base: user                #   Name of the OCP users in the cluster. Default is `user`.
 ocp4_workload_lpe_3scale_tenant_admin_password: admin            #   Default password for each tenant admin.
 ocp4_workload_lpe_3scale_create_gws_with_each_tenant: True       #   To create a Gateway Project & deploy APIcast staging & production as self-managed gateways for each tenant.
 -----
