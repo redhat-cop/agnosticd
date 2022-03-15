@@ -1,0 +1,107 @@
+---
+
+# Install the 3scale Operator
+- name: Install Operator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: "{{ ocp4_workload_lpe_3scale_operator_package_name }}"
+    install_operator_namespace: "{{ ocp4_workload_lpe_3scale_namespace }}"
+    install_operator_channel: "{{ ocp4_workload_lpe_3scale_current_channel | default('')}}"
+    install_operator_csv_nameprefix: "{{ ocp4_workload_lpe_3scale_operator_package_name }}"
+    install_operator_catalog: redhat-operators
+    install_operator_automatic_install_plan_approval: "true"
+    install_operator_starting_csv: "{{ ocp4_workload_lpe_3scale_current_csv | default('')}}"
+    install_operator_catalogsource_setup: "false"
+    install_operator_manage_namespaces:
+      - "{{ ocp4_workload_lpe_3scale_namespace }}"
+
+# Install minio object storage for s3
+- name: Include Minio Deployment & S3 Configuration
+  include_tasks:
+    file: ./files/install_minio_s3_for_3scale.yml
+
+# Add ocp user to created projects
+- name: "Add {{ ocp_username }} to the API Manager namepaces"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', './../templates/role-binding.yml.j2' ) | from_yaml }}"
+  loop:
+    - "{{ ocp4_workload_lpe_3scale_namespace }}"
+
+# Deploy SMTP if required
+- name: Determine if SMTP configured
+  when: ocp4_workload_lpe_3scale_smtp_host != '<changeme>'
+  block:
+    - name: Deploy configured SMTP Connection
+      kubernetes.core.k8s:
+        state: present
+        merge_type:
+          - strategic-merge
+          - merge
+        definition: "{{ lookup('template', './templates/smtp.yml.j2' ) | from_yaml }}"
+
+# Deploy 3scale API manager
+- name: Deploy 3scale API Manager (with Minio S3)
+  kubernetes.core.k8s:
+    state: present
+    merge_type:
+      - strategic-merge
+      - merge
+    definition: "{{ lookup('template', './templates/apimanager-s3.yml.j2' ) | from_yaml }}"
+
+# Wait to APIManager resource creation
+- name: Wait for 3scale pods to be ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: DeploymentConfig
+    namespace: "{{ ocp4_workload_lpe_3scale_namespace }}"
+    name: apicast-production
+  register: r_dc
+  until:
+    - r_dc is defined
+    - r_dc.resources is defined
+    - r_dc.resources | list | length > 0
+    - r_dc.resources[0].status is defined
+    - r_dc.resources[0].status.readyReplicas is defined
+    - r_dc.resources[0].status.readyReplicas | int >= 1
+  retries: 60
+  delay: 15
+
+  # Get the Master Access Token
+- name: "Get the system seed"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ ocp4_workload_lpe_3scale_namespace }}"
+    name: system-seed
+  register: r_dc
+  until:
+    - r_dc is defined
+    - r_dc.resources is defined
+    - r_dc.resources | list | length > 0
+  retries: 60
+  delay: 15
+
+- name: Get the Master token, Master password, Admin password
+  set_fact:
+    ocp4_workload_lpe_3scale_master_access_token: "{{ r_dc.resources[0].data.MASTER_ACCESS_TOKEN | b64decode }}"
+    ocp4_workload_lpe_3scale_master_password: "{{ r_dc.resources[0].data.MASTER_PASSWORD | b64decode }}"
+    ocp4_workload_lpe_3scale_admin_password: "{{ r_dc.resources[0].data.ADMIN_PASSWORD | b64decode }}"
+
+- name: Get Master API Host and Create tenant url
+  set_fact:
+    ocp4_workload_lpe_3scale_master_api_host: "https://{{ ocp4_workload_lpe_3scale_master_access_token }}@master.{{guid}}.{{ocp4_workload_lpe_3scale_ocp_apps_domain}}"   # yamllint disable-line rule:line-length
+    ocp4_workload_lpe_3scale_create_tenant_url: "https://master.{{guid}}.{{ocp4_workload_lpe_3scale_ocp_apps_domain}}/master/api/providers.xml"
+
+- name: Patch deployment config to update email addresses
+  kubernetes.core.k8s:
+    state: present
+    merge_type:
+      - strategic-merge
+      - merge
+    definition: "{{ lookup('template', './../templates/apimanager-dc-email-update.yml.j2' ) | from_yaml }}"
+  loop:
+    - "system-sidekiq"
+    - "system-app"
