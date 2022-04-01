@@ -1,0 +1,125 @@
+---
+# Implement your Pre Workload deployment tasks here
+# -------------------------------------------------
+
+- name: Set Ansible Python interpreter to /usr/bin/python
+  set_fact:
+      ansible_python_interpreter: "/usr/bin/python"
+
+- name: remove existing k8s virtualenv 
+  file:
+    path: /opt/virtualenvs/k8s
+    state: absent
+  become: true
+  when: remove_k8s_venv == true
+
+- name: manually create the initial k8s virtualenv
+  command:
+    cmd: python3 -m venv /opt/virtualenvs/k8s
+    creates: "/opt/virtualenvs/k8s/bin/python"
+  become: true
+
+- name: Download requirements file ansible2.11-python3.8-2021-09-27.txt
+  get_url:
+    url: https://raw.githubusercontent.com/redhat-cop/agnosticd/development/tools/virtualenvs/ansible2.11-python3.8-2021-09-27.txt
+    dest: /tmp/ansible2.11-python3.8-2021-09-27.txt
+
+- name: install requirements in k8s virtualenv
+  pip:
+    requirements: /tmp/ansible2.11-python3.8-2021-09-27.txt
+    virtualenv: /opt/virtualenvs/k8s
+  become: true
+
+- name: Set Ansible Python interpreter to k8s virtualenv
+  set_fact:
+      ansible_python_interpreter: "/opt/virtualenvs/k8s/bin/python"
+
+- name: create /etc/containers/certs.d/private-registry.nginx.com
+  file:
+    path: /etc/containers/certs.d/private-registry.nginx.com
+    state: directory
+    mode: '0777'
+  become: yes
+  
+- name: copy cert file to /etc/containers/certs.d/private-registry.nginx.com
+  copy:
+    src: ~/secrets/nginx/nginx-repo.crt
+    dest: /etc/containers/certs.d/private-registry.nginx.com/client.cert
+
+- name: copy key file to /etc/containers/certs.d/private-registry.nginx.com
+  copy:
+    src: ~/secrets/nginx/nginx-repo.key
+    dest: /etc/containers/certs.d/private-registry.nginx.com/client.key
+
+- name: install ansible-galaxy collection install containers.podman
+  shell: ansible-galaxy collection install containers.podman
+  delegate_to: localhost
+
+
+- name: pull nginx-ic image
+  containers.podman.podman_image: 
+    name: private-registry.nginx.com/nginx-ic-nap/nginx-plus-ingress:2.1.1-ubi
+    state: present  
+
+- name: remove /etc/containers/certs.d/private-registry.nginx.com
+  file:
+    path: /etc/containers/certs.d/private-registry.nginx.com
+    state: absent
+  become: yes
+
+- name: create f5-nginx imagestream
+  kubernetes.core.k8s:
+    state: present
+    template: './templates/f5-nginx-image-stream.j2'
+
+- name: oc serviceaccounts get-token -n openshift builder
+  shell: oc serviceaccounts get-token -n openshift builder
+  register: token
+
+- name: get imageregistry url
+  k8s_info:
+    kind: ImageStream
+    name: f5-nginx
+    namespace: openshift
+  register: imagestream_url
+
+- name: set imageregistry url
+  set_fact:
+    registry_url: "{{ imagestream_url.resources[0].status.publicDockerImageRepository }}"
+
+- debug:
+    msg: "{{ token.stdout }}"
+- debug:
+    msg: "{{ registry_url }}"
+
+- name: login podman to imageregistry
+  containers.podman.podman_login:
+    username: unused
+    password: "{{ token.stdout }}"
+    registry: "{{ registry_url }}"
+    
+- name: 
+
+# Leave these as the last tasks in the playbook
+# ---------------------------------------------
+
+# For deployment onto a dedicated cluster (as part of the
+# cluster deployment) set workload_shared_deployment to False
+# This is the default so it does not have to be set explicitely
+- name: pre_workload tasks complete
+  debug:
+    msg: "Pre-Workload tasks completed successfully."
+  when:
+  - not silent|bool
+  - not workload_shared_deployment|default(False)
+
+# For RHPDS deployment (onto a shared cluster) set
+# workload_shared_deployment to True
+# (in the deploy script or AgnosticV configuration)
+- name: pre_workload tasks complete
+  debug:
+    msg: "Pre-Software checks completed successfully"
+  when:
+  - not silent|bool
+  - workload_shared_deployment|default(False)
+
