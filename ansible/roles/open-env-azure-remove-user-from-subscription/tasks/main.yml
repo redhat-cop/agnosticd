@@ -1,39 +1,86 @@
 ---
-- name: Login with azure root user
-  command: >-
-    az login -u "{{ azure_user }}"
-    -p="{{ azure_user_password }}" --tenant="{{ azure_tenant }}"
-- name: Delete azure open environment resource group
+- name: Initialize azureProfile.json
+  command: >
+    az login --service-principal -u {{ azure_service_principal }}
+    -p {{ azure_password }} --tenant {{ azure_tenant }}
+
+- name: Retrieving which Pool-ID / Subscription is in use for the lab
+  command: >
+      curl {{ az_function_show }}{{ project_tag }}
+  register: poolid
+
+- name: Write out the assigned Pool-ID / Subscription
+  debug:
+    msg: "{{ poolid.stdout }}"
+
+- name: Get facts for the subscription by name
+  azure.azcollection.azure_rm_subscription_info:
+    auth_source: cli
+    name: "{{ poolid.stdout }}"
+  register: assignedsubscription
+
+- name: write out the assignedsubscription
+  debug:
+    msg: "{{ assignedsubscription }}"
+
+- name: Get subscription ID
+  set_fact:
+    subscription_id: "{{ assignedsubscription['subscriptions'][0].subscription_id }}"
+
+- name: Set Default Subscription (assigned subscription)
+  command: >
+    az account set --subscription "{{ subscription_id }}"
+
+- name: Get all resource group names
+  azure.azcollection.azure_rm_resourcegroup_info:
+    auth_source: cli
+    subscription_id: "{{ subscription_id }}"
+    tenant: "{{ azure_tenant }}"
+  register: allresourcegroups
+
+- name: Delete the Azure subscription's resource groups (RG's created by the lab user)
+  when: allresourcegroups['resourcegroups']|length>0
   azure.azcollection.azure_rm_resourcegroup:
     auth_source: cli
-    subscription_id: "{{ azure_subscription_id }}"
-    name: "openenv-{{ guid }}"
-    location: eastus
+    subscription_id: "{{ subscription_id }}"
+    name: "{{ item.name }}"
+    location: "{{ item.location }}"
     force_delete_nonempty: yes
     state: absent
-- name: Get application info
-  azure.azcollection.azure_rm_adapplication_info:
+  loop: "{{ allresourcegroups['resourcegroups'] }}"
+
+- name: get subscription fqid
+  set_fact:
+    subscriptionfqid: "{{ assignedsubscription['subscriptions'][0].fqid }}"
+
+- name: Clean up all Tags on the Subscription 
+  command: >
+    az tag delete --resource-id {{ subscriptionfqid }} --yes
+
+- name: Get the users object from Active Directory
+  azure.azcollection.azure_rm_aduser_info:
     auth_source: cli
-    identifier_uri: "api://openenv-{{ guid }}"
+    user_principal_name: "{{ email }}"
     tenant: "{{ azure_tenant }}"
-  register: azapp
-- name: Delete application
-  when: azapp['applications']|length>0
-  azure.azcollection.azure_rm_adapplication:
+  register: azuser
+
+- name: Get CONTRIBUTOR Role Definition
+  azure.azcollection.azure_rm_roledefinition_info:
     auth_source: cli
-    tenant: "{{ azure_tenant }}"
-    app_id: "{{ azapp['applications'][0].app_id }}"
+    scope: "{{ subscriptionfqid }}"
+    role_name: Contributor
+  register: contributor_role_definition
+
+- name: REMOVE the user's CONTRIBUTOR role from the subscription
+  azure.azcollection.azure_rm_roleassignment:
+    auth_source: cli
+    scope: "{{ subscriptionfqid }}"
+    assignee_object_id: "{{ azuser['ad_users'][0].object_id }}"
+    role_definition_id:
+      "{{ contributor_role_definition['roledefinitions'][0].id }}"
     state: absent
-- name: Get ARO application info
-  azure.azcollection.azure_rm_adapplication_info:
-    auth_source: cli
-    identifier_uri: "api://openenv-aro-{{ guid }}"
-    tenant: "{{ azure_tenant }}"
-  register: azaroapp
-- name: Delete ARO application
-  when: azaroapp['applications']|length>0
-  azure.azcollection.azure_rm_adapplication:
-    auth_source: cli
-    tenant: "{{ azure_tenant }}"
-    app_id: "{{ azaroapp['applications'][0].app_id }}"
-    state: absent
+
+#Remove allocation from CosmosDB
+- name:  REMOVE POOL ALLOCATION.  Which Pool-ID / Subscription was used for the lab
+  command: >
+      curl {{ az_function_release }}{{ project_tag }}
