@@ -1,7 +1,16 @@
 Role Name
 =========
 
-This role ADDS the Red Hat user to an Azure subscription and grants the necessary Azure role
+open-env-azure-add-user-to-subscription
+
+Role Description
+================
+
+This role does the following:
+- Checks if the user is a Red Hat associate (member of Red Hat Active Directory)
+- Gets and locks an Azure subscription from a pool from a function in Azure backed by a CosmosDB database
+- Adds the 'Contributor' role for the Red Hat user to the subscription
+- Tags the subscription with GUID and email
 
 Requirements
 ------------
@@ -25,7 +34,7 @@ License
 
 BSD
 
-Author Information
+Authors Information
 ------------------
-
 prutledg@redhat.com
+hmourad@redhat.com
