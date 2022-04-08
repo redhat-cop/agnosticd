@@ -24,7 +24,7 @@ Role Variables
 --------------
 
 guid - the guid to use for the deployment
-email - an email address to invite
+requester_email - an email address to invite
 
 Dependencies
 ------------
