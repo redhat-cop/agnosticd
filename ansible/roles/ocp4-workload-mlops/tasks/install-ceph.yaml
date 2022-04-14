@@ -1,0 +1,110 @@
+---
+- set_fact:
+    ceph_worker_nodes: "{{ worker_nodes | json_query('resources[*].metadata.name') }}"
+
+- name: "Adding Ceph labels to worker nodes"
+  shell: "oc label nodes --overwrite {{ item }} cluster.ocs.openshift.io/openshift-storage=''"
+  loop: "{{ ceph_worker_nodes[:3] }}"
+
+# Create Namespace
+- name: "Creating namespace"
+  k8s:
+    definition:  
+      metadata:
+        name: "{{ ceph_storage.ceph_namespace }}"
+        apiVersion: v1
+        labels:
+          openshift.io/cluster-monitoring: 'true'
+      kind: Namespace
+    state: present
+
+- name: "Create OperatorGroup"
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'ceph_operatorgroup.yaml.j2') }}"
+
+- name: "Create Subscription"
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'ceph_subscription.yaml.j2') }}"
+
+- name: Get OCS version
+  k8s_facts:
+    kind: ClusterServiceVersion
+    api_version: operators.coreos.com/v1alpha1
+    namespace: "{{ ceph_storage.ceph_namespace }}"
+  until: ocs_csv.resources|length > 0
+  retries: 60
+  delay: 10 
+  register: ocs_csv
+
+- name: Set ocs version fact
+  set_fact:
+    ocs_csv_name: "{{ocs_csv.resources[0].metadata.name}}"
+
+- name: "Wait for OCS Operator to be Succeeded"
+  k8s_facts:
+    kind: ClusterServiceVersion
+    api_version: operators.coreos.com/v1alpha1
+    name: "{{ocs_csv_name}}"
+    namespace: "{{ ceph_storage.ceph_namespace }}"
+  register: storagecluster
+  until: storagecluster | json_query("resources[0].status.phase=='Succeeded'")
+  retries: 100
+  delay: 10
+
+- name: "Wait for Ceph CRDs to exist"
+  k8s_facts:
+    api_version: "apiextensions.k8s.io/v1beta1"
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  loop: "{{ ceph_storage.ceph_expected_crds }}"
+  register: crds
+  until: crds.resources|length > 0
+  retries: 60
+  delay: 10 
+
+- name: "Create StorageCluster"
+  k8s:
+    state: present
+    definition: "{{ lookup('template', 'ceph_storagecluster.yaml.j2') }}"
+
+- name: "Wait for OCS CR instances to be Ready"
+  k8s_facts:
+    api_version: "{{item.api_version}}"
+    kind: "{{item.kind}}"
+    name: "{{item.name}}"
+    namespace: "{{ ceph_storage.ceph_namespace }}"
+  register: out
+  until: out | json_query("resources[0].status.phase=='Ready'")
+  retries: 150
+  delay: 10
+  loop:
+    - {api_version: 'noobaa.io/v1alpha1', kind: 'NooBaa', name: 'noobaa'} 
+    - {api_version: 'noobaa.io/v1alpha1', kind: 'BackingStore', name: 'noobaa-default-backing-store'} 
+    - {api_version: 'noobaa.io/v1alpha1', kind: 'BucketClass', name: 'noobaa-default-bucket-class'}     
+    - {api_version: 'ocs.openshift.io/v1', kind: 'StorageCluster', name: 'ocs-storagecluster'} 
+    - {api_version: 'ceph.rook.io/v1', kind: 'CephBlockPool', name: 'ocs-storagecluster-cephblockpool'} 
+    - {api_version: 'ocs.openshift.io/v1', kind: 'OCSInitialization', name: 'ocsinit'} 
+
+- name: Set gp2 as non default storage class
+  k8s:
+    definition:
+      kind: StorageClass
+      apiVersion: storage.k8s.io/v1
+      metadata:
+        name: gp2
+        annotations:
+          storageclass.kubernetes.io/is-default-class: 'false'
+  when: ceph_storage.set_cephfs_default_sc
+
+- name: Set CephFS as default storage class
+  k8s:
+    definition:
+      kind: StorageClass
+      apiVersion: storage.k8s.io/v1
+      metadata:
+        name: ocs-storagecluster-cephfs
+        annotations:
+          storageclass.kubernetes.io/is-default-class: 'true'
+  when: ceph_storage.set_cephfs_default_sc

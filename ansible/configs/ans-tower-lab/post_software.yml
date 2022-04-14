@@ -1,83 +1,115 @@
+---
 - name: Step 00xxxxx post software
-  hosts: support
-  gather_facts: False
-  become: yes
+  hosts: localhost
+  gather_facts: false
+  become: true
   tasks:
     - debug:
         msg: "Post-Software tasks Started"
 
-- name: Configure windows AD on first windows machine
-  hosts:
-    - windows[0]
-  gather_facts: False
-  tags:
-    - step004
-    - common_tasks
-    - windows_tasks
-  roles:
-    - { role: "windows-ad", when: hostvars.localhost.install_win_ad | bool }
-  tasks:
-    - name: Reboot upon promotion
-      win_reboot:
-      when: hostvars.localhost.install_win_ad | bool
-
-    - name: Wait for connection
-      wait_for_connection:
-      when: hostvars.localhost.install_win_ad | bool
-
 - name: Step lab post software deployment
   hosts: bastions
-  gather_facts: False
-  become: yes
+  gather_facts: false
+  become: true
   tags:
-    - opentlc_bastion_tasks
-  tasks:
-    - import_role:
-        name: bastion-opentlc-ipa
-      when: install_ipa_client|bool
+    - post_bastion_tasks
 
+  tasks:
     - name: Copy Tower License File
       copy:
         content: "{{ tower_license | from_json }}"
-        dest: /root/license.txt
+        dest: "/root/license.txt"
+        mode: 0644
 
     - name: Copy Openstack PEM key
       blockinfile:
-        path: /root/.ssh/openstack.pem
+        path: "/root/.ssh/openstack.pem"
         block: |
           {{ openstack_pem | b64decode }}
-        owner: root
-        group: root
-        mode: 0400
+        mode: 0440
         state: present
-        create: yes
+        create: true
 
     - name: Copy Openstack Pub key
       blockinfile:
-        path: /root/.ssh/openstack.pub
+        path: "/root/.ssh/openstack.pub"
         block: |
           {{ openstack_pub | b64decode }}
-        owner: root
-        group: root
-        mode: 0400
+        mode: 0440
         state: present
-        create: yes
-#    - name: Install ansible
-#      yum:
-#       name: ansible
-#       state: latest
+        create: true
 
-- name: Post Tower configs
-  hosts: towers[0]
-  become: yes
-  roles:
-    - { role: "tower_demo", when: hostvars.localhost.deploy_tower_demo | d(false) | bool }
+    - name: Remove first and last lines from Openstack keys
+      lineinfile:
+        path: "/root/.ssh/{{ item }}"
+        regexp: '^#(.*)$'
+        state: absent
+      loop:
+        - "openstack.pem"
+        - "openstack.pub"
 
-- name: Install Tower For Homework
-  hosts: bastions
-  become: yes
-  roles:
-    - { role: "install-tower", when: hostvars.localhost.deploy_tower_homework | d(false) | bool }
+    - name: Inject Ansible Tower license
+      command: tower-cli setting modify LICENSE @/root/license.txt --insecure
+      when: software_to_deploy | d('None') == 'tower'
+
+    - name: Include lab user
+      include_tasks: setup_lab_user.yml
+
+
+- name: Deploy user setup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags:
+    - step005
+  # yamllint disable rule:line-length
+  tasks:
+    - name: osp user.info
+      when: cloud_provider == 'osp'
+      block:
+        - name: print out user.info
+          agnosticd_user_info:
+            msg: "{{ item }}"
+          loop:
+            - "To access Ansible Tower console via browser:"
+            - "Tower URL: https://tower0.{{ guid }}.{{ osp_cluster_dns_zone }}"
+            - "{% if software_to_deploy | d('None') == 'tower' %}Ansible Tower Admin Password: {{ tower_admin_password }}{% endif %}"
+            - ""
+            - "To access bastion via SSH:"
+            - "ssh {{ student_name }}@bastion.{{ guid }}.{{ osp_cluster_dns_zone }}"
+            - "Enter ssh password when prompted: {{ hostvars['bastion']['student_password'] }}"
+
+        - name: Save user data
+          agnosticd_user_info:
+            data:
+              tower_url: "https://tower0.{{ guid }}.{{ osp_cluster_dns_zone }}"
+              tower_admin_password: "{% if software_to_deploy | d('None') == 'tower' %}{{ tower_admin_password }}{% endif %}"
+              ssh_command: "ssh {{ student_name }}@bastion.{{ guid }}.{{ osp_cluster_dns_zone }}"
+              ssh_password: "{{ hostvars['bastion']['student_password'] }}"
+
+    - name: ec2 user.info
+      when: cloud_provider == 'ec2'
+      block:
+        - name: print out user.info
+          agnosticd_user_info:
+            msg: "{{ item }}"
+          loop:
+            - "To access Ansible Tower console via browser:"
+            - "https://tower1.{{ guid }}{{ subdomain_base_suffix }}"
+            - "{% if software_to_deploy | d('None') == 'tower' %}Ansible Tower Admin Password: {{ tower_admin_password }}{% endif %}"
+            - ""
+            - "To access bastion via SSH:"
+            - "ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix }}"
+            - "Enter ssh password when prompted: {{ hostvars[groups['bastions'][0]]['student_password'] }}"
+
+        - name: Save user data
+          agnosticd_user_info:
+            data:
+              tower_url: "https://tower1.{{ guid }}{{ subdomain_base_suffix }}"
+              tower_admin_password: "{% if software_to_deploy | d('None') == 'tower' %}{{ tower_admin_password }}{% endif %}"
+              ssh_command: "ssh {{ student_name }}@bastion.{{ guid }}{{ subdomain_base_suffix }}"
+              ssh_password: "{{ hostvars[groups['bastions'][0]]['student_password'] }}"
+
 
 - name: PostSoftware flight-check
   hosts: localhost

@@ -1,0 +1,97 @@
+---
+# Implement your Workload deployment tasks here
+
+- set_fact:
+    user_name: "user{{ user_num }}"
+
+- set_fact:
+    project_name: "opendatahub-{{ user_name }}"
+
+- debug:
+    msg: "Deploying ML Workflows workshop materials to preexisting project {{ project_name }}"
+
+- name: Verify user can create projects
+  command: "oc auth can-i create project"
+  register: canicreateprojects
+  failed_when: canicreateprojects.stdout != 'yes'
+
+- name: "Make sure project {{ project_name }} is there"
+  k8s:
+    state: present
+    name: "{{ project_name }}"
+    kind: Project
+    api_version: project.openshift.io/v1
+
+- name: Create the custom notebook image
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  with_items:
+    - "{{ lookup('template', 'custom-notebook-imagestream.yaml.j2') }}"
+
+- name: Create the pipeline builder image
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  with_items:
+    - "{{ lookup('template', 'pipeline-s2i-imagestream.yaml.j2') }}"
+
+- name: Create the pipeline build and app
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  with_items:
+    - "{{ lookup('template', 'pipeline-imagestream.yaml.j2') }}"
+    - "{{ lookup('template', 'pipeline-buildconfig.yaml.j2') }}"
+    - "{{ lookup('template', 'pipeline-deploymentconfig.yaml.j2') }}"
+    - "{{ lookup('template', 'pipeline-service.yaml.j2') }}"
+
+- name: build the pipeline
+  shell: |
+      oc start-build pipeline -n {{ project_name }}
+
+- name: Kick Jupyterhub
+  shell: |
+      oc scale dc/jupyterhub --replicas=0 -n {{ project_name }}
+
+- name: Nudge Jupyterhub
+  shell: |
+      oc scale dc/jupyterhub --replicas=1 -n {{ project_name }}
+
+- name: build the spam emitter
+  shell: |
+      oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-stream-generator -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092  -e KAFKA_TOPIC=social-firehose -e RATE=300 -e SPAM_PROPORTION=.95 --name=spam-emitter
+
+- name: build the legitimate emitter
+  shell: |
+      oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-stream-generator -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092  -e KAFKA_TOPIC=social-firehose -e RATE=300 -e SPAM_PROPORTION=.3 --name=legitimate-emitter
+
+- name: build the emitter for too many legitimate messages
+  shell: |
+      oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-stream-generator -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092  -e KAFKA_TOPIC=legitimate-firehose -e RATE=1000 -e SPAM_PROPORTION=.01 --name=legitimate-flood
+
+- name: build the filter for legitimate messages
+  shell: |
+      oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-processor -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092 -e KAFKA_TOPIC=legitimate-firehose  --name=flood-filter
+
+- name: build the filter for spam messages
+  shell: |
+      oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-processor -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092 -e KAFKA_TOPIC=social-firehose  --name=spam-filter
+
+- name: scale down the flood filter
+  shell: |
+    oc scale dc/flood-filter --replicas=0 -n {{ project_name }}
+
+- name: scale up the pipeline
+  shell: |
+      oc scale dc/pipeline --replicas=4 -n {{ project_name }}
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
+

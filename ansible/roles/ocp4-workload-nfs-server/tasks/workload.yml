@@ -1,0 +1,202 @@
+---
+- name: Create or update storage class
+  k8s:
+    state: present
+    definition:
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: "{{ _nfs_provided_storage_class }}"
+      provisioner: kubernetes.io/no-provisioner
+      reclaimPolicy: Retain
+      volumeBindingMode: WaitForFirstConsumer
+
+- name: Create project for NFS server
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ _nfs_project }}"
+
+- name: Create PVC for NFS server underlying storage
+  k8s:
+    state: present
+    definition:
+      kind: PersistentVolumeClaim
+      apiVersion: v1
+      metadata:
+        labels:
+          app: "{{ _nfs_app }}"
+        name: "{{ _nfs_app }}-pvc"
+        namespace: "{{ _nfs_project }}"
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: "{{ _nfs_pvc_type }}"
+        resources:
+          requests:
+            storage: "{{ _nfs_pvc_size }}"
+
+- name: Create ImageStream for nfs server image
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ImageStream
+      metadata:
+        labels:
+          app: "{{ _nfs_app }}"
+        name: "{{ _nfs_app }}"
+        namespace: "{{ _nfs_project }}"
+      spec: {}
+
+- name: Import image to ImageStream
+  shell: oc import-image --from={{ _nfs_server_image }} --scheduled {{ _nfs_app }} -n {{ _nfs_project }}
+
+- name: Create service account
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: "{{ _nfs_app }}"
+        namespace: "{{ _nfs_project }}"
+
+- name: Add anyuid SCC to SA
+  shell: oc adm policy add-scc-to-user anyuid system:serviceaccount:{{ _nfs_project }}:{{ _nfs_app }}
+
+- name: Add privileged SCC to SA
+  shell: oc adm policy add-scc-to-user privileged system:serviceaccount:{{ _nfs_project }}:{{ _nfs_app }}
+
+- name: Create NFS server StatefulSet
+  k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        labels:
+          app: "{{ _nfs_app }}"
+        name: "{{ _nfs_app }}"
+        namespace: "{{ _nfs_project }}"
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: "{{ _nfs_app }}"
+            statefulset: "{{ _nfs_app }}"
+        template:
+          metadata:
+            labels:
+              app: "{{ _nfs_app }}"
+              statefulset: "{{ _nfs_app }}"
+          spec:
+            serviceAccountName: "{{ _nfs_app }}"
+            containers:
+              - name: "{{ _nfs_app }}"
+                command:
+                  - /usr/local/bin/run_nfs.sh
+                  - -G
+                  - "0"
+                  - "vol0"
+                  - "vol1"
+                  - "vol2"
+                  - "vol3"
+                  - "vol4"
+                  - "vol5"
+                  - "vol6"
+                  - "vol7"
+                image: "{{ _nfs_server_image }}"
+                ports:
+                  - name: nfs
+                    containerPort: 2049
+                  - name: mountd
+                    containerPort: 20048
+                  - name: rpcbind
+                    containerPort: 111
+                securityContext:
+                  privileged: true
+                volumeMounts:
+                  - mountPath: /exports
+                    name: pvc-{{ _nfs_app }}
+            volumes:
+              - name: pvc-{{ _nfs_app }}
+                persistentVolumeClaim:
+                  claimName: "{{ _nfs_app }}-pvc"
+
+#TODO: Add health check to statefulset
+#TODO: Add check to make sure Pod comes up
+
+- name: Create NFS server service
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        labels:
+          app: "{{ _nfs_app }}"
+        name: "{{ _nfs_app }}"
+        namespace: "{{ _nfs_project }}"
+      spec:
+        ports:
+          - name: nfs
+            port: 2049
+          - name: mountd
+            port: 20048
+          - name: rpcbind
+            port: 111
+        selector:
+          app: nfs-server
+  register: r_nfs_service
+
+- name: Get NFS server service clusterIP
+  set_fact:
+    nfs_ip: "{{ r_nfs_service.result.spec.clusterIP }}"
+
+- name: Dump nfs_ip
+  debug:
+    var: nfs_ip
+
+- name: Create PVs pointing to NFS
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolume
+      metadata:
+        labels:
+          app: "{{ _nfs_app }}"
+        name: "{{ item }}"
+      spec:
+        storageClassName: "{{ _nfs_provided_storage_class }}"
+        capacity:
+          storage: "{{ _nfs_pv_provided_size }}"
+        accessModes:
+          - ReadWriteOnce
+          - ReadOnlyMany
+          - ReadWriteMany
+        persistentVolumeReclaimPolicy: Recycle
+        nfs:
+          server: "{{ nfs_ip }}"
+          path: "/{{ item }}"
+        mountOptions:
+          - vers=4
+  loop:
+    - "vol0"
+    - "vol1"
+    - "vol2"
+    - "vol3"
+    - "vol4"
+    - "vol5"
+    - "vol6"
+    - "vol7"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

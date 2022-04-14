@@ -1,0 +1,234 @@
+:scrollbar:
+:data-uri:
+:toc2:
+:linkattrs:
+
+= API Lifecycle - A CI/CD Walkthrough for OpenBanking APIs
+
+:numbered:
+
+== Overview
+
+This workload provisions all the required resources for running the API Lifecycle lab On OpenShift 4. The following are provisioned:
+
+. 3scale Operator
+. 3scale Multitenant API Manager 2.7 (using RWO System Storage)
+. 3scale Tenants (*openbanking-dev* and *openbanking-prod*)
+. 3scale Gateway Projects with APIcast gateways v2.7 (openbanking-dev-gw and openbanking-prod-gw)
+. camelK operator
+. Tekton Operator
+. Namespaces for API Implementation:
+.. *openbanking-api-dev*
+.. *openbanking-api-test*
+.. *openbanking-api-prod*
+. Namespace for CICD:
+.. *openbanking-cicd*
+
+=== Prerequisites and assumptions
+
+An OCP 4 cluster is provisioned and this role is run using a cluster admin.
+
+
+. The version of 3scale provisioned in this lab (v2.7) is known to run on OpenShift Container Platform v4.*.
++
+This version of OpenShift should already be pre-installed before executing this ansible role.
+
+. Using a version of oc utility that corresponds to your target OCP cluster, ensure oc utility is already authenticated as the cluster-admin.
+
+. This ansible role requires installation of the lxml python module on target host executing this ansible. ie:
++
+-----
+# dnf install python3-lxml
+-----
+
+. It is highly recommended that you SSH into the bastion node of your OCP cluster. The following tasks are best executed on the bastion node.
++
+-----
+# ssh -i ~/.ssh/your_private_key_name <OPENTLC_ID>@bastion.<GUID>.openshift.opentlc.com
+-----
+
+. Ensure that you are explicitly logged onto the master API of the OCP cluster, from your bastion node.
++
+-----
+# oc login master.<GUID>.openshift.opentlc.com
+-----
+
+==== Resource requirements
+
+This ansible role allows for provisioning of 3scale of different sizes based on the value of the following ansible variable: _is_shared_cluster_
+
+. Resource utilization: _is_shared_cluster = true_
+.. The cluster quota for both CPU and RAM is set fairly high by default:
+... CPU limit:  30 cores
+... RAM limit:  30 Gi
+.. The cpu and RAM limits defined in the 3scale API Manager template are also set fairly high.
+.. These default settings are set intentionally high to allow for high throughput
+
+. Resource utilization: _is_shared_cluster = false_
++
+This is the default.
+The resources needed to provision 3scale drops down to about 12 Gi RAM and 6 CPU
+
+
+==== SMTP Providers
+You'll want to have registered with an smtp provider to enable the 3scale API Manager with the ability to send emails.
+
+In 3scale, smtp settings are configured globally and is leveraged by all API _tenants_.
+When provisioning 3scale, you can specify the following ansible variables:
+
+* smtp_host
+* smtp_userid
+* smtp_passwd
+* smtp_authentication
+
+
+A few SMTP providers with _Free Plans_ that this ansible role has been tested with are listed below:
+
+. *SocketLabs:* Currently offering a free plan that allows for link:https://www.socketlabs.com/signup/[2000 emails per month]
+. *SendGrid:* Currently offering a free plan that allows for link:https://sendgrid.com/pricing/[100 emails per day]
+
+You can choose to provision your 3scale API Manager such that it is not configured to send emails.
+To do so, ensure that the value of _smtp_userid_ = "changeme"
+
+=== Project Layout
+
+. Notice the directory layout and files included in this project:
++
+-----
+$ tree
+
+├── defaults
+│   └── main.yml
+├── meta
+│   └── main.yml
+├── README.adoc
+├── tasks
+│   ├── main.yml
+│   ├── pre_workload.yml
+│   ├── remove_workload.yml
+│   ├── wait_for_deploy.yml
+│   └── workload.yml
+│   └── post_workload.yml
+│   └── tenant_loop.yml
+└── templates
+    └── << all the k8s object J2 files >>
+-----
+
+. Highlights of the most important files are as follows:
+
+.. *defaults/main.yml* : ansible variables and their defaults
+.. *tasks/workload.yml* : ansible tasks executed when provisioning 3scale API Manager
+.. *tasks/tenat_loop.yml* : ansible task for creating tenant and self-managed gateways for each tenant
+
+
+
+== Deployment
+
+=== Environment Variables
+
+-----
+# Update the following:
+$ echo "export OCP_AMP_ADMIN_ID=api0" >> ~/.bashrc  # OCP user that owns OCP namespace where mult-tenant 3scale resides
+                                                    # A cluster quota is assigned to this user
+                                                    # NOTE: this OCP user doesn't necessarily need to exist
+
+
+$ echo "export API_MANAGER_NS=3scale-mt-\$OCP_AMP_ADMIN_ID" >> ~/.bashrc      # OCP namespace where 3scale API Manager resides
+
+# Execute the following:
+$ source ~/.bashrc
+
+
+# SMTP Configurations to enable API Manager to send emails
+$ smtp_host=smtp.socketlabs.com
+$ smtp_port=587
+$ smtp_authentication=login
+$ smtp_userid=<change me>
+$ smtp_passwd=<change me>
+$ smtp_domain=redhat.com
+
+# Admin Email user and domain:
+    
+$ adminEmailUser=<change me>            # e.g 3scaleadmin
+$ adminEmailDomain=<change me>          # e.g redhat.com
+
+
+RESUME_CONTROL_PLANE_GWS=false          #   3scale API Manager includes a staging and production gateway by default
+                                        #   These two GWs typically are not used for applying API policies to requests  because the "data plane" (aka: gateways) tends to be deployed in a different environment
+                                        #   However, the staging gateway is needed by system-provider web application for API Gateway policies details.
+                                        #   Subsquently, the default value is:  true
+
+
+
+SUBDOMAIN_BASE=<change me>              #   OCP wildcard DNS after "apps";  ie; 2345.openshift.opentlc.com
+                                        #   examples:
+                                        #       oc cluster up vm:   SUBDOMAIN_BASE=clientvm.`oc whoami --show-server | cut -d'.' -f 2,3,4,5 | cut -d':' -f 1`
+                                        #       ravello vm      :   SUBDOMAIN_BASE=`oc whoami --show-server | cut -d'-' -f 2 | cut -d':' -f 1`
+                                        #       ocp workshop 4   :   SUBDOMAIN_BASE=`oc whoami --show-server | cut -d'.' -f 2,3,4,5,6 | cut -d':' -f 1`
+
+use_rwo_for_cms=false                   #   3scale control plane consists of a Content Management System (CMS) that typically is scaled out for improved performance in a production environment
+                                        #   This CMS subsequently requires a ReadWriteMany access mode for its corresponding "system-storage" PVC
+                                        #   In a deployment of 3scale control plane to OCP 4.* where AWS EBS is used for storage, a ReadWriteMany access mode is not available
+                                        #     Reference:   https://docs.openshift.com/container-platform/4.2/storage/understanding-persistent-storage.html#pv-access-modes_understanding-persistent-storage
+                                        #   In that scenario, set this environment variable to: true
+                                        #   Doing so hacks the 3scale control plane template to specify ReadWriteOnce (and not ReadWriteMany)
+                                        #   If you set this to true, then do not attempt to create more than one replica of the system-app pod 
+
+$ rht_service_token_user=<change me>    #   RHT Registry Service Account name as per:   https://access.redhat.com/terms-based-registry
+$ rht_service_token_password=<changeme> #   RHT Registry Service Account passwd as per: https://access.redhat.com/terms-based-registry/
+
+
+-----
+
+=== Provision  API CICD Lab
+
+The OCP namespace for 3scale multi-tenant app will be owned by the following user: {{OCP_AMP_ADMIN_ID}}.
+
+{{OCP_AMP_ADMIN_ID}} will be assigned a clusterquota so as to manage limits and requests assigned to 3scale
+
+. Execute:
++
+-----
+
+# API CICD Lab Provisoning
+$ ansible-playbook -i localhost, -c local ./configs/ocp-workloads/ocp-workload.yml \
+                    -e ocp_workload=ocp4-workload-summit-api-cicd \
+                    -e ACTION=create \
+                    -e"subdomain_base=$SUBDOMAIN_BASE" \
+                    -e"OCP_AMP_ADMIN_ID=$OCP_AMP_ADMIN_ID" \
+                    -e"API_MANAGER_NS=$API_MANAGER_NS" \
+                    -e"smtp_port=$smtp_port" \
+                    -e"smtp_authentication=$smtp_authentication" \
+                    -e"smtp_host=$smtp_host" \
+                    -e"smtp_userid=$smtp_userid" \
+                    -e"smtp_passwd=$smtp_passwd" \
+                    -e"smtp_domain=$smtp_domain" \
+                    -e"is_shared_cluster=false" \
+                    -e"adminEmailUser=$adminEmailUser" \
+                    -e"adminEmailDomain=$adminEmailDomain" \
+                    -e"rht_service_token_user=$rht_service_token_user" \
+                    -e"rht_service_token_password=$rht_service_token_password" \
+                    -e"use_rwo_for_cms=$use_rwo_for_cms"
+-----
+
+. After about 5 minutes, provisioning of the  API Manager and the tenants should complete.
+
+
+=== Remove Provisioned Artifacts
+
+Run the remove workload with *ACTION=remove* in order to remove all of the projects created as part of this workload. 
+
+. Execute:
++
+----
+
+$ ansible-playbook -i localhost, -c local ./configs/ocp-workloads/ocp-workload.yml \
+                    -e ocp_workload=ocp4-workload-summit-api-cicd \
+                    -e ACTION=remove
+
+----
+
+All the projects created as part of this workload will be removed.
+
+
+

@@ -1,0 +1,106 @@
+---
+# Deploy Jenkins Operator and Jenkins Instance
+- name: Create project for Jenkins
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/project.j2' ) | from_yaml }}"
+
+- name: Create Catalogsource for use with catalog snapshot
+  when: ocp4_workload_jenkins_operator_use_catalog_snapshot | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/catalogsource.j2' ) | from_yaml }}"
+
+- name: Create OpenShift Objects for Jenkins
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/operatorgroup.j2
+  - ./templates/subscription.j2
+  - ./templates/pvc.j2
+
+- name: Wait until InstallPlan is created
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ ocp4_workload_jenkins_operator_project }}"
+  register: r_install_plans
+  vars:
+    _query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'jenkins-operator')]
+  retries: 30
+  delay: 5
+  until:
+  - r_install_plans.resources | length > 0
+  - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+- name: Set InstallPlan Name
+  set_fact:
+    ocp4_workload_jenkins_operator_jenkins_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'jenkins-operator')].metadata.name|[0]
+
+- name: Get InstallPlan
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ ocp4_workload_jenkins_operator_jenkins_install_plan_name }}"
+    namespace: "{{ ocp4_workload_jenkins_operator_project }}"
+  register: r_install_plan
+
+- name: Approve InstallPlan if necessary
+  when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+  k8s:
+    state: present
+    definition: "{{ lookup( 'template', './templates/installplan.j2' ) }}"
+
+- name: Get Installed CSV
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: jenkins-operator
+    namespace: "{{ ocp4_workload_jenkins_operator_project }}"
+  register: r_subscription
+  retries: 30
+  delay: 5
+  until:
+  - r_subscription.resources[0].status.currentCSV is defined
+  - r_subscription.resources[0].status.currentCSV | length > 0
+
+- name: Wait until CSV is Installed
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: "{{ ocp4_workload_jenkins_operator_project }}"
+  register: r_csv
+  retries: 15
+  delay: 5
+  until:
+  - r_csv.resources[0].status.phase is defined
+  - r_csv.resources[0].status.phase | length > 0
+  - r_csv.resources[0].status.phase == "Succeeded"
+
+- name: Deploy Jenkins instance
+  when: ocp4_workload_jenkins_operator_deploy | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/jenkins.j2' ) | from_yaml }}"
+
+- name: Wait until Jenkins is running
+  when: ocp4_workload_jenkins_operator_deploy | bool
+  k8s_info:
+    api_version: v1
+    kind: Pod
+    name: "jenkins-{{ ocp4_workload_jenkins_operator_name }}"
+    namespace: "{{ ocp4_workload_jenkins_operator_project }}"
+  register: r_jenkins
+  retries: 50
+  delay: 10
+  until:
+  - r_jenkins.resources[0].status.containerStatuses[0].ready is defined
+  - r_jenkins.resources[0].status.containerStatuses[0].ready | bool
+  - r_jenkins.resources[0].status.containerStatuses[1].ready is defined
+  - r_jenkins.resources[0].status.containerStatuses[1].ready | bool

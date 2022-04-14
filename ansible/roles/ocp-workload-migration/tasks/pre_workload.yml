@@ -1,0 +1,97 @@
+---
+- become: true
+  block:
+  - name: "Setup pre-requisite python packages"
+    package:
+      state: present
+      name:
+      - git
+      - python3-pip
+
+  - name: "Setup pre-requisite venv packages"
+    pip:
+      name:
+      - virtualenv
+      - selinux
+      state: present
+      executable: /usr/bin/pip3
+
+  - name: "Copy requirements.txt for k8s venv"
+    copy:
+      src: "../files/requirements.txt"
+      dest: "/tmp/requirements.txt"
+
+  - name: "Create venv"
+    pip:
+      requirements: "/tmp/requirements.txt"
+      virtualenv: "/opt/virtualenvs/k8s-wload-migration"
+      virtualenv_site_packages: false
+      virtualenv_command: "/usr/local/bin/virtualenv"
+
+  - name: "Set Ansible interpreter to venv"
+    set_fact:
+      ansible_python_interpreter: /opt/virtualenvs/k8s-wload-migration/bin/python
+
+- wait_for:
+    port: 22
+    host: "{{ hostvars[groups.bastions.0].ansible_hostname }}.{{ guid }}.internal"
+    timeout: 5
+  register: status
+  ignore_errors: true
+
+- block:
+  - name: "Download lab content to bastion"
+    include_tasks: "./download-content.yml"
+    loop: "{{ mig_download_content }}"
+    loop_control:
+      loop_var: "mig_download_content_item"
+
+  - name: "Downloading lab scripts [1]"
+    tempfile:
+      state: directory
+    register: scripts_dir
+
+  - name: "Downloading lab scripts [2]"
+    git:
+      repo: "https://github.com/konveyor/mig-agnosticd"
+      dest: "{{ scripts_dir.path }}"
+
+  - name: "Downloading lab scripts [3]"
+    copy:
+      src: "{{ scripts_dir.path }}/demos/2020_Summit/labs/{{ item }}"
+      dest: "/home/{{ student_name }}"
+      remote_src: true
+      owner: "{{ student_name }}"
+      mode: "u+rwx"
+    loop:
+    - 'scripts'
+    - 'files'
+
+  - name: "Downloading CPMA binary to bastion"
+    get_url:
+      url: "https://cpma.s3.us-east-2.amazonaws.com/cpma"
+      dest: "/home/{{ student_name }}/cpma"
+      owner: "{{ student_name }}"
+      mode: "u+rwx"
+
+  - name: "Saving OCP3 cluster info for bookbag deployment"
+    copy:
+      content: |
+        [OCP3]
+        guid={{ guid }}
+        domain={{ subdomain_base_suffix }}
+        student_name={{ student_name }}
+        bastion={{ hostvars[groups.bastions.0].ansible_hostname }}.{{ guid }}{{ subdomain_base_suffix }}
+      dest: /home/{{ student_name }}/cluster.info
+  when:
+  - student_name is defined
+  - not status.failed
+  - groups.bastions is defined
+  delegate_to: "{{ groups.bastions | first }}"
+  become: true
+
+# Leave this as the last task in the playbook.
+- name: pre_workload tasks complete
+  debug:
+    msg: "Pre-Workload tasks completed successfully."
+  when: not silent | bool

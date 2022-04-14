@@ -1,0 +1,131 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Remove default Catalogs from OperaturHub
+  when: ocp4_workload_migration_training_disable_default_catalogs | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/operatorhub.yaml.j2' ) | from_yaml }}"
+  vars:
+    __ocp4_workload_migration_training_disable_operatorhub: true
+
+- name: Create openshift-migration namespace
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/namespace.yaml.j2' ) | from_yaml }}"
+
+- name: Create Catalogsource for use with catalog snapshot
+  when: ocp4_workload_migration_training_use_catalog_snapshot | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/catalogsource.yaml.j2' ) | from_yaml }}"
+
+- name: Install Migration Toolkit for Containers
+  when: ocp4_workload_migration_training_install_mtc | bool
+  block:
+  - name: Create Migration Toolkit for Containers subscription
+    k8s:
+      state: present
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - ./templates/operatorgroup.yaml.j2
+    - ./templates/subscription.yaml.j2
+
+  - name: Wait until InstallPlan is created
+    k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: InstallPlan
+      namespace: openshift-migration
+    register: r_install_plans
+    vars:
+      __query: >-
+        [?starts_with(spec.clusterServiceVersionNames[0], 'mtc-operator')]
+    retries: 30
+    delay: 5
+    until:
+    - r_install_plans.resources | length > 0
+    - r_install_plans.resources | to_json | from_json | json_query(__query)
+
+  - name: Set InstallPlan Name
+    set_fact:
+      __ocp4_workload_migration_training_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(__query) }}"
+    vars:
+      __query: >-
+        [?starts_with(spec.clusterServiceVersionNames[0], 'mtc-operator')].metadata.name|[0]
+
+  - name: Get InstallPlan
+    k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: InstallPlan
+      name: "{{ __ocp4_workload_migration_training_install_plan_name }}"
+      namespace: openshift-migration
+    register: r_install_plan
+
+  - name: Approve InstallPlan if necessary
+    when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+    k8s:
+      state: present
+      definition: "{{ lookup( 'template', './templates/installplan.yaml.j2' ) }}"
+
+  - name: Set CSV name
+    set_fact:
+      __ocp4_workload_migration_training_csv: "{{ r_install_plan.resources[0].spec.clusterServiceVersionNames[0] }}"
+  - debug:
+      msg: "{{ __ocp4_workload_migration_training_csv }}"
+
+  - name: Wait until CSV is installed
+    k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: ClusterServiceVersion
+      name: "{{ __ocp4_workload_migration_training_csv }}"
+      namespace: openshift-migration
+    register: r_csv
+    retries: 30
+    delay: 5
+    until:
+    - r_csv.resources is defined
+    - r_csv.resources | length > 0
+    - r_csv.resources[0].status.phase is defined
+    - r_csv.resources[0].status.phase | length > 0
+    - r_csv.resources[0].status.phase == "Succeeded"
+
+  - name: Create Migration Controller
+    k8s:
+      state: present
+      definition: "{{ lookup( 'template', './templates/migration_controller.yaml.j2' ) }}"
+
+  - name: Wait until Migration Controller is running
+    k8s_info:
+      api_version: v1
+      kind: Deployment
+      name: migration-controller
+      namespace: openshift-migration
+    register: r_migration_controller_deployment
+    retries: 30
+    delay: 10
+    until:
+    - r_migration_controller_deployment.resources | length | int > 0
+    - r_migration_controller_deployment.resources[0].status.readyReplicas is defined
+    - r_migration_controller_deployment.resources[0].status.readyReplicas | int == r_migration_controller_deployment.resources[0].spec.replicas | int
+
+  - name: Get MTC UI route
+    k8s_info:
+      api_version: route.openshift.io/v1
+      kind: Route
+      name: migration
+      namespace: openshift-migration
+    register: r_migration_route
+
+  - name: Print MTC UI route
+    agnosticd_user_info:
+      msg: "The Migration Toolkit for Containers is available at https://{{ r_migration_route.resources[0].spec.host }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

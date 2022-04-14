@@ -1,0 +1,100 @@
+---
+- name: Get bookbag namespace
+  k8s_info:
+    kubeconfig: "{{ _bookbag_kubeconfig | default(omit) }}"
+    api_version: project.openshift.io/v1
+    kind: Project
+    name: "{{ bookbag_namespace }}"
+  register: r_get_bookbag_namespace
+  failed_when: false
+
+- name: Create bookbag namespace
+  when: r_get_bookbag_namespace.resources | default([]) | length == 0
+  k8s:
+    kubeconfig: "{{ _bookbag_kubeconfig | default(omit) }}"
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: ProjectRequest
+      metadata:
+        name: "{{ bookbag_namespace }}"
+
+- name: Create temporary directory for bookbag source
+  tempfile:
+    prefix: bookbag-{{ guid }}-
+    state: directory
+  register: r_bookbag_tmp
+
+- name: Clone bookbag repository to output dir
+  git:
+    repo: "{{ bookbag_git_repo }}"
+    version: "{{ bookbag_git_version | default(omit) }}"
+    dest: "{{ r_bookbag_tmp.path }}"
+
+- name: Process bookbag build template
+  command: >-
+    oc process --local -f {{ (r_bookbag_tmp.path ~ '/build-template.yaml') | quote }} -o json
+  register: r_process_build_template
+
+- name: Apply resources from build template
+  k8s:
+    kubeconfig: "{{ _bookbag_kubeconfig | default(omit) }}"
+    namespace: "{{ bookbag_namespace }}"
+    definition: "{{ item }}"
+  loop: "{{ r_process_build_template.stdout | from_json | json_query('items') }}"
+  loop_control:
+    label: "{{ item.apiVersion }} {{ item.kind }} {{ item.metadata.name }}"
+
+- name: Build bookbag image
+  command: >-
+    oc start-build bookbag --follow
+    {% if _bookbag_kubeconfig is defined %}--kubeconfig={{ _bookbag_kubeconfig | quote }}{% endif %}
+    --namespace={{ bookbag_namespace | quote }}
+    --from-dir={{ r_bookbag_tmp.path | quote }}
+
+- name: Read user-data.yaml
+  slurp:
+    src: "{{ hostvars.localhost.output_dir ~ '/user-data.yaml' }}"
+  delegate_to: localhost
+  register: r_user_data
+
+- name: Read user-info.yaml
+  slurp:
+    src: "{{ hostvars.localhost.output_dir ~ '/user-info.yaml' }}"
+  delegate_to: localhost
+  register: r_user_info
+
+- name: Set fact for user data and info
+  set_fact:
+    _bookbag_user_data: "{{ r_user_data.content | b64decode | from_yaml | default({}, true) }}"
+    _bookbag_user_info: '{{ r_user_info.content | b64decode | from_yaml | default([], true) | join("\n") }}'
+
+- name: Deploy bookbag for environment
+  when:
+  - _bookbag_user_data.users is undefined
+  include_tasks:
+    file: deploy-bookbag.yaml
+  vars:
+    _bookbag_instance_name: "{{ bookbag_name }}"
+    _bookbag_user_info_messages: "{{ _bookbag_user_info }}"
+    _bookbag_vars: "{{ _bookbag_user_data }}"
+
+- name: Deploy bookbag for users
+  when:
+  - _bookbag_user_data.users is defined
+  loop: >-
+    {{ _bookbag_user_data.users | dict2items }}
+  loop_control:
+    loop_var: _bookbag_users_item
+  include_tasks:
+    file: deploy-bookbag.yaml
+  vars:
+    _bookbag_instance_name: "{{ bookbag_name }}-{{ _bookbag_user }}"
+    _bookbag_user: "{{ _bookbag_users_item.key }}"
+    _bookbag_user_info_messages: "{{ _bookbag_vars.msg | default('') }}"
+    _bookbag_vars: "{{ _bookbag_users_item.value }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

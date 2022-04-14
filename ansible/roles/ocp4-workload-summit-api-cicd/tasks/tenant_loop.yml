@@ -1,0 +1,127 @@
+--- 
+- name: "{{orgName}}      1)  **********   TENANT CREATION  **********"
+  set_fact: 
+    tenantAdminEmail: "{{adminEmailUser}}%2B{{ orgName }}%40{{adminEmailDomain}}"
+- debug: 
+    msg: "{{orgName}} tenantAdminEmail = {{tenantAdminEmail}}"
+- register: create_tenant_response
+  uri: 
+    body: "access_token={{master_access_token}}&org_name={{orgName}}&username={{tenantAdminId}}&password={{tenantAdminPasswd}}&email={{tenantAdminEmail}}"
+    headers: 
+      Content-Type: application/x-www-form-urlencoded
+    method: POST
+    return_content: true
+    status_code: 201
+    timeout: 20
+    url: "{{create_tenant_url}}"
+    validate_certs: false
+
+- register: tenant_access_token  
+  xml:
+    xmlstring: "{{create_tenant_response.content}}"
+    xpath: //access_token/value
+    content: text
+
+- register: account_id
+  xml: 
+    content: text
+    xmlstring: "{{create_tenant_response.content}}"
+    xpath: //account/id
+
+- register: user_id
+  xml: 
+    content: text
+    xmlstring: "{{create_tenant_response.content}}"
+    xpath: "//user[state = \"pending\"]/id"
+
+- name: "{{orgName}}     4) activate new user"
+  set_fact: 
+    activate_user_url: "https://master.{{ocp_apps_domain}}/admin/api/accounts/{{account_id.matches[0].id}}/users/{{user_id.matches[0].id}}/activate.xml"
+
+- register: activate_user_response
+  uri: 
+    body: "access_token={{master_access_token}}"
+    method: PUT
+    return_content: true
+    status_code: 200
+    timeout: 10
+    url: "{{activate_user_url}}"
+    validate_certs: false
+
+# Routes are created after some delay. Wait here for routes to  be ready.
+- pause:
+    minutes: 1
+
+- name: "{{orgName}}     4) List developer user id"
+  set_fact: 
+    developer_user_url: "https://{{orgName}}-admin.{{ocp_apps_domain}}/admin/api/accounts.xml"
+
+- register: developer_user_response
+  uri: 
+    body: "access_token={{tenant_access_token.matches[0].value}}"
+    method: GET
+    return_content: true
+    status_code: 200
+    timeout: 10
+    url: "{{developer_user_url}}"
+    validate_certs: false
+
+- register: developer_user_id
+  xml: 
+    content: text
+    xmlstring: "{{developer_user_response.content}}"
+    xpath: //account/id
+
+- debug: 
+    msg: "ORG NAME: {{ orgName }} , ACCESS TOKEN: {{tenant_access_token.matches[0].value}}  ADMIN ACCOUNT: {{account_id.matches[0].id}} ADMIN_USER: {{user_id.matches[0].id}} DEVELOPER_ACCOUNT: {{ developer_user_id.matches[0].id }}"
+    verbosity: 0
+
+# create the DEV tenant Gateway
+- block:
+    - name: "**********  {{  tenantGwProject }} TENANT API GW  Provisioning **********"
+      command: "oc adm new-project {{ tenantGwProject }} --admin={{ ocp_user }}  --description='{{ tenantGwProjectDisplay }}'"
+      register: create_proj
+      failed_when: create_proj.stderr != ""  and 'already exists' not in create_proj.stderr
+
+    - set_fact:
+        THREESCALE_PORTAL_ENDPOINT: "https://{{ tenant_access_token.matches[0].value }}@{{orgName}}-admin.{{ocp_apps_domain}}"
+
+    - name: "Create threescale-registry-auth image pull secret in {{ tenantGwProject }}"
+      shell: |
+        oc create secret docker-registry threescale-registry-auth \
+            --docker-server=registry.redhat.io \
+            --docker-username='{{ rht_service_token_user }}' \
+            --docker-password={{ rht_service_token_password }} \
+            -n  {{ tenantGwProject }}
+
+    - name: "Create threescale-portal-endpoint secret in {{ tenantGwProject }}"
+      shell: |
+        oc secret new-basicauth apicast-configuration-url-secret \
+            --password={{ THREESCALE_PORTAL_ENDPOINT }} \
+            -n  {{ tenantGwProject }}
+
+    - name: "Create Staging Gateway; {{ THREESCALE_PORTAL_ENDPOINT }}"
+      shell: |
+        oc new-app \
+               -f {{tenant_api_gw_template_url}} \
+               --param APICAST_NAME=stage-apicast \
+               --param DEPLOYMENT_ENVIRONMENT=sandbox \
+               --param CONFIGURATION_LOADER=lazy \
+               --param CONFIGURATION_CACHE=0 \
+               --param MANAGEMENT_API=debug \
+               -n {{ tenantGwProject }}
+      register: create_stage_gw
+      failed_when: create_stage_gw.stderr != ""  and 'already exists' not in create_stage_gw.stderr
+
+    - name: "Create Production Gateway; {{ THREESCALE_PORTAL_ENDPOINT }}"
+      shell: |
+        oc new-app \
+               -f {{tenant_api_gw_template_url}} \
+               --param APICAST_NAME=prod-apicast \
+               --param DEPLOYMENT_ENVIRONMENT=production \
+               --param CONFIGURATION_LOADER=boot \
+               -n {{ tenantGwProject }}
+      register: create_prod_gw
+      failed_when: create_prod_gw.stderr != ""  and 'already exists' not in create_prod_gw.stderr
+  when: create_gws_with_each_tenant|bool
+

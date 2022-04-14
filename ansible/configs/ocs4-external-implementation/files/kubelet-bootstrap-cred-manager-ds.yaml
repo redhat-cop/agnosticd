@@ -1,0 +1,98 @@
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kubelet-bootstrap-cred-manager
+  namespace: openshift-machine-config-operator
+  labels:
+    k8s-app: kubelet-bootrap-cred-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: kubelet-bootstrap-cred-manager
+  template:
+    metadata:
+      labels:
+        k8s-app: kubelet-bootstrap-cred-manager
+    spec:
+      containers:
+      - name: kubelet-bootstrap-cred-manager
+        image: quay.io/openshift/origin-cli:v4.0
+        command: ['/bin/bash', '-ec']
+        args:
+        - |
+          #!/bin/bash
+
+          set -eoux pipefail
+
+          while true; do
+            unset KUBECONFIG
+
+            echo "--------------"
+            echo "Gather info..."
+            echo "--------------"
+            # context
+            intapi=$(oc get infrastructures.config.openshift.io cluster -o "jsonpath={.status.apiServerInternalURI}")
+            context="$(oc --config=/etc/kubernetes/kubeconfig config current-context)"
+            # cluster
+            cluster="$(oc --config=/etc/kubernetes/kubeconfig config view -o "jsonpath={.contexts[?(@.name==\"$context\")].context.cluster}")"
+            server="$(oc --config=/etc/kubernetes/kubeconfig config view -o "jsonpath={.clusters[?(@.name==\"$cluster\")].cluster.server}")"
+            # token
+            ca_crt_data="$(oc get secret -n openshift-machine-config-operator node-bootstrapper-token -o "jsonpath={.data.ca\.crt}" | base64 --decode)"
+            namespace="$(oc get secret -n openshift-machine-config-operator node-bootstrapper-token  -o "jsonpath={.data.namespace}" | base64 --decode)"
+            token="$(oc get secret -n openshift-machine-config-operator node-bootstrapper-token -o "jsonpath={.data.token}" | base64 --decode)"
+
+            echo "-------------------"
+            echo "Generate kubeconfig"
+            echo "-------------------"
+
+            export KUBECONFIG="$(mktemp)"
+            kubectl config set-credentials "kubelet" --token="$token" >/dev/null
+            ca_crt="$(mktemp)"; echo "$ca_crt_data" > $ca_crt
+            kubectl config set-cluster $cluster --server="$intapi" --certificate-authority="$ca_crt" --embed-certs >/dev/null
+            kubectl config set-context kubelet --cluster="$cluster" --user="kubelet" >/dev/null
+            kubectl config use-context kubelet >/dev/null
+
+            echo "------------------------"
+            echo "Moving to new kubeconfig"
+            echo "------------------------"
+            cp /etc/kubernetes/kubeconfig /etc/kubernetes/kubeconfig.prev
+            chown root:root ${KUBECONFIG}
+            chmod 0644 ${KUBECONFIG}
+            mv "${KUBECONFIG}" /etc/kubernetes/kubeconfig
+
+            echo "-------------------"
+            echo "Sleep 60 seconds..."
+            echo "-------------------"
+            sleep 60
+          done
+        securityContext:
+          privileged: true
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /etc/kubernetes/
+          name: kubelet-dir
+      nodeSelector:
+        node-role.kubernetes.io/master: ""
+      priorityClassName: "system-cluster-critical"
+      restartPolicy: Always
+      securityContext:
+        runAsUser: 0
+      tolerations:
+      - key: "node-role.kubernetes.io/master"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "node.kubernetes.io/unreachable"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 120
+      - key: "node.kubernetes.io/not-ready"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 120
+      volumes:
+      - hostPath:
+          path: /etc/kubernetes/
+          type: Directory
+        name: kubelet-dir

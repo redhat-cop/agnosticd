@@ -1,0 +1,98 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Check for valid Nexus image tag
+  assert:
+    that:
+    - ocp4_workload_nexus_operator_nexus_image_tag is not match('latest')
+    fail_msg: >-
+      Due to the frequent changes in the Nexus container image, 'latest' is not a valid image tag.
+      Please use a specific version starting with 3.24.0.
+    quiet: true
+
+- name: Check for supported Nexus image version
+  assert:
+    that:
+    - ocp4_workload_nexus_operator_nexus_image_tag is version_compare('3.24', '>=')
+    fail_msg: "Minimum supported Nexus Version is 3.24.0."
+    quiet: true
+
+- name: Create OpenShift Objects for Nexus Operator
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  retries: 20
+  delay: 10
+  loop:
+  - project.j2
+  - crd.j2
+  - service_account.j2
+  - cluster_role.j2
+  - cluster_role_binding.j2
+  - operator.j2
+
+- name: Wait for Nexus operator Pod to be ready
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: "{{ ocp4_workload_nexus_operator_project }}"
+    name: "nexus-operator"
+  register: r_nexus_operator_deployment
+  retries: 20
+  delay: 10
+  until:
+  - r_nexus_operator_deployment.resources is defined
+  - r_nexus_operator_deployment.resources | length | int > 0
+  - r_nexus_operator_deployment.resources[0].status.readyReplicas is defined
+  - >-
+    r_nexus_operator_deployment.resources[0].status.readyReplicas | int
+    == r_nexus_operator_deployment.resources[0].spec.replicas | int
+
+- name: Deploy default Nexus instance
+  when: ocp4_workload_nexus_operator_deploy_nexus_instance | bool
+  block:
+  - name: Create OpenShift Custom Resource for Nexus Instance
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './templates/nexus.j2' ) | from_yaml }}"
+
+  - name: Wait for Nexus Pod to be ready
+    k8s_info:
+      api_version: v1
+      kind: Deployment
+      namespace: "{{ ocp4_workload_nexus_operator_project }}"
+      name: "{{ ocp4_workload_nexus_operator_name }}"
+    register: r_nexus_deployment
+    retries: 30
+    delay: 10
+    until:
+    - r_nexus_deployment.resources is defined
+    - r_nexus_deployment.resources | length | int > 0
+    - r_nexus_deployment.resources[0].status.readyReplicas is defined
+    - r_nexus_deployment.resources[0].status.readyReplicas | int == r_nexus_deployment.resources[0].spec.replicas | int
+
+  - name: Get Nexus admin password
+    k8s:
+      api_version: gpte.opentlc.com/v1alpha1
+      kind: Nexus
+      name: "{{ ocp4_workload_nexus_operator_name }}"
+      namespace: "{{ ocp4_workload_nexus_operator_project }}"
+    register: r_nexus
+    until:
+    - r_nexus.result.status.admin_password is defined
+    retries: 20
+    delay: 5
+    ignore_errors: true
+
+  - name: Display Nexus password
+    when: not r_nexus.failed
+    agnosticd_user_info:
+      msg: "Nexus password is {{ r_nexus.result.status.admin_password }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

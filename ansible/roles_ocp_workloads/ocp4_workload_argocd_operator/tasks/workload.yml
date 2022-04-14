@@ -1,0 +1,120 @@
+# vim: set ft=ansible
+---
+- name: Create OpenShift Project for ArgoCD Operator
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/project.j2
+
+- name: Create Catalogsource for use with catalog snapshot
+  when: ocp4_workload_argocd_operator_use_catalog_snapshot | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/catalogsource.j2' ) | from_yaml }}"
+
+- name: Create OpenShift Objects for ArgoCD Operator
+  k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - ./templates/operatorgroup.j2
+  - ./templates/subscription.j2
+  - ./templates/clusterrolebinding.j2
+
+- name: Wait until InstallPlan is created
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+  register: r_install_plans
+  vars:
+    _query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'argocd-operator')]
+  retries: 30
+  delay: 5
+  until:
+  - r_install_plans.resources | length > 0
+  - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+- name: Set InstallPlan Name
+  set_fact:
+    ocp4_workload_argocd_operator_install_plan_name: >-
+      {{ r_install_plans.resources | to_json | from_json | json_query(query) }}
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'argocd-operator')].metadata.name|[0]
+
+- name: Get InstallPlan
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ ocp4_workload_argocd_operator_install_plan_name }}"
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+  register: r_install_plan
+
+- name: Approve InstallPlan if necessary
+  when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+  k8s:
+    state: present
+    definition: "{{ lookup( 'template', './templates/installplan.j2' ) }}"
+
+- name: Get Installed CSV
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: argocd-operator
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+  register: r_subscription
+  retries: 30
+  delay: 5
+  until:
+  - r_subscription.resources[0].status.currentCSV is defined
+  - r_subscription.resources[0].status.currentCSV | length > 0
+
+- name: Wait until CSV is Installed
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: "{{ ocp4_workload_argocd_operator_project }}"
+  register: r_csv
+  retries: 15
+  delay: 5
+  until:
+  - r_csv.resources[0].status.phase is defined
+  - r_csv.resources[0].status.phase | length > 0
+  - r_csv.resources[0].status.phase == "Succeeded"
+
+- name: Deploy ArgoCD
+  when: ocp4_workload_argocd_operator_deploy_argocd | bool
+  block:
+  - name: Create ArgoCD
+    k8s:
+      state: present
+      definition: "{{ lookup('template', './templates/argocd.j2' ) | from_yaml }}"
+
+  - name: Wait for ArgoCD to be installed
+    k8s_info:
+      api_version: argoproj.io/v1alpha1
+      kind: ArgoCD
+      name: "{{ ocp4_workload_argocd_operator_argocd_name }}"
+      namespace: "{{ ocp4_workload_argocd_operator_project }}"
+    register: r_ocp4_workload_argocd_operator_install_status
+    retries: 30
+    delay: 10
+    until:
+    - r_ocp4_workload_argocd_operator_install_status is defined
+    - r_ocp4_workload_argocd_operator_install_status.resources is defined
+    - r_ocp4_workload_argocd_operator_install_status.resources[0] is defined
+    - r_ocp4_workload_argocd_operator_install_status.resources[0].status is defined
+    - r_ocp4_workload_argocd_operator_install_status.resources[0].status.phase is defined
+    - r_ocp4_workload_argocd_operator_install_status.resources[0].status.server is defined
+    - r_ocp4_workload_argocd_operator_install_status.resources[0].status.phase == "Available"
+    - r_ocp4_workload_argocd_operator_install_status.resources[0].status.server == "Running"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

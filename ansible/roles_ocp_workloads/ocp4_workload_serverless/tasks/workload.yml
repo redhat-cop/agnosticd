@@ -1,0 +1,158 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Install Operator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: serverless-operator
+    install_operator_namespace: openshift-operators
+    install_operator_channel: "{{ ocp4_workload_serverless_channel }}"
+    install_operator_catalog: redhat-operators
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_serverless_automatic_install_plan_approval | default(true) }}"
+    install_operator_starting_csv: "{{ ocp4_workload_serverless_starting_csv }}"
+    install_operator_catalogsource_setup: "{{ ocp4_workload_serverless_use_catalog_snapshot | default(false)}}"
+    install_operator_catalogsource_name: "{{ ocp4_workload_serverless_catalogsource_name | default('') }}"
+    install_operator_catalogsource_namespace: openshift-operators
+    install_operator_catalogsource_image: "{{ ocp4_workload_serverless_catalog_snapshot_image | default('') }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_serverless_catalog_snapshot_image_tag | default('') }}"
+
+- name: Create knative-serving namespace and KNative Serving object
+  k8s:
+    state: present
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ns-knative-serving.yaml
+  - knative_serving.yaml
+
+- name: Wait until KNative Serving installation is complete
+  when: ocp4_workload_serverless_wait_for_deploy | bool
+  k8s_info:
+    api_version: operator.knative.dev/v1alpha1
+    kind: KnativeServing
+    name: knative-serving
+    namespace: knative-serving
+  register: r_kn_serving
+  retries: 30
+  delay: 10
+  until:
+  - r_kn_serving.resources[0].status.conditions[0].status is defined
+  - r_kn_serving.resources[0].status.conditions[0].status == "True"
+  - r_kn_serving.resources[0].status.conditions[1].status is defined
+  - r_kn_serving.resources[0].status.conditions[1].status == "True"
+  - r_kn_serving.resources[0].status.conditions[2].status is defined
+  - r_kn_serving.resources[0].status.conditions[2].status == "True"
+  - r_kn_serving.resources[0].status.conditions[3].status is defined
+  - r_kn_serving.resources[0].status.conditions[3].status == "True"
+
+- name: Install KNative Eventing
+  when: ocp4_workload_serverless_install_eventing | bool
+  block:
+  - name: Create knative-eventing namespace and KNative Eventing object
+    k8s:
+      state: present
+      definition: "{{ lookup('file', item ) | from_yaml }}"
+    loop:
+    - ns-knative-eventing.yaml
+    - knative_eventing.yaml
+
+  - name: Wait until KNative Eventing installation is complete
+    when: ocp4_workload_serverless_wait_for_deploy | bool
+    k8s_info:
+      api_version: operator.knative.dev/v1alpha1
+      kind: KnativeEventing
+      name: knative-eventing
+      namespace: knative-eventing
+    register: r_kn_eventing
+    retries: 30
+    delay: 10
+    until:
+    - r_kn_eventing.resources[0].status.conditions[0].status is defined
+    - r_kn_eventing.resources[0].status.conditions[0].status == "True"
+    - r_kn_eventing.resources[0].status.conditions[1].status is defined
+    - r_kn_eventing.resources[0].status.conditions[1].status == "True"
+
+- name: Get kn ConsoleCLIDownload
+  k8s_info:
+    api_version: console.openshift.io/v1
+    kind: ConsoleCLIDownload
+    name: kn
+  register: r_kn_cli_download
+  retries: 20
+  delay: 5
+  ignore_errors: true
+  until:
+  - r_kn_cli_download.resources is defined
+  - r_kn_cli_download.resources | length > 0
+
+- name: Get kn download URL from ConsoleCLIDownload
+  when: r_kn_cli_download.resources | length > 0
+  set_fact:
+    __ocp4_workload_serverless_kn_url: >-
+      {{ r_kn_cli_download.resources[0] | to_json | from_json
+       | json_query("spec.links[?contains(href,'-linux-amd64')].href") | first }}
+
+- name: No ConsoleCLIDownload for kn - try Route instead
+  when: r_kn_cli_download.resources | length == 0
+  block:
+  - name: Get kn download route
+    k8s_info:
+      api_version: route.openshift.io/v1
+      kind: Route
+      name: kn-cli-downloads
+      namespace: knative-serving
+    register: r_kn_download
+
+  - name: Get kn download URL from Route
+    when:
+    - r_kn_download.resources is defined
+    - r_kn_download.resources | length > 0
+    set_fact:
+      __ocp4_workload_serverless_kn_url: "{{ r_kn_download.resources[0].status.ingress[0].host }}/amd64/linux/kn-linux-amd64.tar.gz"
+
+- name: Install kn cli tool if a download URL was found
+  when: __ocp4_workload_serverless_kn_url is defined
+  block:
+  - name: Download kn cli tool
+    get_url:
+      url: "{{ __ocp4_workload_serverless_kn_url }}"
+      validate_certs: false
+      dest: /tmp/kn-linux-amd64.tar.gz
+      mode: 0660
+    register: r_kn
+    until: r_kn is success
+    retries: 10
+    delay: 10
+
+  - name: Install kn CLI on bastion
+    become: true
+    unarchive:
+      src: /tmp/kn-linux-amd64.tar.gz
+      remote_src: true
+      dest: /usr/bin
+      mode: 0775
+      owner: root
+      group: root
+    args:
+      creates: /usr/bin/kn
+
+  - name: Remove downloaded file
+    file:
+      state: absent
+      path: /tmp/kn-linux-amd64.tar.gz
+
+  - name: Create kn bash completion file
+    become: true
+    shell: /usr/bin/kn completion bash >/etc/bash_completion.d/kn
+    args:
+      creates: /etc/bash_completion.d/kn
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
