@@ -6,6 +6,10 @@ kind: MachineConfig
 metadata:
   labels:
     machineconfiguration.openshift.io/role: worker
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: ipa
+    meta.helm.sh/release-namespace: ipa
   name: 01-sebool
 spec:
   config:
