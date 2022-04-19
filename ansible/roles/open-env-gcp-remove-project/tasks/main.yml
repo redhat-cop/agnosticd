@@ -1,0 +1,89 @@
+---
+- name: Get project name
+  set_fact:
+    project_name: "openenv-{{ guid }}-{{ requester_name }}"
+
+- name: Call GCP get token role
+  include_role:
+    name: gcp-get-token
+
+- name: Get project
+  uri:
+    url: "https://cloudresourcemanager.googleapis.com/v3/projects/{{ project_name }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ auth_response.json.access_token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body:
+  ignore_errors: true
+  register: project_info
+
+- name: Delete project
+  when: 'project_info.status == 200 and project_info.json.state == "ACTIVE"'
+  block:
+    - name: Get project policy
+      uri:
+        url: "https://cloudresourcemanager.googleapis.com/v1/projects/{{ project_name }}:getIamPolicy"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ auth_response.json.access_token }}"
+          Accept: "application/json"
+          Content-Type: "application/json"
+        body:
+      register: project_policy
+
+    - name: Get current members
+      set_fact:
+        current_members: "{{ project_policy.json.bindings[0].members }}"
+
+    - name: Create user string
+      set_fact:
+        add_user: "user:{{ requester_email }}"
+
+    - name: Remove user from members
+      set_fact:
+        new_members: "{{ current_members | reject('search', add_user) | list }}"
+
+    - name: Create new policy
+      set_fact:
+        new_policy:
+          bindings: [ { members: "{{ new_members }}", role: "roles/owner" } ]
+          etag: "{{ project_policy.json.etag }}"
+          version: 1
+
+    - name: Set new project policy
+      uri:
+        url: "https://cloudresourcemanager.googleapis.com/v1/projects/{{ project_name }}:setIamPolicy"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ auth_response.json.access_token }}"
+          Accept: "application/json"
+          Content-Type: "application/json"
+        body:
+          policy: "{{ new_policy }}"
+        body_format: json
+      register: updated_project_policy
+
+    - name: Delete project with API (because collection is broken)
+      uri:
+        url: "https://cloudresourcemanager.googleapis.com/v3/projects/{{ project_name }}"
+        method: DELETE
+        headers:
+          Authorization: "Bearer {{ auth_response.json.access_token }}"
+          Accept: "application/json"
+          Content-Type: "application/json"
+        body:
+
+    # This removes the project but then produces an error today (bug in collection).
+    # Leave here in case collection gets fixed.
+    #- name: Delete GCP Project
+    #  google.cloud.gcp_resourcemanager_project:
+    #    auth_kind: serviceaccount
+    #    service_account_contents: "{{ gcp_credentials }}"
+    #    name: "{{ project_name }}"
+    #    id: "{{ project_name }}"
+    #    parent:
+    #      type: organization
+    #      id: "{{ gcp_organization }}"
+    #    state: absent
