@@ -46,7 +46,7 @@ EXAMPLES = '''
        OS_INTERFACE: "{{ osp_interface | default('internal') }}"
        PATH: "/root/.local/bin:{{ ansible_env.PATH }}"
        CEPH_CONF: "/etc/ceph/{{ ceph_cluster | default('red') }}.conf"
-     convert_blueprint:
+     osp_upload_storage_to_ibmcloud:
        ibm_endpoint: "{{ ibm_endpoint }}"
        ibm_auth_endpoint: "{{ ibm_auth_endpoint }}"
        ibm_api_key: "{{ ibm_api_key }}"
