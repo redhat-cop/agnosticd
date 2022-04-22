@@ -23,6 +23,7 @@ Role Variables
 
 guid - the guid to use for the deployment
 requester_email - the user's email address (must match GCP principal)
+gcp_admin_group - group in GCP that has admin access to all projects, must start with group:
 
 Dependencies
 ------------
