@@ -22,8 +22,7 @@ Role Variables
 --------------
 
 guid - the guid to use for the deployment
-requester_email - an email address to invite
-requester_name - login name of user
+requester_email - the user's email address (must match GCP principal)
 
 Dependencies
 ------------
