@@ -86,8 +86,8 @@ class ActionModule(ActionBase):
 
         try:
             output_dir = self._templar.template(
-                task_vars.get('output_dir',
-                    task_vars['hostvars'].get('localhost',{}).get('output_dir',
+                task_vars.get('agnosticd_output_dir',
+                    task_vars['hostvars'].get('localhost',{}).get('agnosticd_output_dir',
                         task_vars.get('playbook_dir', '.')
                     )
                 )
