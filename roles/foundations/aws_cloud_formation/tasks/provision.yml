@@ -1,6 +1,159 @@
 ---
-- name: Pre-check
+- name: Run pre-check tasks
   import_tasks: pre_check.yml
+
+- name: Run infra-images role
+  include_role:
+    name: infra-images
+
+# If infra-aws-capacity-reservation role was not executed, run it
+- name: Run infra-aws-capacity-reservation role
+  when: >-
+    agnosticd_aws_capacity_reservation_results is not defined or
+    agnosticd_aws_capacity_reservation_results.reservations | default({}) | length == 0
+  include_role:
+    name: infra-aws-capacity-reservation
+  vars:
+    ACTION: provision
+
+- name: Run infra-aws-open-environment role
+  when: agnosticd_open_environment | default(false) | bool
+  include_role:
+    name: infra-aws-open-environment
+  vars:
+    ACTION: provision
+
+- name: Create ssh provision key
+  when: instances | default([]) | length > 0
+  include_role:
+    name: create_ssh_provision_key
+
+- name: Locate environment SSH key
+  when: instances | default([]) | length > 0
+  include_role:
+    name: locate_env_authorized_key
+
+- name: Create keypair in ec2
+  when: instances | default([]) | length > 0
+  include_role:
+    name: infra-ec2-ssh-key
+
+- name: Run infra-ec2-template-generate role
+  include_role:
+    name: infra-ec2-template-generate
+
+- name: Run infra-ec2-template-create role
+  include_role:
+    name: infra-ec2-template-create
+  vars:
+    aws_region_loop: "{{ aws_region }}"
+
+- name: Run infra-ec2-template-create role into fallback region
+  when:
+  - fallback_regions is defined
+  - cloudformation_out is failed
+  include_role:
+    name: infra-ec2-template-create
+  vars:
+    aws_region_loop: "{{item}}"
+  with_items: "{{ fallback_regions }}"
+
+- name: Report Cloudformation error
+  when: not cloudformation_out is succeeded
+  fail:
+    msg: "FAIL {{ project_tag }} Create Cloudformation"
+  tags:
+  - provision_cf_template
+
+# - name: Step 001.2 Create Inventory and SSH config setup
+# Sometimes the infra step is skipped, for example when scaling up a cluster.
+# when step001.1 is skipped, aws_region_final is not defined.
+- name: Detect AWS region
+  when: aws_region_final is not defined
+  include_tasks: detect_aws_region.yml
+
+- name: Run infra-ec2-create-inventory role
+  include_role:
+    name: infra-ec2-create-inventory
+
+- name: Run Common SSH config generator role
+  when:
+  - groups.bastions is defined
+  - groups.bastions | length > 0
+  include_role:
+    name: infra-common-ssh-config-generate
+
+# include global vars again
+# this time for all hosts now that the inventory is built
+- import_playbook: ../include_vars.yml
+  tags:
+  - create_inventory
+  - must
+
+
+# WK This will not work for Windows or Network groups
+#    Figure out how to *not* do it on those
+# hosts:
+#   - all:!windows:!network
+
+- name: Set facts for remote access
+  set_fact:
+    aws_region_final: "{{ hostvars['localhost'].aws_region_final }}"
+    ansible_ssh_extra_args: "{{ ansible_ssh_extra_args | default() }} -F {{ output_dir }}/{{ env_type }}_{{ guid }}_ssh_conf"
+  tags:
+  - create_inventory
+
+- name: Run infra-ec2-wait_for_linux_hosts role
+  include_role:
+    name: infra-ec2-wait_for_linux_hosts
+
+- name: Run infra-ec2-linux-set-hostname role
+  include_role:
+    name: infra-ec2-linux-set-hostname
+
+- name: Add authorized_keys
+  when: >-
+    ssh_authorized_keys | default([]) | length > 0
+    or
+    all_ssh_authorized_keys | default([]) | length > 0
+  include_role:
+    name: ssh_authorized_keys
+
+# - name: Step 001.4 Configure Windows Hosts and Wait for Connection
+#   gather_facts: false
+#   hosts:
+#     - windows
+#   tags:
+#     - step001
+#     - step001.4
+#   tasks:
+#     - name: set facts for remote access
+#       tags:
+#         - create_inventory
+#       set_fact:
+#         ansible_become: false
+#         ansible_connection: winrm
+#         ansible_host: "{{ public_dns_name }}"
+#         ansible_password: "{{ hostvars['localhost'].windows_password | default(hostvars['localhost'].generated_windows_password) }}"
+#         ansible_port: 5986
+#         ansible_user: Administrator
+#         ansible_winrm_server_cert_validation: ignore
+#         aws_region_final: "{{hostvars['localhost'].aws_region_final}}"
+
+#     - name: Run infra-ec2-wait_for_linux_hosts Role
+#       include_role:
+#         name: infra-ec2-wait_for_windows_hosts
+
+#     - name: Set output_dir for all windows hosts
+#       set_fact:
+#         output_dir: "{{ hostvars.localhost.output_dir }}"
+
+
+
+
+
+
+
 
 - name: Create ssh keys
   when:
