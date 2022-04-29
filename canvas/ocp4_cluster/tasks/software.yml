@@ -1,0 +1,217 @@
+---
+- name: Configure all hosts with repositories, common files and set environment key
+  hosts:
+  - all:!windows
+  become: true
+  gather_facts: false
+  roles:
+  - role: set-repositories
+    when: repo_method is defined
+
+  - role: common
+    when: install_common | bool
+
+  - role: set_env_authorized_key
+    when: set_env_authorized_key | bool
+
+  tasks:
+  - name: Add GUID to /etc/skel/.bashrc
+    lineinfile:
+      path: "/etc/skel/.bashrc"
+      regexp: "^export GUID"
+      line: "export GUID={{ guid }}"
+
+- name: Step 003.1 - Configuring bastion hosts
+  hosts: bastions
+  become: true
+  roles:
+  - role: bastion-lite
+    when: install_bastion | bool
+
+  - role: bastion-student-user
+    when: install_student_user | bool
+
+  tasks:
+  - name: Setup student SSH Key
+    when:
+    - install_student_user | bool
+    - student_name is defined
+    - env_authorized_key is defined
+    block:
+    - name: Copy SSH private key to student user .ssh directory
+      copy:
+        src: "/root/.ssh/{{ env_authorized_key }}.pem"
+        dest: "~{{ student_name }}/.ssh/{{ env_authorized_key }}.pem"
+        mode: u=rw,go=
+        owner: "{{ student_name }}"
+        remote_src: true
+
+    - name: Copy SSH public key to student user .ssh directory
+      copy:
+        src: "/root/.ssh/{{ env_authorized_key }}.pub"
+        dest: "~{{ student_name }}/.ssh/{{ env_authorized_key }}.pub"
+        mode: u=rw,go=
+        owner: "{{ student_name }}"
+        remote_src: true
+
+    - name: Copy SSH config to student user .ssh directory
+      copy:
+        src: "/root/.ssh/config"
+        dest: "~{{ student_name }}/.ssh/config"
+        mode: u=rw,go=
+        owner: "{{ student_name }}"
+        remote_src: true
+
+- name: Create a Python3 VirtualEnv for use in the k8s Ansible tasks
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+  - name: Setup k8s virtualenv
+    include_role:
+      name: host_virtualenv
+    vars:
+      host_virtualenv_path: /opt/virtualenvs/k8s
+      # Merge base k8s requirements with cloud provider specific requirements
+      host_virtualenv_requirements:
+      - requirements_k8s.txt
+      - requirements_{{ cloud_provider }}.txt
+
+  - name: Install git
+    package:
+      state: present
+      name:
+      - git
+
+- name: PreSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+  - debug:
+      msg: "Pre-Software checks completed successfully"
+
+#### Software
+
+- name: Step 004 - Software
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+  - name: Step 004.1 - Call role to provision OpenShift4 installation host
+    include_role:
+      name: host-ocp4-provisioner
+
+- name: Step 004.2 - Install OpenShift 4
+  hosts: bastions
+  gather_facts: false
+  become: false
+  run_once: true
+  tasks:
+  - name: Call role to install OpenShift
+    include_role:
+      name: host-ocp4-installer
+
+
+### Post Software
+
+---
+- name: Step 005 - Post software
+  hosts: bastions
+  become: false
+  gather_facts: false
+  tasks:
+  - debug:
+      msg: "Post-Software steps starting"
+
+# Deploy Workloads
+- name: Step 005.2 - Deploy infra and student Workloads
+  import_playbook: workloads.yml
+
+# Set up credentials on bastion
+- name: Step 005.3 Remove credentials from bastion
+  hosts: bastions
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Remove full cloud credentials from bastion
+    when: not ocp4_cluster_full_cloud_credentials_on_bastion | bool
+    block:
+    - name: Remove AWS Credentials from bastion
+      when: cloud_provider == 'ec2'
+      block:
+      - name: Remove AWS credentials file
+        file:
+          path: "/home/{{ ansible_user }}/.aws/credentials"
+          state: absent
+
+      - name: Create AWS credentials file with Route53 credentials for certificate renewals
+        when: '"ocp4_workload_le_certificates" in infra_workloads'
+        blockinfile:
+          dest: "~/.aws/credentials"
+          create: true
+          content: |
+            [default]
+            # {{ hostvars.localhost.route53user }}
+            # Route53 credentials for Certbot Let's Encrypt renewal
+            aws_access_key_id = {{ hostvars.localhost.route53user_access_key }}
+            aws_secret_access_key = {{ hostvars.localhost.route53user_secret_access_key }}
+
+    - name: Remove Azure Credentials directory from bastion
+      when: cloud_provider == 'azure'
+      file:
+        path: "/home/{{ ansible_user }}/.azure"
+        state: absent
+
+    - name: Remove the openshift-installer GCP Credentials directory from bastion
+      when: cloud_provider == 'gcp'
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+      - "/home/{{ ansible_user }}/.gcp"
+      - "/home/{{ ansible_user }}/.config/gcloud"
+
+  - name: Save kubeadmin password for Azure and GCP
+    when: cloud_provider == "azure" or cloud_provider == "gcp"
+    slurp:
+      src: '/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeadmin-password'
+    register: r_kubeadmin_password
+
+- name: Step 005.4 Print Student Info
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Print student access information
+    when:
+    - install_student_user | bool
+    - ocp4_cluster_show_access_user_info | bool
+    block:
+    - name: Store bastion hostname as a fact
+      set_fact:
+        bastion_hostname: "{{ groups['bastions'].0 }}"
+
+    - name: Print access user info
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+      - "You can access your bastion via SSH:"
+      - "  ssh {{ student_name }}@{{ hostvars[bastion_hostname].shortname }}.{{ guid }}{{ subdomain_base_suffix if cloud_provider == 'ec2' else '.'+ocp4_base_domain }}"
+      - ""
+      - "  Make sure you use the username '{{ student_name }}' and the password '{{ hostvars[bastion_hostname]['student_password'] }}' when prompted."
+
+    - name: Print kubeadmin user info
+      when: cloud_provider == "azure" or cloud_provider == "gcp"
+      agnosticd_user_info:
+        msg: "  kubeadmin password: {{ hostvars[bastion_hostname]['r_kubeadmin_password']['content'] | b64decode }}"
+
+- name: Step 005.5 Tell CloudForms we are done
+  hosts: localhost
+  run_once: true
+  gather_facts: false
+  become: false
+  tasks:
+  - debug:
+      msg: "Post-Software checks completed successfully"
