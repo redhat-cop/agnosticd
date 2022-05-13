@@ -19,21 +19,13 @@
 - name: Set Gitea repo variables
   set_fact:
     _ocp4_workload_ama_gitops_gitea_repo_url: >-
-      {{ r_gitea.resources[0].status.giteaRoute }}/{{ ocp4_workload_ama_gitops_gitea_user }}/{{ ocp4_workload_ama_gitops_gitea_repo }}
+      {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
+      ocp4_workload_ama_gitops_gitea_user | urlencode }}:{{
+      ocp4_workload_ama_gitops_gitea_user_password | urlencode }}@{{
+      r_gitea.resources[0].status.giteaHostname }}/{{
+      ocp4_workload_ama_gitops_gitea_user }}/{{ ocp4_workload_ama_gitops_gitea_repo }}
     _ocp4_workload_ama_gitops_gitea_repo_route_url: >-
       {{ r_gitea.resources[0].status.giteaRoute }}
-
-- name: Create k8s resources
-  kubernetes.core.k8s:
-    state: present
-    definition: "{{ lookup('template', item ) | from_yaml }}"
-  loop:
-  - namespace-pipeline.yaml.j2
-  - namespace-demo.yaml.j2
-  - gitea-secret.yaml.j2
-  - rolebinding-clusterview.yaml.j2
-  - rolebinding-retail-pipeline.yaml.j2
-  - service-account.yaml.j2
 
 - name: Make sure cloned repo directory does not exist
   ansible.builtin.file:
@@ -42,33 +34,13 @@
 
 - name: Clone application source code
   ansible.builtin.git:
+    accept_hostkey: true
+    force: true
     repo: "{{ _ocp4_workload_ama_gitops_gitea_repo_url }}"
     dest: "~{{ ansible_user }}/appmod-enablement"
-
-- name: Deploy tekton resources
-  kubernetes.core.k8s:
-    state: present
-    namespace: "{{ ocp4_workload_ama_gitops_pipeline_namespace }}"
-    src: "{{ item }}"
-  loop:
-  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/build-bot-sa.yaml"
-  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/git-user-secret.yaml"
-  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/buildah-task.yaml"
-  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/git-clone-task.yaml"
-  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/maven-with-subdir-task.yaml"
-  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/update-manifest-task.yaml"
-  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/customers-workspace-pvc.yaml"
-  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/customers-deployment-pipeline.yaml"
-
-- name: Create PipelineRun
-  kubernetes.core.k8s:
-    state: present
-    definition: "{{ lookup('template', 'pipelinerun.yaml.j2' ) | from_yaml }}"
-
-- name: Create ArgoCD instance
-  kubernetes.core.k8s:
-    state: present
-    definition: "{{ lookup('template', 'argocd.yaml.j2' ) | from_yaml }}"
+    version: "{{ ocp4_workload_ama_gitops_gitea_repo_branch }}"
+  environment:
+    GIT_TERMINAL_PROMPT: false
 
 - name: Update ~/appmod-enablement/argocd/customers-application.yaml
   lineinfile:
@@ -101,6 +73,18 @@
 - name: Update ~/appmod-enablement/argocd/gateway-application.yaml
   lineinfile:
     path: "~{{ ansible_user }}/appmod-enablement/argocd/gateway-application.yaml"
+    state: present
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+  # Ends with customers
+  - regexp: '.*\.$customers$'
+    line: "    url: http://{{ ocp4_workload_ama_rhev_vm_tomcat_vm_ip_address }}:8080/customers/customers"
+
+# Point gateway to use customer service on RHEV
+- name: Update ~/appmod-enablement/gateway/helm/config/application.yaml
+  lineinfile:
+    path: "~{{ ansible_user }}/appmod-enablement/gateway/helm/config/application.yaml"
     state: present
     regexp: "{{ item.regexp }}"
     line: "{{ item.line }}"
@@ -140,25 +124,11 @@
   - regexp: "^    namespace: retail"
     line: "    namespace: {{ ocp4_workload_ama_gitops_demo_namespace }}"
 
-- name: Update ~/appmod-enablement/customers-tomcat-gitops/helm/secret/persistence.properties
-  lineinfile:
-    path: "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/helm/secret/persistence.properties"
-    state: present
-    regexp: "{{ item.regexp }}"
-    line: "{{ item.line }}"
-  loop:
-  - regexp: "^jdbc.url="
-    line: "jdbc.url=jdbc:oracle:thin:@{{ ocp4_workload_ama_gitops_oracle_vm_service }}:1521/xepdb1"
-  - regexp: "jdbc.user="
-    line: "jdbc.user={{ ocp4_workload_ama_gitops_oracle_db_user }}"
-  - regexp: "jdbc.password="
-    line: "jdbc.password={{ ocp4_workload_ama_gitops_oracle_db_password }}"
-
 - name: Commit changes to the repository
   command:
     chdir: "~{{ ansible_user }}/appmod-enablement"
     cmd: >-
-      git commit -a -m 'Updates for deployment.'
+      git commit -a -m 'Updates for starting scenario.'
 
 - name: Push all changes back to the {{ ocp4_workload_ama_gitops_gitea_repo }} repository
   command:
@@ -168,6 +138,44 @@
       }}:{{ ocp4_workload_ama_gitops_gitea_user_password
       }}@{{ _ocp4_workload_ama_gitops_gitea_repo_route_url | urlsplit('hostname')
       }}/{{ ocp4_workload_ama_gitops_gitea_user }}/{{ ocp4_workload_ama_gitops_gitea_repo }}
+
+- name: Create k8s resources
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - namespace-pipeline.yaml.j2
+  - namespace-demo.yaml.j2
+  - gitea-secret.yaml.j2
+  - rolebinding-clusterview.yaml.j2
+  - rolebinding-retail-pipeline.yaml.j2
+  - service-account.yaml.j2
+
+- name: Deploy tekton resources
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ ocp4_workload_ama_gitops_pipeline_namespace }}"
+    src: "{{ item }}"
+  loop:
+  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/build-bot-sa.yaml"
+  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/git-user-secret.yaml"
+  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/buildah-task.yaml"
+  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/git-clone-task.yaml"
+  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/maven-with-subdir-task.yaml"
+  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/update-manifest-task.yaml"
+  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/customers-workspace-pvc.yaml"
+  - "~{{ ansible_user }}/appmod-enablement/customers-tomcat-gitops/tekton/customers-deployment-pipeline.yaml"
+
+- name: Create PipelineRun
+  when: ocp4_workload_ama_gitops_pipeline_execute | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'pipelinerun.yaml.j2' ) | from_yaml }}"
+
+- name: Create ArgoCD instance
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'argocd.yaml.j2' ) | from_yaml }}"
 
 - name: Create orders PostgreSQL database
   vars:
