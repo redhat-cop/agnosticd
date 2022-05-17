@@ -1,0 +1,77 @@
+---
+- name: Check if email is Red Hat associate
+  fail:
+    msg: User is not a Red Hat associate
+  when:
+    - '"@redhat.com" not in requester_email'
+
+- name: Create GCP Project
+  google.cloud.gcp_resourcemanager_project:
+    auth_kind: serviceaccount
+    service_account_contents: "{{ gcp_credentials }}"
+    name: "{{ project_name }}"
+    id: "{{ project_name }}"
+    parent:
+      type: organization
+      id: "{{ gcp_organization }}"
+    state: present
+  register: new_project
+
+- name: Call GCP get token role
+  include_role:
+    name: gcp-get-token
+
+- name: Get project policy
+  uri:
+    url: "https://cloudresourcemanager.googleapis.com/v1/projects/{{ new_project.projectId }}:getIamPolicy"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ auth_response.json.access_token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body:
+  register: project_policy
+
+- name: Get current members
+  set_fact:
+    current_members: "{{ project_policy.json.bindings[0].members }}"
+
+- name: Create add user string
+  set_fact:
+    user_to_add: "user:{{ requester_email }}"
+
+- name: Add user and admin group to members
+  set_fact:
+    new_members: "{{ current_members + [ user_to_add, gcp_admin_group ] }}"
+
+- name: Create new policy
+  set_fact:
+    new_policy:
+      bindings: [ { members: "{{ new_members }}", role: "roles/owner" } ]
+      etag: "{{ project_policy.json.etag }}"
+      version: 1
+
+- name: Set new project policy
+  uri:
+    url: "https://cloudresourcemanager.googleapis.com/v1/projects/{{ new_project.projectId }}:setIamPolicy"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ auth_response.json.access_token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body:
+      policy: "{{ new_policy }}"
+    body_format: json
+  register: updated_project_policy
+
+- name: Update billing info for project
+  ansible.builtin.uri:
+    url: "https://cloudbilling.googleapis.com/v1/projects/{{ new_project.projectId }}/billingInfo"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ auth_response.json.access_token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body:
+      billingAccountName: "billingAccounts/{{ gcp_billing_account_id }}"
+    body_format: json
