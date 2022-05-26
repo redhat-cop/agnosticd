@@ -89,7 +89,7 @@ func init() {
 	profiles["openstack"] = Profile{
 		Name: "openstack",
 		RootDeviceHints: RootDeviceHints{
-			DeviceName: "/dev/vdb",
+			DeviceName: "/dev/sdb",
 		},
 		RootGB:  10,
 		LocalGB: 50,
