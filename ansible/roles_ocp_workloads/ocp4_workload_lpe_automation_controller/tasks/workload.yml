@@ -1,0 +1,62 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- environment:
+    KUBECONFIG: "{{ tmp_kubeconfig }}"
+  block:
+    - name: Create Project {{ automation_controller_project }}
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './templates/namespace.j2' ) | from_yaml }}"
+      register: r_createproject
+      until: r_createproject is succeeded
+      retries: 5
+
+    - name: Create OpenShift objects for workload
+      k8s:
+        state: present
+        definition: "{{ lookup('template', item ) | from_yaml }}"
+      loop:
+        - ./templates/operatorgroup.j2
+        - ./templates/subscription.j2
+        - ./templates/admin_secret.j2
+        - ./templates/automationcontroller.j2
+
+    - name: Retrieve created route
+      k8s_facts:
+        api_version: "route.openshift.io/v1"
+        kind: Route
+        name: "{{ automation_controller_app_name }}"
+        namespace: "{{ automation_controller_project }}"
+      register: r_route
+      until: r_route.resources[0].spec.host is defined
+      retries: "{{ automation_controller_deploy_retry_count }}"
+      delay: "{{ automation_controller_deploy_retry_delay }}"
+
+    - name: Get automation_controller route hostname
+      set_fact:
+        automation_controller_hostname: "{{ r_route.resources[0].spec.host }}"
+
+    - name: wait for automation_controller to be running
+      uri:
+        url: http://{{ automation_controller_hostname }}/api/v2/ping/
+        status_code: 200
+      register: result
+      until: result.json.version is defined
+      retries: "{{ automation_controller_deploy_retry_count }}"
+      delay: "{{ automation_controller_deploy_retry_delay }}"
+
+    - name: Display version
+      debug:
+        msg: "{{ result.json.version }}"
+      when: not silent | bool
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
