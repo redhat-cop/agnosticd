@@ -42,22 +42,85 @@
   - r_tackle.resources[0].status is defined
   - r_tackle.resources[0].status.conditions | length > 0
   - r_tackle.resources[0].status.conditions[0].status is match( "True" )
+  - r_tackle.resources[0].status.conditions[0].type is match( "Ready" )
+
+- name: Wait until all Tackle Keycloak Deployment is ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Deployment
+    name: tackle-keycloak
+    namespace: "{{ ocp4_workload_mta_tackle_namespace }}"
+  register: r_tackle_keycloak_deployment
+  until:
+  - r_tackle_keycloak_deployment.resources is defined
+  - r_tackle_keycloak_deployment.resources | length > 0
+  - r_tackle_keycloak_deployment.resources[0].status is defined
+  - r_tackle_keycloak_deployment.resources[0].status.readyReplicas is defined
+  - r_tackle_keycloak_deployment.resources[0].spec.replicas == r_tackle_keycloak_deployment.resources[0].status.readyReplicas
+  retries: 30
+  delay: 5
+
+- name: Get Tackle route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: tackle
+    namespace: "{{ ocp4_workload_mta_tackle_namespace }}"
+  register: r_tackle_route
+
+- name: Set Tackle host variable
+  set_fact:
+    _ocp4_workload_mta_tackle_host: "{{ r_tackle_route.resources[0].spec.host }}"
+
+- name: Seed Tackle
+  when: ocp4_workload_mta_tackle_seed | bool
+  block:
+  - name: Copy default seed shell script
+    when: ocp4_workload_mta_tackle_seed_script_url | length == 0
+    become: true
+    template:
+      src: seed-tackle.sh.j2
+      dest: /usr/bin/seed-tackle.sh
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Download seed script from URL
+    when: ocp4_workload_mta_tackle_seed_script_url | length > 0
+    block:
+    - name: Download seed script template
+      delegate_to: localhost
+      get_url:
+        url: "{{ ocp4_workload_mta_tackle_seed_script_url }}"
+        dest: /tmp/seed-tackle.sh.j2
+        mode: 0664
+
+    - name: Install seed script
+      become: true
+      template:
+        src: /tmp/seed-tackle.sh.j2
+        dest: /usr/bin/seed-tackle.sh
+        owner: root
+        group: root
+        mode: 0775
+
+    - name: Remove downloaded template script
+      delegate_to: localhost
+      file:
+        state: absent
+        path: /tmp/seed-tackle.sh/j2
+
+  - name: Execute seed shell script
+    shell:
+      cmd: /usr/bin/seed-tackle.sh
+    register: r_seed
+    retries: 10
+    delay: 5
+    until: r_seed.rc == 0
 
 - name: Print access information
   when: ocp4_workload_mta_tackle_print_access_information | bool
   block:
-  - name: Get Tackle route
-    kubernetes.core.k8s_info:
-      api_version: route.openshift.io/v1
-      kind: Route
-      name: tackle
-      namespace: "{{ ocp4_workload_mta_tackle_namespace }}"
-    register: r_tackle_route
-
-  - name: Set Tackle host variable
-    set_fact:
-      _ocp4_workload_mta_tackle_host: "{{ r_tackle_route.resources[0].spec.host }}"
-
   - name: Print access information
     agnosticd_user_info:
       msg: "{{ item }}"
@@ -65,8 +128,8 @@
     - ""
     - "Konveyor Tackle (Migration Toolkit for Applications Upstream):"
     - "  URL:      https://{{ _ocp4_workload_mta_tackle_host }}"
-    - "  User:     tackle"
-    - "  Password: password"
+    - "  User:     {{ ocp4_workload_mta_tackle_user }}"
+    - "  Password: {{ ocp4_workload_mta_tackle_password }}"
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
