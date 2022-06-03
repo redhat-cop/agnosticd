@@ -1,4 +1,44 @@
 ---
+- name: Download VScode server RPM
+  get_url:
+    url: >-
+      {{ ocp4_workload_vscode_bastion_vscode_package_url }}
+    dest: "{{ ocp4_workload_vscode_bastion_home_directory }}/code-server.rpm"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0664
+
+- name: Save python environment variable
+  set_fact:
+    _ocp4_workload_vscode_bastion_python_interpreter: "{{ ansible_python_interpreter }}"
+
+- name: Use default python
+  set_fact:
+    ansible_python_interpreter: /usr/bin/python
+
+- name: Install Chrome
+  when: ocp4_workload_vscode_bastion_install_chrome | bool
+  become: true
+  package:
+    name: https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm
+    disable_gpg_check: true
+    state: present
+
+- name: Install code-server
+  become: true
+  package:
+    name: "{{ ocp4_workload_vscode_bastion_home_directory }}/code-server.rpm"
+    state: present
+
+- name: Use previous python
+  set_fact:
+    ansible_python_interpreter: "{{ _ocp4_workload_vscode_bastion_python_interpreter }}"
+
+- name: Remove rpm file
+  ansible.builtin.file:
+    state: absent
+    path: "{{ ocp4_workload_vscode_bastion_home_directory }}/code-server.rpm"
+
 - name: Generate VSCode server password if no password specified
   when: ocp4_workload_vscode_bastion_vscode_password | default('') | length == 0
   ansible.builtin.set_fact:
@@ -59,15 +99,6 @@
       owner: "{{ ansible_user }}"
       group: "{{ ansible_user }}"
 
-- name: Download VScode server RPM
-  get_url:
-    url: >-
-      {{ ocp4_workload_vscode_bastion_vscode_package_url }}
-    dest: "{{ ocp4_workload_vscode_bastion_home_directory }}/code-server.rpm"
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    mode: 0664
-
 # Do not use loop to work around Tower bug where ansible_user gets replaced with root
 - name: Ensure VSCode config directories exist
   block:
@@ -114,6 +145,14 @@
       state: directory
       path: >-
         {{ ocp4_workload_vscode_bastion_home_directory }}/.local/share/code-server
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+      mode: 0770
+  - name: Create .local/share/code-server/extensions directory
+    ansible.builtin.file:
+      state: directory
+      path: >-
+        {{ ocp4_workload_vscode_bastion_home_directory }}/.local/share/code-server/extensions
       owner: "{{ ansible_user }}"
       group: "{{ ansible_user }}"
       mode: 0770
@@ -171,24 +210,35 @@
     group: "{{ ansible_user }}"
     mode: 0664
 
-- name: Run code-server configuration actions as root
-  become: true
+- name: Install extensions
+  when: ocp4_workload_vscode_bastion_extensions | length > 0
   block:
-  - name: Install VSCode server RPM
-    ansible.builtin.command:
-      cmd: "dnf -y install {{ ocp4_workload_vscode_bastion_home_directory }}/code-server.rpm"
+  - name: Download extension files for VSCode
+    get_url:
+      url: "{{ ocp4_workload_vscode_bastion_extension_root_url }}/{{ item }}"
+      dest: "{{ ocp4_workload_vscode_bastion_home_directory }}/.local/share/code-server/extensions/"
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+    loop: "{{ ocp4_workload_vscode_bastion_extensions }}"
+    register: r_download_extension
+    until: r_download_extension is not failed
+    retries: 5
 
-  - name: "Enable and start code-server@{{ ansible_user }} system service"
-    ansible.builtin.service:
-      name: "code-server@{{ ansible_user }}"
-      enabled: true
-      state: started
-      daemon_reload: true
+  - name: Install VSCode extensions
+    command: "/bin/code-server --install-extension {{ ocp4_workload_vscode_bastion_home_directory }}/.local/share/code-server/extensions/{{ item }}"
+    loop: "{{ ocp4_workload_vscode_bastion_extensions }}"
+    ignore_errors: true
+    register: r_install_extension
+    until: r_install_extension is not failed
+    retries: 5
 
-- name: Remove rpm file
-  ansible.builtin.file:
-    state: absent
-    path: "{{ ocp4_workload_vscode_bastion_home_directory }}/code-server.rpm"
+- name: "Enable and start code-server@{{ ansible_user }} system service"
+  become: true
+  ansible.builtin.service:
+    name: "code-server@{{ ansible_user }}"
+    enabled: true
+    state: started
+    daemon_reload: true
 
 - name: Print User Info
   agnosticd_user_info:
