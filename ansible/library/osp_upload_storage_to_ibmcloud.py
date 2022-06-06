@@ -46,7 +46,7 @@ EXAMPLES = '''
        OS_INTERFACE: "{{ osp_interface | default('internal') }}"
        PATH: "/root/.local/bin:{{ ansible_env.PATH }}"
        CEPH_CONF: "/etc/ceph/{{ ceph_cluster | default('red') }}.conf"
-     convert_blueprint:
+     osp_upload_storage_to_ibmcloud:
        ibm_endpoint: "{{ ibm_endpoint }}"
        ibm_auth_endpoint: "{{ ibm_auth_endpoint }}"
        ibm_api_key: "{{ ibm_api_key }}"
@@ -70,8 +70,8 @@ RETURN = '''
 '''
 
 from ansible.module_utils.basic import *
-from ansible.module_utils.openstack import openstack_full_argument_spec, openstack_module_kwargs, \
-    openstack_cloud_from_module
+from ansible_collections.openstack.cloud.plugins.module_utils.openstack import \
+    openstack_full_argument_spec, openstack_module_kwargs, openstack_cloud_from_module
 import ibm_boto3
 import os,time
 from ibm_botocore.client import Config, ClientError
