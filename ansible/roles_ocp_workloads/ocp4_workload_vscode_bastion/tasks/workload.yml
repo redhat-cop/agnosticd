@@ -1,28 +1,4 @@
 ---
-- name: Generate VSCode server password if no password specified
-  when: ocp4_workload_vscode_bastion_vscode_password | default('') | length == 0
-  ansible.builtin.set_fact:
-    ocp4_workload_vscode_bastion_vscode_password: >-
-      {{ lookup('password', '/dev/null length={{ ocp4_workload_vscode_bastion_vscode_password_length }} chars=ascii_letters,digits') }}
-
-- name: Validate that certbot virtualenv directory exists
-  ansible.builtin.stat:
-    path: "{{ ocp4_workload_vscode_bastion_vscode_certbot_virtualenv }}/bin/activate"
-  register: r_certbot_virtualenv
-
-- name: Fail if certbot virtualenv directoroy does not exist
-  when: not r_certbot_virtualenv.stat.exists
-  ansible.builtin.fail:
-    msg: "Virtualenv for Certbot does not exist in {{ ocp4_workload_vscode_bastion_vscode_certbot_virtualenv }}"
-
-- name: Ensure the VS Code certs directory exists
-  ansible.builtin.file:
-    state: directory
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    path: "{{ ocp4_workload_vscode_bastion_vscode_cert_directory }}"
-    mode: 0770
-
 - name: Download VScode server RPM
   get_url:
     url: >-
@@ -31,6 +7,82 @@
     owner: "{{ ansible_user }}"
     group: "{{ ansible_user }}"
     mode: 0664
+
+- name: Install Chrome
+  when: ocp4_workload_vscode_bastion_install_chrome | bool
+  become: true
+  ansible.builtin.command:
+    cmd: "dnf -y install https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm"
+
+- name: Install code-server
+  become: true
+  ansible.builtin.command:
+    cmd: "dnf -y install {{ ocp4_workload_vscode_bastion_home_directory }}/code-server.rpm"
+
+- name: Remove rpm file
+  ansible.builtin.file:
+    state: absent
+    path: "{{ ocp4_workload_vscode_bastion_home_directory }}/code-server.rpm"
+
+- name: Generate VSCode server password if no password specified
+  when: ocp4_workload_vscode_bastion_vscode_password | default('') | length == 0
+  ansible.builtin.set_fact:
+    ocp4_workload_vscode_bastion_vscode_password: >-
+      {{ lookup('password', '/dev/null length={{ ocp4_workload_vscode_bastion_vscode_password_length }} chars=ascii_letters,digits') }}
+
+- name: Set http URL for VSCode server
+  when: ocp4_workload_vscode_bastion_ec2_certificates | bool
+  set_fact:
+    _ocp4_workload_vscode_bastion_url: http://bastion.{{ guid }}{{ subdomain_base_suffix }}:8080"
+
+- name: Request Let's Encrypt certificates for EC2
+  when: ocp4_workload_vscode_bastion_ec2_certificates | bool
+  block:
+  - name: Override variable with https URL for VSCode server
+    when: ocp4_workload_vscode_bastion_ec2_certificates | bool
+    set_fact:
+      _ocp4_workload_vscode_bastion_url: https://bastion.{{ guid }}{{ subdomain_base_suffix }}:8443"
+
+  - name: Validate that certbot virtualenv directory exists
+    ansible.builtin.stat:
+      path: "{{ ocp4_workload_vscode_bastion_vscode_certbot_virtualenv }}/bin/activate"
+    register: r_certbot_virtualenv
+
+  - name: Fail if certbot virtualenv directoroy does not exist
+    when: not r_certbot_virtualenv.stat.exists
+    ansible.builtin.fail:
+      msg: "Virtualenv for Certbot does not exist in {{ ocp4_workload_vscode_bastion_vscode_certbot_virtualenv }}"
+
+  - name: Ensure the VS Code certs directory exists
+    ansible.builtin.file:
+      state: directory
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+      path: "{{ ocp4_workload_vscode_bastion_vscode_cert_directory }}"
+      mode: 0770
+
+- name: Run Let's Encrypt configuration actions as root
+  when: ocp4_workload_vscode_bastion_ec2_certificates | bool
+  become: true
+  block:
+  - name: Copy run_vscode_certbot shell script
+    ansible.builtin.template:
+      src: run_vscode_certbot.j2
+      dest: /usr/bin/run_vscode_certbot
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Run certbot to get a certificate
+    ansible.builtin.command: /usr/bin/run_vscode_certbot
+
+  - name: Change Ownership of generated certs to {{ ansible_user }}
+    file:
+      state: directory
+      recurse: true
+      path: "{{ ocp4_workload_vscode_bastion_vscode_cert_directory }}"
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
 
 # Do not use loop to work around Tower bug where ansible_user gets replaced with root
 - name: Ensure VSCode config directories exist
@@ -78,6 +130,14 @@
       state: directory
       path: >-
         {{ ocp4_workload_vscode_bastion_home_directory }}/.local/share/code-server
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+      mode: 0770
+  - name: Create .local/share/code-server/extensions directory
+    ansible.builtin.file:
+      state: directory
+      path: >-
+        {{ ocp4_workload_vscode_bastion_home_directory }}/.local/share/code-server/extensions
       owner: "{{ ansible_user }}"
       group: "{{ ansible_user }}"
       mode: 0770
@@ -135,43 +195,35 @@
     group: "{{ ansible_user }}"
     mode: 0664
 
-- name: Run code-server configuration actions as root
-  become: true
+- name: Install extensions
+  when: ocp4_workload_vscode_bastion_extensions | length > 0
   block:
-  - name: Copy run_vscode_certbot shell script
-    ansible.builtin.template:
-      src: run_vscode_certbot.j2
-      dest: /usr/bin/run_vscode_certbot
-      owner: root
-      group: root
-      mode: 0775
-
-  - name: Run certbot to get a certificate
-    ansible.builtin.command: /usr/bin/run_vscode_certbot
-
-  - name: Change Ownership of generated certs to {{ ansible_user }}
-    file:
-      state: directory
-      recurse: true
-      path: "{{ ocp4_workload_vscode_bastion_vscode_cert_directory }}"
+  - name: Download extension files for VSCode
+    get_url:
+      url: "{{ ocp4_workload_vscode_bastion_extension_root_url }}/{{ item }}"
+      dest: "{{ ocp4_workload_vscode_bastion_home_directory }}/.local/share/code-server/extensions/"
       owner: "{{ ansible_user }}"
       group: "{{ ansible_user }}"
+    loop: "{{ ocp4_workload_vscode_bastion_extensions }}"
+    register: r_download_extension
+    until: r_download_extension is not failed
+    retries: 5
 
-  - name: Install VSCode server RPM
-    ansible.builtin.command:
-      cmd: "dnf -y install {{ ocp4_workload_vscode_bastion_home_directory }}/code-server.rpm"
+  - name: Install VSCode extensions
+    command: "/bin/code-server --install-extension {{ ocp4_workload_vscode_bastion_home_directory }}/.local/share/code-server/extensions/{{ item }}"
+    loop: "{{ ocp4_workload_vscode_bastion_extensions }}"
+    ignore_errors: true
+    register: r_install_extension
+    until: r_install_extension is not failed
+    retries: 5
 
-  - name: "Enable and start code-server@{{ ansible_user }} system service"
-    ansible.builtin.service:
-      name: "code-server@{{ ansible_user }}"
-      enabled: true
-      state: started
-      daemon_reload: true
-
-- name: Remove rpm file
-  ansible.builtin.file:
-    state: absent
-    path: "{{ ocp4_workload_vscode_bastion_home_directory }}/code-server.rpm"
+- name: "Enable and start code-server@{{ ansible_user }} system service"
+  become: true
+  ansible.builtin.service:
+    name: "code-server@{{ ansible_user }}"
+    enabled: true
+    state: started
+    daemon_reload: true
 
 - name: Print User Info
   agnosticd_user_info:
@@ -179,6 +231,6 @@
   loop:
   - ""
   - "Visual Studio Code Server is available on the Bastion VM."
-  - "  URL:      https://bastion.{{ guid }}{{ subdomain_base_suffix }}:8443"
+  - "  URL:      {{ _ocp4_workload_vscode_bastion_url }}"
   - "  Password: {{ ocp4_workload_vscode_bastion_vscode_password }}"
   - ""

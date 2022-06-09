@@ -8,6 +8,39 @@
     group: root
     mode: 0775
 
+- name: Install software on Bastion
+  become: true
+  block:
+  - name: Install JDK 11
+    command:
+      cmd: dnf -y install java-11-openjdk-devel
+
+  - name: Create /usr/local/maven directory
+    file:
+      path: /usr/local/maven
+      state: directory
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Download and unarchive Maven Distribution
+    unarchive:
+      src: https://gpte-public.s3.amazonaws.com/apache-maven-3.8.5-bin.tar.gz
+      remote_src: true
+      dest: /usr/local/maven
+      owner: root
+      group: root
+      extra_opts:
+      - --strip=1
+
+  - name: Set up Link in bin_path
+    file:
+      state: link
+      src: /usr/local/maven/bin/mvn
+      dest: /usr/bin/mvn
+      owner: root
+      group: root
+
 - name: Retrieve Gitea instance
   kubernetes.core.k8s_info:
     api_version: gpte.opentlc.com/v1
@@ -18,6 +51,8 @@
 
 - name: Set Gitea repo variables
   set_fact:
+    _ocp4_workload_big_demo_gitea_hostname: >-
+      {{ r_gitea.resources[0].status.giteaHostname }}
     _ocp4_workload_big_demo_gitea_repo_route_url: >-
       {{ r_gitea.resources[0].status.giteaRoute }}
     _ocp4_workload_big_demo_gitea_repo_inventory_url: >-
@@ -57,6 +92,48 @@
       {{ _ocp4_workload_big_demo_gitea_repo_route_url }}/{{
       ocp4_workload_big_demo_gitea_user }}/{{ ocp4_workload_big_demo_gitea_repo_gitops }}
 
+- name: Delete existing Gitea token if it exists
+  ansible.builtin.uri:
+    url: >-
+      https://{{ _ocp4_workload_big_demo_gitea_hostname
+      }}/api/v1/users/{{ ocp4_workload_big_demo_gitea_user
+      }}/tokens/{{ ocp4_workload_big_demo_gitea_repo_gitops }}
+    method: DELETE
+    status_code: [204, 404, 422]
+    user: "{{ ocp4_workload_big_demo_gitea_user }}"
+    password: "{{ ocp4_workload_big_demo_gitea_user_password }}"
+    force_basic_auth: true
+    validate_certs: false
+
+# Get Token for Gitea user
+# curl -XPOST -H "Content-Type: application/json"  -k -d '{"name":"industrial-edge"}'
+#      -u ${GITEA_USER}:openshift ${GITEA_URL}/api/v1/users/lab-user/tokens
+- name: Set up a Gitea token
+  ansible.builtin.uri:
+    url: >-
+      https://{{ _ocp4_workload_big_demo_gitea_hostname
+      }}/api/v1/users/{{ ocp4_workload_big_demo_gitea_user }}/tokens
+    method: POST
+    body: "{{ body }}"
+    body_format: json
+    status_code: 201
+    user: "{{ ocp4_workload_big_demo_gitea_user }}"
+    password: "{{ ocp4_workload_big_demo_gitea_user_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  vars:
+    body:
+      name: "{{ ocp4_workload_big_demo_gitea_repo_gitops }}"
+  register: r_gitea_token
+
+- name: Set Gitea token variable
+  set_fact:
+    _ocp4_workload_big_demo_gitea_token: "{{ r_gitea_token.json.sha1 }}"
+
+- name: Print Gitea token
+  debug:
+    msg: "Using Gitea token: {{ _ocp4_workload_big_demo_gitea_token }}"
+
 # Don't loop with "~{{ ansible-user }}"
 - name: Make sure cloned repo directories do not exist
   block:
@@ -77,6 +154,14 @@
       path: "{{ ocp4_workload_big_demo_home_directory }}/{{ ocp4_workload_big_demo_gitea_repo_gitops }}"
       state: absent
 
+- name: Set up .gitconfig
+  ansible.builtin.copy:
+    src: gitconfig
+    dest: "~{{ ansible_user}}/.gitconfig"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0664
+
 # Don't loop with "~{{ ansible-user }}"
 - name: Clone application source code
   block:
@@ -87,6 +172,8 @@
       repo: "{{ _ocp4_workload_big_demo_gitea_repo_inventory_url }}"
       dest: "{{ ocp4_workload_big_demo_home_directory }}/{{ ocp4_workload_big_demo_gitea_repo_inventory }}"
       version: "{{ ocp4_workload_big_demo_gitea_repo_inventory_branch }}"
+    environment:
+      GIT_SSL_NO_VERIFY: "true"
   - name: Clone gateway repository
     ansible.builtin.git:
       accept_hostkey: true
@@ -94,6 +181,8 @@
       repo: "{{ _ocp4_workload_big_demo_gitea_repo_gateway_url }}"
       dest: "{{ ocp4_workload_big_demo_home_directory }}/{{ ocp4_workload_big_demo_gitea_repo_gateway }}"
       version: "{{ ocp4_workload_big_demo_gitea_repo_gateway_branch }}"
+    environment:
+      GIT_SSL_NO_VERIFY: "true"
   - name: Clone catalog repository
     ansible.builtin.git:
       accept_hostkey: true
@@ -101,6 +190,8 @@
       repo: "{{ _ocp4_workload_big_demo_gitea_repo_catalog_url }}"
       dest: "{{ ocp4_workload_big_demo_home_directory }}/{{ ocp4_workload_big_demo_gitea_repo_catalog }}"
       version: "{{ ocp4_workload_big_demo_gitea_repo_catalog_branch }}"
+    environment:
+      GIT_SSL_NO_VERIFY: "true"
   - name: Clone gitops repository
     ansible.builtin.git:
       accept_hostkey: true
@@ -108,6 +199,8 @@
       repo: "{{ _ocp4_workload_big_demo_gitea_repo_gitops_url }}"
       dest: "{{ ocp4_workload_big_demo_home_directory }}/{{ ocp4_workload_big_demo_gitea_repo_gitops }}"
       version: "{{ ocp4_workload_big_demo_gitea_repo_gitops_branch }}"
+    environment:
+      GIT_SSL_NO_VERIFY: "true"
   - name: Clone object-detection-rest repository
     ansible.builtin.git:
       accept_hostkey: true
@@ -115,14 +208,8 @@
       repo: "{{ _ocp4_workload_big_demo_gitea_repo_object_detection_url }}"
       dest: "{{ ocp4_workload_big_demo_home_directory }}/{{ ocp4_workload_big_demo_gitea_repo_object_detection }}"
       version: "{{ ocp4_workload_big_demo_gitea_repo_object_detection_branch }}"
-
-- name: Set up .gitconfig
-  ansible.builtin.copy:
-    src: gitconfig
-    dest: "~{{ ansible_user}}/.gitconfig"
-    owner: "{{ ansible_user }}"
-    group: "{{ ansible_user }}"
-    mode: 0664
+    environment:
+      GIT_SSL_NO_VERIFY: "true"
 
 - name: Create k8s resources
   kubernetes.core.k8s:
@@ -131,7 +218,7 @@
   loop:
   - cicd/namespace-pipeline.yaml.j2
   - cicd/gitea-secret.yaml.j2
-  - cicd/service-account.yaml.j2
+  - cicd/gitea-token.yaml.j2
 
 # Can't do loop because of "~{{ ansible-user}}" but on Tower
 - name: Update ~/{{ ocp4_workload_big_demo_gitea_repo_gitops }}/config/argocd/argo-app.yaml
@@ -274,6 +361,88 @@
     line: "          == '{{ ocp4_workload_big_demo_gitea_user }}/{{ ocp4_workload_big_demo_gitea_repo_catalog }}')"
   - regexp: "^          == 'rh-aiservices-bu/car-rest'[.,/)]"
     line: "          == '{{ ocp4_workload_big_demo_gitea_user }}/{{ ocp4_workload_big_demo_gitea_repo_object_detection }}')"
+
+# Copy app-ci-pipeline, service-account, task-gitea-pull-request
+# to the bastion and add to the repo
+- name: Replace Pipeline YAML
+  ansible.builtin.template:
+    src: cicd/app-ci-pipeline.yaml.j2
+    dest: >-
+      {{ ocp4_workload_big_demo_home_directory }}/{{
+         ocp4_workload_big_demo_gitea_repo_gitops
+      }}/config/cicd/base/04-pipelines/app-ci-pipeline.yaml
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0664
+    force: true
+
+- name: Replace Service Account YAML
+  ansible.builtin.template:
+    src: cicd/service-account.yaml.j2
+    dest: >-
+      {{ ocp4_workload_big_demo_home_directory }}/{{
+         ocp4_workload_big_demo_gitea_repo_gitops
+      }}/config/cicd/base/02-rolebindings/pipeline-service-account.yaml
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0664
+    force: true
+
+- name: Add Gitea Pull Request Tekton Task YAML
+  ansible.builtin.template:
+    src: cicd/task-gitea-pull-request.yaml.j2
+    dest: >-
+      {{ ocp4_workload_big_demo_home_directory }}/{{
+         ocp4_workload_big_demo_gitea_repo_gitops
+      }}/config/cicd/base/03-tasks/task-gitea-pull-request.yaml
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0664
+    force: true
+
+- name: Replace update manifests task
+  ansible.builtin.file:
+    src: update-manifest-task.yaml
+    dest: >-
+      {{ ocp4_workload_big_demo_home_directory }}/{{
+         ocp4_workload_big_demo_gitea_repo_gitops
+      }}/config/cicd/base/03-tasks/update-manifest-task.yaml
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0664
+    force: true
+
+- name: Replace pr update manifests task
+  ansible.builtin.file:
+    src: pr-manifest-task.yaml
+    dest: >-
+      {{ ocp4_workload_big_demo_home_directory }}/{{
+         ocp4_workload_big_demo_gitea_repo_gitops
+      }}/config/cicd/base/03-tasks/pr-manifest-task.yaml
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0664
+    force: true
+
+- name: Replace kustomization.yaml
+  ansible.builtin.file:
+    src: kustomization.yaml
+    dest: >-
+      {{ ocp4_workload_big_demo_home_directory }}/{{
+         ocp4_workload_big_demo_gitea_repo_gitops
+      }}/config/cicd/base/kustomization.yaml
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0664
+    force: true
+
+- name: Add new files to the repository
+  command:
+    chdir: >-
+      {{ ocp4_workload_big_demo_home_directory }}/{{
+         ocp4_workload_big_demo_gitea_repo_gitops }}
+    cmd: "git add ."
+  ignore_errors: true
 
 - name: Commit changes to the repository
   command:
