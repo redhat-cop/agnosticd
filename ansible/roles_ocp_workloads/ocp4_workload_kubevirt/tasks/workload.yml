@@ -1,52 +1,104 @@
 ---
+# Implement your Workload deployment tasks here
 - name: Setting up workload for user
   debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
-- name: Create project for HCO
-  k8s:
-    state: present
-    definition: "{{ lookup('file', 'project.yaml') }}"
+- name: Install OpenShift Virtualization Operator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: kubevirt-hyperconverged
+    install_operator_namespace: openshift-cnv
+    install_operator_manage_namespaces:
+    - openshift-cnv
+    install_operator_channel: "{{ ocp4_workload_kubevirt_channel }}"
+    install_operator_catalog: redhat-operators
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_kubevirt_automatic_install_plan_approval | default(true) }}"
+    install_operator_starting_csv: "{{ ocp4_workload_kubevirt_starting_csv }}"
+    install_operator_catalogsource_setup: "{{ ocp4_workload_kubevirt_use_catalog_snapshot | default(false)}}"
+    install_operator_catalogsource_name: "{{ ocp4_workload_kubevirt_catalogsource_name | default('') }}"
+    install_operator_catalogsource_namespace: openshift-cnv
+    install_operator_catalogsource_image: "{{ ocp4_workload_kubevirt_catalog_snapshot_image | default('') }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_kubevirt_catalog_snapshot_image_tag | default('') }}"
 
-- name: Create operator group for HCO
-  k8s:
+- name: Create the HyperConverged instance
+  kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('file', 'operatorgroup.yaml') }}"
+    definition: "{{ lookup('file', 'hyperconverged.yaml') }}"
 
-- name: Wait for operator group to be present
-  k8s_info:
-    api_version: operators.coreos.com/v1
-    kind: OperatorGroup
-    name: cnv
+- name: Wait until HyperConverged is installed
+  kubernetes.core.k8s_info:
+    api_version: hco.kubevirt.io/v1beta1
+    kind: HyperConverged
+    name: kubevirt-hyperconverged
     namespace: openshift-cnv
-  register: result
-  until:
-    - "result.resources | length > 0"
-
-- name: Create subscription for HCO
-  k8s:
-    state: present
-    definition: "{{ lookup('template', 'subscription.yaml.j2') }}"
-
-- name: Wait for subscription to succeed
-  k8s_info:
-    api_version: operators.coreos.com/v1alpha1
-    kind: ClusterServiceVersion
-    name: "{{ kubevirt_subscription_name }}"
-    namespace: openshift-cnv
-  register: result
-  until:
-    - "result.resources | length > 0"
-    - "result.resources[0].status is defined"
-    - "result.resources[0].status.phase == 'Succeeded'"
-  retries: 30
+  register: r_hyperconverged
+  retries: 120
   delay: 10
+  until:
+  - r_hyperconverged.resources | length > 0
+  - r_hyperconverged.resources[0].status is defined
+  - r_hyperconverged.resources[0].status.conditions | length > 0
+  - r_hyperconverged.resources[0].status.conditions | json_query( hyperconverged_query ) | bool
+  vars:
+    hyperconverged_query: >-
+      [?type=='Available'].status[] | [0]
 
-- name: Create the HCO instance
-  k8s:
-    state: present
-    definition: "{{ lookup('file', 'cnv-hco.yaml') }}"
+- name: Install virtctl to bastion VM
+  when: ocp4_workload_kubevirt_install_virtctl | bool
+  block:
+  - name: Get virtctl-clidownloads-kubevirt-hyperconverged ConsoleCLIDownload
+    k8s_info:
+      api_version: console.openshift.io/v1
+      kind: ConsoleCLIDownload
+      name: virtctl-clidownloads-kubevirt-hyperconverged
+    register: r_virtctl_cli_download
+    retries: 20
+    delay: 5
+    ignore_errors: true
+    until:
+    - r_virtctl_cli_download.resources is defined
+    - r_virtctl_cli_download.resources | length > 0
 
-- debug:
-    msg: "workload Tasks completed successfully"
+  - name: Get virtctl download URL from ConsoleCLIDownload
+    when: r_virtctl_cli_download.resources | length > 0
+    set_fact:
+      _ocp4_workload_kubevirt_virtctl_url: >-
+        {{ r_virtctl_cli_download.resources[0] | to_json | from_json
+        | json_query("spec.links[?contains(href,'linux')].href") | first }}
+
+  - name: Download virtctl cli tool
+    get_url:
+      url: "{{ _ocp4_workload_kubevirt_virtctl_url }}"
+      validate_certs: false
+      dest: /tmp/virtctl.tar.gz
+      mode: 0660
+    register: r_virtctl
+    until: r_virtctl is success
+    retries: 10
+    delay: 10
+
+  - name: Install virtctl CLI on bastion
+    become: true
+    unarchive:
+      src: /tmp/virtctl.tar.gz
+      remote_src: true
+      dest: /usr/bin
+      mode: 0775
+      owner: root
+      group: root
+    args:
+      creates: /usr/bin/virtctl
+
+  - name: Remove downloaded file
+    file:
+      state: absent
+      path: /tmp/virtctl.tar.gz
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
   when: not silent|bool
