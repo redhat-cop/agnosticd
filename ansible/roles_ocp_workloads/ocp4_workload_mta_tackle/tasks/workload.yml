@@ -1,0 +1,161 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Install Tackle Operator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: tackle-operator
+    install_operator_namespace: "{{ ocp4_workload_mta_tackle_namespace }}"
+    install_operator_manage_namespaces:
+    - "{{ ocp4_workload_mta_tackle_namespace }}"
+    install_operator_channel: "{{ ocp4_workload_mta_tackle_channel }}"
+    install_operator_catalog: community-operators
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_mta_tackle_automatic_install_plan_approval | default(true) }}"
+    install_operator_starting_csv: "{{ ocp4_workload_mta_tackle_starting_csv }}"
+    install_operator_catalogsource_setup: "{{ ocp4_workload_mta_tackle_use_catalog_snapshot | default(false)}}"
+    install_operator_catalogsource_name: "{{ ocp4_workload_mta_tackle_catalogsource_name | default('') }}"
+    install_operator_catalogsource_namespace: "{{ ocp4_workload_mta_tackle_namespace }}"
+    install_operator_catalogsource_image: "{{ ocp4_workload_mta_tackle_catalog_snapshot_image | default('') }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_mta_tackle_catalog_snapshot_image_tag | default('') }}"
+
+- name: Create the Tackle instance
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tackle.yaml.j2') }}"
+
+- name: Wait until Tackle is installed
+  kubernetes.core.k8s_info:
+    api_version: tackle.io/v1alpha1
+    kind: Tackle
+    name: tackle
+    namespace: "{{ ocp4_workload_mta_tackle_namespace }}"
+  register: r_tackle
+  retries: 120
+  delay: 10
+  until:
+  - r_tackle.resources | length > 0
+  - r_tackle.resources[0].status is defined
+  - r_tackle.resources[0].status.conditions | length > 0
+  - r_tackle.resources[0].status.conditions[0].status is match( "True" )
+  - r_tackle.resources[0].status.conditions[0].type is match( "Ready" )
+
+- name: Wait until all Tackle Keycloak Deployment is ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Deployment
+    name: tackle-keycloak
+    namespace: "{{ ocp4_workload_mta_tackle_namespace }}"
+  register: r_tackle_keycloak_deployment
+  until:
+  - r_tackle_keycloak_deployment.resources is defined
+  - r_tackle_keycloak_deployment.resources | length > 0
+  - r_tackle_keycloak_deployment.resources[0].status is defined
+  - r_tackle_keycloak_deployment.resources[0].status.readyReplicas is defined
+  - r_tackle_keycloak_deployment.resources[0].spec.replicas == r_tackle_keycloak_deployment.resources[0].status.readyReplicas
+  retries: 30
+  delay: 5
+
+- name: Get Tackle route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: tackle
+    namespace: "{{ ocp4_workload_mta_tackle_namespace }}"
+  register: r_tackle_route
+
+- name: Set Tackle host variable
+  set_fact:
+    _ocp4_workload_mta_tackle_host: "{{ r_tackle_route.resources[0].spec.host }}"
+
+# - name: Wait until retrieving a token succeeds
+#   uri:
+#     url: "https://{{ _ocp4_workload_mta_tackle_host }}/auth/realms/tackle/protocol/openid-connect/token"
+#     method: POST
+#     body:
+#       username: tackle
+#       password: password
+#       grant_type: password
+#     status_code: 200
+#     body_format: form-urlencoded
+#     validate_certs: false
+#     user: backend-service
+#     password: secret
+#     force_basic_auth: true
+#   register: r_token
+#   until: r_token is not failed
+#   retries: 30
+#   delay: 5
+
+# - name: Print access token
+#   debug:
+#     msg: "Access Token: {{ r_token.json.access_token }}"
+
+- name: Seed Tackle
+  when: ocp4_workload_mta_tackle_seed | bool
+  block:
+  - name: Copy default seed shell script
+    when: ocp4_workload_mta_tackle_seed_script_url | length == 0
+    become: true
+    template:
+      src: seed-tackle.sh.j2
+      dest: /usr/bin/seed-tackle.sh
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Download seed script from URL
+    when: ocp4_workload_mta_tackle_seed_script_url | length > 0
+    block:
+    - name: Download seed script template
+      delegate_to: localhost
+      get_url:
+        url: "{{ ocp4_workload_mta_tackle_seed_script_url }}"
+        dest: /tmp/seed-tackle.sh.j2
+        mode: 0664
+
+    - name: Install seed script
+      become: true
+      template:
+        src: /tmp/seed-tackle.sh.j2
+        dest: /usr/bin/seed-tackle.sh
+        owner: root
+        group: root
+        mode: 0775
+
+    - name: Remove downloaded template script
+      delegate_to: localhost
+      file:
+        state: absent
+        path: /tmp/seed-tackle.sh/j2
+
+  - name: Execute seed shell script
+    shell:
+      cmd: /usr/bin/seed-tackle.sh
+    register: r_seed
+    retries: 10
+    delay: 5
+    until: r_seed.rc == 0
+
+- name: Print access information
+  when: ocp4_workload_mta_tackle_print_access_information | bool
+  block:
+  - name: Print access information
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - ""
+    - "Konveyor Tackle (Migration Toolkit for Applications Upstream):"
+    - "  URL:      https://{{ _ocp4_workload_mta_tackle_host }}"
+    - "  User:     {{ ocp4_workload_mta_tackle_user }}"
+    - "  Password: {{ ocp4_workload_mta_tackle_password }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
