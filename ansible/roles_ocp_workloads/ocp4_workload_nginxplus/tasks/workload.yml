@@ -1,0 +1,85 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+# To Do: Implement your workload deployment tasks here
+# -------------------------------------------------------------------------
+
+- name: create {{ nginx_namespace }} namespace
+  kubernetes.core.k8s:
+    name: "{{ nginx_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+
+- name: create {{ nginx_imagestream }} imagestream
+  kubernetes.core.k8s:
+    state: present
+    template: './templates/nginx-imagestream.j2'
+
+- name: oc serviceaccounts get-token -n {{ nginx_namespace }} builder
+  shell: oc serviceaccounts get-token -n "{{ nginx_namespace }}" builder
+  register: token
+
+- name: get imageregistry url
+  kubernetes.core.k8s_info:
+    kind: ImageStream
+    name: "{{ nginx_imagestream }}"
+    namespace: "{{ nginx_namespace }}"
+  register: imagestream_url
+
+- name: set imageregistry url
+  set_fact:
+    registry_url: "{{ imagestream_url.resources[0].status.publicDockerImageRepository }}"
+
+- debug:
+    msg: "{{ registry_url }}"
+
+- name: log podman into imageregistry
+  containers.podman.podman_login:
+    username: unused
+    password: "{{ token.stdout }}"
+    registry: "{{ registry_url }}"
+
+- name: podman tag image
+  shell: podman tag "{{ private_registry_url}}"/"{{ image_name }}" "{{ registry_url }}"
+
+- name: podman push image to imageregistry
+  shell: podman push "{{ private_registry_url}}"/"{{ image_name }}" "{{ registry_url }}" || /bin/true
+
+- name: Create objects for NGINX IC- operatorgroup
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+    - nginx-operatorgroup.j2
+
+- name: Create objects for NGINX IC- subscription
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+    - nginx-subscription.j2
+  register: subscription
+
+- name: Pause for 30 seconds while operator installs
+  pause:
+    seconds: 30
+  when: subscription.changed
+
+- name: Create objects for NGINX IC- controller
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+    - nginx-controller.j2
+  when: install_controller == true
+
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
