@@ -1,31 +1,36 @@
 ---
 - name: Set ACM cluster variables
   set_fact:
-    acm_cluster_name: "{{ item.managed_cluster_name }}"
-    acm_cluster_kconf_path: "{{ item.managed_cluster_kconf_path }}"
+    cluster_name: "{{ item.managed_cluster_name }}"
+    cluster_kconf_path: "{{ item.managed_cluster_kconf_path | default('~/.kube/') }}"
 
 - name: Create directory
   file:
-    path: "{{ acm_cluster_kconf_path }}/{{ acm_cluster_name }}"
+    path: "{{ cluster_kconf_path }}/{{ cluster_name }}"
     state: directory
 
-- name: Find kubeconfig secret
-  shell: >-
-    oc get secret -o name -n {{ acm_cluster_name }}
-    -l hive.openshift.io/cluster-deployment-name={{ acm_cluster_name }}
-    -l hive.openshift.io/secret-type=kubeconfig
+- name: Wait until subscription is created
+  k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ cluster_name }}"
+    label_selectors:
+      - hive.openshift.io/secret-type=kubeconfig
   register: r_secret_kconf
+  retries: 30
+  delay: 10
+  until:
+    - r_secret_kconf.resources | length > 0
+    - r_secret_kconf.resources.0.metadata.resourceVersion | length > 0
 
 - name: Extract kubeconfig
-  command: >-
-    oc extract -n "{{ acm_cluster_name }}"
-    "{{ r_secret_kconf.stdout }}"
-    --to={{ acm_cluster_kconf_path }}//{{ acm_cluster_name }}
-    --confirm
+  copy:
+    content: "{{ r_secret_kconf.resources.0.data.kubeconfig | b64decode }}"
+    dest: "{{ cluster_kconf_path }}/{{ cluster_name }}/kubeconfig"
 
 - name: Proccess to modify
   slurp:
-    path: "{{ acm_cluster_kconf_path }}/{{ acm_cluster_name }}/kubeconfig"
+    path: "{{ cluster_kconf_path }}/{{ cluster_name }}/kubeconfig"
   register: r_kconf
 
 - name: Decode kubeconfig
@@ -42,20 +47,28 @@
   vars:
     newcontext:
       contexts:
-        - name: "{{ acm_cluster_name }}"
+        - name: "{{ cluster_name }}"
           context:
             cluster: "{{ mycontext.contexts.0.context.cluster }}"
-            user: "{{ acm_cluster_name }}-admin"
+            user: "{{ cluster_name }}-admin"
       users:
-        - name: "{{ acm_cluster_name }}-admin"
+        - name: "{{ cluster_name }}-admin"
           user: "{{ mycontext.users.0.user }}"
 
 - name: Store kubeconfig
   copy:
     content: "{{ mycontext | to_nice_yaml }}"
-    dest: "{{ acm_cluster_kconf_path }}/{{ acm_cluster_name }}/kubeconfig"
+    dest: "{{ cluster_kconf_path }}/{{ cluster_name }}/kubeconfig"
 
 - name: set bashrc variable
   set_fact:
     bash_managed_cluster_kconf: >-
-      {{ bash_managed_cluster_kconf | default('') +':'+ acm_cluster_kconf_path+acm_cluster_name+'/'+'kubeconfig'}}
+      {{ bash_managed_cluster_kconf +':'+ cluster_kconf_path+cluster_name+'/'+'kubeconfig'}}
+
+- name: Copy .kube to user
+  become: true
+  copy:
+    src: "/home/ec2-user/.kube/{{ cluster_name }}"
+    dest: "/home/{{ student_name }}/.kube/"
+    remote_src: true
+    owner: "{{ student_name }}"
