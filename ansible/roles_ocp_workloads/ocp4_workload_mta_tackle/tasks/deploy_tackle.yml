@@ -1,0 +1,94 @@
+---
+- name: Deploy tackle with retries
+  block:
+  - name: Set the retry count
+    set_fact:
+      _ocp4_workload_mta_tackle_deploy_retry_count: >-
+        {{ 0 if _ocp4_workload_mta_tackle_deploy_retry_count is undefined else _ocp4_workload_mta_tackle_deploy_retry_count|int + 1 }}
+
+  - name: Check if a Tackle instance exists
+    kubernetes.core.k8s_info:
+      api_version: "{{ ocp4_workload_mta_tackle_api_version }}"
+      kind: Tackle
+      name: tackle
+      namespace: "{{ _ocp4_workload_mta_tackle_namespace }}"
+    register: r_tackle
+
+  - name: Cleanup previous tackle deployment
+    when: r_tackle.resources | length > 0
+    block:
+    - name: Delete previous Tackle instance
+      kubernetes.core.k8s:
+        state: absent
+        api_version: "{{ ocp4_workload_mta_tackle_api_version }}"
+        kind: Tackle
+        name: tackle
+        namespace: "{{ _ocp4_workload_mta_tackle_namespace }}"
+
+    - name: Wait until Tackle instance is gone
+      kubernetes.core.k8s_info:
+        api_version: "{{ ocp4_workload_mta_tackle_api_version }}"
+        kind: Tackle
+        name: tackle
+        namespace: "{{ _ocp4_workload_mta_tackle_namespace }}"
+      register: r_tackle
+      until: r_tackle.resources | length == 0
+      retries: 10
+
+  - name: Create the Tackle instance
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'tackle.yaml.j2') }}"
+
+  - name: Set deployment fact for Tackle V1
+    when: not ocp4_workload_mta_tackle_api_version is search("konveyor")
+    set_fact:
+      _ocp4_workload_mta_tackle_deployment: tackle-keycloak
+
+  - name: Set deployment fact for Tackle V2 with authentication
+    when:
+    - ocp4_workload_mta_tackle_api_version is search("konveyor")
+    - ocp4_workload_mta_tackle_feature_auth_required | bool
+    set_fact:
+      _ocp4_workload_mta_tackle_deployment: tackle-keycloak-sso
+
+  - name: Set deployment fact for Tackle V2 without authentication
+    when:
+    - ocp4_workload_mta_tackle_api_version is search("konveyor")
+    - not ocp4_workload_mta_tackle_feature_auth_required | bool
+    set_fact:
+      _ocp4_workload_mta_tackle_deployment: tackle-ui
+
+  - name: Wait until Tackle deployment '{{ _ocp4_workload_mta_tackle_deployment }}' is ready
+    kubernetes.core.k8s_info:
+      api_version: v1
+      kind: Deployment
+      name: "{{ _ocp4_workload_mta_tackle_deployment }}"
+      namespace: "{{ _ocp4_workload_mta_tackle_namespace }}"
+    register: r_tackle_keycloak_deployment
+    until:
+    - r_tackle_keycloak_deployment.resources is defined
+    - r_tackle_keycloak_deployment.resources | length > 0
+    - r_tackle_keycloak_deployment.resources[0].status is defined
+    - r_tackle_keycloak_deployment.resources[0].status.readyReplicas is defined
+    - r_tackle_keycloak_deployment.resources[0].spec.replicas == r_tackle_keycloak_deployment.resources[0].status.readyReplicas
+    retries: 60
+    delay: 10
+    ignore_errors: true
+
+  - name: Set success flag
+    when: r_tackle_keycloak_deployment.resources[0].spec.replicas == r_tackle_keycloak_deployment.resources[0].status.readyReplicas
+    set_fact:
+      _ocp4_workload_mta_tackle_deployed_successfully: true
+
+  rescue:
+  - fail:
+      msg: "Ended after {{ ocp4_workload_mta_tackle_deploy_retries }} retries"
+    when:
+    - not _ocp4_workload_mta_tackle_deployed_successfully | bool
+    - _ocp4_workload_mta_tackle_deploy_retry_count|int == ocp4_workload_mta_tackle_deploy_retries
+
+  - debug:
+      msg: "Tackle failed to deploy. Try {{ _ocp4_workload_mta_tackle_deploy_retry_count }}. Retrying..."
+
+  - include_tasks: deploy_tackle.yml
