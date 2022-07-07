@@ -1,0 +1,82 @@
+---
+- name: Generate code server password if no password specified
+  when: ocp4_workload_codeserver_password | default('') | length == 0
+  ansible.builtin.set_fact:
+    ocp4_workload_codeserver_password: >-
+      {{ lookup('password', '/dev/null length={{ ocp4_workload_codeserver_password_length }} chars=ascii_letters,digits') }}
+
+- name: Determine Wildcard Domain
+  k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: r_ingress_controller
+
+- name: Set wildcard domain variable
+  set_fact:
+    _ocp4_workload_codeserver_wildcard_domain: "{{ r_ingress_controller.resources[0].status.domain }}"
+
+- name: Retrieve Gitea instance
+  kubernetes.core.k8s_info:
+    api_version: gpte.opentlc.com/v1
+    kind: Gitea
+    name: "{{ ocp4_workload_codeserver_gitea_name }}"
+    namespace: "{{ ocp4_workload_codeserver_gitea_namespace }}"
+  register: r_gitea
+
+- name: Set Gitea repo variables
+  set_fact:
+    _ocp4_workload_codeserver_gitea_url: >-
+      {{ r_gitea.resources[0].status.giteaRoute }}
+    _ocp4_workload_codeserver_gitea_hostname: >-
+      {{ r_gitea.resources[0].status.giteaHostname }}
+    _ocp4_workload_codeserver_gitea_protocol: >-
+      {{ 'https' if r_gitea.resources[0].status.giteaRoute is search('https') else 'http' }}
+
+- name: Print Gitea repo variables
+  debug:
+    msg: "{{ item }}"
+  loop:
+  - "{{ _ocp4_workload_codeserver_gitea_url }}"
+  - "{{ _ocp4_workload_codeserver_gitea_hostname }}"
+  - "{{ _ocp4_workload_codeserver_gitea_protocol }}"
+
+- name: Single user installation
+  when: not ocp4_workload_codeserver_multi_user_install | bool
+  block:
+  - name: Install code server
+    include_tasks: install_single_user.yml
+
+  - name: Print code server information
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - ""
+    - "Code server has been setup for your user:"
+    - "  URL: https://{{ ocp4_workload_codeserver_name }}-{{ ocp4_workload_codeserver_namespace
+     }}.{{ _ocp4_workload_codeserver_wildcard_domain }}"
+    - "  Password: {{ ocp4_workload_codeserver_password }}"
+
+- name: Multi User installation
+  when: ocp4_workload_codeserver_multi_user_install | bool
+  block:
+  - name: Install code server
+    ansible.builtin.include_tasks: install_multi_user.yml
+    loop: "{{ range(1, ocp4_workload_codeserver_multi_user_num_users | int + 1) | list }}"
+    loop_control:
+      loop_var: n
+      label: "{{ ocp4_workload_codeserver_multi_user_username_base }}{{ n }}"
+
+  - name: Save code server information for each user
+    agnosticd_user_info:
+      user: "{{ ocp4_workload_codeserver_multi_user_username_base }}{{ n }}"
+      data:
+        codeserver_url: >-
+          https://{{ ocp4_workload_codeserver_name }}-{{ ocp4_workload_codeserver_multi_user_namespace_base }}{{
+          ocp4_workload_codeserver_multi_user_username_base }}{{ n }}.{{ _ocp4_workload_codeserver_wildcard_domain }}
+        codeserver_password: "{{ ocp4_workload_codeserver_password }}"
+    loop: "{{ range(1, 1 + ocp4_workload_codeserver_multi_user_num_users | int) | list }}"
+    loop_control:
+      loop_var: n
+      label: "{{ ocp4_workload_codeserver_multi_user_username_base }}{{ n }}"
