@@ -1,0 +1,248 @@
+# Set the BASE URL of TACKLE
+TACKLE_URL=https://{{ _ocp4_workload_mta_tackle_host }}
+REALM_NAME="tackle"
+USERNAME="{{ ocp4_workload_mta_tackle_user }}"
+PASSWORD="{{ ocp4_workload_mta_tackle_password }}"
+SECRET="secret"
+
+access_token=$(
+  curl -k -s -X POST "$TACKLE_URL/auth/realms/${REALM_NAME}/protocol/openid-connect/token" \
+    --user "backend-service:${SECRET}" \
+    -H 'content-type: application/x-www-form-urlencoded' \
+    -d "username=${USERNAME}&password=${PASSWORD}&grant_type=password" | jq --raw-output '.access_token'
+)
+
+function getOrCreateEntity() {
+  endpoint=$1
+  fieldKey=$2
+  json=$3
+
+  # Extract "fieldValue" from JSON
+  fieldValue=$(echo $json | jq -r --arg key "$fieldKey" '.[$key]')
+
+  # Search by "fieldKey"
+  search_response=$(
+    curl -k -s -X GET -G "$TACKLE_URL/$endpoint?page=0&size=10" \
+      --data-urlencode "$fieldKey=$fieldValue" \
+      -H 'Accept: application/json' \
+      -H 'Content-Type: application/json;charset=UTF-8' \
+      -H 'Authorization: Bearer '$access_token
+  )
+
+  # Extract an element, from array response, that has "fieldKey" equals to "fieldValue"
+  result=$(echo $search_response | jq --arg key "$fieldKey" --arg value "$fieldValue" '.[] | select(.[$key]==$value)')
+
+  # If no result is found then create a new entity
+  if [ -z "$result" ]; then
+    result=$(
+      curl -k -s -X POST "$TACKLE_URL/$endpoint" \
+        -H 'Accept: application/json' \
+        -H 'Content-Type: application/json;charset=UTF-8' \
+        -H 'Authorization: Bearer '$access_token \
+        -d "$json"
+    )
+  fi
+
+  echo "$result"
+}
+
+function getOrCreateStakeholder() {
+  getOrCreateEntity "api/controls/stakeholder" "email" "$1"
+}
+
+function getOrCreateStakeholderGroup() {
+  getOrCreateEntity "api/controls/stakeholder-group" "name" "$1"
+}
+
+function getOrCreateBusinessService() {
+  getOrCreateEntity "api/controls/business-service" "name" "$1"
+}
+
+function getOrCreateTagType() {
+  getOrCreateEntity "api/controls/tag-type" "name" "$1"
+}
+
+function getOrCreateTag() {
+  getOrCreateEntity "api/controls/tag" "name" "$1"
+}
+
+function getOrCreateApplication() {
+  getOrCreateEntity "api/application-inventory/application" "name" "$1"
+}
+
+function getOrCreateAssessment() {
+  application_id=$1
+
+  assessment=$(
+    curl -k -s "$TACKLE_URL/api/pathfinder/assessments?applicationId=$application_id" \
+      -H 'Accept: application/json' \
+      -H 'Content-Type: application/json;charset=UTF-8' \
+      -H 'Authorization: Bearer '$access_token
+  )
+  assessment_id=$(echo "$assessment" | jq '.[].id')
+
+  if [ -z "$assessment_id" ]; then
+    assessment=$(
+      curl -k -s "$TACKLE_URL/api/pathfinder/assessments" \
+        -H 'Accept: application/json' \
+        -H 'Content-Type: application/json;charset=UTF-8' \
+        -H 'Authorization: Bearer '$access_token \
+        -d '{"applicationId":'$application_id'}'
+    )
+    assessment_id=$(echo "$assessment" | jq '.id')
+  fi
+
+  result=$(
+    curl -k -s "$TACKLE_URL/api/pathfinder/assessments/$assessment_id" \
+      -H 'Accept: application/json' \
+      -H 'Content-Type: application/json;charset=UTF-8' \
+      -H 'Authorization: Bearer '$access_token
+  )
+
+  echo "$result"
+}
+
+fillAssessment() {
+  assessment=$1
+  category_index=$2
+  question_index=$3
+  option_index=$4
+
+  options=$(echo "$assessment" | jq '.questionnaire.categories | (.[] | select(.order == '$category_index') | .questions) | (.[] | select(.order == '$question_index') | .options) | (.[] | select(.order == '$option_index') | .checked) |= true')
+  question=$(echo "$assessment" | jq --argjson newval "$options" '.questionnaire.categories | (.[] | select(.order == '$category_index') | .questions) | (.[] | select(.order == '$question_index') | .options) |= $newval')
+  questions=$(echo "$assessment" | jq --argjson newval "$question" '.questionnaire.categories | (.[] | select(.order == '$category_index') | .questions) |= $newval')
+
+  filledAssessment=$(echo "$assessment" | jq --argjson newval "$questions" '.questionnaire.categories |= $newval')
+  echo "$filledAssessment"
+}
+
+# START CREATING OBJECTS THROUGH THE API:
+
+#
+## Upload a CSV
+#
+
+# Create Stakeholders
+stakeholder1=$(getOrCreateStakeholder '{"email": "hscorpio@globex.com","displayName": "Hank Scorpio"}')
+stakeholder2=$(getOrCreateStakeholder '{"email": "hsimpson@globex.com","displayName": "Homer Simpson"}')
+
+echo "Created Stakeholder:" $stakeholder1
+echo "Created Stakeholder:" $stakeholder2
+
+# Create StakeholderGroups
+stakeholderGroup1=$(getOrCreateStakeholderGroup '{"name": "IT Management"}')
+stakeholderGroup2=$(getOrCreateStakeholderGroup '{"name": "Retail Management"}')
+
+echo "Created StakeholderGroup:" $stakeholderGroup1
+echo "Created StakeholderGroup:" $stakeholderGroup2
+
+# Create BusinessServices
+businessService1=$(getOrCreateBusinessService '{"name": "Retail"}')
+businessService2=$(getOrCreateBusinessService '{"name": "Finance and HR"}')
+
+echo "Created BusinessService:" $businessService1
+echo "Created BusinessService:" $businessService2
+
+# Create TagType
+tagType1=$(getOrCreateTagType '{"name":"Corporate Libraries","colour":"#6ec664"}')
+
+echo "Created TagType:" $tagType1
+
+# Create Tag
+tag1=$(echo '{"name":"Corporate Custom Configuration Library","tagType":'$tagType1'}')
+tag1=$(getOrCreateTag "$tag1")
+
+echo "Created Tag:" $tag1
+
+# Upload CSV file
+
+curl -k -s "$TACKLE_URL/api/application-inventory/file/upload" \
+  -F "fileName=myFileName.csv" \
+  -F "file=@/home/rroman/Downloads/applications-konveyor-noglobex.csv" \
+  -H 'Authorization: Bearer '$access_token
+
+echo "Imported CSV File"
+
+# Find Customers application
+customers_application=$(echo '{"name":"Customers"}')
+customers_application=$(getOrCreateApplication "$customers_application")
+
+echo "Found customers application: " $customers_application
+
+# Assess Customers application (fill Pathfinder questionnaire)
+#
+application_id=$(echo "$customers_application" | jq '.id') # Get the applicationID we want to assess
+stakeholder_id=$(echo "$stakeholder2" | jq '.id')          # Get the stakeholderID we want to associate with the assessment
+
+application_assesment=$(getOrCreateAssessment $application_id)
+application_assesment_id=$(echo "$application_assesment" | jq '.id')
+
+# Fill Stakeholders and set final status
+application_assesment=$(echo "$application_assesment" | jq '.stakeholders=['$stakeholder_id']')
+application_assesment=$(echo "$application_assesment" | jq '.status="COMPLETE"')
+
+# Fill "Application details"
+application_assesment=$(fillAssessment "$application_assesment" 1 1 4)
+application_assesment=$(fillAssessment "$application_assesment" 1 2 4)
+application_assesment=$(fillAssessment "$application_assesment" 1 3 5)
+application_assesment=$(fillAssessment "$application_assesment" 1 4 4)
+application_assesment=$(fillAssessment "$application_assesment" 1 5 5)
+application_assesment=$(fillAssessment "$application_assesment" 1 6 4)
+application_assesment=$(fillAssessment "$application_assesment" 1 7 4)
+
+# Fill "Application dependencies"
+application_assesment=$(fillAssessment "$application_assesment" 2 1 4)
+application_assesment=$(fillAssessment "$application_assesment" 2 2 5)
+application_assesment=$(fillAssessment "$application_assesment" 2 3 6)
+application_assesment=$(fillAssessment "$application_assesment" 2 4 5)
+application_assesment=$(fillAssessment "$application_assesment" 2 5 5)
+
+# Fill "Application architecture"
+application_assesment=$(fillAssessment "$application_assesment" 3 1 4)
+application_assesment=$(fillAssessment "$application_assesment" 3 2 5)
+application_assesment=$(fillAssessment "$application_assesment" 3 3 5)
+application_assesment=$(fillAssessment "$application_assesment" 3 4 1)
+application_assesment=$(fillAssessment "$application_assesment" 3 5 4)
+
+# Fill "Application observability"
+application_assesment=$(fillAssessment "$application_assesment" 4 1 6)
+application_assesment=$(fillAssessment "$application_assesment" 4 2 4)
+application_assesment=$(fillAssessment "$application_assesment" 4 3 4)
+application_assesment=$(fillAssessment "$application_assesment" 4 4 5)
+application_assesment=$(fillAssessment "$application_assesment" 4 5 4)
+
+# Fill "Application cross-cutting concerns"
+application_assesment=$(fillAssessment "$application_assesment" 5 1 4)
+application_assesment=$(fillAssessment "$application_assesment" 5 2 0)
+application_assesment=$(fillAssessment "$application_assesment" 5 3 7)
+application_assesment=$(fillAssessment "$application_assesment" 5 4 5)
+application_assesment=$(fillAssessment "$application_assesment" 5 5 2)
+application_assesment=$(fillAssessment "$application_assesment" 5 6 3)
+
+patch_assessment_response=$(
+  curl -k -s -X PATCH "$TACKLE_URL/api/pathfinder/assessments/$application_assesment_id" \
+    -H 'Accept: application/json' \
+    -H 'Content-Type: application/json;charset=UTF-8' \
+    -H 'Authorization: Bearer '$access_token \
+    -d "$application_assesment"
+)
+
+echo "Created Assessment:" $patch_assessment_response
+
+# Copy assessment from application "Customers" to "Orders" and "RetailFrontend"
+sourceApp_id=$application_assesment_id
+
+targetApp1_id1=$(getOrCreateApplication '{"name":"Orders"}' | jq '.id')
+targetApp1_id2=$(getOrCreateApplication '{"name":"RetailFrontend"}' | jq '.id')
+
+bulkCopy=$(jq -n --argjson source "$sourceApp_id" --argjson target1 "$targetApp1_id1" --argjson target2 "$targetApp1_id2" '{"fromAssessmentId":$source,"applications":[{"applicationId":$target1},{"applicationId":$target2}]}')
+
+bulkCopy=$(
+  curl -k -s -X POST "$TACKLE_URL/api/pathfinder/assessments/bulk" \
+    -H 'Accept: application/json' \
+    -H 'Content-Type: application/json;charset=UTF-8' \
+    -H 'Authorization: Bearer '$access_token \
+    -d "$bulkCopy"
+)
+
+echo "Copy bulk created" $bulkCopy
