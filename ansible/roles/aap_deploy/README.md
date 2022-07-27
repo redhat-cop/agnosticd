@@ -1,7 +1,5 @@
-**LOCAL COPY** DO NOT USE!!!
-
-deploy_automationcontroller
-=========
+aap\_deploy
+==========
 
 Installs, and licenses via manifest, Ansible Automation controller.
 Whilst a more natural naming convention might be `deploy_automation_controller` the Red Hat installer itself etc calls it `automationcontroller`.
@@ -56,7 +54,7 @@ Invoking this role
   become: true
 
   roles:
-    - deploy_automationcontroller
+    - aap_deploy
 ```
 
 The tag `deploy_automationcontroller_installer` can be skipped to avoid going again through the cluster installation, which takes the longest time (for test purposes).
