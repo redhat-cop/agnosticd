@@ -1,0 +1,116 @@
+---
+# Implement your Workload deployment tasks here
+
+# - name: Setting up workload for user
+#   debug:
+#     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Save current context
+  shell: oc config current-context
+  register: r_context
+
+- name: Switch context and create project
+  shell: |
+    oc login -u admin -p r3dh4t1! https://api.cluster-4ls44.4ls44.sandbox1680.opentlc.com:6443 && \
+    oc new-project {{ ocp4_workload_bookbag_bookbag_namespace }} || oc project {{ ocp4_workload_bookbag_bookbag_namespace }}
+
+- name: Create bookbag base build template
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+    namespace: "{{ ocp4_workload_bookbag_bookbag_namespace }}"
+    merge_type:
+      - strategic-merge
+      - merge
+  loop:
+    - ./templates/bookbag-base-is.yml.j2
+    - ./templates/bookbag-base-bc.yml.j2
+
+- name: Get currently running base build
+  shell: oc get build -n ohc-demo | grep {{ ocp4_workload_bookbag_bookbag_name }} | grep -v NAME | grep -v Running | awk '{print $1}'
+  register: r_builds
+
+- name: Get currently running base build
+  when: r_builds.stdout | length == 0
+  block:
+  - name: No complete build, get the running build
+    shell: oc get build -n ohc-demo | grep {{ ocp4_workload_bookbag_bookbag_name }} | grep Running | awk '{print $1}'
+    until: r_build_1.stdout | length > 0
+    delay: 1
+    retries: 60
+    register: r_build_1
+
+  - name: Wait for base build {{ r_build_1.stdout }} to complete
+    shell: oc get build {{ r_build_1.stdout }} -n {{ ocp4_workload_bookbag_bookbag_namespace }} -o jsonpath="{['status.phase']}"
+    until: r_build_2.stdout == 'Complete'
+    delay: 5
+    retries: 60
+    register: r_build_2
+
+- name: Recreate ArgoCD TLS
+  when: ocp4_workload_bookbag_bookbag_recreate_argo_tls | bool
+  block:
+  - name: Recreate ArgoCD TLS to fix bug - fixed in 1.5.0+
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', './templates/firefox-argocd-fix.yml.j2') | from_yaml }}"
+      namespace: "{{ ocp4_workload_bookbag_bookbag_argocd_namespace }}"
+      merge_type:
+        - strategic-merge
+        - merge
+
+- name: Create firefox-{{ ocp4_workload_bookbag_bookbag_name }}
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) | from_yaml }}"
+    namespace: "{{ ocp4_workload_bookbag_bookbag_namespace }}"
+    merge_type:
+      - strategic-merge
+      - merge
+  loop:
+    - ./templates/firefox-bookbag-crb.yml.j2
+    - ./templates/firefox-bookbag-deployment.yml.j2
+    - ./templates/firefox-bookbag-route.yml.j2
+    - ./templates/firefox-bookbag-svc.yml.j2
+
+- name: Get firefox-{{ ocp4_workload_bookbag_bookbag_name }} url
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: firefox-{{ ocp4_workload_bookbag_bookbag_name }}
+    namespace: "{{ ocp4_workload_bookbag_bookbag_namespace }}"
+  until: r_route.resources | length > 0
+  delay: 5
+  retries: 60
+  register: r_route
+
+- name: Create bookbag template
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/bookbag-template.yml.j2' ) | from_yaml }}"
+    namespace: "{{ ocp4_workload_bookbag_bookbag_namespace }}"
+
+- name: Build bookbag image
+  shell: |
+    oc process bookbag-template -n {{ ocp4_workload_bookbag_bookbag_namespace }} \
+    -p WORKSHOP_IMAGE="image-registry.openshift-image-registry.svc:5000/{{ ocp4_workload_bookbag_bookbag_namespace }}/{{ ocp4_workload_bookbag_bookbag_name }}-base:latest" \
+    -p APPLICATIONS_URL="https://{{ r_route.resources[0].spec.host }}" \
+    -p WORKSHOP_NAME={{ ocp4_workload_bookbag_bookbag_name }} \
+    | oc apply -n {{ ocp4_workload_bookbag_bookbag_namespace }} -f -
+
+- name: Create other role bindings
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/bookbag-rolebinding.yml.j2' ) | from_yaml }}"
+    namespace: "{{ ocp4_workload_bookbag_bookbag_namespace }}"
+  loop:
+    - gitea
+
+- name: Revert to previous context
+  shell: oc config use-context {{ r_context.stdout }}
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent
