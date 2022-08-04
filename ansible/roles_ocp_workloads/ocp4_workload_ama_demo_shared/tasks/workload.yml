@@ -61,7 +61,7 @@
 # - passlib==1.7.4
 
 - name: Determine cluster wildcard domain
-  k8s_info:
+  kubernetes.core.k8s_info:
     api_version: operator.openshift.io/v1
     kind: IngressController
     name: default
@@ -71,6 +71,14 @@
 - name: Save cluster apps domain variable
   ansible.builtin.set_fact:
     _ocp4_workload_ama_demo_shared_apps_domain: "{{ r_ingress_controller.resources[0].status.domain }}"
+
+- name: Get Gitea instance
+  kubernetes.core.k8s_info:
+    api_version: gpte.opentlc.com/v1
+    kind: Gitea
+    name: "{{ ocp4_workload_ama_demo_shared_gitea_instance }}"
+    namespace: "{{ ocp4_workload_ama_demo_shared_gitea_project }}"
+  register: r_gitea
 
 - name: Setup RHV credentials
   when: ocp4_workload_ama_demo_shared_rhv_user_setup | bool
@@ -177,18 +185,36 @@
 - name: Set up GitOps environment
   when: ocp4_workload_ama_demo_shared_gitops_setup | bool
   block:
-  - name: Retrieve Gitea instance
-    kubernetes.core.k8s_info:
-      api_version: gpte.opentlc.com/v1
-      kind: Gitea
-      name: "{{ ocp4_workload_ama_demo_shared_gitea_instance }}"
-      namespace: "{{ ocp4_workload_ama_demo_shared_gitea_project }}"
-    register: r_gitea
+  - name: Create demo namespaces for all users
+    vars:
+      _ocp4_workload_ama_demo_shared_namespace: >-
+        {{ ocp4_workload_ama_demo_shared_demo_namespace_prefix }}{{
+           ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'apps/namespace.yaml.j2' ) | from_yaml }}"
+    loop: "{{ range(1, ocp4_workload_ama_demo_shared_gitea_user_count | int + 1) | list }}"
+    loop_control:
+      loop_var: n
+      label: "{{ ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}"
 
-  - name: Set Gitea repo variables
-    set_fact:
-      _ocp4_workload_ama_demo_shared_gitea_repo_route_url: >-
-        {{ r_gitea.resources[0].status.giteaRoute }}
+  - name: Create cicd namespaces for all users
+    vars:
+      _ocp4_workload_ama_demo_shared_namespace: >-
+        {{ ocp4_workload_ama_demo_shared_pipeline_namespace_prefix }}{{
+           ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'apps/namespace.yaml.j2' ) | from_yaml }}"
+    loop: "{{ range(1, ocp4_workload_ama_demo_shared_gitea_user_count | int + 1) | list }}"
+    loop_control:
+      loop_var: n
+      label: "{{ ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}"
+
+  - name: Create ArgoCD and Tekton environment for all users
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'cicd/applicationset.yaml.j2' ) | from_yaml }}"
 
   - name: Create PostgreSQL database 'orders' for all users
     vars:
@@ -210,8 +236,16 @@
       state: present
       definition: "{{ lookup('template', 'postgresql/applicationset.yaml.j2' ) | from_yaml }}"
 
-  - name: Set up Gitops environment
-    ansible.builtin.include_tasks: setup-gitops.yml
+  # Don't use ApplicationSet -> users can change their applications
+  - name: Create ArgoCD Applications for all users
+    vars:
+      _ocp4_workload_ama_demo_shared_namespace: >-
+        {{ ocp4_workload_ama_demo_shared_demo_namespace_prefix }}{{
+           ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}
+      _ocp4_workload_ama_demo_shared_user: "{{ ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}"
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'apps/application.yaml.j2' ) | from_yaml }}"
     loop: "{{ range(1, ocp4_workload_ama_demo_shared_gitea_user_count | int + 1) | list }}"
     loop_control:
       loop_var: n
@@ -223,9 +257,11 @@
     state: present
     definition: "{{ lookup('template', item ) | from_yaml }}"
   loop:
+  # Database image
   - kubevirt/namespace.yaml.j2
   - kubevirt/datavolume.yaml.j2
   - kubevirt/clusterrole.yaml.j2
+  # VMs for all users
   - kubevirt/applicationset.yaml.j2
 
 - name: Save Save AgnosticD information (RHV)
@@ -261,6 +297,39 @@
       rhv_oracle_vm_database_user: "{{ ocp4_workload_ama_demo_shared_oracle_db_user }}"
       rhv_oracle_vm_database_password: "{{ ocp4_workload_ama_demo_shared_oracle_db_password }}"
       rhv_oracle_vm_database_admin_password: "{{ ocp4_workload_ama_demo_shared_oracle_dba_password }}"
+
+# -------------------
+# AgnosticD User Info
+# -------------------
+
+- name: Save AgnosticD information for all users (AMA Shared Demo)
+  when: ocp4_workload_ama_demo_shared_gitops_setup | bool
+  agnosticd_user_info:
+    user: "{{ ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}"
+    data:
+      user: "{{ ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}"
+      gitea_url: >-
+        {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
+           r_gitea.resources[0].status.giteaHostname }}/{{
+           ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}/{{
+           ocp4_workload_ama_demo_shared_gitea_repo }}
+      retail_namespace: "{{ ocp4_workload_ama_demo_shared_demo_namespace_prefix }}{{ ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}"
+      cicd_namespace: "{{ ocp4_workload_ama_demo_shared_pipeline_namespace_prefix }}{{ ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}"
+  loop: "{{ range(1, ocp4_workload_ama_demo_shared_gitea_user_count | int + 1) | list }}"
+  loop_control:
+    loop_var: n
+    label: "{{ ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}"
+
+- name: Save AgnosticD information for all users (Tomcat IP)
+  when: ocp4_workload_ama_demo_shared_tomcat_vm_setup | bool
+  agnosticd_user_info:
+    user: "{{ ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}"
+    data:
+      tomcat_ip: "{{ _ocp4_workload_ama_demo_shared_tomcat_ip }}"
+  loop: "{{ range(1, ocp4_workload_ama_demo_shared_gitea_user_count | int + 1) | list }}"
+  loop_control:
+    loop_var: n
+    label: "{{ ocp4_workload_ama_demo_shared_gitea_user_prefix }}{{ n }}"
 
 # Cleanup Private Key
 - name: Remove private key
