@@ -1,0 +1,174 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Wait for Machine Config to apply
+  script: sebool-mc-worker.sh
+  register: cmd
+  failed_when: "cmd.rc != 0"
+  vars:
+    ansible_command_timeout: 600
+
+- name: Install IPA
+  command: >-
+    helm upgrade --install ipa redhat-cop/ipa --namespace=ipa \
+      --create-namespace --set app_domain={{ ocp4_workload_tl500_apps_domain }} \
+      --set admin_password={{ tl500_ldap_admin_password | quote }} \
+      --set ocp_auth.enabled=true \
+      --set ocp_auth.bind_password={{ tl500_ldap_admin_password | quote }} \
+      --set ocp_auth.bind_dn={{ bind_dn | quote }} --timeout=45m
+
+- name: Wait for IPA to be ready
+  uri:
+    url: https://ipa-ipa.{{ ocp4_workload_tl500_apps_domain }}/
+    validate_certs: false
+  register: result
+  until: result.status == 200
+  retries: 50
+  delay: 10
+
+- name: Init Kerberos creds
+  shell: >-
+    oc exec -it dc/ipa -n ipa -- \
+      sh -c "echo {{ tl500_ldap_admin_password }} | /usr/bin/kinit admin"
+  register: init_kerberos
+  retries: 5
+  delay: 30
+  until: init_kerberos is not failed
+
+- name: Create IPA LDAP Sync user
+  shell: >-
+    oc exec -it dc/ipa -n ipa -- \
+      sh -c "echo {{ tl500_ldap_admin_password }} | \
+      ipa user-add ldap_admin --first=ldap \
+      --last=admin --email=ldap_admin@redhatlabs.dev --password"
+  register: create_ipa_sync_user
+  failed_when: "create_ipa_sync_user.rc != 0 and
+               'already exists' not in create_ipa_sync_user.stdout"
+
+- name: Create IPA LDAP Sync user membership
+  shell: >-
+    oc exec -it dc/ipa -n ipa -- \
+      sh -c "ipa group-add-member {{ item | quote }} --users=ldap_admin"
+  register: create_ipa_sync_usergroup
+  loop:
+    - "admins"
+    - "editors"
+    - "trust admins"
+  failed_when: "create_ipa_sync_usergroup.rc != 0 and
+               'already a member' not in create_ipa_sync_usergroup.stdout"
+
+- name: Create IPA Group
+  shell: >-
+    oc exec -it dc/ipa -n ipa -- \
+      sh -c "ipa group-add ${GROUP_NAME} --desc 'TL500 Student Group'"
+  register: create_ipa_group
+  environment:
+    GROUP_NAME: "{{ group_name }}"
+  retries: 5
+  delay: 30
+  failed_when: "create_ipa_group.rc != 0 and
+               'already exists' not in create_ipa_group.stdout"
+
+- name: Create IPA users
+  shell: >-
+    oc exec -it dc/ipa -n ipa -- \
+      sh -c "echo {{ tl500_user_password }} | ipa user-add user{{ item }} --first=user \
+        --last={{ item }} --email=user{{ item }}@redhatlabs.dev --password"
+  register: create_ipa_users
+  loop: "{{ range(1, num_users|int + 1, 1)|list }}"
+  when:
+    - num_users|int > 0
+  failed_when: "create_ipa_users.rc != 0 and
+               'already exists' not in create_ipa_users.stdout"
+
+- name: Create IPA user-group membership
+  shell: >-
+    oc exec -it dc/ipa -n ipa -- \
+      sh -c "ipa group-add-member ${GROUP_NAME} --users=user{{ item }}"
+  register: create_ipa_usergroup
+  environment:
+    GROUP_NAME: "{{ group_name }}"
+  loop: "{{ range(1, num_users|int + 1, 1)|list }}"
+  when:
+    - num_users|int > 0
+  failed_when: "create_ipa_usergroup.rc != 0 and
+               'already a member' not in create_ipa_usergroup.stdout"
+
+- name: Get openshift-management git repo
+  command: "{{ item }}"
+  args:
+    chdir: "/tmp/{{ guid }}/"
+  loop:
+    - "git clone https://github.com/redhat-cop/openshift-management.git"
+
+- name: Create LDAP Group Sync Job
+  args:
+    chdir: "/tmp/{{ guid }}/openshift-management"
+  command: >-
+    helm upgrade cronjob-ldap-group-sync \
+    --install charts/cronjob-ldap-group-sync \
+    --set image="quay.io/openshift/origin-cli" \
+    --set image_tag="latest" \
+    --set ldap_bind_dn="{{ bind_dn }}" \
+    --set ldap_bind_password="{{ tl500_ldap_admin_password }}" \
+    --set ldap_bind_password_secret="ldap-bind-password" \
+    --set ldap_group_membership_attributes='["member"]' \
+    --set ldap_group_name_attributes='["cn"]' \
+    --set ldap_group_uid_attribute=ipaUniqueID \
+    --set ldap_groups_filter='(&(objectclass=ipausergroup)(cn=student))' \
+    --set ldap_groups_search_base="{{ groups_search_base }}" \
+    --set ldap_url='ldap://ipa.ipa.svc.cluster.local:389' \
+    --set ldap_user_name_attributes='["uid"]' \
+    --set ldap_user_uid_attribute=dn \
+    --set ldap_users_search_base="{{ users_search_base }}" \
+    --set ldap_groups_whitelist="" \
+    --set schedule="*/10 * * * *" \
+    --set namespace=cluster-ops \
+    --namespace=cluster-ops \
+    --create-namespace
+
+- name: Get enablement-framework git repo
+  command: "{{ item }}"
+  args:
+    chdir: "/tmp/{{ guid }}/"
+  loop:
+    - "git clone https://github.com/rht-labs/enablement-framework.git"
+
+- name: Install tl500-base chart
+  command: "{{ item }}"
+  args:
+    chdir: "/tmp/{{ guid }}/enablement-framework/tooling/charts/tl500-base"
+  loop:
+    - "helm dep up"
+    - "helm upgrade --install tl500-base . \
+        --namespace tl500 --create-namespace --timeout=20m"
+  register: tl500_base_result
+  until: tl500_base_result.rc == 0
+  ignore_errors: true
+  retries: 3
+  delay: 10
+
+- name: Install tl500-course-content chart
+  command: "{{ item }}"
+  args:
+    chdir: "/tmp/{{ guid }}/enablement-framework/tooling/charts/tl500-course-content"
+  loop:
+    - "helm dep up"
+    - "helm upgrade --install tl500-course-content . \
+        --namespace tl500 --create-namespace --timeout=20m"
+  register: tl500_course_content
+  until: tl500_course_content.rc == 0
+  ignore_errors: true
+  retries: 3
+  delay: 10
+
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

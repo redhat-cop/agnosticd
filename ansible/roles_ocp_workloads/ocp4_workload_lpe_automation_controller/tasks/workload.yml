@@ -1,0 +1,126 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- environment:
+    KUBECONFIG: "{{ tmp_kubeconfig }}"
+  block:
+    - name: Create Project {{ automation_controller_project }}
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './templates/namespace.j2' ) | from_yaml }}"
+      register: r_createproject
+      until: r_createproject is succeeded
+      retries: 5
+
+    - name: Create Operator group, secret and Install operator
+      k8s:
+        state: present
+        definition: "{{ lookup('template', item ) | from_yaml }}"
+      loop:
+        - ./templates/operatorgroup.j2
+        - ./templates/admin_secret.j2
+        - ./templates/subscription.j2
+
+    - name: Wait until subscription is created
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        namespace: "{{ automation_controller_project }}"
+      register: r_aap_operator
+      vars:
+        _query: >-
+          [?starts_with(spec.clusterServiceVersionNames[0], 'aap-operator')]
+      retries: 30
+      delay: 10
+      until:
+        - r_aap_operator.resources | length > 0
+        - r_aap_operator.resources | to_json | from_json | json_query(_query)
+
+    - name: Get Installed CSV
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: ansible-automation-platform-operator
+        namespace: "{{ automation_controller_project }}"
+      register: r_subscription
+      retries: 30
+      delay: 10
+      until:
+        - r_subscription.resources[0].status.currentCSV is defined
+        - r_subscription.resources[0].status.currentCSV | length > 0
+
+    - name: Wait until CSV is Installed
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ r_subscription.resources[0].status.currentCSV }}"
+        namespace: "{{ automation_controller_project }}"
+      register: r_csv
+      retries: 30
+      delay: 10
+      until:
+        - r_csv.resources[0].status.phase is defined
+        - r_csv.resources[0].status.phase | length > 0
+        - r_csv.resources[0].status.phase == "Succeeded"
+
+    - name: Create Automation Controller
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './templates/automationcontroller.j2' ) | from_yaml }}"
+
+    - name: Retrieve created route
+      k8s_facts:
+        api_version: "route.openshift.io/v1"
+        kind: Route
+        name: "{{ automation_controller_app_name }}"
+        namespace: "{{ automation_controller_project }}"
+      register: r_route
+      until: r_route.resources[0].spec.host is defined
+      retries: 30
+      delay: 45
+
+    - name: Get automation_controller route hostname
+      set_fact:
+        automation_controller_hostname: "{{ r_route.resources[0].spec.host }}"
+
+    - name: wait for automation_controller to be running
+      uri:
+        url: http://{{ automation_controller_hostname }}/api/v2/ping/
+        status_code: 200
+      register: result
+      until: result.json.version is defined
+      retries: 60
+      delay: 45
+
+    - name: Pause for 5 minutes for AC to be ready
+      pause:
+        minutes: 5
+
+    - name: Display version
+      debug:
+        msg: "{{ result.json.version }}"
+      when: not silent | bool
+
+    - name: Print Access information
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+        - "Automation Controller Web URL: https://{{ automation_controller_hostname }}"
+        - "Login Name:  admin"
+        - "Login Password: {{ automation_controller_admin_password }}"
+
+    - name: Print Access information
+      agnosticd_user_info:
+        data:
+          ac_web_url: "https://{{ automation_controller_hostname }}"
+          ac_user: "admin"
+          ac_password: "{{ automation_controller_admin_password }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
