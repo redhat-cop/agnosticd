@@ -58,7 +58,7 @@ destroy: ##
 ssh-bastion: ## ssh to your bastion
 ssh-bastion: ## Assumes an existing output_dir
 	echo "\nYou will probably want to sudo su devops - the primary user on this bastion\n"
-	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf bastion
+	ssh -F $(OUTPUT_DIR)/$(GUID)/$(ENV_TYPE)_$(GUID)_ssh_conf bastion
 
 last-status: ## Output last status file
 last-status: ## Update status file via make status
