@@ -1,0 +1,168 @@
+---
+- name: "[{{ t_project_name_pipelines }}] - create project"
+  kubernetes.core.k8s:
+    state: present
+    api_version: project.openshift.io/v1
+    kind: Project
+    name: "{{ t_project_name_pipelines }}"
+    definition:
+      metadata:
+        name: "{{ t_project_name_pipelines }}"
+        annotations:
+          openshift.io/description: "Quarkus Superheroes Pipelines"
+          openshift.io/display-name: "Quarkus Superheroes Pipelines"
+
+- name: "[{{ t_project_name_test }}] - create project"
+  kubernetes.core.k8s:
+    state: present
+    api_version: project.openshift.io/v1
+    kind: Project
+    name: "{{ t_project_name_test }}"
+    definition:
+      metadata:
+        name: "{{ t_project_name_test }}"
+        annotations:
+          openshift.io/description: "Quarkus Superheroes Test Environment"
+          openshift.io/display-name: "Quarkus Superheroes Test Environment"
+
+- name: "[{{ t_project_name_test }}] - create imagestreams"
+  kubernetes.core.k8s:
+    state: present
+    api_version: image.openshift.io/v1
+    kind: ImageStream
+    definition:
+      metadata:
+        name: "{{ item }}"
+        namespace: "{{ t_project_name_test }}"
+  loop:
+    - rest-fights
+
+- name: "[{{ t_project_name_test }}] - create buildconfigs"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tekton/buildconfig.yaml.j2') }}"
+  loop:
+    - rest-fights
+
+- name: "[{{ t_project_name_test }}] - create pipeline rolebinding"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tekton/rolebinding.yaml.j2') }}"
+
+- name: "[{{ t_project_name_pipelines }}] - create pvc for tekton workspace"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tekton/pvc.yaml.j2') }}"
+
+- name: "[{{ t_project_name_pipelines }}] - create tekton task s2i-binary"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tekton/task-s2i-binary.yaml.j2') }}"
+
+- name: Retrieve Gitea instance
+  kubernetes.core.k8s_info:
+    api_version: gpte.opentlc.com/v1
+    kind: Gitea
+    name: "{{ ocp4_workload_gitea_operator_name }}"
+    namespace: "{{ ocp4_workload_gitea_operator_project }}"
+  register: r_gitea
+
+- name: "[{{ t_project_name_pipelines }}] - create tekton pipeline quarkus-superheroes"
+  vars:
+    _app_name: rest-fights
+    # yamllint disable-line rule:line-length
+    _source_git_url: "{{ r_gitea.resources[0].status.giteaRoute }}/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_repo_name }}"
+    _source_git_revision: "{{ ocp4_workload_quarkus_super_heroes_demo_release_tag }}"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tekton/pipeline.yaml.j2') }}"
+
+- name: "[{{ t_project_name_pipelines }}] - delete pipelinerun quarkus-superheroes"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: tekton.dev/v1beta1
+    kind: PipelineRun
+    name: quarkus-superheroes
+    namespace: "{{ t_project_name_pipelines }}"
+
+- name: "[{{ t_project_name_pipelines }}] - create pipelinerun quarkus-superheroes"
+  kubernetes.core.k8s:
+    state: present
+    api_version: tekton.dev/v1beta1
+    kind: PipelineRun
+    definition:
+      metadata:
+        name: quarkus-superheroes
+        namespace: "{{ t_project_name_pipelines }}"
+      spec:
+        pipelineRef:
+          name: quarkus-superheroes
+        workspaces:
+        - name: app-source
+          persistentVolumeClaim:
+            claimName: workspace-pvc
+        - name: maven-settings
+          emptyDir: {}
+
+- name: "[{{ t_project_name_pipelines }}] - wait pipelinerun quarkus-superheroes"
+  kubernetes.core.k8s_info:
+    api_version: tekton.dev/v1beta1
+    kind: PipelineRun
+    name: quarkus-superheroes
+    namespace: "{{ t_project_name_pipelines }}"
+  register: r_pipelinerun_superheroes
+  retries: 60
+  delay: 10
+  until:
+  - r_pipelinerun_superheroes.resources[0].status is defined
+  - r_pipelinerun_superheroes.resources[0].status.conditions[0].status is defined
+  - r_pipelinerun_superheroes.resources[0].status.conditions[0].reason is defined
+  - r_pipelinerun_superheroes.resources[0].status.conditions[0].status is match("True")
+  - r_pipelinerun_superheroes.resources[0].status.conditions[0].reason is match("Succeeded")
+
+- name: "[{{ t_project_name_pipelines }}] - create tekton triggertemplate"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tekton/trigger-template.yaml.j2') }}"
+
+- name: "[{{ t_project_name_pipelines }}] - create tekton triggerbinding"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tekton/trigger-binding.yaml.j2') }}"
+
+- name: "[{{ t_project_name_pipelines }}] - create tekton eventlistener"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tekton/trigger-eventlistener.yaml.j2') }}"
+
+- name: "[{{ t_project_name_pipelines }}] - create tekton eventlistener route"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tekton/trigger-eventlistener-route.yaml.j2') }}"
+
+- name: create gitea webook
+  ansible.builtin.uri:
+    # yamllint disable-line rule:line-length
+    url: "{{ r_gitea.resources[0].status.giteaRoute }}/api/v1/repos/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_repo_name }}/hooks"
+    method: POST
+    force_basic_auth: true
+    user: "{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}"
+    password: "{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_password }}"
+    headers:
+      accept: application/json
+    body_format: json
+    body: |
+      {
+        "active": true,
+        "branch_filter": "*",
+        "config": {
+          "url": "http://el-{{ t_project_name_pipelines }}.{{ route_subdomain }}",
+          "http_method": "POST",
+          "content_type": "json"
+        },
+        "events": [
+          "push"
+        ],
+        "type": "gitea"
+      }
+    status_code: [201, 409]
