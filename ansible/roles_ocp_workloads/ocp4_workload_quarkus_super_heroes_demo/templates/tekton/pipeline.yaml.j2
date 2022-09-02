@@ -3,7 +3,7 @@ apiVersion: tekton.dev/v1beta1
 kind: Pipeline
 metadata:
   name: quarkus-superheroes
-  namespace: "{{ t_project_name_pipelines }}"
+  namespace: {{ t_project_name_pipelines }}
 spec:
   params:
   - name: APP_NAME
@@ -26,6 +26,18 @@ spec:
     type: string
     description: Namespace where the buildconfig is located
     default: {{ t_project_name_test }}
+  - name: KUSTOMIZE_GIT_URL
+    type: string
+    description: The kustomize git repository url
+    default: {{ _source_git_url }}-deploy
+  - name: KUSTOMIZE_GIT_REVISION
+    type: string
+    description: The kustomize git repository revision
+    default: kustomize
+  - name: KUSTOMIZE_GIT_CONTEXT_DIR
+    type: string
+    description: The subdirectory in the kustomize git repository
+    default: deploy/kustomize/{{ _app_name }}
 
   workspaces:
   - name: app-source
@@ -48,7 +60,7 @@ spec:
     - name: output
       workspace: app-source
 
-  - name: maven-build
+  - name: build-maven
     runAfter:
     - git-clone
     taskRef:
@@ -74,7 +86,7 @@ spec:
 
   - name: build-image
     runAfter:
-    - maven-build
+    - build-maven
     taskRef:
       kind: Task
       name: s2i-binary
@@ -88,3 +100,44 @@ spec:
     workspaces:
     - name: source
       workspace: app-source
+
+  - name: generate-tag
+    runAfter:
+    - build-maven
+    taskRef:
+      kind: Task
+      name: generate-tag
+
+  - name: tag-image
+    runAfter:
+    - build-image
+    - generate-tag
+    taskRef:
+      kind: ClusterTask
+      name: openshift-client
+    params:
+    - name: SCRIPT
+      value: >-
+        oc tag
+        $(params.NAMESPACE)/$(params.APP_NAME):latest
+        $(params.NAMESPACE)/$(params.APP_NAME):$(tasks.generate-tag.results.image-tag)
+
+  - name: update-image
+    runAfter:
+    - tag-image
+    taskRef:
+      kind: Task
+      name: update-kustomize-repo
+    params:
+    - name: gitRepositoryUrl
+      value: $(params.KUSTOMIZE_GIT_URL)
+    - name: gitRepositoryRevision
+      value: $(params.KUSTOMIZE_GIT_REVISION)
+    - name: gitPath
+      value: $(params.KUSTOMIZE_GIT_CONTEXT_DIR)
+    - name: image
+      value: image-registry.openshift-image-registry.svc:5000\/$(params.NAMESPACE)\/$(params.APP_NAME)
+    - name: imageTag
+      value: $(tasks.generate-tag.results.image-tag)
+    - name: verbose
+      value: 'true'

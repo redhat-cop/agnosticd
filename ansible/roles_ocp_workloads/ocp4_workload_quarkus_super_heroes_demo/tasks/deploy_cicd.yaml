@@ -1,16 +1,37 @@
 ---
-- name: "[{{ t_project_name_pipelines }}] - create project"
+- name: Retrieve Gitea instance
+  kubernetes.core.k8s_info:
+    api_version: gpte.opentlc.com/v1
+    kind: Gitea
+    name: "{{ ocp4_workload_gitea_operator_name }}"
+    namespace: "{{ ocp4_workload_gitea_operator_project }}"
+  register: r_gitea
+
+- name: "[{{ t_project_name_argocd }}] - create project"
   kubernetes.core.k8s:
     state: present
     api_version: project.openshift.io/v1
     kind: Project
-    name: "{{ t_project_name_pipelines }}"
+    name: "{{ t_project_name_argocd }}"
     definition:
       metadata:
-        name: "{{ t_project_name_pipelines }}"
+        name: "{{ t_project_name_argocd }}"
         annotations:
-          openshift.io/description: "Quarkus Superheroes Pipelines"
-          openshift.io/display-name: "Quarkus Superheroes Pipelines"
+          openshift.io/description: "Quarkus Superheroes ArgoCD"
+          openshift.io/display-name: "Quarkus Superheroes ArgoCD"
+
+- name: "[{{ t_project_name_argocd }}] - create argocd instance"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'argocd/argocd.yaml.j2') }}"
+
+- name: "[{{ t_project_name_argocd }}] - create argocd repo secret"
+  vars:
+    # yamllint disable-line rule:line-length
+    _gitea_repo_url: "{{ r_gitea.resources[0].status.giteaRoute }}/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_repo_name }}-deploy"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'argocd/argocd-repo-secret.yaml.j2') }}"
 
 - name: "[{{ t_project_name_test }}] - create project"
   kubernetes.core.k8s:
@@ -20,10 +41,43 @@
     name: "{{ t_project_name_test }}"
     definition:
       metadata:
-        name: "{{ t_project_name_test }}"
         annotations:
           openshift.io/description: "Quarkus Superheroes Test Environment"
           openshift.io/display-name: "Quarkus Superheroes Test Environment"
+
+- name: "[{{ t_project_name_test }}] - label argocd.argoproj.io/managed-by"
+  kubernetes.core.k8s:
+    state: patched
+    kind: Namespace
+    name: "{{ t_project_name_test }}"
+    definition:
+      metadata:
+        labels:
+          argocd.argoproj.io/managed-by: "{{ t_project_name_argocd }}"
+
+- name: "[{{ t_project_name_test }}] - create argocd rolebinding"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'argocd/argocd-rolebinding.yaml.j2') }}"
+
+- name: "[{{ t_project_name_test }}] - deploy Kafka"
+  kubernetes.core.k8s:
+    namespace: "{{ t_project_name_test }}"
+    state: present
+    # yamllint disable-line rule:line-length
+    definition: "{{ lookup('file', '../files/amqstreams_instance.yaml') | from_yaml_all | list }}"
+
+- name: "[{{ t_project_name_test }}] - install Prometheus"
+  vars:
+    t_project_name: "{{ t_project_name_test }}"
+  include_tasks: install_prometheus.yml
+  when: ocp4_workload_quarkus_super_heroes_demo_install_prometheus | bool
+
+- name: "[{{ t_project_name_test }}] - install Grafana"
+  vars:
+    t_project_name: "{{ t_project_name_test }}"
+  include_tasks: install_grafana.yml
+  when: ocp4_workload_quarkus_super_heroes_demo_install_grafana | bool
 
 - name: "[{{ t_project_name_test }}] - create imagestreams"
   kubernetes.core.k8s:
@@ -35,37 +89,76 @@
         name: "{{ item }}"
         namespace: "{{ t_project_name_test }}"
   loop:
-    - rest-fights
+  - rest-fights
 
 - name: "[{{ t_project_name_test }}] - create buildconfigs"
   kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('template', 'tekton/buildconfig.yaml.j2') }}"
   loop:
-    - rest-fights
+  - rest-fights
 
-- name: "[{{ t_project_name_test }}] - create pipeline rolebinding"
+- name: "[{{ t_project_name_pipelines }}] - create project"
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', 'tekton/rolebinding.yaml.j2') }}"
+    api_version: project.openshift.io/v1
+    kind: Project
+    name: "{{ t_project_name_pipelines }}"
+    definition:
+      metadata:
+        annotations:
+          openshift.io/description: "Quarkus Superheroes Pipelines"
+          openshift.io/display-name: "Quarkus Superheroes Pipelines"
+        name: "{{ t_project_name_pipelines }}"
 
-- name: "[{{ t_project_name_pipelines }}] - create pvc for tekton workspace"
+- name: create gitea token
+  ansible.builtin.uri:
+    # yamllint disable-line rule:line-length
+    url: "{{ r_gitea.resources[0].status.giteaRoute }}/api/v1/users/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}/tokens"
+    method: POST
+    force_basic_auth: true
+    user: "{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}"
+    password: "{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_password }}"
+    return_content: true
+    headers:
+      accept: application/json
+    body_format: json
+    body: |
+      {
+        "name": "pipeline_tkn_{{ 1000 | random }}"
+      }
+    status_code: [201]
+  register: r_gitea_token
+
+- name: "[{{ t_project_name_pipelines }}] - create secret gitea-token"
+  vars:
+    _gitea_user_url: "{{ r_gitea.resources[0].status.giteaRoute }}/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}"
+    _gitea_token_username: "{{ r_gitea_token.json.name }}"
+    _gitea_token_password: "{{ r_gitea_token.json.sha1 }}"
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', 'tekton/pvc.yaml.j2') }}"
+    definition: "{{ lookup('template', 'tekton/secret-gitea-token.yaml.j2') }}"
 
-- name: "[{{ t_project_name_pipelines }}] - create tekton task s2i-binary"
+- name: "[{{ t_project_name_pipelines }}] - link gitea-token service account pipeline"
+  kubernetes.core.k8s:
+    state: patched
+    kind: ServiceAccount
+    name: pipeline
+    namespace: "{{ t_project_name_pipelines }}"
+    definition:
+      secrets:
+        - name: gitea-token
+
+- name: "[{{ t_project_name_pipelines }}] - create tekton tasks"
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', 'tekton/task-s2i-binary.yaml.j2') }}"
-
-- name: Retrieve Gitea instance
-  kubernetes.core.k8s_info:
-    api_version: gpte.opentlc.com/v1
-    kind: Gitea
-    name: "{{ ocp4_workload_gitea_operator_name }}"
-    namespace: "{{ ocp4_workload_gitea_operator_project }}"
-  register: r_gitea
+    definition: "{{ lookup('template', 'tekton/{{ item }}.yaml.j2') }}"
+  loop:
+  - pvc
+  - rolebinding
+  - task-s2i-binary
+  - task-update-kustomize
+  - task-generate-tag
 
 - name: "[{{ t_project_name_pipelines }}] - create tekton pipeline quarkus-superheroes"
   vars:
@@ -76,6 +169,43 @@
   kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('template', 'tekton/pipeline.yaml.j2') }}"
+
+- name: "[{{ t_project_name_pipelines }}] - create tekton triggers"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'tekton/{{ item }}.yaml.j2') }}"
+  loop:
+  - trigger-template
+  - trigger-binding
+  - trigger-eventlistener
+  - trigger-eventlistener-route
+
+- name: create gitea webook
+  ansible.builtin.uri:
+    # yamllint disable-line rule:line-length
+    url: "{{ r_gitea.resources[0].status.giteaRoute }}/api/v1/repos/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_repo_name }}/hooks"
+    method: POST
+    force_basic_auth: true
+    user: "{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}"
+    password: "{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_password }}"
+    headers:
+      accept: application/json
+    body_format: json
+    body: |
+      {
+        "active": true,
+        "branch_filter": "*",
+        "config": {
+          "url": "http://el-{{ t_project_name_pipelines }}.{{ route_subdomain }}",
+          "http_method": "POST",
+          "content_type": "json"
+        },
+        "events": [
+          "push"
+        ],
+        "type": "gitea"
+      }
+    status_code: [201]
 
 - name: "[{{ t_project_name_pipelines }}] - delete pipelinerun quarkus-superheroes"
   kubernetes.core.k8s:
@@ -111,7 +241,7 @@
     name: quarkus-superheroes
     namespace: "{{ t_project_name_pipelines }}"
   register: r_pipelinerun_superheroes
-  retries: 60
+  retries: 90
   delay: 10
   until:
   - r_pipelinerun_superheroes.resources[0].status is defined
@@ -120,49 +250,20 @@
   - r_pipelinerun_superheroes.resources[0].status.conditions[0].status is match("True")
   - r_pipelinerun_superheroes.resources[0].status.conditions[0].reason is match("Succeeded")
 
-- name: "[{{ t_project_name_pipelines }}] - create tekton triggertemplate"
+- name: "[{{ t_project_name_argocd }}] - wait argocd ready"
+  kubernetes.core.k8s_info:
+    api_version: argoproj.io/v1alpha1
+    kind: ArgoCD
+    name: argocd
+    namespace: "{{ t_project_name_argocd }}"
+  register: result
+  until: result | json_query("resources[0].status.phase=='Available'")
+  retries: 10
+  delay: 5
+
+- name: "[{{ t_project_name_argocd }}] - create argocd application"
+  vars:
+    _gitea_repo_url: "{{ r_gitea.resources[0].status.giteaRoute }}/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_repo_name }}-deploy"
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', 'tekton/trigger-template.yaml.j2') }}"
-
-- name: "[{{ t_project_name_pipelines }}] - create tekton triggerbinding"
-  kubernetes.core.k8s:
-    state: present
-    definition: "{{ lookup('template', 'tekton/trigger-binding.yaml.j2') }}"
-
-- name: "[{{ t_project_name_pipelines }}] - create tekton eventlistener"
-  kubernetes.core.k8s:
-    state: present
-    definition: "{{ lookup('template', 'tekton/trigger-eventlistener.yaml.j2') }}"
-
-- name: "[{{ t_project_name_pipelines }}] - create tekton eventlistener route"
-  kubernetes.core.k8s:
-    state: present
-    definition: "{{ lookup('template', 'tekton/trigger-eventlistener-route.yaml.j2') }}"
-
-- name: create gitea webook
-  ansible.builtin.uri:
-    # yamllint disable-line rule:line-length
-    url: "{{ r_gitea.resources[0].status.giteaRoute }}/api/v1/repos/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}/{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_repo_name }}/hooks"
-    method: POST
-    force_basic_auth: true
-    user: "{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_user }}"
-    password: "{{ ocp4_workload_quarkus_super_heroes_demo_clone_repo_gitea_password }}"
-    headers:
-      accept: application/json
-    body_format: json
-    body: |
-      {
-        "active": true,
-        "branch_filter": "*",
-        "config": {
-          "url": "http://el-{{ t_project_name_pipelines }}.{{ route_subdomain }}",
-          "http_method": "POST",
-          "content_type": "json"
-        },
-        "events": [
-          "push"
-        ],
-        "type": "gitea"
-      }
-    status_code: [201, 409]
+    definition: "{{ lookup('template', 'argocd/argocd-application.yaml.j2') }}"
