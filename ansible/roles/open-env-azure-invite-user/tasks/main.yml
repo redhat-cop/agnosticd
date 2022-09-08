@@ -1,0 +1,79 @@
+---
+- name: Initialize azureProfile.json
+  command: >
+    az login --service-principal -u {{ azure_service_principal }}
+    -p {{ azure_password }} --tenant {{ azure_tenant }}
+- name: Get CICD User Default
+  set_fact:
+    cicd_user: "{{ open_env_azure_cicd_user | default('jenkins.sfo01@gmail.com') }}"
+- name: Set email variable (backwards compatible)
+  when: 'email is defined'
+  set_fact:
+    user_email: "{{ email }}"
+- name: Set email variable
+  when: 'requester_email is defined'
+  set_fact:
+    user_email: "{{ requester_email }}"
+- name: Check if email is Red Hat associate or CICD User
+  fail:
+    msg: "user_email ({{ user_email }}) does not match cicd_user ({{ cicd_user }}) and does not contain @redhat.com"
+  when:
+    - '"@redhat.com" not in user_email'
+    - 'cicd_user not in user_email'
+- name: Set Up UPN for Red Hat Associate
+  when: '"@redhat.com" in user_email'
+  set_fact:
+    upn: "{{ user_email | replace('@redhat.com','_redhat.com#EXT#@prutledgopentlc.onmicrosoft.com') }}"
+- name: Set Up UPN for CICD
+  when: 'cicd_user in user_email'
+  set_fact:
+    upn: "{{ user_email | replace('@gmail.com','_gmail.com#EXT#@prutledgopentlc.onmicrosoft.com') }}"
+- name: Checking if user is in Active Directory
+  register: azuserc
+  azure.azcollection.azure_rm_aduser_info:
+    auth_source: cli
+    user_principal_name: "{{ upn }}"
+    tenant: "{{ azure_tenant }}"
+  ignore_errors: true
+- name: Create user block
+  when:
+    - azuserc is failed
+    - "'does not exist or one of its queried reference-property objects are not present.' in azuserc.msg"
+  block:
+    - name: Get OAuth Token
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ azure_tenant }}/oauth2/v2.0/token"
+        method: POST
+        headers:
+          Content-Type: application/x-www-form-urlencoded
+        body:
+          grant_type: "client_credentials"
+          client_id: "{{ azure_service_principal }}"
+          scope: "https://graph.microsoft.com/.default"
+          client_secret: "{{ azure_password }}"
+        body_format: form-urlencoded
+        validate_certs: true
+      register: authtoken
+    - name: Invite user to org
+      ansible.builtin.uri:
+        url: https://graph.microsoft.com/v1.0/invitations
+        method: POST
+        headers:
+          Content-type: application/json
+          Authorization: "Bearer {{ authtoken.json.access_token }}"
+        status_code: 201
+        body_format: json
+        body:
+          invitedUserEmailAddress: "{{ user_email }}"
+          inviteRedirectUrl: "https://portal.azure.com"
+          sendInvitationMessage: true
+          invitedUserDisplayName: "OpenEnv_User_{{ user_email }}"
+    - name: Print Open Environment Information
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+        - "An invitation has been sent to your redhat.com inbox."
+        - "You will need to accept the invitation."
+    - name: Wait 60 seconds for Azure to create user
+      ansible.builtin.wait_for:
+        timeout: 60

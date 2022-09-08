@@ -1,0 +1,100 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user rhods_username = {{ rhods_username }}"
+
+- name: Set up RHODS Object Detection project and workload
+  k8s:
+    state: present
+    definition: "{{ lookup('template',  item ) | from_yaml }}"
+  loop:
+  - prod_namespace.yaml.j2
+  - pvc-workspace.yaml.j2
+  - object-detection-app-git-buildconfig.yaml.j2
+  - object-detection-app-git-imagestream.yaml.j2
+  - object-detection-app-git-deployment.yaml.j2
+  - object-detection-app-git-route.yaml.j2
+  - object-detection-app-git-service.yaml.j2
+  - object-detection-rest-buildconfig.yaml.j2
+  - object-detection-rest-imagestream.yaml.j2
+  - object-detection-rest-deployment.yaml.j2
+  - object-detection-rest-route.yaml.j2
+  - object-detection-rest-service.yaml.j2
+  - task-generate-tag.yaml.j2
+  - task-sanity-check-model.yaml.j2
+  - object-detection-rest-pipeline.yaml.j2
+  - object-detection-rest-pipeline-run.yaml.j2
+  - trigger-template.yaml.j2
+  - trigger-binding.yaml.j2
+  - trigger-eventlistener.yaml.j2
+  - web-terminal-subscription.yaml.j2
+  - el-route.yaml.j2
+
+#- name: Get EventListener Route information
+#  k8s_info:
+#    api_version: route.openshift.io/v1
+#    kind: Route
+#    name: el-el-rhods-object-detect-rest
+#    namespace: "{{ rhods_username }}-rhods-project"
+#  register: el_route
+
+#- name: check eventlistener route name
+# command: oc get route el-el-rhods-object-detect-rest -n admin-rhods-project -o=jsonpath='{.spec.host}'
+# register: el_route
+
+#- name: print el_route  output
+#  debug:
+#    var: el_route.resources[0].spec.host
+
+- name: Wait until Event Listener Route exists in the cicd namespace
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: el-el-rhods-object-detect-rest
+    namespace: "{{ ocp4_workload_aiml_namespace }}"
+  register: r_webhook_route
+  until: r_webhook_route.resources | length > 0
+  delay: 10
+  retries: 30
+
+- name: Retrieve Gitea instance
+  kubernetes.core.k8s_info:
+    api_version: gpte.opentlc.com/v1
+    kind: Gitea
+    name: "{{ ocp4_workload_big_demo_gitea_instance }}"
+    namespace: "{{ ocp4_workload_big_demo_gitea_project }}"
+  register: r_gitea
+
+- name: Set Gitea repo variables
+  set_fact:
+    _ocp4_workload_big_demo_gitea_hostname: >-
+      {{ r_gitea.resources[0].status.giteaHostname }}
+    _ocp4_workload_big_demo_gitea_repo_route_url: >-
+      {{ r_gitea.resources[0].status.giteaRoute }}
+    _ocp4_workload_big_demo_gitea_repo_object_detection_url: >-
+      {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
+      ocp4_workload_big_demo_gitea_user | urlencode }}:{{
+      ocp4_workload_big_demo_gitea_user_password | urlencode }}@{{
+      r_gitea.resources[0].status.giteaHostname }}/{{
+      ocp4_workload_big_demo_gitea_user }}/{{ ocp4_workload_big_demo_gitea_repo_object_detection }}
+
+- name: Generate web hook secret if not defined
+  when: ocp4_workload_big_demo_gitea_webhook_secret | length == 0
+  set_fact:
+    ocp4_workload_big_demo_gitea_webhook_secret: >-
+      {{ lookup('password', '/dev/null length={{ ocp4_workload_big_demo_gitea_webhook_secret_length }}
+      chars=ascii_letters,digits') }}
+
+- name: Register event listeners in Gitea
+  include_tasks: update-webhook.yml
+  loop:
+  - "{{ ocp4_workload_big_demo_gitea_repo_object_detection }}"
+  loop_control:
+    loop_var: _ocp4_workload_big_demo_webhook_repository
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

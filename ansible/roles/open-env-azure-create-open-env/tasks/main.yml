@@ -1,0 +1,142 @@
+---
+- name: Login with azure root user
+  command: >-
+    az login -u "{{ azure_user }}"
+    -p="{{ azure_user_password }}" --tenant="{{ azure_tenant }}"
+- name: Get user from Active Directory
+  register: azuser
+  azure.azcollection.azure_rm_aduser_info:
+    auth_source: cli
+    user_principal_name: "{{ upn }}"
+    tenant: "{{ azure_tenant }}"
+- name: Create OPEN environment resource group
+  azure.azcollection.azure_rm_resourcegroup:
+    auth_source: cli
+    subscription_id: "{{ azure_subscription_id }}"
+    name: "openenv-{{ guid }}"
+    location: eastus
+    state: present
+    tags:
+      guid: "{{ guid }}"
+      delete: never
+- name: Get resource group info
+  register: azrg
+  azure.azcollection.azure_rm_resourcegroup_info:
+    auth_source: cli
+    name: "openenv-{{ guid }}"
+    tenant: "{{ azure_tenant }}"
+- name: Get Owner Role Definition
+  azure.azcollection.azure_rm_roledefinition_info:
+    auth_source: cli
+    scope: "{{ azrg['resourcegroups'][0].id }}"
+    role_name: Owner
+  register: azownerrd
+- name: Make user owner of resource group
+  azure.azcollection.azure_rm_roleassignment:
+    auth_source: cli
+    scope: "{{ azrg['resourcegroups'][0].id }}"
+    assignee_object_id: "{{ azuser['ad_users'][0].object_id }}"
+    role_definition_id:
+      "{{ azownerrd['roledefinitions'][0].id }}"
+- name: See if application already exists
+  azure.azcollection.azure_rm_adapplication_info:
+    identifier_uri: "api://openenv-{{ guid }}"
+    tenant: "{{ azure_tenant }}"
+  ignore_errors: true
+  register: azappcheck
+- name: Create the Application and SP
+  when: azappcheck['applications']|length==0
+  command: >-
+    az ad sp create-for-rbac
+    --name "api://openenv-{{ guid }}"
+    --role Owner
+    --scopes "{{ azrg['resourcegroups'][0].id }}"
+  register: azappcreate
+- name: Get password
+  when: azappcreate.changed
+  block:
+    - set_fact: azpass="{{ azappcreate.stdout | from_json | json_query('password') }}"
+- name: Wait 60 seconds for Azure to create application
+  when: azappcreate.changed
+  ansible.builtin.wait_for:
+    timeout: 60
+- name: Get application info
+  azure.azcollection.azure_rm_adapplication_info:
+    auth_source: cli
+    identifier_uri: "api://openenv-{{ guid }}"
+    tenant: "{{ azure_tenant }}"
+  register: azapp
+- name: Add API Application.ReadWrite.All permissions to SP
+  when: azappcheck['applications']|length==0
+  command: >-
+    az ad app permission add
+    --id "{{ azapp['applications'][0].app_id }}"
+    --api 00000003-0000-0000-c000-000000000000
+    --api-permissions bdfbf15f-ee85-4955-8675-146e8e5296b5=Scope
+  register: azpermsupdate
+- name: Wait 60 seconds for Azure to apply permission
+  when: azpermsupdate.changed
+  ansible.builtin.wait_for:
+    timeout: 60
+- name: Authorize admin consent
+  when: azpermsupdate.changed
+  command: >-
+    az ad app permission admin-consent
+    --id "{{ azapp['applications'][0].app_id }}"
+- name: Get SP info
+  command: >-
+    az ad sp show --id "api://openenv-{{ guid }}"
+  register: azappinfo
+- name: Build payload for role assignment
+  set_fact:
+    payload:
+      {
+        '@odata.type': '#microsoft.graph.unifiedRoleAssignment',
+        'principalId': "{{ azappinfo.stdout | from_json | json_query('objectId') }}",
+        'roleDefinitionId': '8e2e22ca-bde6-4977-bc67-7f189cc47557',
+        'directoryScopeId': '/'
+      }
+- name: Assign Application Administrator role to SP
+  command: >-
+    az rest -m post
+    --headers Content-type=application/json
+    -u https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments
+    -b "{{ payload }}"
+- name: See if ARO SP already exists
+  azure.azcollection.azure_rm_adapplication_info:
+    auth_source: cli
+    identifier_uri: "api://openenv-aro-{{ guid }}"
+    tenant: "{{ azure_tenant }}"
+  ignore_errors: true
+  register: azaroappcheck
+- name: Create the Service Principal for ARO
+  when: azaroappcheck['applications']|length==0
+  command: >-
+    az ad sp create-for-rbac
+    --name "api://openenv-aro-{{ guid }}"
+    --role Contributor
+    --scopes "{{ azrg['resourcegroups'][0].id }}"
+  register: azaroappcreate
+- name: Save ARO SP password
+  when: azaroappcreate.changed
+  block:
+    - set_fact: az_aro_pass="{{ azaroappcreate.stdout | from_json | json_query('password') }}"
+- name: Get ARO SP info
+  command: >-
+    az ad sp show --id "api://openenv-aro-{{ guid }}"
+  register: azaroappinfo
+- name: Build payload for role assignment
+  set_fact:
+    payload:
+      {
+        '@odata.type': '#microsoft.graph.unifiedRoleAssignment',
+        'principalId': "{{ azaroappinfo.stdout | from_json | json_query('objectId') }}",
+        'roleDefinitionId': '8e2e22ca-bde6-4977-bc67-7f189cc47557',
+        'directoryScopeId': '/'
+      }
+- name: Assign Application Administrator role to ARO SP
+  command: >-
+    az rest -m post
+    --headers Content-type=application/json
+    -u https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments
+    -b "{{ payload }}"
