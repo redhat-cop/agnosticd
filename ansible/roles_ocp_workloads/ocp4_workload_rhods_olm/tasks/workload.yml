@@ -1,21 +1,21 @@
 ---
 # Implement your Workload deployment tasks here
 - name: Create the projects
-  k8s:
+  kubernetes.core.k8s:
     state: present
     kind: Namespace
     name: "{{ item }}"
   loop: "{{ ocp4_workload_rhods_olm_namespace_list }}"
 
 - name: Create the modh puller secret in all ODS namespaces
-  k8s:
+  kubernetes.core.k8s:
     state: present
     namespace: "{{ item }}"
     definition: "{{ lookup('template', './templates/pullsecret.yaml.j2' ) | from_yaml }}"
   loop: "{{ ocp4_workload_rhods_olm_namespace_list }}"
 
 - name: Create RHODS Pagerduty Secret
-  k8s:
+  kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('template', 'pagerduty-secret.yaml.j2' ) }}"
 
@@ -31,7 +31,7 @@
     install_operator_packagemanifest_name: "{{ ocp4_workload_rhods_olm_install_operator_name }}"
     install_operator_automatic_install_plan_approval: true
     install_operator_csv_nameprefix: rhods-operator
-    install_operator_starting_csv: "{{ ocp4_workload_rhods_olm_starting_csv }}"
+    install_operator_starting_csv: ""
     install_operator_catalogsource_setup: true
     install_operator_catalogsource_name: "{{ ocp4_workload_rhods_olm_catalogsource_name }}"
     install_operator_catalogsource_namespace: "{{ ocp4_workload_rhods_olm_catalogsource_namespace }}"
@@ -41,38 +41,37 @@
     - addon-managed-odh-pullsecret
 
 - name: Wait for Jupyter Deployment Configs to exist
-  k8s_info:
+  kubernetes.core.k8s_info:
     api_version: apps.openshift.io/v1
     kind: DeploymentConfig
     name: "{{ item }}"
     namespace: "{{ ocp4_workload_rhods_olm_applications_namespace }}"
   loop:
-  - "jupyterhub"
-  - "jupyterhub-db"
+  - jupyterhub
+  - jupyterhub-db
   register: r_jh_dc
-  retries: 24
-  delay: 20
-  until:
-  - r_jh_dc.resources | length > 0
+  retries: 60
+  delay: 30
+  until: r_jh_dc.resources | length > 0
 
 - name: Wait for ready Jupyter Deployment Configs
-  k8s_info:
+  kubernetes.core.k8s_info:
     api_version: apps.openshift.io/v1
     kind: DeploymentConfig
     name: "{{ item }}"
     namespace: "{{ ocp4_workload_rhods_olm_applications_namespace }}"
   loop:
-  - "jupyterhub"
-  - "jupyterhub-db"
+  - jupyterhub
+  - jupyterhub-db
   register: r_jh_dc
-  retries: 24
-  delay: 20
+  retries: 60
+  delay: 30
   until:
   - r_jh_dc.resources[0].status.readyReplicas is defined
   - r_jh_dc.resources[0].status.readyReplicas | int >= 1
 
 - name: Update the RHODS config to allow all users
-  k8s:
+  kubernetes.core.k8s:
     api_version: v1
     kind: ConfigMap
     namespace: redhat-ods-applications
@@ -84,54 +83,79 @@
         allowed_groups: system:authenticated
 
 - name: Redeploy Jupyter after updating config
-  command: |
-    oc rollout latest deploymentconfig/{{ item }} -n redhat-ods-applications
+  kubernetes.core.k8s:
+    state: present
+    merge_type: strategic-merge
+    definition:
+      apiVersion: apps.openshift.io/v1
+      kind: DeploymentConfig
+      metadata:
+        name: "{{ item }}"
+        namespace: "{{ ocp4_workload_rhods_olm_applications_namespace }}"
+      spec:
+        template:
+          metadata:
+            labels:
+              all-users: enabled
   loop:
-  - "jupyterhub-db"
-  - "jupyterhub"
+  - jupyterhub-db
+  - jupyterhub
 
 - name: Get the ODH dashboard route
-  k8s_info:
+  kubernetes.core.k8s_info:
     api_version: route.openshift.io/v1
     kind: Route
-    name: odh-dashboard
+    name: rhods-dashboard
     namespace: "{{ ocp4_workload_rhods_olm_applications_namespace }}"
   register: r_odh_dashboard_route
 
 - name: Get the OpenShift console route
-  k8s_info:
+  kubernetes.core.k8s_info:
     api_version: route.openshift.io/v1
     kind: Route
     name: console
     namespace: openshift-console
   register: r_console_route
 
+- name: Remove core-resource-limits for rhods related projects.
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: LimitRange
+    name: rhods-notebooks-core-resource-limits
+    namespace: rhods-notebooks
+    state: absent
+
 - name: Report demo user info (for provisioner)
   agnosticd_user_info:
     msg: "{{ item }}"
   loop:
   - ""
-  - "ODH Dashboard: https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
-  - "Lab Guide:     https://github.com/OpenShiftDemos/rhods-fraud-detection"
-  - ""
+  - "RedHat OpenShift Data Science Dashboard: https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
+
+- name: Report demo user info (for student)
+  agnosticd_user_info:
+    msg: |
+      Your username is: userX
+      Password: 'openshift'
+#      ODH Dddashboard: https://{{ r_odh_dashboard_route.resources[0].spec.host }}
+    data:
+      rhodh_dashboard: "https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
+      rhodh_password: openshift
 
 - name: Report demo user info (for multi-user)
+  when: ocp4_workload_rhods_olm_is_workshop | bool
   agnosticd_user_info:
     user: "{{ ocp4_workload_authentication_htpasswd_user_base }}{{ item }}"
     msg:
     - "Please open the lab guide first, and follow the instructions you find there."
     - ""
-    - "Lab Guide:         https://github.com/OpenShiftDemos/rhods-fraud-detection"
-    - ""
-    - "ODH Dashboard:     https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
+    - "Red Hat OpenShift Data Science Dashboard:     https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
     - "OpenShift console: https://{{ r_console_route.resources[0].spec.host }}"
     - ""
     - "Username:          {{ ocp4_workload_rhods_olm_workshop_username_base }}{{ item }}"
     - "Password:          {{ ocp4_workload_rhods_olm_workshop_password }}"
     - "GUID:              {{ guid }}"
   loop: "{{ range(1, 1 + ocp4_workload_rhods_olm_workshop_num_users | int) | list }}"
-  when:
-  - ocp4_workload_rhods_olm_is_workshop | bool
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete

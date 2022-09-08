@@ -1,0 +1,72 @@
+---
+- name: Create cluster-admin service account
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: "{{ openshift_cluster_admin_service_account_name }}"
+        namespace: "{{ openshift_cluster_admin_service_account_namespace }}"
+
+- name: Grant cluster-admin service account cluster-admin privileges
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: >-
+          {{ 'cluster-admin:serviceaccount:%s:%s' | format(
+            openshift_cluster_admin_service_account_namespace,
+            openshift_cluster_admin_service_account_name
+          ) }}
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-admin
+      subjects:
+      - kind: ServiceAccount
+        name: "{{ openshift_cluster_admin_service_account_name }}"
+        namespace: "{{ openshift_cluster_admin_service_account_namespace }}"
+
+- name: Wait for cluster-admin service account token
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ServiceAccount
+    name: "{{ openshift_cluster_admin_service_account_name }}"
+    namespace: "{{ openshift_cluster_admin_service_account_namespace }}"
+  register: r_cluster_admin_service_account
+  failed_when: >-
+    r_cluster_admin_service_account.resources[0].secrets is undefined or
+    r_cluster_admin_service_account.resources[0].secrets | selectattr(
+      'name', 'regex', '^' ~ openshift_cluster_admin_service_account_name ~ '-token-'
+    ) | list | length < 1
+  until: r_cluster_admin_service_account is success
+  retries: 5
+  delay: 1
+
+- name: Get cluster-admin service account token
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: >-
+      {{ (r_cluster_admin_service_account.resources[0].secrets | selectattr(
+        'name', 'regex', '^' ~ openshift_cluster_admin_service_account_name ~ '-token-'
+      ) | first).name }}
+    namespace: "{{ openshift_cluster_admin_service_account_namespace }}"
+  register: r_cluster_admin_service_account_token
+  failed_when: r_cluster_admin_service_account_token.resources | length != 1
+
+- name: Set openshift_api_ca_cert and openshift_cluster_admin_token
+  set_fact:
+    openshift_api_ca_cert: >-
+      {{ r_cluster_admin_service_account_token.resources[0].data['ca.crt'] | b64decode }}
+    openshift_cluster_admin_token: >-
+      {{ r_cluster_admin_service_account_token.resources[0].data.token | b64decode }}
+
+- name: Report openshift_api_ca_cert and openshift_cluster_admin_token as user data
+  agnosticd_user_info:
+    data:
+      openshift_api_ca_cert: "{{ openshift_api_ca_cert }}"
+      openshift_cluster_admin_token: "{{ openshift_cluster_admin_token }}"

@@ -1,0 +1,129 @@
+---
+- name: Setting up workload for Retail ML Object Detection Use Case
+  debug:
+    msg: "Setting up workload for Retail ML Object Detection Use Case"
+
+- name: Set up Gitops environment
+  when: ocp4_workload_aiml_demo_gitops_setup | bool
+  ansible.builtin.include_tasks: setup-gitops.yml
+
+- name: Set up RHODS Object Detection dev project using OpenShift Pipeline and OpenShift GitOps
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template',  item ) | from_yaml }}"
+  loop:
+  - retail-kustomize/dev_namespace.yaml.j2
+  - retail-kustomize/gitea-dev-secret.yaml.j2
+  - retail-kustomize/retail-app.yaml.j2
+
+- name: Create secret in dev
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'retail-kustomize/cluster-config-secret.yaml.j2' ) }}"
+
+- name: Set up RHODS Object Detection PROD project  - argocd
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template',  item ) | from_yaml }}"
+  loop:
+  - retail-prod-kustomize/prod_namespace.yaml.j2
+  - retail-prod-kustomize/gitea-prod-secret.yaml.j2
+  - retail-prod-kustomize/retail-prod-app.yaml.j2
+
+- name: Create secret in prod
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'retail-prod-kustomize/cluster-config-secret.yaml.j2' ) }}"
+
+- name: Wait until Event Listener Route exists in the cicd namespace
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: retail-rhods-project
+    name: el-el-rhods-object-detect-rest
+  register: r_webhook_route
+  until: r_webhook_route.resources | length > 0
+  delay: 10
+  retries: 30
+
+- name: Generate web hook secret if not defined
+  when: ocp4_workload_big_demo_gitea_webhook_secret | length == 0
+  set_fact:
+    ocp4_workload_gitea_webhook_secret: >-
+      {{ lookup('password', '/dev/null length={{ ocp4_workload_big_demo_gitea_webhook_secret_length }} chars=ascii_letters,digits') }}
+
+- name: Register event listeners in Gitea
+  include_tasks: update-webhook.yml
+  loop:
+  - "{{ ocp4_workload_gitea_repo_arc_model }}"
+  loop_control:
+    loop_var: _ocp4_workload_big_demo_webhook_repository
+
+- name: Run the OpenShift Pipeline for Dev environment
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template',  'retail-kustomize/object-detection-rest-pipeline-run.yaml.j2' ) }}"
+
+- name: Set up web terminal
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template',  item ) | from_yaml }}"
+  loop:
+  - web-terminal-subscription.yaml.j2
+
+- kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Route
+    namespace: openshift-gitops
+    label_selectors:
+    - app.kubernetes.io/name=openshift-gitops-server
+  register: r_route_kinfo
+
+- kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: openshift-gitops
+    label_selectors:
+    - app.kubernetes.io/name=openshift-gitops-cluster
+  register: r_secret_kinfo
+
+- kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Route
+    namespace: retail-rhods-project
+    label_selectors:
+    - app.kubernetes.io/name=object-detection-app-git
+  register: r_route_appinfo
+
+- name: Give user1 access to retail-prod-rhods-project
+  shell: "oc policy add-role-to-user edit user1 -n retail-prod-rhods-project"
+
+- name: Give user1 access to retail-rhods-project
+  shell: "oc policy add-role-to-user edit user1 -n retail-rhods-project"
+
+- name: Print Access information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Application url: https://{{r_route_appinfo.resources.0.spec.host }}"
+  - ""
+  - "OpenShift GitOps (argocd) url: https://{{r_route_kinfo.resources.0.spec.host }}"
+  - "OpenShift GitOps username: admin"
+  - "OpenShift GitOps admin password: {{ r_secret_kinfo.resources.0.data['admin.password'] | b64decode }}"
+  - ""
+
+- name: Print Access information
+  agnosticd_user_info:
+    data:
+      app_url: "{{r_route_appinfo.resources.0.spec.host }}"
+      gitops_argocd_url: "{{r_route_kinfo.resources.0.spec.host }}"
+      gitops_argocd_username: "admin"
+      gitops_argocd_admin_password: "{{ r_secret_kinfo.resources.0.data['admin.password'] | b64decode }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

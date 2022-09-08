@@ -1,0 +1,85 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- environment:
+    KUBECONFIG: "{{ tmp_kubeconfig }}"
+  block:
+  - name: Set up automation controller platform  - argocd
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template',  item ) | from_yaml }}"
+    loop:
+    - apps/aap-operator.yml.j2
+    - apps/aap-controller.yml.j2
+
+  - name: Retrieve created route
+    k8s_facts:
+      api_version: "route.openshift.io/v1"
+      kind: Route
+      name: controller
+      namespace: ansible-automation-platform
+    register: r_route
+    until: r_route.resources[0].spec.host is defined
+    retries: 30
+    delay: 45
+
+  - name: Retrieve aap secret
+    k8s_facts:
+      api_version: "v1"
+      kind: Secret
+      name: controller-admin-password
+      namespace: ansible-automation-platform
+    register: r_secret
+    until: r_secret.resources[0].data.password
+    retries: 30
+    delay: 45
+
+  - name: Get automation_controller route hostname
+    set_fact:
+      automation_controller_hostname: "{{ r_route.resources[0].spec.host }}"
+      automation_controller_admin_password: "{{ r_secret.resources[0].data.password |string |b64decode }}"
+
+  - name: wait for automation_controller to be running
+    uri:
+      url: http://{{ automation_controller_hostname }}/api/v2/ping/
+      status_code: 200
+    register: result
+    until: result.json.version is defined
+    retries: 60
+    delay: 45
+
+  - name: Pause for 5 minutes for AC to be ready
+    pause:
+      minutes: 5
+
+  - name: Display version
+    debug:
+      msg: "{{ result.json.version }}"
+    when: not silent | bool
+
+  - name: Print Access information
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - "Automation Controller Web URL: https://{{ automation_controller_hostname }}"
+    - "Login Name:  admin"
+    - "Login Password: {{ automation_controller_admin_password }}"
+
+  - name: Print Access information
+    agnosticd_user_info:
+      data:
+        ac_web_url: "https://{{ automation_controller_hostname }}"
+        ac_user: "admin"
+        ac_password: "{{ automation_controller_admin_password }}"
+
+  - name: Openshift Gitops server info
+    include_tasks: argocd_info.yml
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

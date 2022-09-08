@@ -1,0 +1,264 @@
+---
+- name: Install software on Bastion
+  become: true
+  block:
+  - name: Download Crane CLI to bastion
+    ansible.builtin.get_url:
+      url: "{{ ocp4_workload_ama_demo_crane_url }}"
+      dest: /usr/bin/crane
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Install JDK 11
+    command:
+      cmd: dnf -y install java-11-openjdk-devel
+      warn: false
+
+  - name: Create /usr/local/maven directory
+    file:
+      path: /usr/local/maven
+      state: directory
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Download and unarchive Maven Distribution
+    unarchive:
+      src: "{{ ocp4_workload_ama_demo_maven_url }}"
+      remote_src: true
+      dest: /usr/local/maven
+      owner: root
+      group: root
+      extra_opts:
+      - --strip=1
+
+  - name: Set up Link in bin_path
+    file:
+      state: link
+      src: /usr/local/maven/bin/mvn
+      dest: /usr/bin/mvn
+      owner: root
+      group: root
+
+
+- name: Retrieve Gitea instance
+  kubernetes.core.k8s_info:
+    api_version: gpte.opentlc.com/v1
+    kind: Gitea
+    name: "{{ ocp4_workload_ama_demo_gitea_instance }}"
+    namespace: "{{ ocp4_workload_ama_demo_gitea_project }}"
+  register: r_gitea
+
+- name: Set Gitea repo variables
+  set_fact:
+    _ocp4_workload_ama_demo_gitea_repo_url: >-
+      {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
+      ocp4_workload_ama_demo_gitea_user | urlencode }}:{{
+      ocp4_workload_ama_demo_gitea_user_password | urlencode }}@{{
+      r_gitea.resources[0].status.giteaHostname }}/{{
+      ocp4_workload_ama_demo_gitea_user }}/{{ ocp4_workload_ama_demo_gitea_repo }}
+    _ocp4_workload_ama_demo_gitea_repo_route_url: >-
+      {{ r_gitea.resources[0].status.giteaRoute }}
+
+- name: Set up .gitconfig
+  ansible.builtin.copy:
+    src: gitconfig
+    dest: "{{ ocp4_workload_ama_demo_home_directory }}/.gitconfig"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0664
+
+- name: Make sure cloned repo directory does not exist
+  ansible.builtin.file:
+    path: "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}"
+    state: absent
+
+- name: Clone application source code
+  ansible.builtin.git:
+    accept_hostkey: true
+    force: true
+    repo: "{{ _ocp4_workload_ama_demo_gitea_repo_url }}"
+    dest: "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}"
+    version: "{{ ocp4_workload_ama_demo_gitea_repo_branch }}"
+  environment:
+    GIT_SSL_NO_VERIFY: "true"
+
+- name: Update ~/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/customers-application.yaml
+  lineinfile:
+    path: "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/customers-application.yaml"
+    state: present
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+  - regexp: "^    repoURL:"
+    line: "    repoURL: {{ _ocp4_workload_ama_demo_gitea_repo_url }}"
+  - regexp: "^  namespace: retail"
+    line: "  namespace: {{ ocp4_workload_ama_demo_demo_namespace }}"
+  - regexp: "^    namespace: retail"
+    line: "    namespace: {{ ocp4_workload_ama_demo_demo_namespace }}"
+
+- name: Update ~/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/frontend-application.yaml
+  lineinfile:
+    path: "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/frontend-application.yaml"
+    state: present
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+  - regexp: "^    repoURL:"
+    line: "    repoURL: {{ _ocp4_workload_ama_demo_gitea_repo_url }}"
+  - regexp: "^  namespace: retail"
+    line: "  namespace: {{ ocp4_workload_ama_demo_demo_namespace }}"
+  - regexp: "^    namespace: retail"
+    line: "    namespace: {{ ocp4_workload_ama_demo_demo_namespace }}"
+
+- name: Print IP
+  debug:
+    msg: "Tomcat IP: {{ _ocp4_workload_ama_demo_tomcat_ip }}"
+
+- name: Update ~/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/gateway-application.yaml
+  lineinfile:
+    path: "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/gateway-application.yaml"
+    state: present
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+  - regexp: "^    repoURL:"
+    line: "    repoURL: {{ _ocp4_workload_ama_demo_gitea_repo_url }}"
+  - regexp: "^  namespace: retail"
+    line: "  namespace: {{ ocp4_workload_ama_demo_demo_namespace }}"
+  - regexp: "^    namespace: retail"
+    line: "    namespace: {{ ocp4_workload_ama_demo_demo_namespace }}"
+
+# Point gateway to use customer service on RHEV
+- name: Update ~/{{ ocp4_workload_ama_demo_gitea_repo }}/gateway/helm/config/application.yaml
+  lineinfile:
+    path: "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/gateway/helm/config/application.yaml"
+    state: present
+    # Ends with '/customers'
+    regexp: "^    url.*/customers$"
+    line: "    url: http://{{ _ocp4_workload_ama_demo_tomcat_ip }}:8080/customers-tomcat-0.0.1-SNAPSHOT/customers"
+
+- name: Update ~/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/inventory-application.yaml
+  lineinfile:
+    path: "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/inventory-application.yaml"
+    state: present
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+  - regexp: "^    repoURL:"
+    line: "    repoURL: {{ _ocp4_workload_ama_demo_gitea_repo_url }}"
+  - regexp: "^  namespace: retail"
+    line: "  namespace: {{ ocp4_workload_ama_demo_demo_namespace }}"
+  - regexp: "^    namespace: retail"
+    line: "    namespace: {{ ocp4_workload_ama_demo_demo_namespace }}"
+
+- name: Update ~/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/orders-application.yaml
+  lineinfile:
+    path: "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/orders-application.yaml"
+    state: present
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+  - regexp: "^    repoURL:"
+    line: "    repoURL: {{ _ocp4_workload_ama_demo_gitea_repo_url }}"
+  - regexp: "^  namespace: retail"
+    line: "  namespace: {{ ocp4_workload_ama_demo_demo_namespace }}"
+  - regexp: "^    namespace: retail"
+    line: "    namespace: {{ ocp4_workload_ama_demo_demo_namespace }}"
+
+- name: Commit changes to the repository
+  command:
+    chdir: "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}"
+    cmd: >-
+      git commit -a -m 'Updates for starting scenario.'
+  ignore_errors: true
+
+- name: Push all changes back to the {{ ocp4_workload_ama_demo_gitea_repo }} repository
+  command:
+    chdir: "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}"
+    cmd: >-
+      git push https://{{ ocp4_workload_ama_demo_gitea_user
+      }}:{{ ocp4_workload_ama_demo_gitea_user_password
+      }}@{{ _ocp4_workload_ama_demo_gitea_repo_route_url | urlsplit('hostname')
+      }}/{{ ocp4_workload_ama_demo_gitea_user }}/{{ ocp4_workload_ama_demo_gitea_repo }}
+
+- name: Create k8s resources
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - cicd/namespace-pipeline.yaml.j2
+  - cicd/namespace-demo.yaml.j2
+  - cicd/gitea-secret.yaml.j2
+  - cicd/rolebinding-clusterview.yaml.j2
+  - cicd/rolebinding-retail-pipeline.yaml.j2
+  - cicd/service-account.yaml.j2
+
+- name: Deploy tekton resources
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ ocp4_workload_ama_demo_pipeline_namespace }}"
+    src: "{{ item }}"
+  loop:
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/customers-tomcat-gitops/tekton/build-bot-sa.yaml"
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/customers-tomcat-gitops/tekton/git-user-secret.yaml"
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/customers-tomcat-gitops/tekton/buildah-task.yaml"
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/customers-tomcat-gitops/tekton/git-clone-task.yaml"
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/customers-tomcat-gitops/tekton/maven-with-subdir-task.yaml"
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/customers-tomcat-gitops/tekton/update-manifest-task.yaml"
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/customers-tomcat-gitops/tekton/customers-workspace-pvc.yaml"
+  # yamllint disable-line rule:line-length
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/customers-tomcat-gitops/tekton/customers-deployment-pipeline.yaml"
+
+- name: Create PipelineRun
+  when: ocp4_workload_ama_demo_pipeline_execute | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'pipelinerun.yaml.j2' ) | from_yaml }}"
+
+- name: Create ArgoCD instance
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'cicd/argocd.yaml.j2' ) | from_yaml }}"
+
+- name: Create orders PostgreSQL database
+  vars:
+    _ocp4_workload_ama_demo_db_app_name: "{{ ocp4_workload_ama_demo_orders_db_app_name }}"
+    _ocp4_workload_ama_demo_db_name: "{{ ocp4_workload_ama_demo_orders_db_name }}"
+    _ocp4_workload_ama_demo_db_user: "{{ ocp4_workload_ama_demo_orders_db_user }}"
+    _ocp4_workload_ama_demo_db_password: "{{ ocp4_workload_ama_demo_orders_db_password }}"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - postgresql/secret.yaml.j2
+  - postgresql/pvc.yaml.j2
+  - postgresql/deployment.yaml.j2
+  - postgresql/service.yaml.j2
+
+- name: Create inventory PostgreSQL database
+  vars:
+    _ocp4_workload_ama_demo_db_app_name: "{{ ocp4_workload_ama_demo_inventory_db_app_name }}"
+    _ocp4_workload_ama_demo_db_name: "{{ ocp4_workload_ama_demo_inventory_db_name }}"
+    _ocp4_workload_ama_demo_db_user: "{{ ocp4_workload_ama_demo_inventory_db_user }}"
+    _ocp4_workload_ama_demo_db_password: "{{ ocp4_workload_ama_demo_inventory_db_password }}"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - postgresql/secret.yaml.j2
+  - postgresql/pvc.yaml.j2
+  - postgresql/deployment.yaml.j2
+  - postgresql/service.yaml.j2
+
+- name: Create ArgoCD applications
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ item }}"
+  loop:
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/customers-application.yaml"
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/orders-application.yaml"
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/inventory-application.yaml"
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/gateway-application.yaml"
+  - "{{ ocp4_workload_ama_demo_home_directory }}/{{ ocp4_workload_ama_demo_gitea_repo }}/argocd/frontend-application.yaml"
