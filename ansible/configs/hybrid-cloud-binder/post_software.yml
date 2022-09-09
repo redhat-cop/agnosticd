@@ -25,6 +25,10 @@
         password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
         validate_certs: false
       register: __r_hub
+      retries: 60
+      delay: 15
+      until:
+      - __r_hub.k8s_auth.api_key is defined
 
     - name: create namespaces on hub for dev clusters
       k8s:
@@ -47,6 +51,10 @@
         password: "{{ aws_dev_a_provision_data.openshift_cluster_admin_password }}"
         validate_certs: false
       register: __r_aws_dev_a
+      retries: 60
+      delay: 15
+      until:
+      - __r_aws_dev_a.k8s_auth.api_key is defined
 
     - name: Logging into Azure OCP4 Dev A
       k8s_auth:
@@ -63,6 +71,10 @@
         password: "{{ aws_dev_a_provision_data.openshift_cluster_admin_password }}"
         validate_certs: false
       register: __r_azure_dev_a
+      retries: 60
+      delay: 15
+      until:
+      - __r_azure_dev_a.k8s_auth.api_key is defined
 
     - name: Import AWS OCP4 Cluster A to Hub
       vars:
@@ -80,6 +92,13 @@
       - './templates/managed-cluster.yaml.j2'
       - './templates/auto-import-secret.yaml.j2'
       - './templates/klusterlet-addon-config.yaml.j2'
+      register: __r_import_aws_dev_a
+      retries: 60
+      delay: 15
+        # TODO: need a better test
+        #until:
+        #- __r_import_aws_dev_a is defined
+
 
     - name: Import Azure OCP4 Cluster A to Hub
       vars:
@@ -97,9 +116,14 @@
       - './templates/managed-cluster.yaml.j2'
       - './templates/auto-import-secret.yaml.j2'
       - './templates/klusterlet-addon-config.yaml.j2'
+      register: __r_import_azure_dev_a
+      retries: 60
+      delay: 15
+        # TODO: need a better test
+        #until:
+        #- __r_import_azure_dev_a is defined
 
     - name: Validate Clusters Joined - aws-dev-a
-      ignore_errors: true
       k8s_info:
         host: "{{ __r_hub.k8s_auth.host }}"
         username: "{{ __r_hub.k8s_auth.username }}"
@@ -110,7 +134,8 @@
         name: aws-dev-a
         namespace: aws-dev-a
       register: __r_wait_aws_dev_a
-      retries: 20
+      ignore_errors: true
+      retries: 60
       delay: 15
       until:
       - __r_wait_aws_dev_a.resources is defined
@@ -132,7 +157,7 @@
         name: azure-dev-a
         namespace: azure-dev-a
       register: __r_wait_azure_dev_a
-      retries: 20
+      retries: 60
       delay: 15
       until:
       - __r_wait_azure_dev_a.resources is defined
@@ -155,10 +180,76 @@
         aws_dev_a_provision_data: "{{ aws_dev_a_provision_data }}"
         aws_hub_provision_data: "{{ aws_hub_provision_data }}"
 
-# TODO  copy the installation file into place
-  - name: Copy aws_dev_a_provision_data installation log file to Hub
-    debug:
-      msg: "TODO: put here the {{ aws_dev_a_provision_data }} instllation log"
+  - name: Make directory for UPI file exchange
+    file:
+      path: "{{ output_dir }}/upi-install"
+      state: directory
+      mode: 0755
+
+  - name: add aws_hub to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_hub_provision_data.bastion_public_hostname }}"
+      groups: ohc_hub
+
+  - name: add aws_dev_a to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_dev_a_provision_data.bastion_public_hostname }}"
+      groups: ohc_aws_dev_a
+
+- name: Step 005 Post Software - Fetch UPI files from AWS Dev A
+  hosts: ohc_aws_dev_a
+  become: true
+  gather_facts: false
+  tasks:
+
+  - name: fetch the install logs
+    ansible.builtin.fetch:
+      dest: "{{ output_dir }}/upi-install/openshift_install.log"
+      flat: true
+      src: "/home/ec2-user/cluster-{{ aws_dev_a_provision_data.guid }}/.openshift_install.log"
+
+  - name: fetch the install config
+    ansible.builtin.fetch:
+      dest: "{{ output_dir }}/upi-install/install-config.yaml.bak"
+      flat: true
+      src: "/home/ec2-user/cluster-{{ aws_dev_a_provision_data.guid }}/install-config.yaml.bak"
+
+- name: Step 005 Post Software - Copy UPI files to Hub
+  hosts: ohc_hub
+  become: true
+  gather_facts: false
+  tasks:
+
+  - name: Make directory for UPI file exchange
+    file:
+      path: "/home/{{ aws_dev_a_provision_data.bastion_ssh_user_name }}/cluster-{{ aws_dev_a_provision_data.guid }}/"
+      state: directory
+      owner: "{{ aws_dev_a_provision_data.bastion_ssh_user_name }}"
+      mode: 0755
+
+  - name: copy the install logs
+    ansible.builtin.copy:
+      src: "{{ output_dir }}/upi-install/openshift_install.log"
+      dest: "/home/{{ aws_dev_a_provision_data.bastion_ssh_user_name }}/cluster-{{ aws_dev_a_provision_data.guid }}/openshift_install.log"
+      owner: "{{ aws_dev_a_provision_data.bastion_ssh_user_name }}"
+      mode: 0666
+
+  - name: copy the install config
+    ansible.builtin.copy:
+      src: "{{ output_dir }}/upi-install/install-config.yaml.bak"
+      dest: "/home/{{ aws_dev_a_provision_data.bastion_ssh_user_name }}/cluster-{{ aws_dev_a_provision_data.guid }}/install-config.yaml.bak"
+      owner: "{{ aws_dev_a_provision_data.bastion_ssh_user_name }}"
+      mode: 0666
+
+- name: Step 005 Post Software - Report to Cloudforms
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+  - step005
+  - post_software
+  tasks:
 
   - name: Print string expected by Cloudforms
     debug:
