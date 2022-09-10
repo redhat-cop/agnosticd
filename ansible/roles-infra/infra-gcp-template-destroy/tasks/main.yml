@@ -1,6 +1,6 @@
 ---
 - name: Find managed_zone
-  gcp_dns_managed_zone_info:
+  google.cloud.gcp_dns_managed_zone_info:
     dns_name: '{{ cluster_dns_zone + "."}}'
     project: "{{ gcp_project_id }}"
     auth_kind: "{{ gcp_auth_type }}"
@@ -14,7 +14,7 @@
     - destroy_gcp_deployment
 
 - name: Remove delegation for NS from the main DNSZone
-  gcp_dns_resource_record_set:
+  google.cloud.gcp_dns_resource_record_set:
     project: "{{ gcp_project_id }}"
     auth_kind: "{{ gcp_auth_type }}"
     service_account_file: "{{ gcp_credentials_file }}"
@@ -31,7 +31,10 @@
     - destroy_gcp_deployment
 
 - name: Remove bastion entry from the main DNSZone
-  gcp_dns_resource_record_set:
+  when:
+    - gcp_managed_zone.resources[0] is defined
+    - gcp_managed_zone is defined
+  google.cloud.gcp_dns_resource_record_set:
     project: "{{ gcp_project_id }}"
     auth_kind: "{{ gcp_auth_type }}"
     service_account_file: "{{ gcp_credentials_file }}"
@@ -39,62 +42,60 @@
     name: '{{ "bastion." + guid + "." + cluster_dns_zone + "."}}'
     type: A
     state: absent
-  when:
-    - gcp_managed_zone.resources[0] is defined
-    - gcp_managed_zone is defined
   tags:
     - destroying
     - destroy_cloud_deployment
     - destroy_gcp_deployment
 
-- name: Destroy method deployment-manager
-  block:
-    - name: Delete the project secrets
-      command: "gcloud secrets delete {{ project_tag }}-bastion-ssh-secret -q"
-      environment:
-        PATH: '{{ output_dir }}/google-cloud-sdk/bin:/usr/bin:/usr/local/bin'
-        CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ gcp_credentials_file }}"
-        CLOUDSDK_COMPUTE_REGION: "{{ gcp_region }}"
-        CLOUDSDK_CONFIG: "{{ output_dir }}/.gcloud-{{ guid }}"
-        CLOUDSDK_CORE_PROJECT: "{{ gcp_project_id }}"
-      register: delete_secrets_result
-      failed_when:
-        - (delete_secrets_result.rc != 0)
-        - ("NOT_FOUND" not in delete_secrets_result.stderr)
-      when:
-        - cloud_provider == "gcp"
-      tags:
-        - destroying
-        - destroy_cloud_deployment
-        - destroy_gcp_secrets
+- name: Delete the project secrets
+  command: "gcloud secrets delete {{ project_tag }}-bastion-ssh-secret -q"
+  environment:
+    PATH: '{{ output_dir }}/google-cloud-sdk/bin:/usr/bin:/usr/local/bin'
+    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ gcp_credentials_file }}"
+    CLOUDSDK_COMPUTE_REGION: "{{ gcp_region }}"
+    CLOUDSDK_CONFIG: "{{ output_dir }}/.gcloud-{{ guid }}"
+    CLOUDSDK_CORE_PROJECT: "{{ gcp_project_id }}"
+  register: delete_secrets_result
+  failed_when:
+    - (delete_secrets_result.rc != 0)
+    - ("NOT_FOUND" not in delete_secrets_result.stderr)
+  tags:
+    - destroying
+    - destroy_cloud_deployment
+    - destroy_gcp_secrets
 
-    - name: Delete the deployment
-      command: "gcloud deployment-manager deployments delete {{ project_tag }}-base -q"
-      environment:
-        PATH: '{{ output_dir }}/google-cloud-sdk/bin:/usr/bin:/usr/local/bin'
-        CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ gcp_credentials_file }}"
-        CLOUDSDK_COMPUTE_REGION: "{{ gcp_region }}"
-        CLOUDSDK_CONFIG: "{{ output_dir }}/.gcloud-{{ guid }}"
-        CLOUDSDK_CORE_PROJECT: "{{ gcp_project_id }}"
-      tags:
-        - destroying
-        - destroy_cloud_deployment
-        - destroy_gcp_deployment
-      register: gcp_result
-      until: gcp_result is succeeded
-      retries: 6
-      delay: 10
-      ignore_errors: true
-      when:
-        - cloud_provider == "gcp"
+- name: Delete the deployment
+  command: "gcloud deployment-manager deployments delete {{ project_tag }}-base -q"
+  environment:
+    PATH: '{{ output_dir }}/google-cloud-sdk/bin:/usr/bin:/usr/local/bin'
+    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ gcp_credentials_file }}"
+    CLOUDSDK_COMPUTE_REGION: "{{ gcp_region }}"
+    CLOUDSDK_CONFIG: "{{ output_dir }}/.gcloud-{{ guid }}"
+    CLOUDSDK_CORE_PROJECT: "{{ gcp_project_id }}"
+  tags:
+    - destroying
+    - destroy_cloud_deployment
+    - destroy_gcp_deployment
+  register: gcp_result
+  until: gcp_result is succeeded
+  retries: 6
+  delay: 10
+  ignore_errors: true
 
-    - name: report error
-      fail:
-        msg: "FAIL {{ gcp_project_id }} GCP delete deployment"
-      when:
-        - gcp_result is failed
-        - cloud_provider == "gcp"
-      tags:
-        - destroying
-        - destroy_cloud_deployment
-        - destroy_gcp_deployment
+- name: report error
+  fail:
+    msg: "FAIL {{ gcp_project_id }} GCP delete deployment"
+  when: (gcp_result is failed) and ("code=404" not in gcp_result.stderr)
+  tags:
+    - destroying
+    - destroy_cloud_deployment
+    - destroy_gcp_deployment
+
+- name: Release external IP
+  google.cloud.gcp_compute_address:
+    name: "bastion-ip-{{ guid }}"
+    region: "{{ gcp_region }}"
+    project: "{{ gcp_project_id }}"
+    auth_kind: "{{ gcp_auth_type }}"
+    service_account_file: "{{ gcp_credentials_file }}"
+    state: absent
