@@ -6,7 +6,7 @@ Issue and install Let's Encrypt certificates to PAH
 Requirements
 ------------
 
-Any pre-requisites that may not be covered by Ansible itself or the role should be mentioned here. For instance, if the role uses the EC2 module, it may be a good idea to mention in this section that the boto package is required.
+n/a
 
 Role Variables
 --------------
@@ -16,7 +16,7 @@ See [defaults/main.yml](defaults/main.yml).
 Dependencies
 ------------
 
-n/a
+The Let's Encrypt CA isn't added to the CA trust, use the role `letsencrypt_ca_trust` for this.
 
 Example Playbook
 ----------------
