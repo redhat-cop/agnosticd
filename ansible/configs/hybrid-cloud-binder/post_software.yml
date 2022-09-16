@@ -1,3 +1,4 @@
+# vim: set ft=yaml.ansible
 ---
 - name: Step 005 Post Software
   hosts: localhost
@@ -12,6 +13,16 @@
     debug:
       msg:
       - Entering the open-hybrid-cloud-binder post_software.yml
+
+  - name: add aws_hub to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_hub_provision_data.bastion_public_hostname }}"
+      groups: ohc_hub
+
+  - name: add aws_dev_a to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_dev_a_provision_data.bastion_public_hostname }}"
+      groups: ohc_aws_dev_a
 
   - name: Logging into Hub
     k8s_auth:
@@ -178,16 +189,6 @@
       state: directory
       mode: 0755
 
-  - name: add aws_hub to inventory
-    ansible.builtin.add_host:
-      name: "{{ aws_hub_provision_data.bastion_public_hostname }}"
-      groups: ohc_hub
-
-  - name: add aws_dev_a to inventory
-    ansible.builtin.add_host:
-      name: "{{ aws_dev_a_provision_data.bastion_public_hostname }}"
-      groups: ohc_aws_dev_a
-
 - name: Step 005 Post Software - Fetch UPI files from AWS Dev A
   hosts: ohc_aws_dev_a
   become: true
@@ -243,15 +244,15 @@
         owner: "{{ aws_dev_a_provision_data.bastion_ssh_user_name }}"
         mode: 0666
 
-- name: Step 005 Post Software - Install RHACS Sensor
+- name: Step 005 Post Software - Install RHACS Secured Cluster
   hosts: localhost
   connection: local
   become: false
   gather_facts: false
   tasks:
-    - name: hybrid_cloud_binder_install_sensor
+    - name: hybrid_cloud_binder_install_secured_cluster
       when:
-        - hybrid_cloud_binder_install_sensor is true
+        - hybrid_cloud_binder_install_secured_cluster is true
       block:
 
       - name: Get Central URL
@@ -321,6 +322,84 @@
           validate_certs: false
           state: present
           definition: "{{ lookup('template', 'secured_cluster.yaml.j2') }}"
+
+- name: Get a token for pipelines from Central onto AWS Dev A
+  hosts: ohc_aws_dev_a
+  become: true
+  gather_facts: false
+  tasks:
+  - name: Check if desired virtualenv is available on the host
+    stat:
+      path: "/opt/virtualenvs/k8s/bin/python"
+    register: r_virtualenv
+  - name: Set Ansible Python interpreter to virtualenv
+    when: r_virtualenv.stat.exists
+    set_fact:
+      ansible_python_interpreter: "/opt/virtualenvs/k8s/bin/python"
+
+  - name: Call the OCP4 pipelines role
+    ansible.builtin.include_role:
+      name: ocp4_workload_rhacs_demo_pipeline
+    vars:
+      ocp4_workload_rhacs_central_admin_password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+
+  - name: Get roxctl onto AWS Dev A
+    become: true
+    get_url:
+      url: https://mirror.openshift.com/pub/rhacs/assets/latest/bin/Linux/roxctl
+      dest: /usr/local/bin/roxctl
+      mode: '0755'
+
+        #- name: Logging into Hub
+        #shell: oc login -u {{ aws_hub_provision_data.openshift_cluster_admin_username }} -p {{ aws_hub_provision_data.openshift_cluster_admin_password }} {{ aws_hub_provision_data.openshift_api_url }} --insecure-skip-tls-verify=true # yamllint disable-line rule:line-length
+
+  - name: Get Central URL
+    k8s_info:
+      api_version: route.openshift.io/v1
+      kind: Route
+      name: central
+      namespace: stackrox
+    register: __r_rhacs_central_route
+    ignore_errors: true
+    retries: 60
+    delay: 15
+    until:
+    - __r_rhacs_central_route.resources[0] is defined
+    - __r_rhacs_central_route.resources[0].spec.host is defined
+
+  - name: Store central route as a fact
+    set_fact:
+      __rhacs_central_url: "{{ __r_rhacs_central_route.resources[0].spec.host }}"
+
+  - name: Create API token of role Admin
+    uri:
+      url: "https://{{ __rhacs_central_url }}/v1/apitokens/generate"
+      body: '{"name":"pipelines-ci-token-aws-dev-a","role":null,"roles":["Admin"]}'
+      method: POST
+      user: admin
+      password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+      body_format: json
+      force_basic_auth: true
+      validate_certs: false
+    register: __r_ci_token_json
+
+  - name: Get API token from response
+    set_fact:
+      __rhacs_api_token: "{{ __r_ci_token_json.json.token }}"
+
+  - name: Write API token to bastion environment env
+    become: true
+    lineinfile:
+      path: "/home/{{ aws_dev_a_provision_data.bastion_ssh_user_name }}/.bashrc"
+      regexp: "^export ROX_API_TOKEN="
+      line: "export ROX_API_TOKEN={{ __rhacs_api_token }}"
+
+  - name: Write Rox Central API address to bastion env
+    become: true
+    lineinfile:
+      path: "/home/{{ aws_dev_a_provision_data.bastion_ssh_user_name }}/.bashrc"
+      regexp: "^export ROX_CENTRAL_ADDRESS="
+      line: "export ROX_CENTRAL_ADDRESS={{ __rhacs_central_url }}"
 
 - name: Step 005 Post Software - Report to Cloudforms
   hosts: localhost
