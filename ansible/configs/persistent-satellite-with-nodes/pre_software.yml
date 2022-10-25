@@ -1,0 +1,131 @@
+---
+- name: Step 003 Pre Software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - debug:
+        msg: "Step 003 Pre Software"
+    - import_role:
+        name: infra-local-create-ssh_key
+      when: set_env_authorized_key | bool
+
+- name: Set ssh authorized key for all hosts
+  hosts: all
+  become: true
+  tags:
+    - step004
+    - common_tasks
+  roles:
+    - { role: "set_env_authorized_key", when: 'set_env_authorized_key | bool' }
+
+- name: Remove yum repos
+  hosts: nodes
+  become: true
+  tasks:
+    - name: Remove rh-amazon-rhui-client package
+      package:
+        name: rh-amazon-rhui-client
+        state: absent
+        disablerepo: "*"    ## This option is undocumented but works, Pulls from yum & dnf
+      when: cloud_provider == 'ec2'
+    - name: Find current repository files
+      find:
+        paths: /etc/yum.repos.d
+        recurse: no
+        patterns:
+        - '*.repo'
+      register: r_find_repos
+    - name: Remove current repository files
+      file:
+        path: "{{ file.path }}"
+        state: absent
+      loop: "{{ r_find_repos.files }}"
+      loop_control:
+        loop_var: file
+        label: "{{ file.path }}"
+      ignore_errors: true
+    - name: sat | Set set_repositories_subscription_hostname with randomization
+      when: set_repositories_subscription_hostname is not defined
+      set_fact:
+        set_repositories_subscription_hostname: >-
+          {%- if guid in inventory_hostname -%}
+          {{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic | lower }}
+          {%- else -%}
+          {{ inventory_hostname }}.{{ guid }}.internal-{{ ansible_date_time.iso8601_basic | lower }}
+          {%- endif -%}
+    - name: sat | Set network.fqdn in /etc/rhsm/facts/katello.facts
+      copy:
+        dest: /etc/rhsm/facts/katello.facts
+        content: "{{ __content | to_json }}"
+      vars:
+        __content:
+          network.fqdn: "{{ set_repositories_subscription_hostname }}"
+
+- name: Configuring Bastion Hosts
+  hosts: bastions 
+  become: true
+  tags:
+    - step004
+    - bastion_tasks
+  roles:
+    - { role: "set-repositories", when: 'repo_method is defined' }
+    - { role: "common", when: 'install_common | default(true) | bool' }
+
+- name: Configuring Bastion Hosts
+  hosts: bastions 
+  become: true
+  tags:
+    - step004
+    - bastion_tasks
+  pre_tasks:
+    - name: install common packages for RHEL 9
+      yum:
+        state: present
+        name: "{{ common_packages_el9 }}"
+      register: yumr
+      until: yumr is succeeded
+      retries: 10
+      delay: 10
+  roles:
+    - { role: "bastion", when: 'install_bastion | default(true) |bool' }
+    - { role: "bastion-student-user", when: 'install_student_user | default(true) | bool' }
+  tasks:
+    - name: Setup Student SSH Key
+      when:
+      - install_student_user | bool
+      - student_name is defined
+      - env_authorized_key is defined
+      block:
+      - name: Copy SSH private key to student user .ssh directory
+        copy:
+          src: "/root/.ssh/{{ env_authorized_key }}.pem"
+          dest: "~{{ student_name }}/.ssh/{{ env_authorized_key }}.pem"
+          mode: u=rw,go=
+          owner: "{{ student_name }}"
+          remote_src: true
+      - name: Copy SSH public key to student user .ssh directory
+        copy:
+          src: "/root/.ssh/{{ env_authorized_key }}.pub"
+          dest: "~{{ student_name }}/.ssh/{{ env_authorized_key }}.pub"
+          mode: u=rw,go=
+          owner: "{{ student_name }}"
+          remote_src: true
+      - name: Copy SSH config to student user .ssh directory
+        copy:
+          src: "/root/.ssh/config"
+          dest: "~{{ student_name }}/.ssh/config"
+          mode: u=rw,go=
+          owner: "{{ student_name }}"
+          remote_src: true
+
+- name: PreSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - flight_check
+  tasks:
+    - debug:
+        msg: "Pre-Software checks completed successfully"
