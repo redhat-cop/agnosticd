@@ -1,0 +1,236 @@
+---
+- name: Create k8s namespaces
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - cicd/namespace-ci.yaml.j2
+  - cicd/namespace-coolstore.yaml.j2
+
+- name: Create Sonarqube and Stackrox resources
+  include_tasks: "{{ item }}"
+  loop:
+  - create-sonarqube-resources.yml
+  - create-stackrox-secrets.yml
+
+- name: Retrieve Gitea instance
+  kubernetes.core.k8s_info:
+    api_version: gpte.opentlc.com/v1
+    kind: Gitea
+    name: "{{ ocp4_workload_coolstore_apac_summit_instance }}"
+    namespace: "{{ ocp4_workload_coolstore_apac_summit_project }}"
+  register: r_gitea
+
+- name: Set Gitea repo variables
+  set_fact:
+    _ocp4_workload_coolstore_apac_summit_hostname: >-
+      {{ r_gitea.resources[0].status.giteaHostname }}
+    _ocp4_workload_coolstore_apac_summit_repo_route_url: >-
+      {{ r_gitea.resources[0].status.giteaRoute }}
+    _ocp4_workload_coolstore_apac_summit_repo_url: >-
+      {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
+      ocp4_workload_coolstore_apac_summit_user | urlencode }}:{{
+      ocp4_workload_coolstore_apac_summit_user_password | urlencode }}@{{
+      r_gitea.resources[0].status.giteaHostname }}/{{
+      ocp4_workload_coolstore_apac_summit_user }}/{{ ocp4_workload_coolstore_apac_summit_repo }}
+    _ocp4_workload_coolstore_apac_summit_repo_coolstore_argocd_repo_url: >-
+      {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
+      ocp4_workload_coolstore_apac_summit_user | urlencode }}:{{
+      ocp4_workload_coolstore_apac_summit_user_password | urlencode }}@{{
+      r_gitea.resources[0].status.giteaHostname }}/{{
+      ocp4_workload_coolstore_apac_summit_user }}/{{ ocp4_workload_coolstore_apac_summit_repo_gitops }}
+
+- name: Get subdomain
+  when: ocp4_workload_gitea_operator_gitea_hostname | default("") | length > 0
+  block:
+  - name: Determine Wildcard Domain
+    kubernetes.core.k8s_info:
+      api_version: operator.openshift.io/v1
+      kind: IngressController
+      name: default
+      namespace: openshift-ingress-operator
+    register: r_ingress_controller
+
+  - name: Set WEB UI hostname and SSO URL variable
+    set_fact:
+      _ocp4_workload_coolstore_apac_summit_web_ui_host: >-
+       web-ui-{{ ocp4_workload_coolstore_apac_summit_coolstore_namespace }}.{{
+            r_ingress_controller.resources[0].status.domain }}
+      _ocp4_workload_coolstore_apac_summit_sso_url: >-
+       https://secure-sso-{{ ocp4_workload_coolstore_apac_summit_ci_namespace }}.{{
+            r_ingress_controller.resources[0].status.domain }}/auth
+
+- name: Create k8s build configs and pipeline resources
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - cicd/coolstore-imagestreams.yaml.j2
+  - cicd/coolstore-build-configs.yaml.j2
+  - cicd/ci-imagestreams.yaml.j2
+  - cicd/ci-build-configs.yaml.j2
+  - cicd/generate-tag-task.yaml.j2
+  - cicd/image-check-task.yaml.j2
+  - cicd/image-scan-task.yaml.j2
+  - cicd/unit-test-task.yaml.j2
+  - cicd/update-repo-task.yaml.j2
+  - cicd/sonarqube-scan-task.yaml.j2
+  - cicd/web-ui-ci-pipeline.yaml.j2
+  - cicd/coolstore-event-listener.yaml.j2
+
+- name: Wait for builds to start
+  ansible.builtin.pause:
+    seconds: 10
+
+- name: Check for build complete
+  ansible.builtin.shell: |
+    oc get builds -n coolstore | grep Running
+  register: r_builds
+  until: r_builds.stdout | length == 0
+  delay: 10
+  retries: 120
+  ignore_errors: true
+
+- name: Create pipeline run
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+    namespace: "{{ ocp4_workload_coolstore_apac_summit_coolstore_namespace }}"
+  loop:
+  - cicd/web-ui-ci-pipelinerun.yaml.j2
+
+- name: Wait for pipeline to start
+  ansible.builtin.pause:
+    seconds: 10
+
+- name: Get current running pipeline
+  ansible.builtin.shell: |
+    oc get pipelinerun -n {{ ocp4_workload_coolstore_apac_summit_coolstore_namespace }} | grep Running | awk '{print $1}'
+  register: r_pipeline_run
+
+- name: Wait until {{ r_pipeline_run.stdout }} completes
+  kubernetes.core.k8s_info:
+    api_version: tekton.dev/v1beta1
+    kind: PipelineRun
+    namespace: "{{ ocp4_workload_coolstore_apac_summit_coolstore_namespace }}"
+    name: "{{ r_pipeline_run.stdout }}"
+  register: r_pipline_status
+  until:
+  - r_pipline_status.resources is defined
+  - r_pipline_status.resources | length > 0
+  - r_pipline_status.resources[0].status is defined
+  - r_pipline_status.resources[0].status.conditions is defined
+  - r_pipline_status.resources[0].status.conditions | length > 0
+  - r_pipline_status.resources[0].status.conditions[0].status == 'True'
+  delay: 10
+  retries: 60
+
+- name: Deploy ArgoCD applications
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - cicd/app-coolstore-ci.yaml.j2
+  - cicd/app-coolstore-microservice.yaml.j2
+
+- name: Wait until Event Listener Route exists in the coolstore namespace
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: "{{ ocp4_workload_coolstore_apac_summit_coolstore_namespace }}"
+    name: el-el-coolstore
+  register: r_webhook_route
+  until: r_webhook_route.resources | length > 0
+  delay: 10
+  retries: 30
+
+- name: Generate web hook secret if not defined
+  when: ocp4_workload_coolstore_apac_summit_webhook_secret | length == 0
+  set_fact:
+    ocp4_workload_coolstore_apac_summit_webhook_secret: >-
+      {{ lookup('password', '/dev/null length={{ ocp4_workload_coolstore_apac_summit_webhook_secret_length }} chars=ascii_letters,digits') }}
+
+- name: Set webhook repository
+  set_fact:
+    _ocp4_workload_coolstore_apac_webhook_repository: >-
+      {{ _ocp4_workload_coolstore_apac_summit_repo_url }}
+
+- name: Register event listeners in Gitea
+  include_tasks: update-webhook.yml
+  loop:
+  - "{{ ocp4_workload_coolstore_apac_summit_repo }}"
+  loop_control:
+    loop_var: _ocp4_workload_coolstore_apac_webhook_repository
+
+- name: Get the OpenShift GitOps Route
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Route
+    namespace: openshift-gitops
+    label_selectors:
+    - app.kubernetes.io/name=openshift-gitops-server
+  register: r_route_kinfo
+
+- name: Get the OpenShift GitOps Secret Information
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: openshift-gitops
+    label_selectors:
+    - app.kubernetes.io/name=openshift-gitops-cluster
+  register: r_secret_kinfo
+
+- name: Get the ACS Route
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Route
+    name: central
+    namespace: stackrox
+  register: r_route_acs
+
+- name: Get ACS/Stackrox Secret Information
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: openshift-gitops
+    label_selectors:
+    - app.kubernetes.io/name=openshift-gitops-cluster
+  register: r_secret_acs
+
+- name: Get the SonarQube Route
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Route
+    name: sonarqube
+    namespace: sonarqube
+  register: r_route_sonar
+
+- name: Print Access information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Application url: http://{{ _ocp4_workload_coolstore_apac_summit_web_ui_host }}"
+  - "Application username: appuser"
+  - "Application password: coolstore"
+  - ""
+  - "OpenShift GitOps (argocd) url: https://{{r_route_kinfo.resources.0.spec.host }}"
+  - "OpenShift GitOps username: admin"
+  - "OpenShift GitOps admin password: {{ r_secret_kinfo.resources.0.data['admin.password'] | b64decode }}"
+  - ""
+  - "SonarQube url: https://{{ r_route_sonar.resources.0.spec.host }}"
+  - "SonarQube user: admin"
+  - "SonarQube password: {{ common_password }}"
+
+- name: Print Access information
+  agnosticd_user_info:
+    data:
+      app_url: "http://{{ _ocp4_workload_coolstore_apac_summit_web_ui_host }}"
+      app_username: "appuser"
+      app_password: "coolstore"
+      gitops_argocd_url: "https://{{r_route_kinfo.resources.0.spec.host }}"
+      gitops_argocd_username: "admin"
+      gitops_argocd_admin_password: "{{ r_secret_kinfo.resources.0.data['admin.password'] | b64decode }}"
+      sonarqube_url: "https://{{ r_route_sonar.resources.0.spec.host }}"
+      sonarqube_username: "admin"
+      sonarqube_password: "{{ common_password }}"
