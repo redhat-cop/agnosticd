@@ -12,77 +12,135 @@
       state: present
       definition: "{{ lookup('template',  'apps/aap-operator.yml.j2' ) | from_yaml }}"
 
-  - name: Set up automation controller - argocd
+  - name: Set up automation controller
     when: ocp4_workload_gitops_aap_install.controller
-    kubernetes.core.k8s:
-      state: present
-      definition: "{{ lookup('template',  'apps/aap-controller.yml.j2' ) | from_yaml }}"
+    block:
+      - name: Set up automation controller - argocd
+        kubernetes.core.k8s:
+          state: present
+          definition: "{{ lookup('template',  'apps/aap-controller.yml.j2' ) | from_yaml }}"
 
-  - name: Set up automation hub - argocd
+      - name: Retrieve created controller route
+        k8s_facts:
+          api_version: "route.openshift.io/v1"
+          kind: Route
+          name: controller
+          namespace: ansible-automation-platform
+        register: r_route
+        until: r_route.resources[0].spec.host is defined
+        retries: 300
+        delay: 30
+
+      - name: Retrieve aap secret
+        k8s_facts:
+          api_version: "v1"
+          kind: Secret
+          name: controller-admin-password
+          namespace: ansible-automation-platform
+        register: r_secret
+        until:
+          - r_secret.resources is defined
+          - r_secret.resources | length > 0
+          - r_secret.resources[0].data.password
+        retries: 300
+        delay: 30
+
+      - name: Get automation_controller route hostname
+        set_fact:
+          automation_controller_hostname: "{{ r_route.resources[0].spec.host }}"
+          automation_controller_admin_password: "{{ r_secret.resources[0].data.password |string |b64decode }}"
+
+      - name: wait for automation_controller to be running
+        uri:
+          url: http://{{ automation_controller_hostname }}/api/v2/ping/
+          status_code: 200
+        register: result
+        until: result.json.version is defined
+        retries: 300
+        delay: 30
+
+      - name: Pause for 5 minutes for AC to be ready
+        pause:
+          minutes: 5
+
+      - name: Display version
+        debug:
+          msg: "{{ result.json.version }}"
+        when: not silent | bool
+
+  - name: Set up automation hub
     when: ocp4_workload_gitops_aap_install.hub
-    kubernetes.core.k8s:
-      state: present
-      definition: "{{ lookup('template',  'apps/aap-hub.yml.j2' ) | from_yaml }}"
+    block:
+      - name: Set up automation hub - argocd
+        kubernetes.core.k8s:
+          state: present
+          definition: "{{ lookup('template',  'apps/aap-hub.yml.j2' ) | from_yaml }}"
 
-  - name: Retrieve created route
-    k8s_facts:
-      api_version: "route.openshift.io/v1"
-      kind: Route
-      name: controller
-      namespace: ansible-automation-platform
-    register: r_route
-    until: r_route.resources[0].spec.host is defined
-    retries: 300
-    delay: 30
+      - name: Retrieve created hub route
+        k8s_facts:
+          api_version: "route.openshift.io/v1"
+          kind: Route
+          name: hub
+          namespace: ansible-automation-platform
+        register: r_route
+        until: r_route.resources[0].spec.host is defined
+        retries: 300
+        delay: 30
 
-  - name: Retrieve aap secret
-    k8s_facts:
-      api_version: "v1"
-      kind: Secret
-      name: controller-admin-password
-      namespace: ansible-automation-platform
-    register: r_secret
-    until: r_secret.resources[0].data.password
-    retries: 300
-    delay: 30
+      - name: Retrieve hub secret
+        k8s_facts:
+          api_version: "v1"
+          kind: Secret
+          name: hub-admin-password
+          namespace: ansible-automation-platform
+        register: r_secret
+        until:
+          - r_secret.resources is defined
+          - r_secret.resources | length > 0
+          - r_secret.resources[0].data.password
+        retries: 300
+        delay: 30
 
-  - name: Get automation_controller route hostname
-    set_fact:
-      automation_controller_hostname: "{{ r_route.resources[0].spec.host }}"
-      automation_controller_admin_password: "{{ r_secret.resources[0].data.password |string |b64decode }}"
+      - name: Get automation_hub route hostname
+        set_fact:
+          automation_hub_hostname: "{{ r_route.resources[0].spec.host }}"
+          automation_hub_admin_password: "{{ r_secret.resources[0].data.password |string |b64decode }}"
 
-  - name: wait for automation_controller to be running
-    uri:
-      url: http://{{ automation_controller_hostname }}/api/v2/ping/
-      status_code: 200
-    register: result
-    until: result.json.version is defined
-    retries: 300
-    delay: 30
+  - name: Check if Controller Access information required
+    when: ocp4_workload_gitops_aap_install.controller
+    block:
+        - name: Print Controller Access information
+          agnosticd_user_info:
+            msg: "{{ item }}"
+          loop:
+          - "Automation Controller Web URL: https://{{ automation_controller_hostname }}"
+          - "Login Name:  admin"
+          - "Login Password: {{ automation_controller_admin_password }}"
 
-  - name: Pause for 5 minutes for AC to be ready
-    pause:
-      minutes: 5
+        - name: Store Controller Access information
+          agnosticd_user_info:
+            data:
+              ac_web_url: "https://{{ automation_controller_hostname }}"
+              ac_user: "admin"
+              ac_password: "{{ automation_controller_admin_password }}"
 
-  - name: Display version
-    debug:
-      msg: "{{ result.json.version }}"
-    when: not silent | bool
+  - name: Check if Hub Access information required
+    when: ocp4_workload_gitops_aap_install.hub
+    block:
+        - name: Print Hub Access information
+          agnosticd_user_info:
+            msg: "{{ item }}"
+          loop:
+          - "Automation Hub Web URL: https://{{ automation_hub_hostname }}"
+          - "Login Name:  admin"
+          - "Login Password: {{ automation_hub_admin_password }}"
 
-  - name: Print Access information
-    agnosticd_user_info:
-      msg: "{{ item }}"
-    loop:
-    - "Automation Controller Web URL: https://{{ automation_controller_hostname }}"
-    - "Login Name:  admin"
-    - "Login Password: {{ automation_controller_admin_password }}"
-
-  - name: Print Access information
-    agnosticd_user_info:
-      data:
-        ac_web_url: "https://{{ automation_controller_hostname }}"
-        ac_user: "admin"
-        ac_password: "{{ automation_controller_admin_password }}"
+        - name: Store Hub Access information
+          agnosticd_user_info:
+            data:
+              ah_web_url: "https://{{ automation_hub_hostname }}"
+              ah_user: "admin"
+              ah_password: "{{ automation_hub_admin_password }}"
 
   - name: Openshift Gitops server info
     include_tasks: argocd_info.yml
