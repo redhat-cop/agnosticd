@@ -15,6 +15,8 @@ sudo systemctl stop tomcat
 sudo rm -rf /usr/local/tomcat/webapps/customers-tomcat-0.0.1-SNAPSHOT*
 sudo rm -rf /usr/local/tomcat/webapps/ROOT/*
 
+tar -xvzf coolstore-legacy-0.0.1-SNAPSHOT.tar.gz
+
 sudo cp -rf /tmp/coolstore-legacy-0.0.1-SNAPSHOT/* /usr/local/tomcat/webapps/ROOT/
 
 sudo chown -R tomcat:tomcat /usr/local/tomcat/webapps/ROOT/*
@@ -23,12 +25,8 @@ sudo rm -rf /usr/local/tomcat/logs/*
 
 sudo systemctl start tomcat
 
-curl -i http://localhost:8080/customers
-curl -i http://localhost:8080/customers/1
-curl -i http://localhost:8080/products
-curl -i http://localhost:8080/products/1
-curl -i http://localhost:8080/orders
-curl -i http://localhost:8080/orders/1
+curl -i http://localhost:8080/health/live
+curl -i http://localhost:8080/health/ready
 
 sudo systemctl stop tomcat
 
