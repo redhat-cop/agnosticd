@@ -1,0 +1,106 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Set up a namespace for the execution environment
+  kubernetes.core.k8s:
+    state: present
+    api_version: v1
+    kind: Namespace
+    name: "{{ ocp4_workload_ansible_ee_namespace }}"
+
+- name: Retrieve created hub route
+  k8s_facts:
+    api_version: "route.openshift.io/v1"
+    kind: Route
+    name: hub
+    namespace: ansible-automation-platform
+  register: r_route
+  until: r_route.resources[0].spec.host is defined
+  retries: 300
+  delay: 30
+
+- name: Retrieve hub secret
+  k8s_facts:
+    api_version: "v1"
+    kind: Secret
+    name: hub-admin-password
+    namespace: ansible-automation-platform
+  register: r_secret
+  until:
+  - r_secret.resources is defined
+  - r_secret.resources | length > 0
+  - r_secret.resources[0].data.password
+  retries: 300
+  delay: 30
+
+- name: Base64 encode basic auth
+  set_fact:
+    _docker_registry: "{{ r_route.resources[0].spec.host }}"
+    _docker_registry_password: "{{ r_secret.resources[0].data.password | b64decode }}"
+    _docker_registry_auth: "admin:{{ r_secret.resources[0].data.password | b64decode }}"
+
+- name: Set docker config json
+  set_fact:
+    _docker_config: "{{ lookup('template', 'templates/docker-config.json.j2') | to_nice_json | b64encode }}"
+
+- name: Create secrets and link service account
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+    namespace: "{{ ocp4_workload_ansible_ee_namespace }}"
+    merge_type: strategic-merge
+  loop:
+  - ./templates/hub-push-secret.yml.j2
+  - ./templates/registry-pull-secret.yml.j2
+  - ./templates/link-secret-sa.yml.j2
+
+- name: Apply pipeline resources
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+    namespace: "{{ ocp4_workload_ansible_ee_namespace }}"
+  loop:
+  - ./templates/pvc.yml.j2
+  - ./templates/ansible-builder-task.yml.j2
+  - ./templates/pipeline-ansible-builder.yml.j2
+  - ./templates/trigger-binding.yml.j2
+  - ./templates/trigger-template.yml.j2
+  - ./templates/trigger.yml.j2
+  - ./templates/event-listener.yml.j2
+  - ./templates/el-route.yml.j2
+  - ./templates/github-secret.yml.j2
+
+- name: Apply pipeline resources
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'templates/pipeline-run.yml.j2' ) | from_yaml }}"
+    namespace: "{{ ocp4_workload_ansible_ee_namespace }}"
+  with_items: "{{ ocp4_workload_ansible_ee_image_build }}"
+
+- name: Retrieve created event listener route
+  k8s_facts:
+    api_version: "route.openshift.io/v1"
+    kind: Route
+    name: ansible-ee-el
+    namespace: "{{ ocp4_workload_ansible_ee_namespace }}"
+  register: r_el_route
+  until: r_el_route.resources[0].spec.host is defined
+  retries: 300
+  delay: 30
+
+- name: Set event listener route variable
+  set_fact:
+    _event_listener_route: http://{{ r_el_route.resources[0].spec.host }}
+
+- name: Create webhooks
+  include_tasks: files/create-git-webhooks.yml
+  loop: "{{ ocp4_workload_ansible_ee_image_build }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
