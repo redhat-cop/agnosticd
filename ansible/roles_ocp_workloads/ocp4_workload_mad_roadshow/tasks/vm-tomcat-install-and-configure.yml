@@ -1,0 +1,166 @@
+---
+- name: Setup Tomcat VM from pre-installed template
+  when: not ocp4_workload_mad_roadshow_oracle_vm_install_from_scratch | bool
+  block:
+  # "Legacy" app reads connections properties from /opt/config/persistence.properties
+  # Update properties from the template
+  - name: Copy persistence.properties template
+    ansible.builtin.template:
+      src: tomcat/persistence.properties.j2
+      dest: /opt/config/persistence.properties
+      owner: tomcat
+      group: tomcat
+      mode: 0664
+
+  - name: Enable and start Tomcat systemd service
+    ansible.builtin.systemd:
+      name: tomcat
+      enabled: true
+      state: restarted
+      daemon_reload: true
+
+- name: Setup Tomcat VM from scratch
+  when: ocp4_workload_mad_roadshow_oracle_vm_install_from_scratch | bool
+  block:
+  - name: Open firewall ports 8080, 8443
+    ansible.builtin.firewalld:
+      state: enabled
+      immediate: true
+      permanent: true
+      port: "{{ item }}"
+    loop:
+    - "8080/tcp"
+    - "8443/tcp"
+
+  - name: Install Tomcat prerequisites
+    ansible.builtin.package:
+      state: present
+      name:
+      - java-1.8.0-openjdk
+      - java-1.8.0-openjdk-devel
+      - maven
+      - git
+
+  - name: Set up .gitconfig
+    ansible.builtin.copy:
+      src: tomcat/gitconfig
+      dest: "/home/{{ ocp4_workload_mad_roadshow_vm_user_name }}//.gitconfig"
+      owner: "{{ ocp4_workload_mad_roadshow_vm_user_name }}"
+      mode: 0664
+
+  # Configure and build the customer legacy application
+  - name: Make sure cloned repo directory does not exist
+    ansible.builtin.file:
+      path: "/home/{{ ocp4_workload_mad_roadshow_vm_user_name }}/{{ ocp4_workload_mad_roadshow_tomcat_repo_name }}"
+      state: absent
+
+  - name: Clone application source code
+    ansible.builtin.git:
+      accept_hostkey: true
+      force: true
+      repo: >-
+        {{ ocp4_workload_mad_roadshow_tomcat_repo_ssl | bool | ternary( 'https', 'http' ) }}://{{
+        ocp4_workload_mad_roadshow_tomcat_repo_user | urlencode }}:{{
+        ocp4_workload_mad_roadshow_tomcat_repo_user_password | urlencode }}@gitea.{{
+        _ocp4_workload_mad_roadshow_apps_domain }}/{{
+        ocp4_workload_mad_roadshow_tomcat_repo_user }}/{{ ocp4_workload_mad_roadshow_tomcat_repo_name }}.git
+      dest: "/home/{{ ocp4_workload_mad_roadshow_vm_user_name }}/{{ ocp4_workload_mad_roadshow_tomcat_repo_name }}"
+      version: "{{ ocp4_workload_mad_roadshow_tomcat_repo_branch }}"
+
+  - name: Fix repository ownership
+    ansible.builtin.file:
+      state: directory
+      recurse: true
+      path: "/home/{{ ocp4_workload_mad_roadshow_vm_user_name }}/{{ ocp4_workload_mad_roadshow_tomcat_repo_name }}"
+      owner: "{{ ocp4_workload_mad_roadshow_vm_user_name }}"
+
+  - name: Remove persistence.properties from cloned source
+    ansible.builtin.file:
+      state: absent
+      path: >-
+        /home/{{ ocp4_workload_mad_roadshow_vm_user_name }}/{{
+        ocp4_workload_mad_roadshow_tomcat_repo_name }}/customers-tomcat-legacy/src/main/resources/persistence.properties"
+
+  - name: Build customer application
+    become: true
+    become_user: "{{ ocp4_workload_mad_roadshow_vm_user_name }}"
+    block:
+    - name: Build config-utils library
+      ansible.builtin.command:
+        chdir: "/home/{{ ocp4_workload_mad_roadshow_vm_user_name }}/{{ ocp4_workload_mad_roadshow_tomcat_repo_name }}/config-utils"
+        cmd: "mvn install"
+
+    - name: Build application WAR file
+      ansible.builtin.command:
+        chdir: "/home/{{ ocp4_workload_mad_roadshow_vm_user_name }}/{{ ocp4_workload_mad_roadshow_tomcat_repo_name }}/customers-tomcat-legacy"
+        cmd: "mvn package"
+
+  # Now install and configure Tomcat Server
+  - name: Create group tomcat
+    ansible.builtin.group:
+      name: tomcat
+      state: present
+
+  - name: Create tomcat user
+    ansible.builtin.user:
+      name: tomcat
+      group: tomcat
+      shell: /sbin/nologin
+      create_home: false
+
+  - name: Ensure necessary directories exist
+    ansible.builtin.file:
+      path: "{{ item }}"
+      state: directory
+      owner: tomcat
+      group: tomcat
+      mode: 0775
+    loop:
+    - /usr/local/tomcat
+    - /opt/config
+
+  - name: Download and install Tomcat
+    ansible.builtin.unarchive:
+      src: "{{ ocp4_workload_mad_roadshow_tomcat_download_url }}"
+      remote_src: true
+      dest: /usr/local/tomcat
+      owner: tomcat
+      group: tomcat
+      mode: 0775
+      extra_opts: --strip-components=1
+    args:
+      creates: /usr/local/tomcat/bin/startup.sh
+
+  # "Legacy" app reads connections properties from /opt/config/persistence.properties
+  - name: Copy persistence.properties template
+    ansible.builtin.template:
+      src: tomcat/persistence.properties.j2
+      dest: /opt/config/persistence.properties
+      owner: tomcat
+      group: tomcat
+      mode: 0664
+
+  - name: Add previously built Tomcat customer application
+    ansible.builtin.copy:
+      remote_src: true
+      src: "/home/{{ ocp4_workload_mad_roadshow_vm_user_name }}/{{
+        ocp4_workload_mad_roadshow_tomcat_repo_name }}/customers-tomcat-legacy/target/customers-tomcat-0.0.1-SNAPSHOT.war"
+      dest: /usr/local/tomcat/webapps/customers-tomcat-0.0.1-SNAPSHOT.war
+      owner: tomcat
+      group: tomcat
+      mode: 0664
+
+  - name: Create Tomcat systemd service
+    ansible.builtin.copy:
+      src: tomcat/tomcat.service
+      dest: /etc/systemd/system/tomcat.service
+      owner: root
+      group: root
+      mode: 0644
+
+  - name: Enable and start Tomcat systemd service
+    ansible.builtin.systemd:
+      name: tomcat
+      enabled: true
+      state: started
+      daemon_reload: true
