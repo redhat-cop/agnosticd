@@ -1,0 +1,106 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Retrieve Automation controller hub info
+  when:
+  - ocp4_workload_tekton_ansible_ee_registry_host is not defined
+  - ocp4_workload_tekton_ansible_ee_registry_password is not defined
+  block:
+  - name: Retrieve created hub route
+    k8s_facts:
+      api_version: "route.openshift.io/v1"
+      kind: Route
+      name: hub
+      namespace: "{{ ocp4_workload_tekton_ansible_ee_hub_namespace }}"
+    register: r_hub_route
+    until: r_hub_route.resources[0].spec.host is defined
+    retries: 300
+    delay: 30
+
+  - name: Retrieve hub secret
+    k8s_facts:
+      api_version: "v1"
+      kind: Secret
+      name: "{{ ocp4_workload_tekton_ansible_ee_hub_admin_secret }}"
+      namespace: "{{ ocp4_workload_tekton_ansible_ee_hub_namespace }}"
+    register: r_hub_secret
+    until:
+    - r_hub_secret.resources is defined
+    - r_hub_secret.resources | length > 0
+    - r_hub_secret.resources[0].data.password
+    retries: 300
+    delay: 30
+
+  - name: Base64 encode basic auth
+    set_fact:
+      ocp4_workload_tekton_ansible_ee_registry_host: "{{ r_route.resources[0].spec.host }}"
+      ocp4_workload_tekton_ansible_ee_registry_password: "{{ r_secret.resources[0].data.password | b64decode }}"
+
+- name: Set docker config json
+  set_fact:
+    _auth_config: "{{ lookup('template', 'templates/docker-config.json.j2') | to_nice_json | b64encode }}"
+
+- environment:
+    KUBECONFIG: "{{ tmp_kubeconfig }}"
+  block:
+  - name: Create secrets and link service account
+    kubernetes.core.k8s:
+      namespace: "{{ ocp4_workload_tekton_ansible_ee_namespace }}"
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+      merge_type: strategic-merge
+      state: present
+    loop:
+    - ./templates/secrets/hub-push-secret.yaml.j2
+    - ./templates/secrets/registry-pull-secret.yaml.j2
+    - ./templates/secrets/link-secret-sa.yaml.j2 
+
+  - name: Apply pipeline resources
+    kubernetes.core.k8s:
+      namespace: "{{ ocp4_workload_tekton_ansible_ee_namespace }}"
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+      state: present
+    loop:
+    - ./templates/pvc.yaml.j2
+    - ./templates/pipelines/ansible-builder-task.yaml.j2
+    - ./templates/pipelines/pipeline-ansible-builder.yaml.j2
+    - ./templates/pipelines/trigger-binding.yaml.j2
+    - ./templates/pipelines/trigger-template.yaml.j2
+    - ./templates/pipelines/trigger.yaml.j2
+    - ./templates/pipelines/event-listener.yaml.j2
+    - ./templates/pipelines/event-listener-route.yaml.j2
+    - ./templates/secrets/github-secret.yaml.j2
+
+  - name: Apply pipeline resources
+    kubernetes.core.k8s:
+      namespace: "{{ ocp4_workload_tekton_ansible_ee_namespace }}"
+      definition: "{{ lookup('template', 'templates/pipelines/pipeline-run.yaml.j2' ) | from_yaml }}"
+      state: present
+    loop: "{{ ocp4_workload_tekton_ansible_ee_image_build }}"
+
+  - name: Retrieve created event listener route
+    k8s_facts:
+      api_version: "route.openshift.io/v1"
+      kind: Route
+      name: ansible-ee-el
+      namespace: "{{ ocp4_workload_tekton_ansible_ee_namespace }}"
+    register: r_el_route
+    until: r_el_route.resources[0].spec.host is defined
+    retries: 300
+    delay: 30
+
+  - name: Set event listener route variable
+    set_fact:
+      _event_listener_route: http://{{ r_el_route.resources[0].spec.host }}
+
+  - name: Create webhooks
+    include_tasks: create-git-webhooks.yml
+    loop: "{{ ocp4_workload_ansible_ee_image_build }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
