@@ -8,12 +8,7 @@
     state: present
 
 - name: Create Gogs app
-  shell: "oc new-app \
-  -f  {{ ocp4_workload_dil_agile_integration_gogs_template_url }} \
-  -p GOGS_VERSION={{ ocp4_workload_dil_agile_integration_gogs_version }} \
-  -p SKIP_TLS_VERIFY={{ ocp4_workload_dil_agile_integration_gogs_skip_tls }} \
-  -p HOSTNAME=gogs.{{ route_subdomain }} \
-  -n {{ gogs_project }}"
+  shell: "oc new-app -f  {{ ocp4_workload_dil_agile_integration_gogs_template_url }} -p GOGS_VERSION={{ ocp4_workload_dil_agile_integration_gogs_version }} -p SKIP_TLS_VERIFY={{ ocp4_workload_dil_agile_integration_gogs_skip_tls }} -p HOSTNAME=gogs.{{ route_subdomain }} -n {{ gogs_project }}"
   register: create_gogs_app
   failed_when: create_gogs_app.stderr != '' and 'already exists' not in create_gogs_app.stderr
 
@@ -61,23 +56,53 @@
   retries: 15
   delay: 30
 
+- name: Create Gogs admin user
+  shell: "oc exec -it dc/gogs -n {{ gogs_project }} -- /opt/gogs/gogs admin create-user --name {{ ocp4_workload_dil_agile_integration_gogs_admin }} --password {{ ocp4_workload_dil_agile_integration_gogs_password }} --admin --email admin@example.com"
+  register: create_gogs_admin
+  retries: 15
+  delay: 30
+  until: create_gogs_admin is not failed
+
+- name: Create token
+  uri:
+    url: 'http://gogs.{{ route_subdomain }}/api/v1/users/gogsadmin/tokens'
+    method: POST
+    body: 
+      '{"name": "accesstoken"}'
+    body_format: json
+    user: '{{ ocp4_workload_dil_agile_integration_gogs_admin }}'
+    password: '{{ ocp4_workload_dil_agile_integration_gogs_password }}'
+    headers:
+      Content-Type: "application/json"    
+    force_basic_auth: yes
+    return_content: yes
+    validate_certs: no
+    status_code: 201
+  register: create_token
+  failed_when: create_token.status != 201 and 'already exists' not in create_token.content
+
+- set_fact: 
+    gogs_token: '{{ create_token.json.sha1 }}'
+
+- debug: var=gogs_token
 
 - name: Create Gogs users
   uri:
-    url: http://gogs.{{ route_subdomain }}/user/sign_up
+    url: http://gogs.{{ route_subdomain }}/api/v1/admin/users
     method: POST
-    follow_redirects: safe
-    return_content: yes
-    body_format: form-urlencoded
+    body_format: json
     body:
-      user_name: 'user{{ item }}'
+      email: 'user{{ item }}@example.com'
+      username: 'user{{ item }}'
       password: '{{ ocp4_workload_dil_agile_integration_gogs_user_password }}'
-      retype: '{{ ocp4_workload_dil_agile_integration_gogs_user_password }}'
-      email: 'user{{ item }}@example.com }}'
+    headers:
+      Content-Type: "application/json"
+      Authorization: "token {{ gogs_token }}"
+    force_basic_auth: yes
+    return_content: yes
     validate_certs: no
-    status_code: 200
+    status_code: 201
   register: create_tenant_result
-  ignore_errors: true
   loop: "{{ range(1, num_users|int + 1, 1)|list }}"
   when:
     - num_users|int > 0
@@ -92,21 +117,20 @@
   
 # - debug: var=get_gitrepo.content
 
-# Wait for a minute for users to be created.
-- pause:
-    minutes: 1
+# # Wait for a minute for users to be created.
+# - pause:
+#     minutes: 1
 
 - name: Config repo
   uri: 
     url: 'http://gogs.{{ route_subdomain }}/api/v1/repos/migrate'
     method: POST
     body: 
-      '{"clone_addr": "https://github.com/RedHat-Middleware-Workshops/dayinthelife-import.git", "uid": {{ item | int }},"repo_name": "dayintheliferepo"}'
+      '{"clone_addr": "https://github.com/RedHat-Middleware-Workshops/dayinthelife-import.git", "uid": {{ item|int + 1 }},"repo_name": "dayintheliferepo"}'
     body_format: json
-    user: "user{{ item }}"
-    password: '{{ ocp4_workload_dil_agile_integration_gogs_user_password }}'
     headers:
       Content-Type: "application/json"
+      Authorization: "token {{ gogs_token }}"
     force_basic_auth: yes
     return_content: yes
     validate_certs: no
@@ -130,12 +154,11 @@
     url: 'http://gogs.{{ route_subdomain }}/api/v1/repos/migrate'
     method: POST
     body:
-      '{"clone_addr": "https://github.com/jbossdemocentral/3scaleworkshop-wwwpage.git", "uid": {{ item | int }},"repo_name": "www-page"}'
+      '{"clone_addr": "https://github.com/jbossdemocentral/3scaleworkshop-wwwpage.git", "uid": {{ item|int + 1 }},"repo_name": "www-page"}'
     body_format: json
-    user: "user{{ item }}"
-    password: '{{ ocp4_workload_dil_agile_integration_gogs_user_password }}'
     headers:
       Content-Type: "application/json"
+      Authorization: "token {{ gogs_token }}"    
     force_basic_auth: yes
     return_content: yes
     validate_certs: no

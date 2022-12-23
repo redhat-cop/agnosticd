@@ -39,3 +39,103 @@
     definition: "{{ lookup('template', 'namespace.yml.j2') }}"
   with_items:
   - "{{ ocs_namespace }}"
+
+- name: get CRDs to remove finalizers
+  k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: "{{ item }}"
+  register: crds
+  loop:
+  - CustomResourceDefinition
+
+- name: get v1 kinds to remove finalizer
+  k8s_info:
+    kind: "{{ item }}"
+    namespace: "{{ ocs_namespace }}"
+  register: v1kinds
+  loop:
+  - configmap
+  - secret
+  - PersistentVolumeClaim
+
+- name: get OCS kinds to remove finalizer
+  k8s_info:
+    api_version: ocs.openshift.io/v1
+    kind: "{{ item }}"
+    namespace: "{{ ocs_namespace }}"
+  register: ocs
+  loop:
+  - StorageCluster
+
+- name: get NooBaa kinds to remove finalizer
+  k8s_info:
+    api_version: noobaa.io/v1alpha1
+    kind: "{{ item }}"
+    namespace: "{{ ocs_namespace }}"
+  register: noobaa
+  loop:
+  - NooBaa
+  - BucketClass
+  - BackingStore
+
+- name: get rook kinds to remove finalizer
+  k8s_info:
+    api_version: ceph.rook.io/v1
+    kind: "{{ item }}"
+    namespace: "{{ ocs_namespace }}"
+  register: rook
+  loop:
+  - CephBlockPool
+  - CephCluster
+  - CephFilesystem
+
+- name: init items_to_remove_finalizers
+  set_fact:
+    items_to_remove_finalizers: []
+- name: append to items_to_remove_finalizers items to remove finalizers
+  set_fact:
+    items_to_remove_finalizers: "{{ items_to_remove_finalizers + item.resources }}"
+  loop: "{{ crds.results + noobaa.results + ocs.results + rook.results + v1kinds.results }}"
+
+- name: remove metadata finalizers in workload objects
+  register: result
+  failed_when: (result.stderr is defined) and not ('because it is being terminated' in result.stderr)
+  when: |
+    (
+      'secret' in (item.kind|lower)
+      or 'configmap' in (item.kind|lower)
+      or 'persistentvolumeclaim' in (item.kind|lower)
+      or 'noobaa' in (item.kind|lower)
+      or 'bucketclass' in (item.kind|lower)
+      or 'backingstore' in (item.kind|lower)
+      or 'cephblockpool' in (item.kind|lower)
+      or 'cephcluster' in (item.kind|lower)
+      or 'cephfilesystem' in (item.kind|lower)
+      or 'storagecluster' in (item.kind|lower)
+      or 'ceph.rook.io' in item.metadata.name
+      or 'noobaa.io' in item.metadata.name
+      or 'db-noobaa-db' in item.metadata.name
+      or 'objectbucket.io' in item.metadata.name
+      or 'ocs.openshift.io' in item.metadata.name
+    )
+    and (item.metadata.finalizers is defined)
+  loop: "{{ items_to_remove_finalizers }}"
+  k8s:
+    state: present
+    merge_type: merge
+    definition: "{{ item | combine({'metadata': item.metadata | combine({'finalizers': []}) }) }}"
+
+- name: get remaining pods to force delete
+  k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ ocs_namespace }}"
+  register: leftover_pods
+
+- name: force remove pod with gracePeriodSeconds=0
+  k8s:
+    state: absent
+    definition: "{{ item }}"
+    delete_options:
+      gracePeriodSeconds: 0
+  loop: "{{ leftover_pods.resources }}"

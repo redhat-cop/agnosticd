@@ -9,6 +9,7 @@ import six
 from ansible.errors import AnsibleError
 from ansible.plugins.action import ActionBase
 from ansible.utils.display import Display
+from copy import deepcopy
 
 import boto3
 import botocore.exceptions
@@ -38,6 +39,11 @@ DOCUMENTATION = """
             default: 1h
           distinct:
             description: If true, all the zones must be distinct. If false, do best-effort.
+            required: False
+            type: bool
+            default: False
+          single_zone:
+            description: If true, force all the zones to be the same. If false, do best-effort.
             required: False
             type: bool
             default: False
@@ -133,6 +139,69 @@ def check_response(response):
         display.error(pp.pformat(response))
         six.raise_from(AnsibleError("Error requesting EC2 offerings."), err)
 
+def reservation_match(r1, r2):
+    """Return true if 2 reservations match.
+
+    Reservations match when all the reservations keys except instance_count
+    are identical"""
+
+    # same ref
+    if r1 == r2:
+        return True
+
+    compared = set(r1.keys()).union(set(r2.keys())).difference(set(['instance_count']))
+
+    for c in compared:
+        if c in r1 and c not in r2:
+            return False
+
+        if c not in r1 and c in r2:
+            return False
+
+        if c not in r1 and c not in r2:
+            continue
+
+        if c in r1 and c in r2:
+            if r1[c] == r2[c]:
+                continue
+
+            return False
+
+    return True
+
+
+def inject_reservation(l, *reservations):
+    """Inject reservations by incrementing the count if they match
+
+    Return the list with the reservation injected, leave the original list
+    passed as argument untouched."""
+
+    l = deepcopy(l)
+
+    for reservation in deepcopy(reservations):
+        for r in l:
+            if reservation_match(r, reservation):
+                r['instance_count'] = int(r['instance_count']) + int(reservation['instance_count'])
+                break
+        else:
+            # only executed if the inner loop did NOT break
+            # no match, add the reservation to the list
+            l.append(reservation)
+
+    return l
+
+
+def regroup_reservations(reservations):
+    """Used when single_zone is True. Regroup all the zones into one, named 'az1'."""
+
+    reservations = deepcopy(reservations)
+    result = []
+
+    for zone in sorted(reservations):
+        for reservation in reservations[zone]:
+            result = inject_reservation(result, reservation)
+
+    return {"az1": result}
 
 class ODCRFactory:
     """ActionModule class"""
@@ -427,6 +496,7 @@ class ODCRFactory:
 
         return True, result
 
+
     def set_client(self, region):
         """Create and save boto3 EC2 client for a region"""
         self.clients[region] = boto3.client('ec2',
@@ -462,6 +532,8 @@ class ActionModule(ActionBase):
         'aws_access_key_id',
         'aws_secret_access_key',
         'ttl',
+        'distinct',
+        'single_zone',
         'state'
     ))
     def run(self, tmp=None, task_vars=None):
@@ -474,6 +546,7 @@ class ActionModule(ActionBase):
         del tmp # tmp no longer has any effect
 
         ttl = self._task.args.get('ttl', '1h')
+
         distinct = self._task.args.get('distinct', False)
         if isinstance(distinct, six.string_types):
             if distinct.lower() in ['true', 'y', 'yes']:
@@ -484,6 +557,18 @@ class ActionModule(ActionBase):
         if not isinstance(distinct, bool):
             result['failed'] = True
             result['error'] = 'distinct must be a boolean'
+            return result
+
+        single_zone = self._task.args.get('single_zone', False)
+        if isinstance(single_zone, six.string_types):
+            if single_zone.lower() in ['true', 'y', 'yes']:
+                single_zone = True
+            if single_zone.lower() in ['false', 'n', 'no']:
+                single_zone = False
+
+        if not isinstance(single_zone, bool):
+            result['failed'] = True
+            result['error'] = 'single_zone must be a boolean'
             return result
 
         state = self._task.args.get('state', 'present')
@@ -528,8 +613,13 @@ class ActionModule(ActionBase):
         display.v("regions: %s" % regions)
         display.v("ttl: %s" % ttl)
 
+        virtual_zones = reservations.keys()
         for region in regions:
             try:
+                if single_zone == True:
+                    display.display("Grouping all reservations in a single AZ")
+                    reservations = regroup_reservations(reservations)
+
                 r_ok, result['reservations'] = odcr.do_region(region, reservations)
             except Exception as err:
                 result['failed'] = True
@@ -540,6 +630,15 @@ class ActionModule(ActionBase):
                 if len(result['reservations']) == 1:
                     for k in list(result['reservations']):
                         result['single_availability_zone'] = result['reservations'][k]['availability_zone']
+
+                    # Propagate the zone to the virtual zones
+                    # so it's transparent for the config
+                    if single_zone == True:
+                        for k in virtual_zones:
+                            if k != 'az1':
+                                result['reservations'][k] = {
+                                    "availability_zone": result['single_availability_zone']
+                                }
 
                 result['region'] = region
                 break

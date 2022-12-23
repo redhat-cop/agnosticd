@@ -1,0 +1,119 @@
+---
+
+### BEGIN WORKSHOP SETUP ###
+- fail:
+    msg: User count ({{ ocp4_workload_serverless_ml_workshop_user_count }}) < 1
+  when: ocp4_workload_serverless_ml_workshop_user_count| int < 1
+
+- name: Install OCS Operator
+  include_tasks: ./install_ocs_operator.yaml
+
+- name: Install CRW Operator
+  include_tasks: ./install_crw_operator.yaml
+
+- name: Install AMQ Streams Operator
+  include_tasks: ./install_amqstreams_operator.yaml
+
+- name: Install Serverless Operator
+  include_tasks: ./install_serverless_operator.yaml
+
+- name: Ensure Knative projects exist
+  k8s:
+    state: present
+    name: "{{ item }}"
+    kind: Project
+    api_version: project.openshift.io/v1
+  loop:
+    - knative-serving
+    - knative-eventing
+
+- name: Ensure Knative serving and eventing resources exist
+  k8s:
+    state: present
+    definition: "{{ lookup('file', './files/' + item + '.yml' ) | from_yaml }}"
+  loop:
+    - knative-serving
+    - knative-eventing
+
+- name: Ensure Kafka project exist
+  k8s:
+    state: present
+    name: kafka
+    kind: Project
+    api_version: project.openshift.io/v1
+
+- name: Create Kafka cluster
+  k8s:
+    state: present
+    definition: "{{ lookup('file', './files/kafka-cluster.yml' ) | from_yaml }}"
+
+- name: Wait until Kafka cluster is created
+  k8s_info:
+    api_version: kafka.strimzi.io/v1beta2
+    kind: Kafka
+    name: my-cluster
+    namespace: kafka
+  register: r_kafka_cluster
+  retries: 30
+  delay: 5
+  until:
+    - r_kafka_cluster.resources[0].status.clusterId is defined
+    - r_kafka_cluster.resources[0].status.clusterId | length > 0
+
+- name: Create Knative Kafka Source and Channel
+  k8s:
+    state: present
+    definition: "{{ lookup('file', './files/kafka-knative.yml' ) | from_yaml }}"
+
+- name: Change the default channel to use Kafka
+  k8s:
+    state: present
+    definition: "{{ lookup('file', './files/kafka-channel-configmap.yml' ) | from_yaml }}"
+
+- name: Configure CRW Che cluster
+  k8s:
+    state: present
+    definition: "{{ lookup('file', './files/checluster.yml' ) | from_yaml }}"
+
+- name: Configure OCS cluster
+  k8s:
+    state: present
+    definition: "{{ lookup('file', './files/storage-cluster.yml' ) | from_yaml }}"
+
+- name: Wait until OCS cluster is created
+  k8s_info:
+    api_version: ocs.openshift.io/v1
+    kind: StorageCluster
+    name: ocs-storagecluster
+    namespace: openshift-storage
+  register: r_ocs_cluster
+  retries: 72
+  delay: 5
+  until:
+    - r_ocs_cluster.resources[0].status.phase is defined
+    - r_ocs_cluster.resources[0].status.phase | length > 0
+    - r_ocs_cluster.resources[0].status.phase == 'Ready'
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for {{ ocp4_workload_serverless_ml_workshop_user_count }} users"
+
+- include_tasks: per_user_workload.yaml
+  loop: "{{ range(1, 1 + (ocp4_workload_serverless_ml_workshop_user_count | int)) | list }}"
+  loop_control:
+    loop_var: t_user_num
+  vars:
+    t_user: user{{ t_user_num }}
+    t_user_project: user{{ t_user_num }}
+
+- name: Set up Homeroom for workshop users
+  include_tasks: ./homeroom.yaml
+
+### END WORKSHOP SETUP
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
