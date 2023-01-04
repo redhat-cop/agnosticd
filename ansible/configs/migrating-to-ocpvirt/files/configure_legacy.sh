@@ -1,3 +1,4 @@
+subscription-manager release  --set=8.4
 yum install -y qemu-kvm qemu-img libvirt virt-install libguestfs-tools python3-lxml python3-setuptools
 
 systemctl enable --now libvirtd
