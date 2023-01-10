@@ -1,0 +1,126 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Set managed cluster variables
+  set_fact:
+    ocp4_workload_managed_cluster_name: "{{ item.managed_cluster_name }}"
+    ocp4_workload_managed_cluster_kconf_path: "{{ item.managed_cluster_kconf_path | default('/home/ec2-user/.kube') }}"
+  loop: "{{ ocp4_workload_rhacm_clusters_aws_clusters }}"
+
+- name: Check for managed cluster secret {{ ocp4_workload_managed_cluster_name }}-cluster-secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ ocp4_workload_managed_cluster_name }}-cluster-secret"
+    namespace: "{{ ocp4_workload_managed_cluster_name }}"
+  until: r_cluster_secret.resources | length > 0
+  delay: 60
+  retries: 60
+  register: r_cluster_secret
+
+- name: Set managed cluster API invocation details
+  set_fact:
+    ocp4_workload_managed_cluster_config: "{{ r_cluster_secret.resources[0].data.config | b64decode | from_json}}"
+    ocp4_workload_managed_cluster_api_endpoint: "{{ r_cluster_secret.resources[0].data.server | b64decode }}"
+
+- name: Check if API endpoint returns 200
+  ansible.builtin.uri:
+    url: "{{ ocp4_workload_managed_cluster_api_endpoint }}"
+    method: GET
+    status_code: 200
+    return_content: true
+    headers:
+      Authorization: "Bearer {{ ocp4_workload_managed_cluster_config.bearerToken }}"
+    validate_certs: false
+
+- name: Install managed cluster roles
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_managed_cluster_kconf_path }}/{{   ocp4_workload_managed_cluster_name }}/kubeconfig"
+  block:
+    - name: Use context #we need to figure out how to do this in each role
+      shell: oc config use-context "{{ ocp4_workload_managed_cluster_name }}"
+
+    #    - name: Set up Lets Encrypt on Managed Cluster
+    #      ansible.builtin.include_role:
+    #        name: ocp4_workload_le_certificates            # all segments
+
+    - name: Set up htpasswd authenication on the managed cluster
+      vars:
+        ocp4_workload_authentication_idm_type: htpasswd
+        ocp4_workload_authentication_admin_user: admin
+        ocp4_workload_authentication_htpasswd_admin_password: openshfit
+        ocp4_workload_authentication_htpasswd_user_base: user
+        ocp4_workload_authentication_htpasswd_user_password: openshift
+        ocp4_workload_authentication_htpasswd_user_count: 5
+        ocp4_workload_authentication_remove_kubeadmin: false
+      ansible.builtin.include_role:
+        name: ocp4_workload_authentication
+
+    - name: Install Gitea Operator
+      ansible.builtin.include_role:
+        name: ocp4_workload_gitea_operator
+
+    - name: Install Pipelines
+      ansible.builtin.include_role:
+        name: ocp4_workload_pipelines
+
+    - name: Install GitOps
+      ansible.builtin.include_role:
+        name: ocp4_workload_openshift_gitops
+
+    - name: Wait for Gitea route to be available
+      kubernetes.core.k8s_info:
+        api_version: gpte.opentlc.com/v1
+        kind: Gitea
+        name: "{{ ocp4_workload_gitea_operator_name }}"
+        namespace: "{{ ocp4_workload_gitea_operator_project }}"
+      register: r_gitea
+      until: r_gitea.resources[0].status.giteaRoute is defined
+      retries: 90
+      delay: 10
+
+    - name: Set gitea route
+      set_fact:
+        ocp4_workload_managed_cluster_gitea_route: "{{ r_gitea.resources[0].status.giteaRoute }}"
+
+    - name: Set gitea repo url
+      set_fact:
+        ocp4_workload_managed_cluster_gitea_repo_url: "{{ ocp4_workload_managed_cluster_gitea_route }}/{{ ocp4_workload_gitea_aiml_user }}/gitops.git"
+
+    - name: Install Gitops Repo Secret
+      kubernetes.core.k8s:
+        state: present
+        merge_type:
+          - strategic-merge
+          - merge
+        definition: "{{ lookup('template', './templates/gitops-repo-secret.yml.j2') }}"
+
+    - name: Install RHODS OLM
+      ansible.builtin.include_role:
+        name: ocp4_workload_rhods_olm
+
+    - name: Install MTA
+      ansible.builtin.include_role:
+        name: ocp4_workload_mta
+
+    - name: Install MTA Tackle
+      ansible.builtin.include_role:
+        name: ocp4_workload_mta_tackle
+
+    - name: Install Big Demo
+      ansible.builtin.include_role:
+        name: ocp4_workload_big_demo
+
+    - name: Install Object Detection AI ML Setup
+      ansible.builtin.include_role:
+        name: ocp4_workload_object_detection_ai_ml_setup
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent

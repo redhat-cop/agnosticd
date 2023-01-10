@@ -1,0 +1,221 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+# Get current date and time to use in values-global.yaml
+- name: Set current date and time
+  setup:
+    gather_subset:
+    - min
+
+#############################################################################
+# Setup Helm
+#############################################################################
+
+- name: Ensure kubernetes.core collection is installed on bastion
+  become: true
+  become_user: "{{ ansible_user }}"
+  command: /opt/virtualenvs/k8s/bin/ansible-galaxy collection install kubernetes.core
+
+- name: Check if Helm is already installed
+  ansible.builtin.stat:
+    path: /usr/bin/helm
+  register: r_helm
+
+- name: Setup Helm
+  when: not r_helm.stat.exists
+  become: true
+  block:
+  # Must be /usr/bin/helm for the kubernetes.core.helm module to find the executable
+  - name: Download OpenShift Helm
+    get_url:
+      url: >-
+        {{ ocp4_workload_multicloud_gitops_odf_installer_root_url }}/helm/{{
+        ocp4_workload_multicloud_gitops_odf_helm_version }}/helm-linux-amd64
+      dest: /usr/bin/helm
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Set up bash completion for Helm
+    shell: >-
+      /usr/bin/helm completion bash >/etc/bash_completion.d/helm
+    args:
+      creates: /etc/bash_completion.d/helm
+
+#############################################################################
+# Gitea Setup
+#############################################################################
+
+- name: Get the Gitea route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: route
+    name: gitea
+    namespace: gitea
+  register: r_gitea_route
+
+- name: Set the Gitea server hostname variable
+  set_fact:
+    ocp4_workload_multicloud_gitops_odf_gitea_server_hostname: >-
+      {{ r_gitea_route.resources[0].spec.host }}
+- name: Set variables for Gitea server URL including account
+  set_fact:
+    ocp4_workload_multicloud_gitops_odf_gitea_account_url: >-
+      https://{{ ocp4_workload_multicloud_gitops_odf_gitea_server_hostname }}/{{ ocp4_workload_multicloud_gitops_odf_gitea_user }}
+- name: Delete existing Gitea token if it exists
+  ansible.builtin.uri:
+    url: >-
+      https://{{ ocp4_workload_multicloud_gitops_odf_gitea_server_hostname
+      }}/api/v1/users/{{ ocp4_workload_multicloud_gitops_odf_gitea_user
+      }}/tokens/{{ ocp4_workload_multicloud_gitops_odf_repository_name }}
+    method: DELETE
+    status_code: [204, 404, 422]
+    user: "{{ ocp4_workload_multicloud_gitops_odf_gitea_user }}"
+    password: "{{ ocp4_workload_multicloud_gitops_odf_gitea_password }}"
+    force_basic_auth: true
+    validate_certs: false
+
+# Get Token for Gitea user
+# curl -XPOST -H "Content-Type: application/json"  -k -d '{"name":"industrial-edge"}'
+#      -u ${GITEA_USER}:openshift ${GITEA_URL}/api/v1/users/lab-user/tokens
+- name: Set up a Gitea token
+  ansible.builtin.uri:
+    url: >-
+      https://{{ ocp4_workload_multicloud_gitops_odf_gitea_server_hostname
+      }}/api/v1/users/{{ ocp4_workload_multicloud_gitops_odf_gitea_user }}/tokens
+    method: POST
+    body: "{{ body }}"
+    body_format: json
+    status_code: 201
+    user: "{{ ocp4_workload_multicloud_gitops_odf_gitea_user }}"
+    password: "{{ ocp4_workload_multicloud_gitops_odf_gitea_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  vars:
+    body:
+      name: "{{ ocp4_workload_multicloud_gitops_odf_repository_name }}"
+  register: r_gitea_token
+
+- name: Set Gitea token variable
+  set_fact:
+    ocp4_workload_multicloud_gitops_odf_gitea_token: "{{ r_gitea_token.json.sha1 }}"
+
+- name: Print Gitea token
+  debug:
+    msg: "Using Gitea token: {{ ocp4_workload_multicloud_gitops_odf_gitea_token }}"
+
+#############################################################################
+# Gitea Repository Setup
+# Do all repository stuff as {{ ansible_user }}
+#############################################################################
+- name: Setup repositories
+  become: true
+  become_user: "{{ ansible_user }}"
+  block:
+  # git config --global credential.helper store
+  - name: Set the git credential store
+    community.general.git_config:
+      scope: global
+      name: credential.helper
+      value: store
+
+  # git config --global user.name "lab-user"
+  - name: Set the git config user name
+    community.general.git_config:
+      scope: global
+      name: user.name
+      value: "{{ ocp4_workload_multicloud_gitops_odf_gitea_user_name }}"
+
+  # git config --global user.email you@example.com
+  - name: Set the git config email
+    community.general.git_config:
+      scope: global
+      name: user.email
+      value: "{{ ocp4_workload_multicloud_gitops_odf_gitea_user_email }}"
+
+  - name: Ensure previous ~/values-secret.yaml is absent
+    file:
+      path: "~{{ ansible_user }}/values-secret.yaml"
+      state: absent
+
+  - name: Ensure previous repo root dir is absent
+    file:
+      path: "{{ ocp4_workload_multicloud_gitops_odf_repo_root_dir }}"
+      state: absent
+
+  - name: Clone the {{ ocp4_workload_multicloud_gitops_odf_repository_name }} repository
+    ansible.builtin.git:
+      dest: "{{ ocp4_workload_multicloud_gitops_odf_repo_root_dir }}"
+      repo: "{{ ocp4_workload_multicloud_gitops_odf_gitea_account_url }}/{{ ocp4_workload_multicloud_gitops_odf_repository_name }}"
+      version: "{{ ocp4_workload_multicloud_gitops_odf_repository_tag }}"
+      clone: true
+      recursive: false
+
+  #
+  # NOTE: This task only pertains to the MultiCloud-GitOps Validated Pattern
+  # TODO: Add these in separate tasks and include them for each pattern
+  #
+  - name: Set up config-demo secrets credentials
+    when: ocp4_workload_multicloud_gitops_odf_name is match('multicloud-gitops')
+    set_fact:
+      _ocp4_workload_multicloud_gitops_odf_config_demo_secret: "{{ lookup('password', '/dev/null length=15 chars=ascii_letters') }}"
+
+  - name: Set up values-global.yaml file
+    template:
+      src: values-global.yaml.j2
+      dest: "{{ ocp4_workload_multicloud_gitops_odf_repo_root_dir }}/values-global.yaml"
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+      mode: 0664
+
+  - name: Set up values-secret.yaml file
+    template:
+      src: values-secret.yaml.j2
+      dest: "~{{ansible_user}}/values-secret.yaml"
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+      mode: 0664
+
+  - name: Commit changes to the {{ ocp4_workload_multicloud_gitops_odf_repository_name }} repository
+    command:
+      chdir: "{{ ocp4_workload_multicloud_gitops_odf_repo_root_dir }}"
+      cmd: >-
+        git commit -a -m 'Update values-global.yaml.'
+  - name: Push all changes back to the {{ ocp4_workload_multicloud_gitops_odf_repository_name }} repository
+    command:
+      chdir: "{{ ocp4_workload_multicloud_gitops_odf_repo_root_dir }}"
+      cmd: >-
+        git push https://{{ ocp4_workload_multicloud_gitops_odf_gitea_user
+        }}:{{ ocp4_workload_multicloud_gitops_odf_gitea_password
+        }}@{{ ocp4_workload_multicloud_gitops_odf_gitea_account_url | urlsplit('hostname')
+        }}/{{ ocp4_workload_multicloud_gitops_odf_gitea_user }}/{{ ocp4_workload_multicloud_gitops_odf_repository_name }}
+#############################################################################
+# Call Validated Pattern Ansible setup playbook
+#############################################################################
+
+- name: Call Ansible setup playbook for Validated Pattern {{ ocp4_workload_multicloud_gitops_odf_name }}
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/cluster-{{ guid }}/auth/kubeconfig"
+  shell:
+    chdir: "{{ ocp4_workload_multicloud_gitops_odf_repo_root_dir }}"
+    cmd: /opt/virtualenvs/k8s/bin/ansible-playbook ansible/site.yaml
+
+#############################################################################
+# AgnosticD User Info
+#############################################################################
+
+- name: Print generic AgnosticD user info
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Solution Pattern configured: {{ ocp4_workload_multicloud_gitops_odf_display_name }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

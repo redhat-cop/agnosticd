@@ -1,0 +1,226 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- environment:
+    KUBECONFIG: "{{ tmp_kubeconfig }}"
+  block:
+    - name: Wait until ODF is ready on primary
+      k8s_info:
+        api_key: "{{ ocp_key_primary }}"
+        host: "{{ ocp_primary_api_url }}"
+        validate_certs: false
+        api_version: ocs.openshift.io/v1
+        kind: StorageCluster
+        name: ocs-storagecluster
+        namespace: openshift-storage
+      register: r_storagecluster
+      until:
+        - r_storagecluster.resources.0.status.phase == "Ready"
+      retries: 30
+      delay: 30
+
+    - name: Wait until ODF is ready on secondary
+      k8s_info:
+        api_key: "{{ ocp_key_secondary }}"
+        host: "{{ ocp_secondary_api_url }}"
+        validate_certs: false
+        api_version: ocs.openshift.io/v1
+        kind: StorageCluster
+        name: ocs-storagecluster
+        namespace: openshift-storage
+      register: r_storagecluster2
+      until:
+        - r_storagecluster2.resources.0.status.phase == "Ready"
+      retries: 30
+      delay: 30
+    # - debug: var=r_storagecluster2
+
+    - name: Wait until NooBaa is ready on primary
+      k8s_info:
+        api_key: "{{ ocp_key_primary }}"
+        host: "{{ ocp_primary_api_url }}"
+        validate_certs: false
+        api_version: noobaa.io/v1alpha1
+        kind: NooBaa
+        name: noobaa
+        namespace: openshift-storage
+      register: r_noobaa
+      until:
+        - r_noobaa.resources.0.status.phase == "Ready"
+      retries: 30
+      delay: 30
+
+    #    - debug: var=r_noobaa
+
+    - name: Wait until NooBaa is ready on secondary
+      k8s_info:
+        api_key: "{{ ocp_key_secondary }}"
+        host: "{{ ocp_secondary_api_url }}"
+        validate_certs: false
+        api_version: noobaa.io/v1alpha1
+        kind: NooBaa
+        name: noobaa
+        namespace: openshift-storage
+      register: r_noobaa2
+      until:
+        - r_noobaa2.resources.0.status.phase == "Ready"
+      retries: 30
+      delay: 30
+
+    - name: ODF Multicluster Orchestrator Operator
+      k8s:
+        state: present
+        definition: "{{ lookup('template','./templates/subscription-odf-multi-orch.yaml.j2') | from_yaml }}"
+
+  #  - name: Wait until odr-hub-operator is created on hub cluster
+  #    k8s_info:
+  #      api_version: operators.coreos.com/v1alpha1
+  #      kind: InstallPlan
+  #      namespace: openshift-operators
+  #    register: r_odfhubop
+  #    vars:
+  #      _query: >-
+  #        [?starts_with(spec.clusterServiceVersionNames[0], 'odr-hub-operator')]
+  #    retries: 30
+  #    delay: 10
+  #    until:
+  #      - r_odfhubop.resources | length > 0
+  #      - r_odfhubop.resources | to_json | from_json | json_query(_query)
+
+#    - name: Wait until odf-multicluster-orchestrator is created
+#      k8s_info:
+#        api_version: operators.coreos.com/v1alpha1
+#        kind: InstallPlan
+#        namespace: openshift-operators
+#      register: r_odfmoo
+#    # - debug: var=r_odfmoo.resources
+#    # - debug: var=r_odfmoo.resources.0
+#    # - debug: var=r_odfmoo.resources.0.spec
+#    # - debug: var=r_odfmoo.resources.0.spec.clusterServiceVersionNames[0]
+#    # - debug: var=r_odfmoo.resources.0.spec.clusterServiceVersionNames[1]
+#    # - debug: var=r_odfmoo.resources.0.spec.clusterServiceVersionNames
+#    # - pause:
+#      vars:
+#        _query: >-
+#          [?starts_with(spec.clusterServiceVersionNames[1], 'odf-multicluster-orchestrator.v4.11.3')]
+#      retries: 2
+#      delay: 3
+#      until:
+#        - r_odfmoo.resources.0 | length > 0
+#        - r_odfmoo.resources.0 | to_json | from_json | json_query(_query)
+
+    - name: Pause for 5 minutes for operators to be installed.
+      ansible.builtin.pause:
+        minutes: 5
+
+# Add this oc patch console.operator.openshift.io cluster --type json --patch
+# '[{ "op": "add", "path": "/spec/plugins/-", "value": "odf-multicluster-console" }]'
+
+    - name: Patch to enable console
+      kubernetes.core.k8s_json_patch:
+        api_version: operator.openshift.io/v1
+        kind: Console
+        name: cluster
+        patch:
+          - op: add
+            path: /spec/plugins/-
+            value: odf-multicluster-console
+
+    - name: Get ingress certificate from primary
+      k8s_info:
+        api_key: "{{ ocp_key_primary }}"
+        host: "{{ ocp_primary_api_url }}"
+        validate_certs: false
+        api_version: v1
+        kind: cm
+        name: default-ingress-cert
+        namespace: openshift-config-managed
+      register: r_cabundleprimary
+    # - debug: var=r_cabundleprimary.resources.0.data['ca-bundle.crt']
+
+    - name: Get ingress certificate from secondary
+      k8s_info:
+        api_key: "{{ ocp_key_secondary }}"
+        host: "{{ ocp_secondary_api_url }}"
+        validate_certs: false
+        api_version: v1
+        kind: cm
+        name: default-ingress-cert
+        namespace: openshift-config-managed
+      register: r_cabundlesecondary
+    # - debug: var=r_cabundlesecondary.resources.0.data
+    # - debug: var=r_cabundlesecondary.resources.0.data['ca-bundle.crt']
+
+    - template:
+        src: ./templates/cm-clusters-crt.yaml.j2
+        dest: /tmp/test_output.yaml
+
+    - name: Create configmap on hub
+      k8s:
+        state: present
+        definition: "{{ lookup('template','./templates/cm-clusters-crt.yaml.j2') | from_yaml }}"
+
+    - name: Create configmap on primary
+      k8s:
+        api_key: "{{ ocp_key_primary }}"
+        host: "{{ ocp_primary_api_url }}"
+        validate_certs: false
+        state: present
+        definition: "{{ lookup('template','./templates/cm-clusters-crt.yaml.j2') | from_yaml }}"
+
+    - name: Create configmap on secondary
+      k8s:
+        api_key: "{{ ocp_key_secondary }}"
+        host: "{{ ocp_secondary_api_url }}"
+        validate_certs: false
+        state: present
+        definition: "{{ lookup('template','./templates/cm-clusters-crt.yaml.j2') | from_yaml }}"
+
+    - name: Patch the default Proxy resource on hub
+      k8s:
+        state: present
+        definition: "{{ lookup('template','./templates/patch-proxy.yaml.j2') | from_yaml }}"
+
+    - name: Patch the default Proxy resource on primary
+      k8s:
+        api_key: "{{ ocp_key_primary }}"
+        host: "{{ ocp_primary_api_url }}"
+        validate_certs: false
+        state: present
+        definition: "{{ lookup('template','./templates/patch-proxy.yaml.j2') | from_yaml }}"
+
+    - name: Patch the default Proxy resource on secondary
+      k8s:
+        api_key: "{{ ocp_key_secondary }}"
+        host: "{{ ocp_secondary_api_url }}"
+        validate_certs: false
+        state: present
+        definition: "{{ lookup('template','./templates/patch-proxy.yaml.j2') | from_yaml }}"
+
+    - name: Enable multicluster web console on hub
+      k8s:
+        state: present
+        definition: "{{ lookup('template','./templates/featureset.yaml.j2') | from_yaml }}"
+
+    - name: Pause for 15 minutes for web console setup
+      ansible.builtin.pause:
+        minutes: 15
+
+    - name: Create MirrorPeer
+      k8s:
+        state: present
+        definition: "{{ lookup('template','./templates/mirror_peer_async.yaml.j2') | from_yaml }}"
+
+    - name: Create drpolicy on hub
+      k8s:
+        state: present
+        definition: "{{ lookup('template','./templates/dr_policy_rdr.yaml.j2') | from_yaml }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

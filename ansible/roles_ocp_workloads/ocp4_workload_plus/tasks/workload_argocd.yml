@@ -1,0 +1,67 @@
+---
+- name: Create Catalogsource for use with catalog snapshot
+#  when: ocp4_workload_plus_use_catalog_snapshot | bool
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/catalogSource.j2' ) | from_yaml }}"
+
+- name: Ensure Openshift-gitops Subscription is present
+  k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/argocd/subscription.j2') }}"
+
+- name: Wait until InstallPlan is created
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: openshift-operators
+  register: r_install_plans
+  vars:
+    _query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'openshift-gitops-operator')]
+  retries: 30
+  delay: 5
+  until:
+  - r_install_plans.resources | length > 0
+  - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+- name: Set InstallPlan Name
+  set_fact:
+    ocp4_workload_plus_argocd_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], 'openshift-gitops-operator')].metadata.name|[0]
+
+- name: Get InstallPlan
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ ocp4_workload_plus_argocd_install_plan_name }}"
+    namespace: openshift-operators
+  register: r_install_plan
+
+- name: Approve InstallPlan if necessary
+  when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+  k8s:
+    state: present
+    definition: "{{ lookup( 'template', './templates/argocd/installPlan.j2' ) }}"
+
+- name: Wait until ArgoCD Subscription is Ready
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ ocp4_workload_plus_argocd_starting_csv }}"
+    namespace: openshift-operators
+  register: argocd_csv
+  retries: 30
+  delay: 20
+  until:
+  - argocd_csv.resources | length > 0
+  - argocd_csv.resources[0].status.phase is defined
+  - argocd_csv.resources[0].status.phase | length > 0
+  - argocd_csv.resources[0].status.phase == "Succeeded"
+
+- name: Set ArgoCD ServiceAccount permissions
+  k8s:
+    state: present
+    definition: "{{ lookup('file', './files/argocd-rbac.yaml') }}"
