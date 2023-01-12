@@ -8,6 +8,55 @@
     state: present
     definition: "{{ lookup('template',  'namespace-ci.yml.j2' ) | from_yaml }}"
 
+- name: Retrieve Quay instance
+  kubernetes.core.k8s_info:
+    kind: Route
+    name: quay-quay
+    namespace: quay-enterprise
+  register: r_quay
+  retries: 60
+  delay: 5
+  until: r_quay.resources | length > 0
+
+- name: Set docker registry
+  set_fact:
+    ocp4_workload_multicluster_devsecops_validated_pattern_docker_registry: "{{ r_quay.resources[0].spec.host }}"
+
+- name: Check cosign installation
+  shell: cosign version
+  register: rc_cosign
+  ignore_errors: true
+
+- name: Install cosign if not previously installed
+  when: rc_cosign.rc != 0
+  shell: >-
+    wget "https://github.com/sigstore/cosign/releases/download/v1.6.0/cosign-linux-amd64" &&
+    mv cosign-linux-amd64 /usr/local/bin/cosign &&
+    chmod +x /usr/local/bin/cosign
+  become: true
+
+- name: Create auth file
+  ansible.builtin.copy:
+    content: "{{ ocp4_token }}"
+    dest: /tmp/auth.json
+
+- name: Write cosign key file
+  ansible.builtin.copy:
+    content: "{{ lookup('file', 'files/cosign.key') }}"
+    dest: /tmp/cosign.key
+
+- name: Copy database image to quay repository
+  shell: >-
+    podman login -u {{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_username }} -p {{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_password }} {{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_registry }} &&
+    podman pull --authfile /tmp/auth.json registry.redhat.io/rhel8/postgresql-10 &&
+    podman tag registry.redhat.io/rhel8/postgresql-10 {{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_registry }}/{{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_username }}/postgresql-10 &&
+    podman push --remove-signatures {{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_registry }}/{{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_username }}/postgresql-10
+
+- name: Sign quay repository database image
+  shell: >-
+    cosign login -u {{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_username }} -p {{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_password }} {{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_registry }} &&
+    COSIGN_PASSWORD={{ ocp4_workload_multicluster_devsecops_validated_pattern_cosign_password }} cosign sign --key /tmp/cosign.key --force {{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_registry }}/{{ ocp4_workload_multicluster_devsecops_validated_pattern_docker_username }}/postgresql-10
+
 - name: Create Sonarqube and Stackrox resources
   include_tasks: "{{ item }}"
   loop:
@@ -26,7 +75,7 @@
   set_fact:
     _ocp4_workload_multicluster_devsecops_validated_pattern_gitea_hostname: >-
       {{ r_gitea.resources[0].status.giteaHostname }}
-    _ocp4_workload_multicluster_devsecops_validated_pattern_gitea_repo_route_url: >-
+    _ocp4_workload_multicluster_devsecops_validated_pattern_gitea_route_url: >-
       {{ r_gitea.resources[0].status.giteaRoute }}
     _ocp4_workload_multicluster_devsecops_validated_pattern_gitea_repo_inventory_url: >-
       {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
@@ -41,8 +90,11 @@
       r_gitea.resources[0].status.giteaHostname }}/{{
       ocp4_workload_multicluster_devsecops_validated_pattern_gitea_username }}/multicluster-devsecops-pattern
 
-- name: Register event listeners in Gitea
-  include_tasks: update_devsecops_repository.yaml
+- name: Register webhook and token in Gitea and Update devsecops repository
+  include_tasks: "{{ item }}"
+  loop:
+  - update_gitea_requirements.yaml
+  - update_devsecops_repository.yaml
 
 - name: Set up inventory pipeline application
   k8s:
