@@ -1,0 +1,148 @@
+---
+- name: Create secrets and link service account
+  kubernetes.core.k8s:
+    namespace: "{{ ocp4_workload_tekton_ee_namespace }}"
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+    state: present
+  loop:
+  - ./templates/common/resources/service-account.yaml.j2
+  - ./templates/common/resources/role-binding.yaml.j2
+
+- name: Get service account token
+  command: >-
+    oc sa get-token
+    {{ ocp4_workload_tekton_ee_internal_registry_sa }}
+    -n {{ ocp4_workload_tekton_ee_namespace }}
+  register: r_sa_token
+
+- name: Expose internal registry
+  command: >-
+    oc patch configs.imageregistry.operator.openshift.io/cluster
+    --type=merge --patch '{"spec":{"defaultRoute":true}}'
+
+- name: Get registry route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: openshift-image-registry
+  register: r_reg_route
+
+- name: Set facts
+  set_fact:
+    ocp4_workload_tekton_ee_internal_registry_sa_token: "{{ r_sa_token.stdout }}"
+    ocp4_workload_tekton_ee_internal_registry_route: "{{ r_reg_route.resources.0.spec.host }}"
+
+- name: Get central stackrox route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: stackrox
+    name: central
+  register: r_srox_route
+
+- name: Set facts
+  set_fact:
+    ocp4_workload_tekton_ee_central_stackrox_endpoint: "{{ r_srox_route.resources.0.spec.host }}:443"
+    ocp4_workload_tekton_ee_centeral_stackrox_url: https://{{ r_srox_route.resources.0.spec.host }}
+
+- name: Stackrox token
+  uri:
+    url: "{{ ocp4_workload_tekton_ee_centeral_stackrox_url }}/v1/apitokens/generate"
+    user: "{{ ocp4_workload_tekton_ee_centeral_stackrox_username }}"
+    password: "{{ ocp4_workload_tekton_ee_centeral_stackrox_password }}"
+    method: POST
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body: {"name":"admin", "role":"Admin"}
+  register: r_srox_uri
+
+- name: Set facts
+  set_fact:
+    ocp4_workload_tekton_ee_central_stackrox_token: "{{ r_srox_uri.json.token }}"
+
+- name: Print internal registry route
+  debug:
+    msg: "{{ ocp4_workload_tekton_ee_internal_registry_route }}"
+
+- name: Print internal registry sa token
+  debug:
+    msg: "{{ ocp4_workload_tekton_ee_internal_registry_sa_token }}"
+
+- name: Print stackrox url
+  debug:
+    msg: "{{ ocp4_workload_tekton_ee_centeral_stackrox_url }}"
+
+- name: Print stackrox token
+  debug:
+    msg: "{{ ocp4_workload_tekton_ee_central_stackrox_token }}"
+
+- name: Create secret (token)
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: stackrox-secret
+        namespace: "{{ ocp4_workload_tekton_ee_namespace }}"
+      type: Opaque
+      data:
+        rox_api_token: "{{ ocp4_workload_tekton_ee_central_stackrox_token | string | b64encode }}"
+
+- name: Create secret (endpoint)
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: stackrox-endpoint
+        namespace: "{{ ocp4_workload_tekton_ee_namespace }}"
+      type: Opaque
+      data:
+        rox_central_endpoint: "{{ ocp4_workload_tekton_ee_central_stackrox_endpoint | string | b64encode }}"
+
+- name: Stackrox imagesteam integration
+  uri:
+    url: "{{ ocp4_workload_tekton_ee_centeral_stackrox_url }}/v1/imageintegrations"
+    user: "{{ ocp4_workload_tekton_ee_centeral_stackrox_username }}"
+    password: "{{ ocp4_workload_tekton_ee_centeral_stackrox_password }}"
+    method: POST
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body: >-
+      {
+      "name": "{{ ocp4_workload_tekton_ee_internal_registry_sa }}-{{ ocp4_workload_tekton_ee_namespace }}-{{ guid }}",
+      "type": "docker",
+      "categories": ["REGISTRY"],
+      "docker": {
+      "endpoint": "{{ ocp4_workload_tekton_ee_internal_registry_route }}",
+      "username": "{{ ocp4_workload_tekton_ee_internal_registry_sa }}",
+      "password": "{{ ocp4_workload_tekton_ee_internal_registry_sa_token }}",
+      "insecure": true
+      },
+      "skipTestIntegration": false
+      }
+
+- name: Get Stackrox policies
+  uri:
+    url: "{{ ocp4_workload_tekton_ee_centeral_stackrox_url }}/v1/policies"
+    user: "{{ ocp4_workload_tekton_ee_centeral_stackrox_username }}"
+    password: "{{ ocp4_workload_tekton_ee_centeral_stackrox_password }}"
+    method: GET
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+  register: r_policies
+
+- name: Inform only policies
+  include_tasks: "./additional/stackrox-policy-configuration.yml"
+  loop: "{{ ocp4_workload_tekton_ee_centeral_stackrox_inform_only_policies }}"
