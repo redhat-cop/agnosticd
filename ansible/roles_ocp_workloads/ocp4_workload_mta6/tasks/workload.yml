@@ -1,0 +1,141 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Determine cluster wildcard domain
+  k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: r_ingress_controller
+
+- name: Set wildcard domain variable
+  set_fact:
+    _ocp4_workload_mta6_wildcard_domain: "{{ r_ingress_controller.resources[0].status.domain }}"
+
+# -----------------------------------------------------------------------------
+- name: Single user installation
+  when: ocp4_workload_mta6_num_users | int == 1
+  block:
+
+  - name: Check Openshift Gitops / ArgoCD installation
+    kubernetes.core.k8s_info:
+      kind: ArgoCD
+      name: openshift-gitops
+      namespace: openshift-gitops
+    register: r_argocd
+
+  - name: Single user installation with Operator
+    when: r_argocd.resources | length == 0
+    block:
+
+    # Needs to install rhsso separately, because installation via
+    # mta operator results in non-deterministic behaviour on the
+    # installPlan csv name
+    - name: install Red Hat Single Sign-on RHSSO Operator (required by MTA)
+      include_role:
+        name: install_operator
+      vars:
+        install_operator_name: rhsso-operator
+        install_operator_namespace: "{{ ocp4_workload_mta6_namespace_base }}"
+        install_operator_manage_namespaces: ["{{ ocp4_workload_mta6_namespace_base }}"]
+        install_operator_channel: "{{ ocp4_workload_mta6_rhsso_channel }}"
+        install_operator_starting_csv: "{{ ocp4_workload_mta6_rhsso_starting_csv }}"
+        install_operator_catalogsource_setup: "{{ ocp4_workload_mta6_catalogsource_setup }}"
+        install_operator_catalogsource_name: "{{ ocp4_workload_mta6_catalogsource_name }}"
+        install_operator_catalogsource_namespace: "{{ ocp4_workload_mta6_namespace_base }}"
+        install_operator_catalogsource_image: "{{ ocp4_workload_mta6_catalogsource_image }}"
+        install_operator_catalogsource_image_tag: "{{ ocp4_workload_mta6_catalogsource_image_tag }}"
+
+    - name: install Migration Toolkit for Applications MTA Operator
+      include_role:
+        name: install_operator
+      vars:
+        install_operator_name: mta-operator
+        install_operator_namespace: "{{ ocp4_workload_mta6_namespace_base }}"
+        install_operator_manage_namespaces: ["{{ ocp4_workload_mta6_namespace_base }}"]
+        install_operator_channel: "{{ ocp4_workload_mta6_channel }}"
+        install_operator_starting_csv: "{{ ocp4_workload_mta6_starting_csv }}"
+        install_operator_catalogsource_setup: "{{ ocp4_workload_mta6_catalogsource_setup }}"
+        install_operator_catalogsource_name: "{{ ocp4_workload_mta6_catalogsource_name }}"
+        install_operator_catalogsource_namespace: "{{ ocp4_workload_mta6_namespace_base }}"
+        install_operator_catalogsource_image: "{{ ocp4_workload_mta6_catalogsource_image }}"
+        install_operator_catalogsource_image_tag: "{{ ocp4_workload_mta6_catalogsource_image_tag }}"
+
+    - name: create tackle instance
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'tackle.yaml.j2') | from_yaml }}"
+
+    - name: create tackle setup seed
+      when: ocp4_workload_mta6_seed | bool
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'job-tackle-setup.yaml.j2') | from_yaml }}"
+
+  - name: Install MTA (single user) with ArgoCD
+    when: r_argocd.resources | length > 0
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'application.yaml.j2') }}"
+
+  - name: Save MTA user info (single user, auth enabled)
+    when: ocp4_workload_mta6_feature_auth_required | default(true)
+    agnosticd_user_info:
+      data:
+        mta_url: >-
+          https://mta-{{ ocp4_workload_mta6_namespace_base }}.{{
+          _ocp4_workload_mta6_wildcard_domain }}
+        tackle_user: "{{ ocp4_workload_mta6_user }}"
+        tackle_password: "{{ ocp4_workload_mta6_password }}"
+
+  - name: Save MTA user info (single user, auth disabled)
+    when: not ocp4_workload_mta6_feature_auth_required | default(true)
+    agnosticd_user_info:
+      data:
+        mta_url: >-
+          https://mta-{{ ocp4_workload_mta6_namespace_base }}.{{
+          _ocp4_workload_mta6_wildcard_domain }}
+
+# -----------------------------------------------------------------------------
+- name: Multi user installation
+  when: ocp4_workload_mta6_num_users | int > 1
+  block:
+  - name: Install MTA (multi user)
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'applicationset.yaml.j2') }}"
+
+  - name: Save MTA user information for each user (authentication enabled)
+    when: ocp4_workload_mta6_feature_auth_required | default(true)
+    agnosticd_user_info:
+      user: "{{ ocp4_workload_mta6_user_base }}{{ item }}"
+      data:
+        mta_url: >-
+          https://mta-{{ ocp4_workload_mta6_namespace_base }}-{{
+          ocp4_workload_mta6_user_base }}{{ item }}.{{
+          _ocp4_workload_mta6_wildcard_domain }}
+        mta_user: "{{ ocp4_workload_mta6_user }}"
+        mta_password: "{{ ocp4_workload_mta6_password }}"
+    loop: "{{ range(1, 1 + ocp4_workload_mta6_num_users | int) | list }}"
+
+  - name: Save MTA user information for each user (authentication disabled)
+    when: not ocp4_workload_mta6_feature_auth_required | default(true)
+    agnosticd_user_info:
+      user: "{{ ocp4_workload_mta6_user_base }}{{ item }}"
+      data:
+        mta_url: >-
+          https://tackle-{{ ocp4_workload_mta6_namespace_base }}-{{
+          ocp4_workload_mta6_user_base }}{{ item }}.{{
+          _ocp4_workload_mta6_wildcard_domain }}
+    loop: "{{ range(1, 1 + ocp4_workload_mta6_num_users | int) | list }}"
+
+# -----------------------------------------------------------------------------
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
