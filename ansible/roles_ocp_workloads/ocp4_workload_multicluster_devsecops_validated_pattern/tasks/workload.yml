@@ -1,0 +1,74 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user = {{ ocp4_username }}"
+
+- name: Set up namespace
+  k8s:
+    state: present
+    definition: "{{ lookup('template',  'namespace-ci.yml.j2' ) | from_yaml }}"
+
+- name: Retrieve Quay instance
+  kubernetes.core.k8s_info:
+    kind: Route
+    name: quay-quay
+    namespace: quay-enterprise
+  register: r_quay
+  retries: 60
+  delay: 5
+  until: r_quay.resources | length > 0
+
+- name: Set docker registry
+  set_fact:
+    ocp4_workload_multicluster_devsecops_validated_pattern_docker_registry: "{{ r_quay.resources[0].spec.host }}"
+
+- name: Create Sonarqube and Stackrox resources
+  include_tasks: "{{ item }}"
+  loop:
+  - sonarqube_create_resources.yml
+  - stackrox_create_secrets.yml
+
+- name: Retrieve Gitea instance
+  kubernetes.core.k8s_info:
+    api_version: gpte.opentlc.com/v1
+    kind: Gitea
+    name: gitea
+    namespace: gitea
+  register: r_gitea
+
+- name: Set Gitea repo variables
+  set_fact:
+    _ocp4_workload_multicluster_devsecops_validated_pattern_gitea_hostname: >-
+      {{ r_gitea.resources[0].status.giteaHostname }}
+    _ocp4_workload_multicluster_devsecops_validated_pattern_gitea_route_url: >-
+      {{ r_gitea.resources[0].status.giteaRoute }}
+    _ocp4_workload_multicluster_devsecops_validated_pattern_gitea_repo_inventory_url: >-
+      {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
+      ocp4_workload_multicluster_devsecops_validated_pattern_gitea_username | urlencode }}:{{
+      ocp4_workload_multicluster_devsecops_validated_pattern_gitea_password | urlencode }}@{{
+      r_gitea.resources[0].status.giteaHostname }}/{{
+      ocp4_workload_multicluster_devsecops_validated_pattern_gitea_username }}/inventory
+    _ocp4_workload_multicluster_devsecops_validated_pattern_gitea_repo_devsecops_url: >-
+      {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
+      ocp4_workload_multicluster_devsecops_validated_pattern_gitea_username | urlencode }}:{{
+      ocp4_workload_multicluster_devsecops_validated_pattern_gitea_password | urlencode }}@{{
+      r_gitea.resources[0].status.giteaHostname }}/{{
+      ocp4_workload_multicluster_devsecops_validated_pattern_gitea_username }}/multicluster-devsecops-pattern
+
+- name: Register webhook and token in Gitea and Update devsecops repository
+  include_tasks: "{{ item }}"
+  loop:
+  - update_gitea_requirements.yaml
+  - update_devsecops_repository.yaml
+
+- name: Set up inventory pipeline application
+  k8s:
+    state: present
+    definition: "{{ lookup('template',  'templates/application-app-inventory-pipeline.yml.j2' ) | from_yaml }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
