@@ -1,0 +1,122 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Retrieve Automation controller hub info
+  when:
+  - ocp4_workload_tekton_ee_hub_registry_route is not defined
+  - ocp4_workload_tekton_ee_hub_registry_password is not defined
+  block:
+  - name: Retrieve created hub route
+    k8s_facts:
+      api_version: "route.openshift.io/v1"
+      kind: Route
+      name: hub
+      namespace: "{{ ocp4_workload_tekton_ee_hub_namespace }}"
+    register: r_hub_route
+    until: r_hub_route.resources[0].spec.host is defined
+    retries: 300
+    delay: 30
+
+  - name: Retrieve hub secret
+    k8s_facts:
+      api_version: "v1"
+      kind: Secret
+      name: "{{ ocp4_workload_tekton_ee_hub_admin_secret }}"
+      namespace: "{{ ocp4_workload_tekton_ee_hub_namespace }}"
+    register: r_hub_secret
+    until:
+    - r_hub_secret.resources is defined
+    - r_hub_secret.resources | length > 0
+    - r_hub_secret.resources[0].data.password
+    retries: 300
+    delay: 30
+
+  - name: Set hub vars
+    set_fact:
+      ocp4_workload_tekton_ee_hub_registry_route: "{{ r_hub_route.resources[0].spec.host }}"
+      ocp4_workload_tekton_ee_hub_registry_password: "{{ r_hub_secret.resources[0].data.password | b64decode }}"
+
+- name: Retrieve Automation controller hub info
+  when:
+  - ocp4_workload_tekton_ee_automation_controller_route is not defined
+  - ocp4_workload_tekton_ee_automation_controller_password is not defined
+  block:
+  - name: Retrieve automation controller route
+    k8s_facts:
+      api_version: "route.openshift.io/v1"
+      kind: Route
+      name: controller
+      namespace: "{{ ocp4_workload_tekton_ee_automation_controller_namespace }}"
+    register: r_ac_route
+    until: r_ac_route.resources[0].spec.host is defined
+    retries: 300
+    delay: 30
+
+  - name: Retrieve automation controller admin secret
+    k8s_facts:
+      api_version: "v1"
+      kind: Secret
+      name: "{{ ocp4_workload_tekton_ee_automation_controller_admin_secret }}"
+      namespace: "{{ ocp4_workload_tekton_ee_automation_controller_namespace }}"
+    register: r_ac_secret
+    until:
+    - r_ac_secret.resources is defined
+    - r_ac_secret.resources | length > 0
+    - r_ac_secret.resources[0].data.password
+    retries: 300
+    delay: 30
+
+  - name: Set automation controller vars
+    set_fact:
+      ocp4_workload_tekton_ee_automation_controller_route: "{{ r_ac_route.resources[0].spec.host }}"
+      ocp4_workload_tekton_ee_automation_controller_password: "{{ r_ac_secret.resources[0].data.password | b64decode }}"
+
+- environment:
+    KUBECONFIG: "{{ tmp_kubeconfig }}"
+  block:
+  - name: Set up a namespace for the execution environment
+    kubernetes.core.k8s:
+      definition: "{{ lookup('template', './templates/common/resources/namespace.yaml.j2') | from_yaml }}"
+      state: present
+
+  - name: configure stackrox
+    include_tasks: "./additional/stackrox-configuration.yml"
+
+  - name: Set docker auth config
+    vars:
+      _secrets_path: "./templates/common/secrets"
+    set_fact:
+      _hub_auth_config: "{{ lookup('template', '{{ _secrets_path }}/hub-auth-config.json.j2') | to_nice_json | b64encode }}"
+      _internal_auth_config: "{{ lookup('template', '{{ _secrets_path }}/internal-auth-config.json.j2') | to_nice_json | b64encode }}"
+
+  - name: Create secrets from common templates
+    kubernetes.core.k8s:
+      namespace: "{{ ocp4_workload_tekton_ee_namespace }}"
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+      merge_type: strategic-merge
+      state: present
+    loop: "{{ lookup('fileglob', './templates/common/secrets/*.yaml.j2', wantlist=True)}}"
+
+  - name: Create tasks from templates
+    kubernetes.core.k8s:
+      namespace: "{{ ocp4_workload_tekton_ee_namespace }}"
+      definition: "{{ lookup('template', item) | from_yaml }}"
+      state: present
+    loop: "{{ lookup('fileglob', './templates/common/tasks/task-*.yaml.j2', wantlist=True)}}"
+
+  - pause:
+      minutes: 10
+
+  - name: Include pipelines and triggers
+    include_tasks: "./additional/pipelines-and-triggers.yml"
+    loop: "{{ ocp4_workload_tekton_ansible_execution_environments }}"
+
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
