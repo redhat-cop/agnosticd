@@ -1,0 +1,454 @@
+---
+- name: Step 005 Environment specific Software
+  hosts: localhost
+  gather_facts: False
+  become: false
+  tasks:
+    - debug:
+        msg: "Software tasks Started"
+
+- name: Prepare bastion node as a root
+  hosts: bastions
+  become: true
+  tags: build
+  tasks:
+    # https://docs.openshift.com/container-platform/4.9/installing/installing_bare_metal_ipi/ipi-install-installation-workflow.html
+    - name: Setting environment
+      when: (purpose == "development" or purpose == "build")
+      block:
+        - name: Create lab-user
+          user:
+            name: "lab-user"
+            group: "users"
+            state: present
+
+        - name: Enable sudoers
+          lineinfile:
+            path: '/etc/sudoers'
+            state: present
+            line: "lab-user  ALL=(ALL) NOPASSWD: ALL"
+            insertafter: 'EOF'
+
+        - name: Create an ssh key for the new use
+          shell: su - lab-user -c "ssh-keygen -t ed25519 -f /home/lab-user/.ssh/id_rsa -N ''"
+
+        - name: Install required packages
+          yum:
+            name: "{{ item }}"
+          loop:
+            - libvirt
+            - qemu-kvm
+            - mkisofs
+            - python3-devel
+            - jq
+            - ipmitool
+            - dhcp-server
+            - bind
+            - bind-utils
+            - firewalld
+            - httpd-tools
+            - mod_ssl
+
+
+        - name: Modify the user to add the libvirt group to the newly created user
+          user:
+            name: "lab-user"
+            groups: "libvirt"
+            state: present
+
+        - name: Start and enable the libvirtd service
+          service:
+            name: libvirtd
+            state: started
+            enabled: true
+
+        - name: Create the default storage pool and start it
+          shell: "{{ item }}"
+          loop:
+            - virsh pool-define-as --name default --type dir --target /var/lib/libvirt/images
+            - virsh pool-start default
+            - virsh pool-autostart default
+
+        - name: Configure the baremetal network
+          shell: "{{ item }}"
+          loop:
+            - nmcli connection add ifname baremetal type bridge con-name baremetal
+            - nmcli con add type bridge-slave ifname "eth1" master baremetal
+            - nmcli connection modify baremetal ipv4.addresses 10.20.0.254/24 ipv4.method manual ipv4.dns 10.20.0.1 ipv4.gateway 10.20.0.1
+            - nmcli con delete "System eth1"
+            - nmcli connection  up baremetal
+
+        - name: Configure the student network
+          shell: "{{ item }}"
+          loop:
+            - nmcli connection add ifname br-student type bridge con-name br-student
+            - nmcli con add type bridge-slave ifname "eth2" master br-student
+            - nmcli connection modify br-student ipv4.addresses 192.168.3.254/24 ipv4.method manual
+            - nmcli con delete "System eth2"
+            - nmcli connection  up br-student
+
+
+        - name: Configure the provisioning network
+          shell: "{{ item }}"
+          loop:
+            - nmcli con down "System eth0"
+            - nmcli con delete "System eth0"
+            - nmcli connection add ifname provisioning type bridge con-name provisioning
+            - nmcli con add type bridge-slave ifname "eth0" master provisioning
+            - nmcli connection modify provisioning ipv6.addresses fd00:1101::1/64 ipv6.method manual
+            - nmcli connection modify provisioning ipv4.addresses 172.22.0.254/24 ipv4.method manual
+            - nmcli con down provisioning
+            - nmcli con up provisioning
+            - sleep 180
+            - rm /etc/sysconfig/network-scripts/ifcfg-eth[012] || echo "ok"
+
+
+        - name: Create pull secret file
+          copy:
+            content: "{{ ocp4_pull_secret }}"
+            dest: "/tmp/pull-secret.txt"
+        - name: Obtain release image hash
+          shell: "curl -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_version }}/release.txt | grep 'Pull From: quay.io' | awk -F ' ' '{print $3}'"
+          register: release_image
+
+        - name: Get the oc binary
+          args:
+            chdir: /tmp
+          shell: "curl -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_version }}/openshift-client-linux.tar.gz | tar zxvf - oc"
+
+        - name: Extract the installer
+          shell: "{{ item }}"
+          args:
+            chdir: /tmp
+          loop:
+            - cp oc /usr/local/bin
+            - /usr/local/bin/oc adm release extract --registry-config "/tmp/pull-secret.txt" --command=openshift-baremetal-install --to "/tmp/" "{{release_image.stdout}}"
+            - cp openshift-baremetal-install /usr/local/bin
+
+
+        - name: Copy dhcpd.conf file
+          copy:
+            src: dhcpd.conf
+            dest: /etc/dhcp/dhcpd.conf
+
+        - name: Restart dhcpd service
+          service:
+            name: dhcpd
+            state: restarted
+            enabled: yes
+
+        - name: Copy named.conf
+          copy:
+            src: named.conf
+            dest: /etc/named.conf
+
+        - name: Copy example.com.zone
+          copy:
+            src: example.com.zone
+            dest: /var/named/example.com.zone
+
+
+        - name: Copy 0.20.10.in-addr.arpa
+          copy:
+            src: 0.20.10.in-addr.arpa
+            dest: /var/named/0.20.10.in-addr.arpa
+
+
+        # TODO
+        - name: Restart named service
+          service:
+            name: named
+            state: restarted
+            enabled: yes
+
+        - name: Start firewalld and enable it
+          service:
+            name: firewalld
+            state: started
+            enabled: yes
+
+
+        - name: Enable masquerade and dns/http access
+          command: "{{ item }}"
+          loop:
+            - firewall-cmd --add-masquerade --permanent
+            - firewall-cmd --add-service=dns --permanent
+            - firewall-cmd --add-service=http --permanent
+            - firewall-cmd --add-service=https --permanent
+            - firewall-cmd --reload
+
+        - name: Update resolv.conf
+          copy:
+            src: resolv.conf
+            dest: /etc/resolv.conf
+
+        - name: Copy legacy.xml
+          copy:
+            src: legacy.xml
+            dest: /etc/libvirt/qemu/legacy.xml
+
+        - name: Download legacy.qcow2
+          get_url:
+            url: https://www.opentlc.com/download/ocp4_virt_foundations/legacy.qcow2
+            dest: /var/lib/libvirt/images/legacy.qcow2
+            owner: qemu
+            group: qemu
+
+        - name: Autostart legacy VM
+          command: virsh start legacy
+
+        - name: Autostart legacy VM
+          command: virsh autostart legacy
+
+        - name: Create directory /var/www/html/download
+          file:
+            path: /var/www/html/download/
+            state: directory
+            owner: apache
+            group: apache
+
+        - name: Download required files for the lab
+          get_url:
+            url: "https://www.opentlc.com/download/ocp4_virt_foundations/{{ item }}"
+            dest: "/var/www/html/download/{{ item }}"
+            owner: apache
+            group: apache
+          loop:
+            - Fedora35.iso
+            - Fedora35.qcow2
+            - Windows2019.iso
+
+
+- name: Install OpenShift
+  hosts: bastions
+  become: true
+  become_user: lab-user
+  tags: build
+  environment:
+    KUBECONFIG: /home/lab-user/install/auth/kubeconfig
+  tasks:
+    - name: Setting environment
+      when: (purpose == "development" or purpose == "build")
+      block:
+        - name: Get the id_rsa content
+          command: cat /home/lab-user/.ssh/id_rsa.pub
+          register: ssh_key_pub
+
+        - name: Create directory to store install-config.yaml
+          file:
+            path: /home/lab-user/install/
+            state: directory
+
+        - name: Copy install-config.yaml file
+          template:
+            src: install-config.yaml.j2
+            dest: /home/lab-user/install/install-config.yaml
+
+        - name: Copy install-config.yaml file (as bak)
+          template:
+            src: install-config.yaml.j2
+            dest: /home/lab-user/install/install-config.yaml.bak
+
+        - name: Run installer
+          shell: /usr/local/bin/openshift-baremetal-install --dir ~/install/ --log-level debug create cluster
+          args:
+            chdir: /home/lab-user/install/
+          async: 100000
+          poll: 0
+          register: install_ocp
+
+        - name: 'install ocp - check on async task'
+          async_status:
+            jid: "{{ install_ocp.ansible_job_id }}"
+          register: job_result
+          until: job_result.finished
+          retries: 600
+
+        - name: Set baremetal nodes as detached to be able to stop them
+          shell: "{{ item }}"
+          loop:
+            - /usr/local/bin/oc annotate bmh master-0 baremetalhost.metal3.io/detached=true -n openshift-machine-api
+            - /usr/local/bin/oc annotate bmh master-1 baremetalhost.metal3.io/detached=true -n openshift-machine-api
+            - /usr/local/bin/oc annotate bmh master-2 baremetalhost.metal3.io/detached=true -n openshift-machine-api
+            - /usr/local/bin/oc annotate bmh worker-0 baremetalhost.metal3.io/detached=true -n openshift-machine-api
+            - /usr/local/bin/oc annotate bmh worker-1 baremetalhost.metal3.io/detached=true -n openshift-machine-api
+            - /usr/local/bin/oc annotate bmh worker-2 baremetalhost.metal3.io/detached=true -n openshift-machine-api
+
+        - name: Copy file htpasswd.yaml
+          copy:
+            src: "htpasswd.yaml"
+            dest: "/home/lab-user/install/htpasswd.yaml"
+
+        - name: Configure developer user
+          shell: "{{ item }}"
+          args:
+            chdir: /home/lab-user/install/
+          loop:
+            - htpasswd -c -B -b users.htpasswd developer r3dh4t1!
+            - /usr/local/bin/oc create secret generic htpass-secret --from-file=htpasswd=users.htpasswd -n openshift-config
+            - /usr/local/bin/oc apply -f htpasswd.yaml
+            - /usr/local/bin/oc adm policy add-cluster-role-to-user cluster-admin developer
+
+- name: Workaround for issue INC2244178
+  hosts: bastions
+  become: true
+  tasks:
+    - name: Configure OCS
+      when: purpose != "build"
+      block:
+        - name: Copy dhcpd.conf file
+          copy:
+            src: dhcpd.conf
+            dest: /etc/dhcp/dhcpd.conf
+
+        - name: Restart dhcpd service
+          service:
+            name: dhcpd
+            state: restarted
+            enabled: yes
+
+        - name: Configure the provisioning network
+          shell: rm /etc/sysconfig/network-scripts/ifcfg-eth[012] || echo "ok"
+
+- name: Approve CSR and Configure OCS
+  hosts: bastions
+  become: true
+  become_user: lab-user
+  tags: build
+  environment:
+    KUBECONFIG: /home/lab-user/install/auth/kubeconfig
+  tasks:
+    - name: Configure OCS
+      when: purpose != "build"
+      block:
+        - name: Copy Approve CSR script
+          copy:
+            src: "approve_csr.sh"
+            dest: "/home/lab-user/install/approve_csr.sh"
+            mode: '0755'
+        - name: Run approve CSRs script
+          shell: "/home/lab-user/install/approve_csr.sh"
+          async: 100000
+          poll: 0
+          register: approve_csr
+
+        - name: 'approve csr - check on async task'
+          async_status:
+            jid: "{{ approve_csr.ansible_job_id }}"
+          register: job_result
+          until: job_result.finished
+          retries: 600
+
+
+        - name: Tag nodes for OCS
+          shell: "{{ item }}"
+          loop:
+            - /usr/local/bin/oc label nodes worker-0 cluster.ocs.openshift.io/openshift-storage=''
+            - /usr/local/bin/oc label nodes worker-1 cluster.ocs.openshift.io/openshift-storage=''
+            - /usr/local/bin/oc label nodes worker-2 cluster.ocs.openshift.io/openshift-storage=''
+
+        - name: Copy files to configure OCS with Local Volumes
+          copy:
+            src: "{{ item }}"
+            dest: "/home/lab-user/install/{{ item }}"
+          loop:
+            - 1_local_storage_operator.yaml
+            - 2_logical_volume.yaml
+            - 3_ocs_operator.yaml
+            - 4_ocs_cluster.yaml
+
+        - name: Configure Local Storage Operator
+          shell: "/usr/local/bin/oc create -f 1_local_storage_operator.yaml"
+          args:
+            chdir: /home/lab-user/install/
+
+        - name: Configure Logical Volumes
+          shell: "/usr/local/bin/oc create -f 2_logical_volume.yaml"
+          retries: 30
+          delay: 30
+          register: result
+          until: result.rc == 0
+          args:
+            chdir: /home/lab-user/install/
+
+        - name: Configure OCS Operator
+          shell: "/usr/local/bin/oc create -f 3_ocs_operator.yaml"
+          args:
+            chdir: /home/lab-user/install/
+
+
+        - name: Configure OCS Cluster
+          shell: "/usr/local/bin/oc create -f 4_ocs_cluster.yaml"
+          retries: 10
+          delay: 30
+          register: result
+          until: result.rc == 0
+          args:
+            chdir: /home/lab-user/install/
+
+        - name: Get the current storageclass
+          shell: /usr/local/bin/oc get storageclass
+          register: r_sc
+
+        - debug: var=r_sc
+
+        - name: Set RBD storage class a default
+          shell: |
+            /usr/local/bin/oc patch storageclass ocs-storagecluster-ceph-rbd -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "true"}}}'
+          args:
+            chdir: /home/lab-user/install/
+          retries: 10
+          delay: 30
+          register: result
+          until: result.rc == 0
+
+- name: Configure httpd
+  hosts: bastions
+  become: true
+  tasks:
+    - name: Install httpd
+      yum:
+        name: httpd
+
+    - name: Copy horizon.conf
+      template:
+        src: httpd/ssl.conf
+        dest: /etc/httpd/conf.d/ssl.conf
+
+    - name: Enable EPEL
+      dnf:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
+        state: present
+        disable_gpg_check: true
+
+    - name: Allow SELinux rule to allow httpd to connect network
+      shell: setsebool -P httpd_can_network_connect 1
+
+    - name: install certbot
+      yum:
+        name: "certbot"
+
+    - name: Ensure httpd is stopped
+      service:
+        name: httpd
+        state: stopped
+
+    - name: Generate certificate using certbot
+      command: certbot certonly  --standalone -d console-openshift-console.apps.{{ guid }}.dynamic.opentlc.com,oauth-openshift.apps.{{ guid }}.dynamic.opentlc.com -m josegonz@redhat.com --agree-tos -n
+
+    - name: Start and enable httpd
+      service:
+        name: httpd
+        state: restarted
+        enabled: yes
+
+- name: Software flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Software checks completed successfully"
