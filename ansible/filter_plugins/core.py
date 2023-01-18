@@ -176,6 +176,91 @@ def equinix_metal_tags_to_dict(tags):
 
     return converted
 
+
+
+# Backport https://github.com/ansible-collections/amazon.aws/commit/bc1dc58a882b563a4e5448d693ef08b4c2bbbceb#diff-11d6a927433f45aa84de2f54fa0adf33e8094ebb417c75ea476ffe61b4e4f587
+# here to support old version of boto that we use in our different virtualenvs
+def dict_sanitize_boto3_filter(filters_dict):
+    filters_sanitized = dict()
+    for k, v in filters_dict.items():
+        if isinstance(v, bool):
+            filters_sanitized[k] = [str(v).lower()]
+        elif isinstance(v, integer_types):
+            filters_sanitized[k] = [str(v)]
+        elif isinstance(v, string_types):
+            filters_sanitized[k]= [v]
+        else:
+            filters_sanitized[k] = v
+
+    return filters_sanitized
+
+def image_to_ec2_filters(image):
+    '''Convert agnosticd instances[].image dict to ec2 filters to be used in ec2_ami_info'''
+
+    function_name = "image_to_ec2_filters"
+
+    if not isinstance(image, dict):
+        raise AnsibleFilterError(
+            '''Invalid type used with %s filter,
+            expect a dict, got %s''' %(function_name, type(image)))
+
+    filters = dict()
+
+    if 'tags' in image:
+        if not isinstance(image['tags'], dict):
+            raise AnsibleFilterError(
+                '''Invalid type for tags used with %s filter,
+                expect a dict, got %s''' %(function_name, type(image['tags'])))
+
+        for key in image['tags']:
+            filters['tag:'+key] = image['tags'][key]
+
+    if 'architecture' in image:
+        filters['architecture'] = image['architecture']
+    else:
+        filters['architecture'] = 'x86_64'
+
+    if 'name' in image:
+        filters['name'] = image['name']
+
+    if 'aws_filters' in image:
+        filters.update(image['aws_filters'])
+
+    return dict_sanitize_boto3_filter(filters)
+
+def agnosticd_get_all_images(image, predefined, done=None):
+    '''Cascade and list images (and fallback images) from an image
+    or a list of images'''
+
+    function_name = "agnosticd_get_all_images"
+    if done is None:
+        done = {}
+
+    # str can be links to another images or list of images
+    if isinstance(image, str):
+        if image in predefined:
+            # Detect infinite loops
+            if image in done:
+                raise AnsibleFilterError(
+                    '%s: Loop detected in image definitions: %s' %(function_name, done))
+
+            done[image] = True
+            # call again by resolving the image defined in predefined
+            return agnosticd_get_all_images(predefined[image], predefined, done)
+
+        # No match, return no image (backward-compatible)
+        return []
+
+    if isinstance(image, dict):
+        return [image]
+
+    if isinstance(image, list):
+        result = []
+        for _image in image:
+            result.extend(agnosticd_get_all_images(_image, predefined, done))
+
+        return result
+
 class FilterModule(object):
     ''' AgnosticD core jinja2 filters '''
 
@@ -185,4 +270,6 @@ class FilterModule(object):
             'ec2_tags_to_dict': ec2_tags_to_dict,
             'dict_to_equinix_metal_tags': dict_to_equinix_metal_tags,
             'equinix_metal_tags_to_dict': equinix_metal_tags_to_dict,
+            'image_to_ec2_filters': image_to_ec2_filters,
+            'agnosticd_get_all_images': agnosticd_get_all_images,
         }

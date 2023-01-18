@@ -154,6 +154,7 @@ def get_image_list(module, project):
         response = cos.list_objects_v2(Bucket=bucket, Prefix=project)
         if 'Contents' in response:
             return response["Contents"]
+        return []
     except Exception as e:
         module.exit_json(msg="Error get bucket content. {0}".format(e))
 

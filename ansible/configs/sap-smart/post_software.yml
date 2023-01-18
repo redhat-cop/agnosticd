@@ -7,11 +7,12 @@
     - debug:
         msg: "Post-Software tasks Started"
 
-    - name: Dump Ansible Tower License to a file
-      copy:
-        content: "{{ tower_license }}"
-        dest: /tmp/license.json
-      when: tower_instance_count > 0
+    - name: downloading tower manifest from OpenTLC
+      get_url:
+        url: "{{ tower_manifest.url }}"
+        dest: "{{ ansible_tower.install.manifest_file }}"
+        username: "{{ tower_manifest.username | default(omit) }}"
+        password: "{{ tower_manifest.password | default(omit) }}"
 
 - name: Configure Ansible Tower
   hosts: towers
@@ -19,8 +20,9 @@
   become: yes
   tasks:
 
-    - block:
-
+    - name: Configure tower
+      when: tower_instance_count > 0
+      block:
       - name: Ensure dependencies for tower-cli are installed
         yum:
           name: python3-pip
@@ -42,9 +44,25 @@
           content: "{{ workflow_schema }}"
           dest: /tmp/schema.yml
 
+      - name: Create symlink to support internal infra-ansible role includes
+        file:
+          src: infra-ansible/roles/ansible
+          dest: "{{ __agnosticd_roles_install_path }}/ansible"
+          state: link
+        delegate_to: localhost
+        become: false
+        run_once: true
+        vars:
+          __agnosticd_roles_install_path: >-
+            {%- if requirements_content is defined and requirements_content | length > 0 -%}
+            {{ playbook_dir }}/dynamic-roles
+            {%- else -%}
+            {{ ANSIBLE_REPO_PATH | default(playbook_dir) }}/roles
+            {%- endif -%}
+
       - name: Ensure Tower License is configured
         include_role:
-          name: infra-ansible/roles/ansible/tower/config-ansible-tower-license
+          name: infra-ansible/roles/ansible/tower/config-ansible-tower-subscription-manifest
 
       - name: Ensure required Credentials are added to Tower
         include_role:
@@ -68,8 +86,6 @@
       - name: Populate new WorkFlow with specified schema
         shell: /usr/local/bin/tower-cli workflow schema "SAP HANA and S/4HANA E2E deployment" @/tmp/schema.yml
 
-      when: tower_instance_count > 0
-
 - name: Register HANA and S4HANA hosts into Satellite and install katello agent
   hosts: hanas:s4hanas
   serial: 1
@@ -90,7 +106,7 @@
 
     - name: Install katello-agent and compliance packages
       yum:
-        name: 
+        name:
           - katello-agent
           # Leaving these 3 commented for future testing in case I finally
           # add the compliance piece to the workshop
@@ -132,6 +148,17 @@
         group: root
         mode: '0600'
         force: yes
+
+- name: Prevent Pulp 500 error
+  hosts: sats
+  become: yes
+  tasks:
+
+    - name: Restore SElinux context
+      shell: restorecon -R /
+
+    - name: Reboot Satellite server
+      reboot:
 
 - name: Deploy SAP HANA and SAP S/4HANA
   hosts: towers
@@ -191,7 +218,7 @@
           ] if tower_instance_count > 0 else []
           )
         }}
-        
+
     - name: Set agnosticd user info data for bastion
       agnosticd_user_info:
         data:

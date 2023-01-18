@@ -1,0 +1,129 @@
+---
+- name: Generate code server password if no password specified
+  when: ocp4_workload_codeserver_password | default("") | length == 0
+  ansible.builtin.set_fact:
+    ocp4_workload_codeserver_password: >-
+      {{ lookup('password', '/dev/null length={{ ocp4_workload_codeserver_password_length }} chars=ascii_letters,digits') }}
+
+- name: Determine Wildcard Domain
+  kubernetes.core.k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: r_ingress_controller
+
+- name: Retrieve Gitea instance
+  kubernetes.core.k8s_info:
+    api_version: gpte.opentlc.com/v1
+    kind: Gitea
+    name: "{{ ocp4_workload_codeserver_gitea_name }}"
+    namespace: "{{ ocp4_workload_codeserver_gitea_namespace }}"
+  register: r_gitea
+
+- name: Set variables
+  ansible.builtin.set_fact:
+    _ocp4_workload_codeserver_wildcard_domain: "{{ r_ingress_controller.resources[0].status.domain }}"
+    _ocp4_workload_codeserver_gitea_url: >-
+      {{ r_gitea.resources[0].status.giteaRoute }}
+    _ocp4_workload_codeserver_gitea_hostname: >-
+      {{ r_gitea.resources[0].status.giteaHostname }}
+    _ocp4_workload_codeserver_gitea_protocol: >-
+      {{ 'https' if r_gitea.resources[0].status.giteaRoute is search('https') else 'http' }}
+    _ocp4_workload_codeserver_repos: []
+
+# -----------------------------------------------------------------------------
+- name: Single user installation
+  when: not ocp4_workload_codeserver_multi_user_install | bool
+  block:
+  # Build dictionary of repositories
+  - name: Add repos to dictionary
+    when: ocp4_workload_codeserver_repos | length > 0
+    ansible.builtin.set_fact:
+      _ocp4_workload_codeserver_repos: |-
+        {{ _ocp4_workload_codeserver_repos + [
+        { 'name': repo.name,
+          'url': _ocp4_workload_codeserver_gitea_protocol ~ '://' ~
+                  ((ocp4_workload_codeserver_repos_user ~ ":") if ocp4_workload_codeserver_repos_user | default("") | length > 0 else "") ~
+                  ((ocp4_workload_codeserver_repos_password | default("") ~ "@") if ocp4_workload_codeserver_repos_password | default("") | length > 0
+                  else "") ~ _ocp4_workload_codeserver_gitea_hostname ~ '/' ~ repo.account ~ "/" ~ repo.name,
+          'branch': repo.branch } ]
+        }}
+    loop: "{{ ocp4_workload_codeserver_repos }}"
+    loop_control:
+      loop_var: repo
+      label: "{{ repo.name }}"
+
+  - name: Print repos dictionary (single user)
+    debug:
+      msg: "{{ _ocp4_workload_codeserver_repos }}"
+
+  - name: Install code server (single user)
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'application.yaml.j2') }}"
+
+  - name: Save code server information
+    agnosticd_user_info:
+      data:
+        codeserver_url: >-
+          https://{{ ocp4_workload_codeserver_name }}-{{ ocp4_workload_codeserver_namespace
+          }}.{{ _ocp4_workload_codeserver_wildcard_domain }}
+        codeserver_password: "{{ ocp4_workload_codeserver_password }}"
+
+- name: Multi User installation
+  when: ocp4_workload_codeserver_multi_user_install | bool
+  block:
+  # Build dictionary of repositories
+  - name: Print repos to be added
+    when: ocp4_workload_codeserver_repos | length > 0
+    debug:
+      msg: |-
+        {{ _ocp4_workload_codeserver_gitea_protocol
+        }}://{{'{{ user }}'}}:{{
+        ((ocp4_workload_codeserver_repos_password | default('') ~ '@') if ocp4_workload_codeserver_repos_password | default('') | length > 0 else '')
+        }}{{ _ocp4_workload_codeserver_gitea_hostname }}/{{'{{ user }}'}}/{{ repo.name }}
+    loop: "{{ ocp4_workload_codeserver_repos }}"
+    loop_control:
+      loop_var: repo
+      label: "{{ repo.name }}"
+
+  - name: Add repos to dictionary
+    when: ocp4_workload_codeserver_repos | length > 0
+    ansible.builtin.set_fact:
+      _ocp4_workload_codeserver_repos: |-
+        {{ _ocp4_workload_codeserver_repos + [
+        { 'name': repo.name,
+          'url': _ocp4_workload_codeserver_gitea_protocol ~ '://' ~
+                  '{{ user }}:' ~
+                  ((ocp4_workload_codeserver_repos_password | default("") ~ "@") if ocp4_workload_codeserver_repos_password | default("") | length > 0
+                  else "") ~
+                  _ocp4_workload_codeserver_gitea_hostname ~ '/' ~ '{{ user }}' ~ "/" ~ repo.name,
+          'branch': repo.branch } ]
+        }}
+    loop: "{{ ocp4_workload_codeserver_repos }}"
+    loop_control:
+      loop_var: repo
+      label: "{{ repo.name }}"
+
+  - name: Print repos dictionary (multi user)
+    debug:
+      msg: "{{ _ocp4_workload_codeserver_repos }}"
+
+  - name: Install code server (multi user)
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'applicationset.yaml.j2') }}"
+
+  - name: Save code server information for each user
+    agnosticd_user_info:
+      user: "{{ ocp4_workload_codeserver_multi_user_username_base }}{{ n }}"
+      data:
+        codeserver_url: >-
+          https://{{ ocp4_workload_codeserver_name }}-{{ ocp4_workload_codeserver_multi_user_namespace_base }}-{{
+          ocp4_workload_codeserver_multi_user_username_base }}{{ n }}.{{ _ocp4_workload_codeserver_wildcard_domain }}
+        codeserver_password: "{{ ocp4_workload_codeserver_password }}"
+    loop: "{{ range(1, 1 + ocp4_workload_codeserver_multi_user_num_users | int) | list }}"
+    loop_control:
+      loop_var: n
+      label: "{{ ocp4_workload_codeserver_multi_user_username_base }}{{ n }}"

@@ -61,16 +61,19 @@ class ActionModule(ActionBase):
             result['error'] = 'msg and body are mutually exclusive'
             return result
 
-        if not user and msg != None:
-            # Output msg in result, prepend "user.info: " for cloudforms compatibility
-            if isinstance(msg, list):
-                result['msg'] = ['user.info: ' + m for m in msg]
+        if msg != None:
+            if user:
+                result['msg'] = msg
             else:
-                result['msg'] = 'user.info: ' + msg
-                # Force display of result like debug
+                # Output msg in result, prepend "user.info: " to support parsing from log
+                if isinstance(msg, list):
+                    result['msg'] = ['user.info: ' + m for m in msg]
+                else:
+                    result['msg'] = 'user.info: ' + msg
+                    # Force display of result like debug
 
         if not user and body != None:
-            # Output msg in result, prepend "user.info: " for cloudforms compatibility
+            # Output msg in result, prepend "user.body: " to support parsing from log
             result['msg'] = 'user.body: ' + body
             # Force display of result like debug
 
@@ -80,6 +83,9 @@ class ActionModule(ActionBase):
                 result['failed'] = True
                 result['error'] = 'data must be a dictionary of name/value pairs'
                 return result
+
+        if user:
+            result['user'] = user
 
         try:
             output_dir = self._templar.template(
