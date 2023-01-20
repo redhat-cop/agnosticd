@@ -14,8 +14,32 @@ oc get taskrun -A | grep Failed
 oc get pods -A | grep -v Running | grep -v Completed
 ```
 
+## Trigger pipelines
+
+In case the quarkus-pipeline failed.
+
 ```
-tkn pipeline start quarkus-pipeline --workspace name=app-source,claimName=workspace-app-source --workspace name=maven-settings,emptyDir= --use-param-defaults -n tekton-user1
+tkn pipeline start quarkus-pipeline --workspace name=app-source,claimName=workspace-app-source --workspace name=maven-settings,emptyDir= --use-param-defaults -n tekton-userX
+```
+
+## Trigger tasks
+
+In case the update-swagger task failed.
+
+```
+export GUID=65dr9
+export SANDBOX=sandbox467
+export OCP_USER=user5
+
+tkn task start update-swagger \
+--param restFightsOpenapiServers="http:\/\/rest-fights-quarkus-superheroes-${OCP_USER}.apps.cluster-${GUID}.${SANDBOX}.opentlc.com" \
+--param restHeroesOpenapiServers="http:\/\/rest-heores-quarkus-superheroes-${OCP_USER}.apps.cluster-${GUID}.${SANDBOX}.opentlc.com" \
+--param restVillainsOpenapiServers="http:\/\/rest-villains-quarkus-superheroes-${OCP_USER}.apps.cluster-${GUID}.${SANDBOX}.opentlc.com" \
+--use-param-defaults --showlog -n tekton-${OCP_USER}
+
+# ArgoCD needs to refresh and sync before deployment restart
+
+oc rollout restart deploy rest-fights -n quarkus-superheroes-${OCP_USER}
 ```
 
 ## Redeploy lab guides
