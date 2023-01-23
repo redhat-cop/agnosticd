@@ -1,0 +1,166 @@
+---
+- name: Setting up workload for user
+  ansible.builtin.debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+# Set up HTPasswd Secret
+- name: Generate admin user password
+  when: ocp4_workload_deploy_hosted_cluster_admin_password | default('') | length == 0
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_admin_password: >-
+      {{ lookup('password', '/dev/null chars=ascii_letters,digits '
+          ~ 'length=' ~ ocp4_workload_deploy_hosted_cluster_admin_password_length
+      ) }}
+
+- name: Use provided admin password
+  when: ocp4_workload_deploy_hosted_cluster_admin_password | default('') | length > 0
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_admin_password: "{{ ocp4_workload_deploy_hosted_cluster_admin_password }}"
+
+- name: Generate htpasswd hash for admin user
+  ansible.builtin.shell: >-
+    htpasswd -nb "admin" "{{ _ocp4_workload_deploy_hosted_cluster_admin_password }}" | cut -d: -f2
+  register: r_htpasswd_admin_line
+
+- name: Set htpasswd admin password hash
+  when: r_htpasswd_admin_line is succeeded
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_admin_password_hash: "{{ r_htpasswd_admin_line.stdout }}"
+
+- name: Generate user passwords
+  when: ocp4_workload_deploy_hosted_cluster_user_password | default('') | length == 0
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_user_password: >-
+      {{ lookup('password', '/dev/null chars=ascii_letters,digits '
+          ~ 'length=' ~ ocp4_workload_deploy_hosted_cluster_user_password_length
+      ) }}
+
+- name: Use provided user passwords
+  when: ocp4_workload_deploy_hosted_cluster_user_password | default('') | length > 0
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_user_password: "{{ ocp4_workload_deploy_hosted_cluster_user_password }}"
+
+- name: Generate htpasswd hash for user passwords
+  ansible.builtin.shell: >-
+    htpasswd -nb "userN" "{{ _ocp4_workload_deploy_hosted_cluster_user_password }}" | cut -d: -f2
+  register: r_htpasswd_user_line
+
+- name: Set htpasswd user password hash
+  when: r_htpasswd_user_line is succeeded
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_user_password_hash: "{{ r_htpasswd_user_line.stdout }}"
+
+- name: Generate htpasswd file
+  ansible.builtin.template:
+    src: htpasswd.j2
+    dest: /home/opentlc-mgr/users.htpasswd
+    owner: opentlc-mgr
+    mode: 0664
+
+- name: Read contents of htpasswd file
+  ansible.builtin.slurp:
+    src: /home/opentlc-mgr/users.htpasswd
+  register: r_htpasswd_file
+
+- name: Remove generated htpasswd file
+  ansible.builtin.file:
+    path: /home/opentlc-mgr/users.htpasswd
+    state: absent
+
+- name: Ensure secret htpasswd-{{ guid }} is absent
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Secret
+    name: "htpasswd-{{ guid }}"
+    namespace: local-cluster
+  register: r_htpasswd_secret_absent
+  retries: 5
+  delay: 10
+  until: r_htpasswd_secret_absent is success
+
+- name: Create secret htpasswd-{{ guid }}
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template',  'secret-htpasswd.yaml.j2' ) | from_yaml }}"
+
+- name: Run hypershift CLI to deploy hosted cluster
+  ansible.builtin.command: >-
+    hypershift create cluster aws
+      --name {{ ocp4_workload_deploy_hosted_cluster_name }}
+      --infra-id {{ ocp4_workload_deploy_hosted_cluster_infra_ID }}
+      --pull-secret /home/opentlc-mgr/pullsecret.json
+      --aws-creds /home/opentlc-mgr/.aws/credentials
+      --region {{ ocp4_workload_deploy_hosted_cluster_aws_region }}
+      --zones {{ ocp4_workload_deploy_hosted_cluster_aws_zones }}
+      --instance-type {{ ocp4_workload_deploy_hosted_cluster_worker_instance_type }}
+      --root-volume-type {{ ocp4_workload_deploy_hosted_cluster_worker_root_volume_type }}
+      --root-volume-size {{ ocp4_workload_deploy_hosted_cluster_worker_root_volume_size }}
+      --base-domain {{ ocp4_workload_deploy_hosted_cluster_base_domain }}
+      --generate-ssh
+      --control-plane-availability-policy {{ ocp4_workload_deploy_hosted_cluster_controlplane_availability }}
+      --network-type {{ ocp4_workload_deploy_hosted_cluster_network_type }}
+      --release-image quay.io/openshift-release-dev/ocp-release:{{ ocp4_workload_deploy_hosted_cluster_version }}-x86_64
+      --node-pool-replicas {{ ocp4_workload_deploy_hosted_cluster_nodepool_replicas }}
+      --namespace local-cluster
+      --wait
+  register: r_hypershift_create_cluster
+
+- name: Patch hosted cluster to add authentication
+  kubernetes.core.k8s:
+    state: patched
+    definition: "{{ lookup('template', 'hosted-cluster-auth.yaml.j2' ) | from_yaml }}"
+
+- name: Create managed cluster to add cluster to ACM
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'managed-cluster.yaml.j2' ) | from_yaml }}"
+
+- name: Create klusterlet-addon-config to allow policy deployment
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'klusterlet-addon-config.yaml.j2' ) | from_yaml }}"
+
+- name: Print user information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "HTPasswd Authentication is enabled on this cluster."
+  - >-
+    User `{{ ocp4_workload_deploy_hosted_cluster_admin_user }}` with password
+    `{{ _ocp4_workload_deploy_hosted_cluster_admin_password }}` is cluster admin.
+  - >-
+    Users {{ ocp4_workload_deploy_hosted_cluster_user_base }}1 ..
+    {{ ocp4_workload_deploy_hosted_cluster_user_base ~ ocp4_workload_deploy_hosted_cluster_user_count }} are
+    created with password `{{ _ocp4_workload_deploy_hosted_cluster_user_password }}`
+
+- name: Save admin user information
+  agnosticd_user_info:
+    data:
+      openshift_cluster_admin_username: "{{ ocp4_workload_deploy_hosted_cluster_admin_user }}"
+      openshift_cluster_admin_password: "{{ _ocp4_workload_deploy_hosted_cluster_admin_password }}"
+      openshift_cluster_user_base: "{{ ocp4_workload_deploy_hosted_cluster_user_base }}"
+      openshift_cluster_user_password: "{{ _ocp4_workload_deploy_hosted_cluster_user_password }}"
+      openshift_cluster_num_users: "{{ ocp4_workload_deploy_hosted_cluster_user_count }}"
+
+- name: Save user information for each user
+  agnosticd_user_info:
+    user: "{{ ocp4_workload_deploy_hosted_cluster_user_base }}{{ n }}"
+    data:
+      # console_url: "{{ _ocp4_workload_authentication_console_route }}"
+      # openshift_cluster_ingress_domain: "{{ _ocp4_workload_authentication_cluster_ingress_domain }}"
+      password: "{{ _ocp4_workload_deploy_hosted_cluster_user_password }}"
+      # login_command: >-
+        # oc login -u {{ ocp4_workload_deploy_hosted_cluster_user_base }}{{ n }}
+        # -p {{ _ocp4_workload_deploy_hosted_cluster_user_password }} {{ r_cluster.resources[0].status.apiServerURL }}
+  loop: "{{ range(1, 1 + ocp4_workload_deploy_hosted_cluster_user_count | int) | list }}"
+  loop_control:
+    loop_var: n
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
