@@ -1,0 +1,101 @@
+---
+- name: Process acm common manifests
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - acm/common/acm-namespace-vault.yml.j2
+  - acm/app/vault/acm-channel.yml.j2
+  - acm/app/vault/acm-placement-rule.yml.j2
+  - acm/app/vault/acm-subscription.yml.j2
+  - acm/app/vault/acm-application.yml.j2
+  vars:
+    _cluster: local-cluster
+
+- name: Retrieve Vault Pod
+  kubernetes.core.k8s_info:
+    kind: Pod
+    name: vault-0
+    namespace: "{{ ocp4_workload_devsecops_validated_pattern_vault_namespace }}"
+  register: r_vault
+  retries: 60
+  delay: 5
+  until:
+  - r_vault.resources is defined
+  - r_vault.resources | length > 0
+  - r_vault.resources[0].status is defined
+  - r_vault.resources[0].status.phase is defined
+  - r_vault.resources[0].status.phase == 'Running'
+
+- name: Initialize vault
+  shell: >-
+    oc exec vault-0 --namespace={{ ocp4_workload_devsecops_validated_pattern_vault_namespace }} \
+     --stdin --tty -- vault operator init -format=yaml > /tmp/vault-auto-unseal-keys.txt
+
+- name: Unseal vault
+  shell: >-
+    oc exec vault-0 --namespace={{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} --stdin --tty -- vault operator unseal -tls-skip-verify $(grep -A 5 unseal_keys_b64 \
+    /tmp/vault-auto-unseal-keys.txt |head -{{ item }}|tail -1|sed 's/- //g')
+  loop:
+  - 2
+  - 3
+  - 4
+
+- name: Get login token
+  shell: >-
+    grep -A 0 root_token /tmp/vault-auto-unseal-keys.txt | sed 's/root_token: //g'
+  register: r_token
+
+- name: Set vault token fact
+  set_fact:
+    ocp4_workload_devsecops_validated_pattern_vault_token: "{{ r_token.stdout }}"
+
+- name: Login to vault
+  shell: >-
+    oc exec vault-0 --namespace={{ ocp4_workload_devsecops_validated_pattern_vault_namespace }} \
+    --stdin --tty -- vault login token={{ ocp4_workload_devsecops_validated_pattern_vault_token }}
+
+- name: Create vault cosign secret
+  shell: >-
+    oc exec -it vault-0 -n {{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} -- vault secrets enable -path=secret/data kv &&
+    oc exec -it vault-0 -n {{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} -- vault kv put secret/data/cosign cosign.key="{{ lookup('file', 'files/cosign.key')
+    }}" cosign.password={{ ocp4_workload_devsecops_validated_pattern_cosign_password }}
+
+- name: Create pipeline role binding for vault namespace
+  k8s:
+    state: present
+    definition: "{{ lookup('template',  'rolebinding-pipeline-edit-vault.yml.j2' ) | from_yaml }}"
+
+- name: Create token secret
+  k8s:
+    state: present
+    definition: "{{ lookup('template',  'acm-vault-token-secret.yaml.j2' ) | from_yaml }}"
+
+- name: Retrieve route
+  kubernetes.core.k8s_info:
+    kind: Route
+    name: vault
+    namespace: "{{ ocp4_workload_devsecops_validated_pattern_vault_namespace }}"
+  register: r_vault
+  retries: 60
+  delay: 5
+  until: r_vault.resources | length > 0
+
+- name: Print Access information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Hashicorp Vault url: https://{{ r_vault.resources[0].spec.host }}"
+  - "Hashicorp Vault token: {{ ocp4_workload_devsecops_validated_pattern_vault_token }}"
+  - "Hashicorp Vault namespace: {{ ocp4_workload_devsecops_validated_pattern_vault_namespace }}"
+
+- name: Print Access information
+  agnosticd_user_info:
+    data:
+      hashicorp_vault_url: "https://{{ r_vault.resources[0].spec.host }}"
+      hashicorp_vault_token: "{{ ocp4_workload_devsecops_validated_pattern_vault_token }}"
+      hashicop_vault_namespace: "{{ ocp4_workload_devsecops_validated_pattern_vault_namespace }}"
