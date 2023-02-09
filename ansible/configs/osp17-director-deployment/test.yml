@@ -1,0 +1,669 @@
+- hosts: bastions
+  tasks:
+    - name: Install sshpass
+      become: True
+      yum:
+        name: sshpass
+
+    - name: 01_2_Undercloud_Installation_Lab
+      shell: "{{ item }}"
+      register: output_01_2_1
+      loop:
+        - ssh-keygen -b 2048 -t rsa -f ~/.ssh/id_rsa -q -N ""
+        - sshpass -p r3dh4t1! ssh-copy-id -o  StrictHostKeyChecking=no root@undercloud.example.com -p 22
+
+    - name: Output 01_2_Undercloud_Installation_Lab
+      include_tasks: test_output.yml
+      loop_control:
+        loop_var: output
+      loop: "{{ output_01_2_1.results }}"
+
+- hosts: undercloud
+  remote_user: root
+  become: true
+  gather_facts: False
+  vars:
+    create_repo: |
+      cat >/etc/yum.repos.d/open.repo <<\EOF
+      [rhel-8-for-x86_64-appstream-eus-rpms]
+      name=rhel-8-for-x86_64-appstream-eus-rpms
+      baseurl=http://192.0.2.253/repos/rhel-8-for-x86_64-appstream-eus-rpms
+      enabled=1
+      gpgcheck=0
+
+      [rhel-8-for-x86_64-baseos-eus-rpms]
+      name=rhel-8-for-x86_64-baseos-eus-rpms
+      baseurl=http://192.0.2.253/repos/rhel-8-for-x86_64-baseos-eus-rpms
+      enabled=1
+      gpgcheck=0
+
+      [rhel-8-for-x86_64-highavailability-eus-rpms]
+      name=rhel-8-for-x86_64-highavailability-eus-rpms
+      baseurl=http://192.0.2.253/repos/rhel-8-for-x86_64-highavailability-eus-rpms
+      enabled=1
+      gpgcheck=0
+
+      [openstack-16.1-for-rhel-8-x86_64-rpms]
+      name=openstack-16.1-for-rhel-8-x86_64-rpms
+      baseurl=http://192.0.2.253/repos/openstack-16.2-for-rhel-8-x86_64-rpms
+      enabled=1
+      gpgcheck=0
+
+      [fast-datapath-for-rhel-8-x86_64-rpms]
+      name=fast-datapath-for-rhel-8-x86_64-rpms
+      baseurl=http://192.0.2.253/repos/fast-datapath-for-rhel-8-x86_64-rpms
+      enabled=1
+      gpgcheck=0
+
+
+      [ansible-2.9-for-rhel-8-x86_64-rpms]
+      name=ansible-2.9-for-rhel-8-x86_64-rpms
+      baseurl=http://192.0.2.253/repos/ansible-2.9-for-rhel-8-x86_64-rpms
+      enabled=1
+      gpgcheck=0
+
+      [rhceph-4-tools-for-rhel-8-x86_64-rpms]
+      name=rhceph-4-tools-for-rhel-8-x86_64-rpms
+      baseurl=http://192.0.2.253/repos/rhceph-4-tools-for-rhel-8-x86_64-rpms
+      enabled=1
+      gpgcheck=0
+      EOF
+
+  tasks:
+    - name: 01_2_Undercloud_Installation_Lab
+      shell: "{{ item }}"
+      register: output_01_2_2
+      loop:
+        - hostnamectl --static status
+        - ip a
+        - cat /etc/sysconfig/network-scripts/ifcfg-eth1
+        - ping -c1 www.redhat.com
+        - useradd stack
+        - mkdir /home/stack/.ssh
+        - cp /root/.ssh/authorized_keys /home/stack/.ssh/
+        - chown -R stack:stack /home/stack/.ssh
+        - echo 'stack ALL=(root) NOPASSWD:ALL' | tee -a /etc/sudoers.d/stack
+        - chmod 0440 /etc/sudoers.d/stack
+        - "{{ create_repo }}"
+        - yum makecache
+        - yum repolist
+        - yum -y update
+
+    - name: Output 01_2_Undercloud_Installation_Lab
+      include_tasks: test_output.yml
+      loop_control:
+        loop_var: output
+      loop: "{{ output_01_2_2.results }}"
+
+- hosts: undercloud
+  become_user: stack
+  become: true
+  gather_facts: False
+  vars:
+    create_user1rc: |
+      source ~/overcloudrc && cat >user1rc <<\EOF
+      # Clear any old environment that may conflict.
+      for key in $( set | awk '{FS="="}  /^OS_/ {print $1}' ); do unset $key ; done
+      export NOVA_VERSION=1.1
+      export COMPUTE_API_VERSION=1.1
+      export OS_USERNAME=user1
+      export OS_PROJECT_NAME=eval
+      export OS_USER_DOMAIN_NAME=Default
+      export OS_PROJECT_DOMAIN_NAME=Default
+      export OS_NO_CACHE=True
+      export OS_CLOUDNAME=user1
+      export no_proxy=,10.0.0.150,192.0.2.150
+      export PYTHONWARNINGS='ignore:Certificate has no, ignore:A true SSLContext object is not available'
+      export OS_AUTH_TYPE=password
+      export OS_PASSWORD="r3dh4t1!"
+      export OS_AUTH_URL=http://10.0.0.150:5000
+      export OS_IDENTITY_API_VERSION=3
+      export OS_COMPUTE_API_VERSION=2.latest
+      export OS_IMAGE_API_VERSION=2
+      export OS_VOLUME_API_VERSION=3
+      export OS_REGION_NAME=regionOne
+
+      # Add OS_CLOUDNAME to PS1
+      if [ -z "${CLOUDPROMPT_ENABLED:-}" ]; then
+          export PS1=${PS1:-""}
+          export PS1=${OS_CLOUDNAME:+"($OS_CLOUDNAME)"}\ $PS1
+          export CLOUDPROMPT_ENABLED=1
+      fi
+      EOF
+
+    create_deploy_sh: |
+      cat >/home/stack/deploy.sh <<\EOF
+      #!/bin/bash
+      THT=/usr/share/openstack-tripleo-heat-templates/
+      CNF=/home/stack/templates/
+      openstack overcloud deploy --templates $THT \
+      -r $CNF/roles_data.yaml \
+      -n $CNF/network_data.yaml \
+      -e ~/containers-prepare-parameter.yaml \
+      -e $CNF/environments/node-info.yaml \
+      -e $THT/environments/network-isolation.yaml \
+      -e $CNF/environments/network-environment.yaml \
+      -e $CNF/environments/ips-from-pool-all.yaml \
+      -e $CNF/scheduler-hints.yaml \
+      -e $CNF/environments/fix-nova-reserved-host-memory.yaml
+      EOF
+    create_ips_from_all: |
+      cat >/home/stack/templates/environments/ips-from-pool-all.yaml <<\EOF
+      # Environment file demonstrating how to pre-assign IPs to all node types
+      resource_registry:
+        OS::TripleO::Controller::Ports::ExternalPort: /usr/share/openstack-tripleo-heat-templates/network/ports/external_from_pool.yaml
+        OS::TripleO::Controller::Ports::InternalApiPort: /usr/share/openstack-tripleo-heat-templates/network/ports/internal_api_from_pool.yaml
+        OS::TripleO::Controller::Ports::StoragePort: /usr/share/openstack-tripleo-heat-templates/network/ports/storage_from_pool.yaml
+        OS::TripleO::Controller::Ports::StorageMgmtPort: /usr/share/openstack-tripleo-heat-templates/network/ports/storage_mgmt_from_pool.yaml
+        OS::TripleO::Controller::Ports::TenantPort: /usr/share/openstack-tripleo-heat-templates/network/ports/tenant_from_pool.yaml
+
+
+        OS::TripleO::Compute::Ports::ExternalPort: /usr/share/openstack-tripleo-heat-templates/network/ports/noop.yaml
+        OS::TripleO::Compute::Ports::InternalApiPort: /usr/share/openstack-tripleo-heat-templates/network/ports/internal_api_from_pool.yaml
+        OS::TripleO::Compute::Ports::StoragePort: /usr/share/openstack-tripleo-heat-templates/network/ports/storage_from_pool.yaml
+        OS::TripleO::Compute::Ports::StorageMgmtPort: /usr/share/openstack-tripleo-heat-templates/network/ports/noop.yaml
+        OS::TripleO::Compute::Ports::TenantPort: /usr/share/openstack-tripleo-heat-templates/network/ports/tenant_from_pool.yaml
+
+
+      parameter_defaults:
+        ControllerIPs:
+          # Each controller will get an IP from the lists below, first controller, first IP
+          ctlplane:
+          - 192.0.2.201
+          - 192.0.2.202
+          - 192.0.2.203
+          external:
+          - 10.0.0.201
+          - 10.0.0.202
+          - 10.0.0.203
+          internal_api:
+          - 172.17.0.201
+          - 172.17.0.202
+          - 172.17.0.203
+          storage:
+          - 172.18.0.201
+          - 172.18.0.202
+          - 172.18.0.203
+          storage_mgmt:
+          - 172.19.0.201
+          - 172.19.0.202
+          - 172.19.0.203
+          tenant:
+          - 172.16.0.201
+          - 172.16.0.202
+          - 172.16.0.203
+
+        ComputeIPs:
+          # Each compute will get an IP from the lists below, first compute, first IP
+          ctlplane:
+          - 192.0.2.211
+          - 192.0.2.212
+          internal_api:
+          - 172.17.0.211
+          - 172.17.0.212
+          storage:
+          - 172.18.0.211
+          - 172.18.0.212
+          storage_mgmt:
+          - 172.19.0.211
+          - 172.19.0.212
+          tenant:
+          - 172.16.0.211
+          - 172.16.0.212
+
+      ### VIPs ###
+
+        ControlFixedIPs: [{'ip_address':'192.0.2.150'}]
+        InternalApiVirtualFixedIPs: [{'ip_address':'172.17.0.150'}]
+        PublicVirtualFixedIPs: [{'ip_address':'10.0.0.150'}]
+        StorageVirtualFixedIPs: [{'ip_address':'172.18.0.150'}]
+        StorageMgmtVirtualFixedIPs: [{'ip_address':'172.19.0.150'}]
+        RedisVirtualFixedIPs: [{'ip_address':'172.17.0.151'}]
+      EOF
+    create_scheduler_hints: |
+      cat >/home/stack/templates/scheduler-hints.yaml <<\EOF
+      parameter_defaults:
+        ControllerSchedulerHints:
+          'capabilities:node': 'controller-%index%'
+        ComputeSchedulerHints:
+          'capabilities:node': 'compute-%index%'
+      EOF
+
+    create_network_data: |
+      cat >/home/stack/templates/network_data.yaml <<\EOF
+      - name: Storage
+        vip: true
+        vlan: 30
+        name_lower: storage
+        ip_subnet: '172.18.0.0/24'
+        allocation_pools: [{'start': '172.18.0.11', 'end': '172.18.0.250'}]
+        ipv6_subnet: 'fd00:fd00:fd00:3000::/64'
+        ipv6_allocation_pools: [{'start': 'fd00:fd00:fd00:3000::10', 'end': 'fd00:fd00:fd00:3000:ffff:ffff:ffff:fffe'}]
+      - name: StorageMgmt
+        name_lower: storage_mgmt
+        vip: true
+        vlan: 40
+        ip_subnet: '172.19.0.0/24'
+        allocation_pools: [{'start': '172.19.0.11', 'end': '172.19.0.250'}]
+        ipv6_subnet: 'fd00:fd00:fd00:4000::/64'
+        ipv6_allocation_pools: [{'start': 'fd00:fd00:fd00:4000::10', 'end': 'fd00:fd00:fd00:4000:ffff:ffff:ffff:fffe'}]
+      - name: InternalApi
+        name_lower: internal_api
+        vip: true
+        vlan: 20
+        ip_subnet: '172.17.0.0/24'
+        allocation_pools: [{'start': '172.17.0.11', 'end': '172.17.0.250'}]
+        ipv6_subnet: 'fd00:fd00:fd00:2000::/64'
+        ipv6_allocation_pools: [{'start': 'fd00:fd00:fd00:2000::10', 'end': 'fd00:fd00:fd00:2000:ffff:ffff:ffff:fffe'}]
+      - name: Tenant
+        vip: false  # Tenant network does not use VIPs
+        name_lower: tenant
+        vlan: 50
+        ip_subnet: '172.16.0.0/24'
+        allocation_pools: [{'start': '172.16.0.11', 'end': '172.16.0.250'}]
+        # Note that tenant tunneling is only compatible with IPv4 addressing at this time.
+        ipv6_subnet: 'fd00:fd00:fd00:5000::/64'
+        ipv6_allocation_pools: [{'start': 'fd00:fd00:fd00:5000::10', 'end': 'fd00:fd00:fd00:5000:ffff:ffff:ffff:fffe'}]
+      - name: External
+        vip: true
+        name_lower: external
+        vlan: 10
+        ip_subnet: '10.0.0.0/24'
+        allocation_pools: [{'start': '10.0.0.201', 'end': '10.0.0.250'}]
+        gateway_ip: '10.0.0.1'
+        ipv6_subnet: '2001:db8:fd00:1000::/64'
+        ipv6_allocation_pools: [{'start': '2001:db8:fd00:1000::10', 'end': '2001:db8:fd00:1000:ffff:ffff:ffff:fffe'}]
+        gateway_ipv6: '2001:db8:fd00:1000::1'
+      - name: Management
+        # Management network is enabled by default for backwards-compatibility, but
+        # is not included in any roles by default. Add to role definitions to use.
+        enabled: true
+        vip: false  # Management network does not use VIPs
+        name_lower: management
+        vlan: 60
+        ip_subnet: '10.0.1.0/24'
+        allocation_pools: [{'start': '10.0.1.4', 'end': '10.0.1.250'}]
+        ipv6_subnet: 'fd00:fd00:fd00:6000::/64'
+        ipv6_allocation_pools: [{'start': 'fd00:fd00:fd00:6000::10', 'end': 'fd00:fd00:fd00:6000:ffff:ffff:ffff:fffe'}]
+      EOF
+    create_fix_nova: |
+      cat >/home/stack/templates/environments/fix-nova-reserved-host-memory.yaml <<\EOF
+      parameter_defaults:
+        NovaReservedHostMemory: 1024
+      EOF
+    create_node_info: |
+      cat >/home/stack/templates/environments/node-info.yaml <<\EOF
+      parameter_defaults:
+        OvercloudControlFlavor: baremetal
+        OvercloudComputeFlavor: baremetal
+        ControllerCount: 3
+        ComputeCount: 2
+      EOF
+
+    create_nodes_json: |
+      cat >/home/stack/nodes.json <<\EOF
+      {
+          "nodes": [
+              {
+                  "mac": [
+                      "2c:c2:60:01:02:02"
+                  ],
+                  "name": "ctrl01",
+                  "pm_addr": "192.0.2.221",
+                  "pm_password": "redhat",
+                  "pm_type": "pxe_ipmitool",
+                  "pm_user": "admin"
+              },
+              {
+                  "mac": [
+                      "2c:c2:60:01:02:03"
+                  ],
+                  "name": "ctrl02",
+                  "pm_addr": "192.0.2.222",
+                  "pm_password": "redhat",
+                  "pm_type": "pxe_ipmitool",
+                  "pm_user": "admin"
+              },
+              {
+                  "mac": [
+                      "2c:c2:60:01:02:04"
+                  ],
+                  "name": "ctrl03",
+                  "pm_addr": "192.0.2.223",
+                  "pm_password": "redhat",
+                  "pm_type": "pxe_ipmitool",
+                  "pm_user": "admin"
+              },
+              {
+                  "mac": [
+                      "2c:c2:60:01:02:05"
+                  ],
+                  "name": "compute01",
+                  "pm_addr": "192.0.2.224",
+                  "pm_password": "redhat",
+                  "pm_type": "pxe_ipmitool",
+                  "pm_user": "admin"
+              },
+              {
+                  "mac": [
+                      "2c:c2:60:01:02:06"
+                  ],
+                  "name": "compute02",
+                  "pm_addr": "192.0.2.225",
+                  "pm_password": "redhat",
+                  "pm_type": "pxe_ipmitool",
+                  "pm_user": "admin"
+              }
+          ]
+      }
+      EOF
+
+    create_hieradata: |
+      cat >/home/stack/hieradata.yaml <<\EOF
+      ironic::config::ironic_config:
+        ipmi/use_ipmitool_retries:
+          value: True
+        conductor/node_locked_retry_interval:
+          value: 10
+      ironic::drivers::ipmi::min_command_interval: 15
+      ironic::drivers::ipmi::command_retry_timeout: 360
+      ironic::conductor::power_state_sync_max_retries: 10
+      EOF
+    create_undercloud_conf: |
+      cat >/home/stack/undercloud.conf <<\EOF
+      [DEFAULT]
+      undercloud_hostname = undercloud.example.com
+      container_images_file = containers-prepare-parameter.yaml
+      local_ip = 192.0.2.1/24
+      undercloud_public_host = 192.0.2.2
+      undercloud_admin_host = 192.0.2.3
+      undercloud_nameservers = 192.0.2.254
+      #undercloud_ntp_servers =
+      #overcloud_domain_name = example.com
+      subnets = ctlplane-subnet
+      local_subnet = ctlplane-subnet
+      #undercloud_service_certificate =
+      generate_service_certificate = true
+      certificate_generation_ca = local
+      local_interface = eth0
+      inspection_extras = false
+      undercloud_debug = false
+      enable_tempest = false
+      enable_ui = false
+      hieradata_override = /home/stack/hieradata.yaml
+
+      [auth]
+
+      [ctlplane-subnet]
+      cidr = 192.0.2.0/24
+      dhcp_start = 192.0.2.5
+      dhcp_end = 192.0.2.24
+      inspection_iprange = 192.0.2.100,192.0.2.120
+      gateway = 192.0.2.254
+      EOF
+
+  tasks:
+    - name: 01_2_Undercloud_Installation_Lab
+      shell: "{{ item }}"
+      args:
+        chdir: /home/stack/
+      register: output_01_2_3
+      loop:
+        - sudo yum -y install python3-tripleoclient
+        - "{{ create_undercloud_conf }}"
+        - "{{ create_hieradata }} "
+        - openstack tripleo container image prepare default   --local-push-destination   --output-env-file containers-prepare-parameter.yaml
+        - sed -i "s/registry.redhat.io/classroom.example.com/" containers-prepare-parameter.yaml
+        - cat containers-prepare-parameter.yaml
+        - time openstack undercloud install
+        - cat ~/stackrc
+        - cat ~/undercloud-passwords.conf
+        - source ~/stackrc && openstack catalog list
+        - ip a
+        - ip r
+        - sudo ovs-vsctl show
+        - cat /etc/os-net-config/config.json | python3 -m json.tool
+        - source ~/stackrc && openstack network list
+        - source ~/stackrc && openstack subnet list
+        - source ~/stackrc && openstack subnet show ctlplane-subnet
+
+    - name: Output 01_2_Undercloud_Installation_Lab
+      include_tasks: test_output.yml
+      loop_control:
+        loop_var: output
+      loop: "{{ output_01_2_3.results }}"
+
+    - name: 01_3_Overcloud_and_Container_Images_Lab
+      shell: "{{ item }}"
+      args:
+        chdir: /home/stack/
+      register: output_01_3_1
+      loop:
+        - mkdir images
+        - mkdir -p templates/environments
+        - sudo yum -y install rhosp-director-images
+        - tar -C images -xvf /usr/share/rhosp-director-images/overcloud-full-latest.tar
+        - tar -C images -xvf /usr/share/rhosp-director-images/ironic-python-agent-latest.tar
+        - source ~/stackrc && openstack overcloud image upload --image-path ~/images
+        - source ~/stackrc && openstack image list
+        - ls -al /var/lib/ironic/httpboot/
+        - cat /var/lib/ironic/httpboot/inspector.ipxe
+        - curl -s http://192.0.2.1:8787/v2/_catalog | python3 -m json.tool
+        - grep Completed /var/log/tripleo-container-image-prepare.log
+
+    - name: Output 01_3_Overcloud_and_Container_Images_Lab
+      include_tasks: test_output.yml
+      loop_control:
+        loop_var: output
+      loop: "{{ output_01_3_1.results }}"
+
+    - name: 01_4_Overcloud_Deployment_Preparation_Lab
+      shell: "{{ item }}"
+      args:
+        chdir: /home/stack/
+      register: output_01_4_1
+      loop:
+        - "{{ create_nodes_json }}"
+        - source ~/stackrc && openstack baremetal node list
+        - source ~/stackrc && openstack overcloud node import --validate-only ~/nodes.json
+        - source ~/stackrc && openstack overcloud node import --introspect --provide nodes.json
+        - source ~/stackrc && openstack baremetal node list
+        - source ~/stackrc && openstack baremetal node show ctrl01
+        - source ~/stackrc && openstack baremetal node show ctrl01 -f json -c driver_info
+        - source ~/stackrc && openstack baremetal introspection list
+        - source ~/stackrc && openstack baremetal node show ctrl01 -f json -c properties
+        - source ~/stackrc && openstack baremetal introspection data save ctrl01 | jq "."
+
+    - name: Output 01_4_Overcloud_Deployment_Preparation_Lab
+      include_tasks: test_output.yml
+      loop_control:
+        loop_var: output
+      loop: "{{ output_01_4_1.results }}"
+
+    - name: 01_5_Overcloud_Templates_Preparation_Lab
+      shell: "{{ item }}"
+      args:
+        chdir: /home/stack/
+      register: output_01_5_1
+      loop:
+        - git init
+        - git config user.email "stack@example.com"
+        - git config user.name "Stack User"
+        - mkdir -p ~/templates/environments
+        - "{{ create_node_info }}"
+        - "{{ create_fix_nova }}"
+        - git add templates/environments/*.yaml
+        - git commit -m "Initial commit"
+        - cp /usr/share/openstack-tripleo-heat-templates/roles_data.yaml ~/templates/
+        - cp /usr/share/openstack-tripleo-heat-templates/network_data.yaml ~/templates/
+        - git add templates/roles_data.yaml
+        - git add templates/network_data.yaml
+        - git commit -m "Copy the default roles_data.yaml and network_data.yaml"
+        - cat templates/roles_data.yaml
+        - "grep -A13 'name: Compute' templates/roles_data.yaml"
+        - egrep -v '^#|^$' templates/network_data.yaml
+        - "{{ create_network_data }}"
+        - git add templates/network_data.yaml
+        - git commit -m "Customize network_data.yaml"
+        - mkdir ~/workplace
+        - mkdir ~/output
+        - cp -rp /usr/share/openstack-tripleo-heat-templates/* workplace
+        - cd workplace && tools/process-templates.py -r ../templates/roles_data.yaml -n ../templates/network_data.yaml -o ../output
+        - cd output && cat environments/network-environment.yaml
+        - cd output && cp environments/network-environment.yaml ~/templates/environments
+        - git add templates/environments/network-environment.yaml
+        - git commit -m "Initial network-environment.yaml"
+        - sed -i 's/single-nic-vlans/multiple-nics/' templates/environments/network-environment.yaml
+        - git add templates/environments/*.yaml
+        - git commit -m "Adjust network-environment.yaml to the lab environment"
+        - grep -A1 SoftwareConfig templates/environments/network-environment.yaml
+        - mkdir -p ~/templates/network/config/multiple-nics/
+        - cp ~/output/network/config/multiple-nics/*.yaml ~/templates/network/config/multiple-nics/
+        - sed -i 's#../../scripts/run-os-net-config.sh#/usr/share/openstack-tripleo-heat-templates/network/scripts/run-os-net-config.sh#' -i templates/network/config/multiple-nics/*.yaml
+        - "grep -A10 OsNetConfigImpl: templates/network/config/multiple-nics/controller.yaml"
+        - "grep -A10 OsNetConfigImpl: templates/network/config/multiple-nics/compute.yaml"
+        - git add templates/network/config/multiple-nics/*
+        - git commit -m "Set absolute path in the nic-configs templates"
+        - cat ~/templates/network/config/multiple-nics/controller.yaml
+        - "{{ create_scheduler_hints }}"
+        - source ~/stackrc && openstack baremetal node list
+        - source ~/stackrc && openstack baremetal node set ctrl01 --property capabilities=node:controller-0,boot_option:local
+        - source ~/stackrc && openstack baremetal node set ctrl02 --property capabilities=node:controller-1,boot_option:local
+        - source ~/stackrc && openstack baremetal node set ctrl03 --property capabilities=node:controller-2,boot_option:local
+        - source ~/stackrc && openstack baremetal node set compute01 --property capabilities=node:compute-0,boot_option:local
+        - source ~/stackrc && openstack baremetal node set compute02 --property capabilities=node:compute-1,boot_option:local
+        - "{{ create_ips_from_all }}"
+
+    - name: Output 01_5_Overcloud_Templates_Preparation_Lab
+      include_tasks: test_output.yml
+      loop_control:
+        loop_var: output
+      loop: "{{ output_01_5_1.results }}"
+
+    - name: 01_6_Overcloud_Deployment_Lab
+      shell: "{{ item }}"
+      args:
+        chdir: /home/stack/
+      register: output_01_6_1
+      loop:
+        - "{{ create_deploy_sh }}"
+        - chmod 755 deploy.sh
+        - git add deploy.sh
+        - git commit -m "Add overcloud deploy script"
+
+    - name: Output 01_6_Overcloud_Deployment_Lab
+      include_tasks: test_output.yml
+      loop_control:
+        loop_var: output
+      loop: "{{ output_01_6_1.results }}"
+
+    - name: Deploy Overcloud
+      shell: source ~/stackrc && sh -x deploy.sh
+      args:
+        chdir: /home/stack/
+      async: 100000
+      poll: 0
+      register: install_overcloud
+
+    - name: "install overcloud - check on async task"
+      async_status:
+        jid: "{{ install_overcloud.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      retries: 800
+      delay: 30
+
+    - name: 01_6_Overcloud_Deployment_Lab
+      shell: "{{ item }}"
+      args:
+        chdir: /home/stack/
+      register: output_01_6_2
+      loop:
+        - source ~/stackrc && openstack server list
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane uptime
+        - source ~/overcloudrc && openstack compute service list
+
+    - name: Output 01_6_Overcloud_Deployment_Lab
+      include_tasks: test_output.yml
+      loop_control:
+        loop_var: output
+      loop: "{{ output_01_6_2.results }}"
+
+    - name: 01_7_Test_Instance_Deployment_Lab
+      shell: "{{ item }}"
+      args:
+        chdir: /home/stack/
+      register: output_01_7_1
+      loop:
+        - source ~/overcloudrc && openstack compute service list
+        - source ~/overcloudrc && openstack network create public --external --provider-physical-network datacentre --provider-network-type flat
+        - source ~/overcloudrc && openstack subnet create public-subnet --no-dhcp --network public --subnet-range 10.0.0.0/24 --allocation-pool start=10.0.0.100,end=10.0.0.200 --gateway 10.0.0.1 --dns-nameserver 8.8.8.8
+        - source ~/overcloudrc && openstack project create eval
+        - source ~/overcloudrc && openstack user create user1 --project eval --password r3dh4t1!
+        - source ~/overcloudrc && openstack role add --user user1 --project eval member
+        - "{{ create_user1rc }}"
+        - source ~/user1rc && openstack network list
+        - source ~/user1rc && openstack network create private
+        - source ~/user1rc && openstack subnet create private-subnet --network private --dns-nameserver 8.8.4.4 --gateway 172.16.1.1 --subnet-range 172.16.1.0/24
+        - source ~/user1rc && openstack network list
+        - source ~/user1rc && openstack subnet list
+        - source ~/user1rc && openstack router create router1
+        - source ~/user1rc && openstack router add subnet router1 private-subnet
+        - source ~/user1rc && openstack router set router1 --external-gateway public
+        - source ~/overcloudrc && openstack port list --router=router1
+        - source ~/overcloudrc && ping -c3 $(openstack port list --router=router1 |egrep -o "10.0.0.[0-9]*")
+        - source ~/overcloudrc && openstack flavor create m1.nano --vcpus 1 --ram 64 --disk 1
+        - source ~/user1rc && openstack security group list
+        - source ~/user1rc && openstack security group rule create --proto icmp default
+        - source ~/user1rc && openstack security group rule create --dst-port 22 --proto tcp default
+        - curl -L -O http://download.cirros-cloud.net/0.4.0/cirros-0.4.0-x86_64-disk.img
+        - source ~/user1rc && openstack image create cirros --file cirros-0.4.0-x86_64-disk.img --disk-format qcow2 --container-format bare
+        - source ~/user1rc && openstack server create test-instance --flavor m1.nano --image cirros --network private
+        - source ~/user1rc && openstack server list
+        - source ~/user1rc && openstack console log show test-instance
+        - source ~/user1rc && openstack floating ip create public
+        - source ~/user1rc && openstack floating ip list
+        - source ~/user1rc && openstack server add floating ip test-instance $(openstack floating ip list --status DOWN -c "Floating IP Address" -f value)
+        - source ~/user1rc && openstack server show test-instance -f json -c addresses
+        - source ~/user1rc && ping -c3 $(openstack floating ip list -c "Floating IP Address" -f value)
+        - sudo yum install -y sshpass
+        - source ~/user1rc && sshpass -p gocubsgo ssh -o StrictHostKeyChecking=no cirros@$(openstack floating ip list -c "Floating IP Address" -f value) cat /etc/resolv.conf
+        - source ~/user1rc && sshpass -p gocubsgo ssh -o StrictHostKeyChecking=no cirros@$(openstack floating ip list -c "Floating IP Address" -f value) ping -c3 redhat.com
+
+    - name: output 01_7_test_instance_deployment_lab
+      include_tasks: test_output.yml
+      loop_control:
+        loop_var: output
+      loop: "{{ output_01_7_1.results }}"
+
+    - name: 01_8_Exploration_Lab
+      shell: "{{ item }}"
+      args:
+        chdir: /home/stack/
+      register: output_01_8_1
+      loop:
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo systemctl status pacemaker
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo pcs status
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo pcs resource show rabbitmq-bundle
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo podman ps -f name=rabbitmq
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo podman ps -f name=glance_api
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo podman exec -it glance_api /bin/sh id
+        - !unsafe ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane "sudo podman inspect -f '{{ .Config.User }}' glance_api"
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo podman exec -it -u root glance_api ps auxww
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo podman exec -it -u root glance_api ip a
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo podman exec -it glance_api ls -al /var/log/glance/
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo podman exec -it glance_api tail /var/log/glance/api.log
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo podman inspect glance_api | jq '.[].Mounts[] | select(.Destination == "/var/log/glance")'
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo tail /var/log/containers/glance/api.log
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo podman exec -t glance_api stat /var/log/glance/api.log
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo stat /var/log/containers/glance/api.log
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo  ls -al /var/log/containers /var/log/containers/httpd
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo podman inspect nova_api | jq '.[].HostConfig.Binds' | grep kolla/config_files
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane sudo jq . /var/lib/kolla/config_files/nova_api.json
+        - ssh -o StrictHostKeyChecking=no heat-admin@overcloud-controller-0.ctlplane "sudo find /var/lib/config-data/puppet-generated/nova -type f -printf '%P\n'"
+
+    - name: output 01_8_Exploration_Lab
+      include_tasks: test_output.yml
+      loop_control:
+        loop_var: output
+      loop: "{{ output_01_8_1.results }}"
