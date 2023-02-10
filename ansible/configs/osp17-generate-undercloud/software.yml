@@ -1,0 +1,113 @@
+---
+- name: Step 005 Environment specific Software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - debug:
+        msg: "Software tasks Started"
+
+- hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Configure and install overcloud
+      when: purpose == "development" or purpose == "build"
+      block:
+        - name: Install needed software
+          shell: "{{ item }}"
+          loop:
+            - "yum update -y"
+            - "yum -y install python3-tripleoclient rhosp-director-images"
+            - "yum remove -y cloud-init"
+
+        - name: Enable PasswordAuthentication
+          lineinfile:
+            path: "/etc/ssh/sshd_config"
+            regex: ^(# *)?PasswordAuthentication
+            line: PasswordAuthentication yes
+
+        - name: Disable ping validation
+          lineinfile:
+            # yamllint disable-line rule:line-length
+            path: "/usr/share/ansible/roles/tripleo_nodes_validation/defaults/main.yml"
+            regex: ^tripleo_nodes_validation_validate_gateway_icmp
+            line: "tripleo_nodes_validation_validate_gateway_icmp: false"
+
+
+        - name: Configure stack user
+          script: files/configure-stack-user.sh
+
+- hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Copy undercloud.conf
+      copy:
+        src: files/undercloud.conf
+        dest: /home/stack/undercloud.conf
+      become_user: stack
+
+    - name: Copy hieradata.yaml
+      copy:
+        src: files/hieradata.yaml
+        dest: /home/stack/hieradata.yaml
+      become_user: stack
+
+    - name: Configure containers
+      script: files/configure-undercloud.sh
+      become_user: stack
+
+
+    - name: Install undercloud
+      shell: SUDO_USER=stack openstack undercloud install
+      args:
+        chdir: /home/stack/
+        #async: 100000
+        #poll: 0
+      become_user: stack
+      register: install_undercloud
+
+    - name: Upload images to undercloud
+      script: files/configure-images.sh
+      args:
+        chdir: /home/stack/
+      become_user: stack
+
+    - name: Unregister node
+      shell: subscription-manager unregister
+      ignore_errors: true
+
+    - name: Remove satellite Cert
+      tags: packer
+      package:
+        name: katello-ca-consumer-*.noarch
+        state: absent
+        disablerepo: "*"
+      ignore_errors: true
+
+    - name: Configure eth1 with ip 10.0.0.253
+      copy:
+        dest: /etc/sysconfig/network-scripts/ifcfg-eth1
+        content: |
+          BOOTPROTO=static
+          DEVICE=eth1
+          IPADDR=10.0.0.253
+          NETMASK=255.255.255.0
+          GATEWAY=10.0.0.1
+          MTU=1500
+          ONBOOT=yes
+          TYPE=Ethernet
+          USERCTL=no
+
+
+- name: Software flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Software checks completed successfully"

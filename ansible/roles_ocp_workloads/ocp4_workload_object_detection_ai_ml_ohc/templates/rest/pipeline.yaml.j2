@@ -1,0 +1,216 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  labels:
+    app.kubernetes.io/name: object-detection-rest
+    pipeline.openshift.io/runtime: python
+    pipeline.openshift.io/runtime-version: 3.9-ubi8
+    pipeline.openshift.io/type: kubernetes
+  name: objdetect-rest-pipeline
+  namespace: "{{ ocp4_workload_object_detection_ai_ml_ohc_namespace }}"
+spec:
+  params:
+  - default: object-detection-rest
+    name: APP_NAME
+    type: string
+  - default: "{{ _ocp4_workload_object_detection_ai_ml_ohc_gitea_repo_arc_model_source_url }}"
+    name: GIT_REPO
+    type: string
+  - default: "dev"
+    name: GIT_REVISION
+    type: string
+  - default: "image-registry.openshift-image-registry.svc:5000/{{ ocp4_workload_object_detection_ai_ml_ohc_namespace }}/object-detection-rest"
+    name: IMAGE_NAME
+    type: string
+  - default: .
+    name: PATH_CONTEXT
+    type: string
+  - default: 3.9-ubi8
+    name: VERSION
+    type: string
+  - name: KUSTOMIZE_GIT_URL_DEV
+    type: string
+    description: The kustomize git repository url
+    default: "{{ _ocp4_workload_object_detection_ai_ml_ohc_gitea_repo_arc_model_argo_url }}"
+  - name: KUSTOMIZE_GIT_CONTEXT_DIR_DEV
+    type: string
+    default: overlays/development/
+    description: The subdirectory in the kustomize git repository
+  - name: KUSTOMIZE_GIT_FILE_NAME
+    type: string
+    default: kustomization.yaml
+    description: The YAML file in which to patch the image
+  - default: "main"
+    name: KUSTOMIZE_GIT_REVISION
+    type: string
+  - name: NAMESPACE_DEV
+    type: string
+    description: Namespace where the buildconfig is located
+    default: " {{ ocp4_workload_object_detection_ai_ml_ohc_namespace }} "
+  - default: 'https://sonarqube-.<CHANGE_ME>'
+    name: SONARQUBE_HOST_URL
+    type: string
+  - default: "default-route-openshift-image-registry.apps.cluster-j47pp-1.sandbox1983.opentlc.com/{{ ocp4_workload_object_detection_ai_ml_ohc_namespace }}/object-detection-rest"
+    name: STACKROX_IMAGE
+    type: string
+  - default: 'CHANGE_ME'
+    name: SONARQUBE_PROJECT_KEY
+    type: string
+  - default: 'CHANGE_ME'
+    name: SONARQUBE_PROJECT_SECRET
+    type: string
+
+
+  tasks:
+  - name: fetch-repo
+    params:
+    - name: url
+      value: $(params.GIT_REPO)
+    - name: revision
+      value: $(params.GIT_REVISION)
+    - name: subdirectory
+      value: ""
+    - name: deleteExisting
+      value: "true"
+    - name: sslVerify
+      value: "false"
+    taskRef:
+      kind: ClusterTask
+      name: git-clone
+    workspaces:
+    - name: output
+      workspace: workspace
+
+  - name: scan-code
+    params:
+      - name: gitRepositoryUrl
+        value: $(params.GIT_REPO)
+      - name: gitRepositoryRevision
+        value: $(params.GIT_REVISION)
+      - name: sonarqubeHostUrl
+        value: $(params.SONARQUBE_HOST_URL)
+      - name: sonarqubeProjectKey
+        value: $(params.SONARQUBE_PROJECT_KEY)
+      - name: sonarqubeProjectSecret
+        value: $(params.SONARQUBE_PROJECT_SECRET)
+    taskRef:
+      kind: Task
+      name: scan-source-code
+    runAfter:
+    - fetch-repo
+    - generate-tag
+
+  - name: generate-tag
+    taskRef:
+      kind: Task
+      name: generate-tag
+
+  - name: sanity-check
+    params:
+    - name: gitRepositoryUrl
+      value: $(params.GIT_REPO)
+    - name: gitRepositoryRevision
+      value: $(params.GIT_REVISION)
+    - name: gitPath
+      value: "."
+    - name: fileName
+      value: ./output.txt
+    - name: verbose
+      value: "true"
+    taskRef:
+      kind: Task
+      name: sanity-check-model
+    runAfter:
+    - scan-code
+
+  - name: build-image
+    params:
+    - name: IMAGE
+      value: $(params.IMAGE_NAME)
+    - name: TLSVERIFY
+      value: "false"
+    - name: PATH_CONTEXT
+      value: $(params.PATH_CONTEXT)
+    - name: VERSION
+      value: $(params.VERSION)
+    runAfter:
+    - sanity-check
+    taskRef:
+      kind: ClusterTask
+      name: s2i-python
+    workspaces:
+    - name: source
+      workspace: workspace
+
+  - name: acs-image-check
+    params:
+      - name: rox_central_endpoint
+        value: stackrox-endpoint
+      - name: rox_api_token
+        value: stackrox-secret
+      - name: image
+        value: >-
+          $(params.STACKROX_IMAGE)
+      - name: insecure-skip-tls-verify
+        value: 'true'
+    runAfter:
+      - build-image
+    taskRef:
+      kind: Task
+      name: acs-image-check
+
+  - name: acs-image-scan
+    params:
+      - name: rox_central_endpoint
+        value: stackrox-endpoint
+      - name: rox_api_token
+        value: stackrox-secret
+      - name: image
+        value: >-
+          $(params.STACKROX_IMAGE)
+      - name: insecure-skip-tls-verify
+        value: 'true'
+    runAfter:
+      - build-image
+    taskRef:
+      kind: Task
+      name: acs-image-scan
+
+  - name: tag
+    params:
+      - name: SCRIPT
+        value: >
+          oc tag cicd/object-detection-rest:latest
+          cicd/object-detection-rest:$(tasks.generate-tag.results.image-tag)
+    runAfter:
+      - acs-image-check
+      - acs-image-scan
+    taskRef:
+      kind: ClusterTask
+      name: openshift-client
+
+  - name: update-repo
+    params:
+      - name: gitRepositoryUrl
+        value: $(params.KUSTOMIZE_GIT_URL_DEV)
+      - name: gitRepositoryRevision
+        value: $(params.KUSTOMIZE_GIT_REVISION)
+      - name: gitRepositoryContextDir
+        value: $(params.KUSTOMIZE_GIT_CONTEXT_DIR_DEV)
+      - name: gitRepositoryFileName
+        value: $(params.KUSTOMIZE_GIT_FILE_NAME)
+      - name: image
+        value: $(params.IMAGE_NAME)
+      - name: imageTag
+        value: $(tasks.generate-tag.results.image-tag)
+      - name: verbose
+        value: 'true'
+    runAfter:
+      - tag
+    taskRef:
+      kind: Task
+      name: update-repo
+
+  workspaces:
+  - name: workspace

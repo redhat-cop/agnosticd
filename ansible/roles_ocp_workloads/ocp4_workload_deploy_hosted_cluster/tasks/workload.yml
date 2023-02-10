@@ -1,0 +1,87 @@
+---
+- name: Setting up workload for user
+  ansible.builtin.debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Setup authentication
+  include_tasks: setup_authentication.yml
+
+- name: Setup oauth certificate
+  include_tasks: setup_oauth_certificate.yml
+
+- name: Run hypershift CLI to deploy hosted cluster
+  ansible.builtin.command: >-
+    hypershift create cluster aws
+      --name {{ ocp4_workload_deploy_hosted_cluster_name }}
+      --infra-id {{ ocp4_workload_deploy_hosted_cluster_infra_ID }}
+      --pull-secret /home/opentlc-mgr/pullsecret.json
+      --aws-creds /home/opentlc-mgr/.aws/credentials
+      --region {{ ocp4_workload_deploy_hosted_cluster_aws_region }}
+      --zones {{ ocp4_workload_deploy_hosted_cluster_aws_zones }}
+      --instance-type {{ ocp4_workload_deploy_hosted_cluster_worker_instance_type }}
+      --root-volume-type {{ ocp4_workload_deploy_hosted_cluster_worker_root_volume_type }}
+      --root-volume-size {{ ocp4_workload_deploy_hosted_cluster_worker_root_volume_size }}
+      --base-domain {{ ocp4_workload_deploy_hosted_cluster_base_domain }}
+      --generate-ssh
+      --control-plane-availability-policy {{ ocp4_workload_deploy_hosted_cluster_controlplane_availability }}
+      --network-type {{ ocp4_workload_deploy_hosted_cluster_network_type }}
+      --release-image quay.io/openshift-release-dev/ocp-release:{{ ocp4_workload_deploy_hosted_cluster_version }}-x86_64
+      --node-pool-replicas {{ ocp4_workload_deploy_hosted_cluster_nodepool_replicas }}
+      --namespace local-cluster
+  register: r_hypershift_create_cluster
+
+- name: Patch hosted cluster to add authentication and oauth certs
+  kubernetes.core.k8s:
+    state: patched
+    definition: "{{ lookup('template', 'hosted-cluster-auth.yaml.j2' ) | from_yaml }}"
+
+- name: Create managed cluster to add cluster to ACM
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'managed-cluster.yaml.j2' ) | from_yaml }}"
+
+- name: Create klusterlet-addon-config to allow policy deployment
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'klusterlet-addon-config.yaml.j2' ) | from_yaml }}"
+
+- name: Set hosted cluster console URL
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_console_url: >-
+      https://console-openshift-console.apps.{{ ocp4_workload_deploy_hosted_cluster_name }}.{{ ocp4_workload_deploy_hosted_cluster_base_domain }}
+
+- name: Create cert-manager policy
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - certmanager/policy.yaml.j2
+  - certmanager/placementrule.yaml.j2
+  - certmanager/placementbinding.yaml.j2
+
+- name: Save common user information
+  agnosticd_user_info:
+    data:
+      openshift_cluster_admin_username: "{{ ocp4_workload_deploy_hosted_cluster_admin_user }}"
+      openshift_cluster_admin_password: "{{ _ocp4_workload_deploy_hosted_cluster_admin_password }}"
+      openshift_cluster_user_base: "{{ ocp4_workload_deploy_hosted_cluster_user_base }}"
+      openshift_cluster_user_password: "{{ _ocp4_workload_deploy_hosted_cluster_user_password }}"
+      openshift_cluster_num_users: "{{ ocp4_workload_deploy_hosted_cluster_user_count }}"
+      openshift_cluster_console_url: "{{ _ocp4_workload_deploy_hosted_cluster_console_url }}"
+
+- name: Save user information for each user
+  agnosticd_user_info:
+    user: "{{ ocp4_workload_deploy_hosted_cluster_user_base }}{{ n }}"
+    data:
+      openshift_cluster_console_url: "{{ _ocp4_workload_deploy_hosted_cluster_console_url }}"
+      password: "{{ _ocp4_workload_deploy_hosted_cluster_user_password }}"
+  loop: "{{ range(1, 1 + ocp4_workload_deploy_hosted_cluster_user_count | int) | list }}"
+  loop_control:
+    loop_var: n
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
