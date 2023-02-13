@@ -1,0 +1,10 @@
+#!/bin/sh -x
+cd /home/stack/
+SUDO_USER=stack openstack tripleo container image prepare default   --local-push-destination   --output-env-file containers-prepare-parameter.yaml
+echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+cat >>containers-prepare-parameter.yaml <<EOF
+  ContainerImageRegistryLogin: true
+  ContainerImageRegistryCredentials:
+    registry.redhat.io:
+      6340056|rhosp16impl: eyJhbGciOiJSUzUxMiJ9.eyJzdWIiOiJlODc0MTVlOTgwZDc0OGE4OTE2MGQwZTA5Mjg2NDkzZSJ9.litLWHIOJY8YMx8KdunJVS5sjDo8-zQDICggn9P1PEQ3U_H2WcBACwHqbsMBJ5Z-F29iAjbnRQtm07oNsd8V6kFpV6tBUBfBHq3YADgTpiVkFPFtnnv1BmlMZASVgiCmIGgnI343H1oDVQ04hcc13CRbTf3J_sBYpqmY8tJaTPGID8tpgTgzX5NQZw4zmCp4tPi4tEVEKdh-rdALZWbTgqlEUDzna6J8d1a39DUpOGv_ZGhUR4pOO2CXHbRYcfiODrNoNMJc82fpKj1cmE1wbWTI9Qa8iqQhCfKy58KbN1LHyVxIZZ8NwKv0gYukm7KW4q1Z8vOFnnE3UxAFGIT15tcWuGbcpabafa7rX0YZen74SJD1gapfmnpQsPObrIc7u4yotvrLMUS4CFU5vvUe362oSGHu3yJhvl9-GxaI9acnyz--HdRKHAyPcjxIRKLeleHgA8kQP1n6W8PXCkyTj5YlZlqB7yhR8XRXrkIKXnja9EhSmfrqAkFAZLK3N3ua4gns1cUZeDWQ6iHboMe1Ld0EHma64GnWBCce7di_IvGYzMv7bqQ33jJeqkyFk-AP3pRjhsluGtu_kXHT0RfAtUay-NcdL1GV1GZhVtICsSK5dymXUy5UPZTzqguL7-KHCHwVXRxuTj_6GYR1x3CsCoTd8OauR2uO5Vqz--AJt5M
+EOF

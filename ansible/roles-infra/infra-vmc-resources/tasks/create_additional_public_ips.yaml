@@ -1,0 +1,59 @@
+- name: Check if Public IP exists
+  uri:
+    url: "{{ nsxt_proxy_url }}/cloud-service/api/v1/infra/public-ips/{{ env_type }}-{{ guid }}-{{ _additional.name }}"
+    method: GET
+    status_code: [200,500]
+    headers:
+      csp-auth-token: "{{ _nsxt_token }}"
+    return_content: yes
+  register: _public_ip_exists
+
+- name: Request a Public IP
+  when: _public_ip_exists.status == 500
+  uri:
+    url: "{{ nsxt_proxy_url }}/cloud-service/api/v1/infra/public-ips/{{ env_type }}-{{ guid }}-{{ _additional.name }}"
+    method: PUT
+    headers:
+      csp-auth-token: "{{ _nsxt_token }}"
+    body_format: json
+    body:
+      display_name: "{{ env_type }}-{{ guid }}-{{ _additional.name }}"
+    return_content: yes
+  register: _public_ip_request
+
+- name: Set the IP in a variable
+  set_fact:
+    _additional_public_ip: "{{ _public_ip_request.json.ip | default(_public_ip_exists.json.ip)}}"
+
+- name: Create a NAT configuration
+  when: _public_ip_exists.status == 500
+  uri:
+    url: "{{ nsxt_proxy_url }}/policy/api/v1/infra/tier-1s/cgw/nat/USER/nat-rules/nat-{{ env_type }}-{{ guid }}-{{ _additional.name }}"
+    method: PUT
+    headers:
+      csp-auth-token: "{{ _nsxt_token }}"
+    body_format: json
+    body:
+      display_name: "nat-{{ env_type }}-{{ guid }}-{{ _additional.name }}"
+      action: REFLEXIVE
+      translated_network: "{{ _additional_public_ip }}"
+      source_network: "{{ project_segment_cidr | nthhost(_additional.nthhost) }}"
+    return_content: yes
+  register: _nat_request
+
+- name: DNS entry ({{ _dns_state | default('present') }})
+  nsupdate:
+    server: >-
+      {{ cluster_dns_server
+      | ipaddr
+      | ternary(cluster_dns_server, lookup('dig', cluster_dns_server))
+      }}
+    zone: "{{ cluster_dns_zone }}"
+    record: "{{ _additional.dns }}"
+    type: A
+    ttl: "300"
+    value: "{{ _additional_public_ip }}"
+    port: "{{ cluster_dns_port | d('53') }}"
+    key_name: "{{ ddns_key_name }}"
+    key_secret: "{{ ddns_key_secret }}"
+
