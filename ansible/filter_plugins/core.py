@@ -299,8 +299,10 @@ def agnosticd_filter_out_installed_collections(requirements, installed_collectio
 
     installed = {}
     for _, collections_ in installed_collections.items():
-        for collection in collections_:
-            installed[collection] = True
+        for collection, value in collections_.items():
+            if collection in installed:
+                continue
+            installed[collection] = value["version"]
 
     keep_collections = []
 
@@ -312,7 +314,13 @@ def agnosticd_filter_out_installed_collections(requirements, installed_collectio
             # collection is not installed, keep it
             keep_collections.append(collection)
         else:
-            display.display("skipping %s, already installed"%(collection['name']))
+            display.warning(
+                "skipping installation of %s==%s ; %s==%s already installed in EE"
+                %(collection['name'],
+                  collection['version'],
+                  collection['name'],
+                  installed[collection['name']])
+            )
 
 
     requirements['collections'] = keep_collections
