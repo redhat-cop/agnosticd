@@ -261,6 +261,63 @@ def agnosticd_get_all_images(image, predefined, done=None):
 
         return result
 
+def agnosticd_filter_out_installed_collections(requirements, installed_collections):
+    '''Remove collections from a requirement content that are already installed.
+
+    argument collections is a dict, usually output of the command:
+    ansible-galaxy collection list --format json
+    , ex:
+    {
+        "/usr/share/ansible/collections/ansible_collections": {
+            {
+                "community.general": {
+                "version": "6.3.0"
+                },
+                "openstack.cloud": {
+                "version": "2.0.0"
+                }
+            }
+        }
+    }
+    '''
+
+    function_name = "agnosticd_remove_collection_already_installed"
+
+    if not isinstance(requirements, dict):
+        raise AnsibleFilterError(
+            '%s: requirement content arg should be a dict' %(function_name)
+        )
+    if not isinstance(installed_collections, dict):
+        raise AnsibleFilterError(
+            '%s: collections arg should be a dict' %(function_name)
+        )
+
+    if 'collections' not in requirements:
+        return requirements
+
+    installed = {}
+    for _, collections_ in installed_collections.items():
+        for collection in collections_:
+            installed[collection] = True
+
+    keep_collections = []
+
+    for collection in requirements['collections']:
+        if 'name' not in collection:
+            continue
+
+        if collection['name'] not in installed:
+            # collection is not installed, keep it
+            keep_collections.append(collection)
+        else:
+            display.display("skipping %s, already installed"%(collection['name']))
+
+
+    requirements['collections'] = keep_collections
+
+    return requirements
+
+
 class FilterModule(object):
     ''' AgnosticD core jinja2 filters '''
 
@@ -272,4 +329,5 @@ class FilterModule(object):
             'equinix_metal_tags_to_dict': equinix_metal_tags_to_dict,
             'image_to_ec2_filters': image_to_ec2_filters,
             'agnosticd_get_all_images': agnosticd_get_all_images,
+            'agnosticd_filter_out_installed_collections': agnosticd_filter_out_installed_collections,
         }
