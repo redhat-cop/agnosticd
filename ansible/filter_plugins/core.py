@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from copy import deepcopy
 from ansible.errors import AnsibleFilterError
 from ansible.utils.display import Display
 from ansible.module_utils.six import string_types, integer_types
@@ -281,6 +282,7 @@ def agnosticd_filter_out_installed_collections(requirements, installed_collectio
     }
     '''
 
+    requirements = deepcopy(requirements)
     function_name = "agnosticd_remove_collection_already_installed"
 
     if not isinstance(requirements, dict):
