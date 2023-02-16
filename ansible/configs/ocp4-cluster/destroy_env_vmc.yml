@@ -1,0 +1,114 @@
+---
+- import_playbook: ../../setup_runtime.yml
+
+- name: Destroy environment on VMC
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+  - name: Create ssh provision key
+    include_role:
+      name: create_ssh_provision_key
+    when:
+    - ssh_provision_key_name is undefined
+
+  - name: Run infra-vmc-create-inventory role
+    include_role:
+      name: infra-vmc-create-inventory
+
+
+  - name: SSH config setup
+    when:
+    - groups["bastions"] is defined
+    - groups["bastions"] | length > 0
+    include_role:
+      name: infra-common-ssh-config-generate
+
+
+- name: Set ssh extra args for all hosts, use ssh_config just created
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  tasks:
+  - name: add -F option ansible_ssh_extra_args
+    set_fact:
+      ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|d() }} -F {{ hostvars['localhost'].ansible_ssh_config }}"
+
+- name: Start all VMC instances if they are stopped
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+  - include_tasks: vmc_instances_start.yaml
+
+# Call Remove Workloads for workloads that need to clean up "other" infrastructure.
+# Workloads that need to be able to be run on the provisioning host (aka not a Bastion)
+- name: Remove workloads
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  run_once: true
+  become: false
+  tasks:
+  - name: Remove ocp workloads
+    when:
+    - remove_workloads | default("") | length > 0
+    block:
+    - name: Invoke roles to remove ocp workloads
+      include_role:
+        name: "{{ workload_loop_var }}"
+      vars:
+        ocp_username: "system:admin"
+        ACTION: "remove"
+        silent: false
+      loop: "{{ remove_workloads }}"
+      loop_control:
+        loop_var: workload_loop_var
+
+# Call Remove Workloads for workloads that need to clean up "other" infrastructure.
+# Workloads that need to be run on the bastion
+- name: Remove workloads
+  hosts: bastions
+  gather_facts: false
+  run_once: true
+  become: false
+  tasks:
+  - name: Set Ansible Python interpreter to k8s virtualenv
+    set_fact:
+      ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+
+  - name: Remove ocp workloads on bastion
+    when:
+    - remove_workloads_bastion | default("") | length > 0
+    block:
+    - name: Invoke roles to remove ocp workloads
+      include_role:
+        name: "{{ workload_loop_var }}"
+      vars:
+        ocp_username: "system:admin"
+        ACTION: "remove"
+        silent: false
+      loop: "{{ remove_workloads_bastion }}"
+      loop_control:
+        loop_var: workload_loop_var
+
+- name: Have the OpenShift installer cleanup what it did
+  hosts: bastions
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Wait for the bastion host to be available
+    wait_for_connection:
+      timeout: 60
+    register: bwait
+    ignore_errors: true
+
+  - name: Call role to destroy the OpenShift cluster
+    when: bwait is successful
+    include_role:
+      name: host-ocp4-destroy
+
+- name: Import default cloud provider destroy playbook
+  import_playbook: "../../cloud_providers/{{ cloud_provider }}_destroy_env.yml"
