@@ -1,8 +1,10 @@
 ENV_TYPE=base-aap2-infra
-GUID=base-aap2-01   # Adjust to taste e.g. make deploy GUID=foo
+# Adjust GUID to taste e.g. make deploy GUID=foo-01
+GUID=base-aap2-01
 OUTPUT_DIR=/tmp/output_dir
 PLAYBOOK_DIR=ansible
 SECRETS_FILE=~/secrets/secret-base-aap2-infra-aws.yml
+TARGET=bastion
 # Adjust to taste
 
 : ## TIP! make supports tab completion with *modern* shells e.g. zsh etc
@@ -16,9 +18,15 @@ help: ##
 # Thanks to victoria.dev for the above syntax
 # https://victoria.dev/blog/how-to-create-a-self-documenting-makefile/
 
+setup: ## Any setup tasks prior to deploy
+setup: ## Virtualenvs, ANSIBLE logs, env vars etc
+	echo "Activate a virtualenv if required"
+	echo "Consider export ANSIBLE_LOG_PATH=/tmp/ansible_base_aap2_infra_$(GUID).log"
+
 deploy: ## Deploy ent-demo-automate-the-enterprise
 deploy: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
 deploy: ## 
+	cd ../../.. ; \
 	ansible-playbook $(PLAYBOOK_DIR)/main.yml \
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
@@ -28,6 +36,7 @@ deploy: ##
 deploy-no-controller: ## Deploy ent-demo-automate-the-enterprise without AAP2 Controller
 deploy-no-controller: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
 deploy-no-controller: ##
+	cd ../../.. ; \
 	ansible-playbook $(PLAYBOOK_DIR)/main.yml \
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
@@ -38,6 +47,7 @@ deploy-no-controller: ##
 deploy-fast: ## Deploy ent-demo-automate-the-enterprise without AAP2 Controller, package updates etc
 deploy-fast: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
 deploy-fast: ##
+	cd ../../.. ; \
 	ansible-playbook $(PLAYBOOK_DIR)/main.yml \
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
@@ -49,15 +59,16 @@ deploy-fast: ##
 destroy: ## Destroy ent-demo-automate-the-enterprise
 destroy: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
 destroy: ## 
+	cd ../../.. ; \
 	ansible-playbook $(PLAYBOOK_DIR)/destroy.yml \
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
 		-e guid=$(GUID)
 
-ssh-bastion: ## ssh to your bastion
-ssh-bastion: ## Assumes an existing output_dir
-	echo "\nYou will probably want to sudo su devops - the primary user on this bastion\n"
-	ssh -F $(OUTPUT_DIR)/$(GUID)/$(ENV_TYPE)_$(GUID)_ssh_conf bastion
+ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
+ssh-target: ## Assumes an existing output_dir
+	echo "\nYou may want to `sudo su - devops` - the primary user if you are on bastion\n"
+	ssh -F $(OUTPUT_DIR)/$(GUID)/$(ENV_TYPE)_$(GUID)_ssh_conf $(TARGET)
 
 last-status: ## Output last status file
 last-status: ## Update status file via make status
@@ -69,7 +80,8 @@ last-status: ##
 status: ## Generate status
 status: ## Update status file
 status: ## 
-	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
+	cd ../../.. ; \
+	ansible-playbook ../../lifecycle_entry_point.yml \
 		-e ACTION=status \
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
@@ -79,9 +91,21 @@ status: ##
 stop: ## Suspend, stop, instances
 stop: ## Restart with make start
 stop: ## 
-# stop:
-#	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
-# 		-e ACTION=stop \
-# 		-e @~/secrets/secret-aws-ate.yml \
-# 		-e env_type=ent-demo-automate-the-enterprise \
-# 		-e guid=$(GUID)
+stop:
+	cd ../../.. ; \
+	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
+			-e ACTION=stop \
+			-e @$(SECRETS_FILE) \
+			-e env_type=$(ENV_TYPE) \
+			-e guid=$(GUID)
+
+start: ## Suspend, start, instances
+start: ## Restart with make start
+start: ## 
+start:
+	cd ../../.. ; \
+	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
+			-e ACTION=start \
+			-e @$(SECRETS_FILE) \
+			-e env_type=$(ENV_TYPE) \
+			-e guid=$(GUID)
