@@ -8,7 +8,7 @@ ansible --version
 echo
 ansible-galaxy --version
 echo
-ansible-galaxy collection list
+ansible-galaxy collection list --format yaml
 echo
 
 echo -e "\n# Python\n"
