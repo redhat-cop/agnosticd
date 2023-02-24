@@ -3,13 +3,15 @@ ENV_TYPE=base-aap2-infra
 GUID=base-aap2-01
 OUTPUT_DIR=/tmp/output_dir
 PLAYBOOK_DIR=ansible
-SECRETS_FILE=~/secrets/secret-base-aap2-infra-aws.yml
+SECRETS_FILE=~/secrets/secret-base-aap2-infra-aws-02.yml
 TARGET=bastion
 # Adjust to taste
 
 : ## TIP! make supports tab completion with *modern* shells e.g. zsh etc
 : ## e.g. make depl<TAB> == make deploy 
 : ## 
+
+.SILENT: my-env
 
 help: ## Show this help - technically unnecessary as `make` alone will do
 help: ## 
@@ -22,6 +24,15 @@ setup: ## Any setup tasks prior to deploy
 setup: ## Virtualenvs, ANSIBLE logs, env vars etc
 	echo "Activate a virtualenv if required"
 	echo "Consider export ANSIBLE_LOG_PATH=/tmp/ansible_base_aap2_infra_$(GUID).log"
+
+my-env: ## Confirm env setup
+my-env: ## Could add extra env vars like `env | grep ANSIBLE`
+	type python3
+	printf "Python3 version is: "
+	python3 --version
+	type ansible
+	ansible --version
+	env | grep ANSIBLE 
 
 deploy: ## Deploy ent-demo-automate-the-enterprise
 deploy: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
