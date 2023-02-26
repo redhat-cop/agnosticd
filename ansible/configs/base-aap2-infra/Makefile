@@ -3,7 +3,11 @@ ENV_TYPE=base-aap2-infra
 GUID=base-aap2-01
 OUTPUT_DIR=/tmp/output_dir
 PLAYBOOK_DIR=ansible
-SECRETS_FILE=~/secrets/secret-base-aap2-infra-aws-02.yml
+
+# AWS Uses Sandbox creds typically
+CREDS=1
+SECRETS_DIR=~/secrets
+SECRETS_FILE=$(SECRETS_DIR)/secret-base-aap2-infra-aws-sandbox0$(CREDS).yml
 TARGET=bastion
 # Adjust to taste
 
@@ -11,22 +15,24 @@ TARGET=bastion
 : ## e.g. make depl<TAB> == make deploy 
 : ## 
 
-.SILENT: my-env
+.SILENT: setup my-env ssh-target
 
 help: ## Show this help - technically unnecessary as `make` alone will do
 help: ## 
-	@egrep -h '\s##\s' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@egrep -h '\s##\s' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", ($$2=="" ? "" : $$1 ),  $$2}' | less
 
 # Thanks to victoria.dev for the above syntax
 # https://victoria.dev/blog/how-to-create-a-self-documenting-makefile/
 
 setup: ## Any setup tasks prior to deploy
 setup: ## Virtualenvs, ANSIBLE logs, env vars etc
-	echo "Activate a virtualenv if required"
-	echo "Consider export ANSIBLE_LOG_PATH=/tmp/ansible_base_aap2_infra_$(GUID).log"
+setup: ## 
+	echo "\n\nActivate a virtualenv if required\n"
+	echo "Consider export ANSIBLE_LOG_PATH=/tmp/ansible_base_aap2_infra_$(GUID).log\n\n"
 
 my-env: ## Confirm env setup
 my-env: ## Could add extra env vars like `env | grep ANSIBLE`
+my-env: ## 
 	type python3
 	printf "Python3 version is: "
 	python3 --version
@@ -46,7 +52,7 @@ deploy: ##
 
 deploy-no-controller: ## Deploy ent-demo-automate-the-enterprise without AAP2 Controller
 deploy-no-controller: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
-deploy-no-controller: ##
+deploy-no-controller: ## 
 	cd ../../.. ; \
 	ansible-playbook $(PLAYBOOK_DIR)/main.yml \
 		-e @$(SECRETS_FILE) \
@@ -57,7 +63,7 @@ deploy-no-controller: ##
 
 deploy-fast: ## Deploy ent-demo-automate-the-enterprise without AAP2 Controller, package updates etc
 deploy-fast: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
-deploy-fast: ##
+deploy-fast: ## 
 	cd ../../.. ; \
 	ansible-playbook $(PLAYBOOK_DIR)/main.yml \
 		-e @$(SECRETS_FILE) \
@@ -78,7 +84,8 @@ destroy: ##
 
 ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
 ssh-target: ## Assumes an existing output_dir
-	echo "\nYou may want to `sudo su - devops` - the primary user if you are on bastion\n"
+ssh-target: ## 
+	echo "\n\nYou may want to 'sudo su - devops' - the primary user if you are on bastion\n\n"
 	ssh -F $(OUTPUT_DIR)/$(GUID)/$(ENV_TYPE)_$(GUID)_ssh_conf $(TARGET)
 
 last-status: ## Output last status file
@@ -92,11 +99,14 @@ status: ## Generate status
 status: ## Update status file
 status: ## 
 	cd ../../.. ; \
-	ansible-playbook ../../lifecycle_entry_point.yml \
+	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
 		-e ACTION=status \
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
-		-e guid=$(GUID)
+		-e guid=$(GUID) # | \
+ 		# grep -A5 "Report status in user info" | \
+ 		# awk '{ print $1 " "$2 " " $3 }'
+
 
 #	ansible-playbook ../../../ansible/lifecycle_entry_point.yml \
 stop: ## Suspend, stop, instances
@@ -113,10 +123,16 @@ stop:
 start: ## Suspend, start, instances
 start: ## Restart with make start
 start: ## 
-start:
 	cd ../../.. ; \
 	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
 			-e ACTION=start \
 			-e @$(SECRETS_FILE) \
 			-e env_type=$(ENV_TYPE) \
 			-e guid=$(GUID)
+
+bounce: ## Bounce the deploy 
+bounce: ## IE stop then start
+bounce: ## 
+bounce: stop start
+
+exit-make-help: ## You're in less - type q to exit
