@@ -5,10 +5,11 @@ OUTPUT_DIR=/tmp/output_dir
 PLAYBOOK_DIR=ansible
 
 # AWS Uses Sandbox creds typically
-CREDS=1
+SANDBOX=1
 SECRETS_DIR=~/secrets
-SECRETS_FILE=$(SECRETS_DIR)/secret-base-aap2-infra-aws-sandbox0$(CREDS).yml
+SECRETS_FILE=$(SECRETS_DIR)/secret-base-aap2-infra-aws-sandbox0$(SANDBOX).yml
 TARGET=bastion
+EXTRA_ARGS=
 # Adjust to taste
 
 : ## TIP! make supports tab completion with *modern* shells e.g. zsh etc
@@ -83,7 +84,7 @@ ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hos
 ssh-target: ## Assumes an existing output_dir
 ssh-target: ## 
 	echo "\n\nYou may want to 'sudo su - devops' - the primary user if you are on bastion\n\n"
-	ssh -F $(OUTPUT_DIR)/$(GUID)/$(ENV_TYPE)_$(GUID)_ssh_conf $(TARGET)
+	ssh -F $(OUTPUT_DIR)/sbox0$(SANDBOX)/$(ENV_TYPE)_sbox0$(SANDBOX)_ssh_conf $(TARGET)
 
 last-status: ## Output last status file
 last-status: ## Update status file via make status
