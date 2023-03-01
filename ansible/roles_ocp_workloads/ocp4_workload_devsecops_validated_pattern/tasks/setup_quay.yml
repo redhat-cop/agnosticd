@@ -1,0 +1,160 @@
+---
+- name: Use quay-{{guid}}.basedomain for the Quay route hostname
+  when: ocp4_workload_quay_operator_registry_route | default("") | length == 0
+  set_fact:
+    _ocp4_workload_devsecops_validated_pattern_quay_registry_route: "quay-{{ guid }}.{{ _ocp4_workload_devsecops_validated_pattern_ocp_apps_domain }}"
+
+- name: Clone application source code
+  block:
+  - name: Clone config repository
+    ansible.builtin.git:
+      accept_hostkey: true
+      force: true
+      repo: "{{ _ocp4_workload_devsecops_validated_pattern_gitea_repo_devsecops_url }}"
+      dest: "~/devsecops-validated-pattern"
+      version: main
+    environment:
+      GIT_SSL_NO_VERIFY: "true"
+
+- name: Fetch template from remote host
+  include_tasks: fetch_and_apply_template.yml
+  loop:
+  - secret-config-bundle.yaml
+  vars:
+    _folder: /home/ec2-user/devsecops-validated-pattern/gitops/acm/quay-enterprise
+    _quay_host_name: "{{ _ocp4_workload_devsecops_validated_pattern_quay_registry_route }}"
+
+- name: Add new files to the repository
+  command:
+    chdir: >-
+      /home/ec2-user/devsecops-validated-pattern
+    cmd: "git add ."
+  ignore_errors: true
+
+- name: Commit changes to the repository
+  command:
+    chdir: >-
+      /home/ec2-user/devsecops-validated-pattern
+    cmd: >-
+      git commit -a -m 'Updates for starting scenario.'
+  ignore_errors: true
+
+- name: Push all changes back to the project repository
+  command:
+    chdir: >-
+      /home/ec2-user/devsecops-validated-pattern
+    cmd: >-
+      git push {{ _ocp4_workload_devsecops_validated_pattern_gitea_repo_devsecops_url }}
+
+- name: Process acm quay manifests
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - acm/infra/quay-enterprise/acm-placement-rule.yml.j2
+  - acm/infra/quay-enterprise/acm-subscription.yml.j2
+  - acm/infra/quay-enterprise/acm-application.yml.j2
+  vars:
+    _purpose: "{{ ocp4_workload_devsecops_validated_pattern_hub_cluster.purpose }}"
+
+- name: Wait for Quay Registry to be available
+  k8s_info:
+    api_version: quay.redhat.com/v1
+    kind: QuayRegistry
+    name: "{{ ocp4_workload_devsecops_validated_pattern_quay_registry_name }}"
+    namespace: "{{ ocp4_workload_devsecops_validated_pattern_quay_registry_namespace }}"
+  register: r_quay_registry
+  until:
+  - r_quay_registry.resources[0].status.currentVersion is defined
+  - r_quay_registry.resources[0].status.currentVersion | length > 0
+  retries: 120
+  delay: 10
+
+- name: Configure QuayAdmin User
+  block:
+  - name: Wait for Quay API to be available
+    uri:
+      url: "{{ r_quay_registry.resources[0].status.registryEndpoint }}/api/v1/discovery"
+      method: GET
+      validate_certs: false
+    register: r_quayapi
+    until: r_quayapi.status == 200 or r_quayapi.status == 403
+    retries: 120
+    delay: 10
+
+  - name: Create QuayAdmin user
+    uri:
+      url: "{{ r_quay_registry.resources[0].status.registryEndpoint }}/api/v1/user/initialize"
+      method: POST
+      body:
+        username: "{{ ocp4_workload_devsecops_validated_pattern_quay_admin_user }}"
+        password: "{{ common_password }}"
+        email: "quayadmin@opentlc.com"
+        access_token: "true"
+      body_format: json
+      validate_certs: false
+      status_code: 200
+    register: r_quayadmin
+
+  - name: Save access_token
+    when: r_quayadmin.status == 200
+    set_fact:
+      _ocp4_workload_devsecops_validated_pattern_quay_registry_admin_token: "{{ r_quayadmin.json.access_token }}"
+
+- name: Get Quay Config Editor credentials secret
+  k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ r_quay_registry.resources[0].status.configEditorCredentialsSecret }}"
+    namespace: "{{ ocp4_workload_devsecops_validated_pattern_quay_registry_namespace }}"
+  register: r_config_editor_secret
+
+- name: Retrieve Quay instance
+  kubernetes.core.k8s_info:
+    kind: Route
+    name: quay-quay
+    namespace: "{{ ocp4_workload_devsecops_validated_pattern_quay_registry_namespace }}"
+  register: r_quay
+  retries: 60
+  delay: 5
+  until: r_quay.resources | length > 0
+
+- name: Set Quay docker registry
+  set_fact:
+    ocp4_workload_devsecops_validated_pattern_docker_registry: "{{ r_quay.resources[0].spec.host }}"
+
+- name: Print quay user info
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Red Hat Quay is available at {{ r_quay_registry.resources[0].status.registryEndpoint }}"
+  - "Red Hat Quay Config is available at {{ r_quay_registry.resources[0].status.configEditorEndpoint }}"
+  - "- Config User: quayconfig"
+  - "- Config Password: {{ r_config_editor_secret.resources[0].data.password | b64decode }}"
+
+- name: Print quay user data
+  agnosticd_user_info:
+    data:
+      quay_console_url: "{{ r_quay_registry.resources[0].status.registryEndpoint }}"
+      quay_config_url: "{{ r_quay_registry.resources[0].status.configEditorEndpoint }}"
+      quay_config_username: "quayconfig"
+      quay_config_password: "{{ r_config_editor_secret.resources[0].data.password | b64decode }}"
+
+- name: Print quay admin info
+  block:
+  - name: Print student admin info
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - ""
+    - "A Quay Super User '{{ ocp4_workload_devsecops_validated_pattern_quay_admin_user }}' has been created."
+    - "The super user password is {{ common_password }}"
+    - "The token for the super user is {{ _ocp4_workload_devsecops_validated_pattern_quay_registry_admin_token }}"
+
+  - name: Print quay user data
+    agnosticd_user_info:
+      data:
+        quay_admin_username: "{{ ocp4_workload_devsecops_validated_pattern_quay_admin_user }}"
+        quay_admin_password: "{{ common_password }}"
+        quay_admin_token: "{{ _ocp4_workload_devsecops_validated_pattern_quay_registry_admin_token }}"

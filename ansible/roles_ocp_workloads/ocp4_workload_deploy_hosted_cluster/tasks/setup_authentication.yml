@@ -1,0 +1,80 @@
+---
+- name: Generate admin user password
+  when: ocp4_workload_deploy_hosted_cluster_admin_password | default('') | length == 0
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_admin_password: >-
+      {{ lookup('password', '/dev/null chars=ascii_letters,digits '
+          ~ 'length=' ~ ocp4_workload_deploy_hosted_cluster_admin_password_length
+      ) }}
+
+- name: Use provided admin password
+  when: ocp4_workload_deploy_hosted_cluster_admin_password | default('') | length > 0
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_admin_password: "{{ ocp4_workload_deploy_hosted_cluster_admin_password }}"
+
+- name: Generate htpasswd hash for admin user
+  ansible.builtin.shell: >-
+    htpasswd -nb "admin" "{{ _ocp4_workload_deploy_hosted_cluster_admin_password }}" | cut -d: -f2
+  register: r_htpasswd_admin_line
+
+- name: Set htpasswd admin password hash
+  when: r_htpasswd_admin_line is succeeded
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_admin_password_hash: "{{ r_htpasswd_admin_line.stdout }}"
+
+- name: Generate user passwords
+  when: ocp4_workload_deploy_hosted_cluster_user_password | default('') | length == 0
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_user_password: >-
+      {{ lookup('password', '/dev/null chars=ascii_letters,digits '
+          ~ 'length=' ~ ocp4_workload_deploy_hosted_cluster_user_password_length
+      ) }}
+
+- name: Use provided user passwords
+  when: ocp4_workload_deploy_hosted_cluster_user_password | default('') | length > 0
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_user_password: "{{ ocp4_workload_deploy_hosted_cluster_user_password }}"
+
+- name: Generate htpasswd hash for user passwords
+  ansible.builtin.shell: >-
+    htpasswd -nb "userN" "{{ _ocp4_workload_deploy_hosted_cluster_user_password }}" | cut -d: -f2
+  register: r_htpasswd_user_line
+
+- name: Set htpasswd user password hash
+  when: r_htpasswd_user_line is succeeded
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_user_password_hash: "{{ r_htpasswd_user_line.stdout }}"
+
+- name: Generate htpasswd file
+  ansible.builtin.template:
+    src: htpasswd.j2
+    dest: /home/opentlc-mgr/users.htpasswd
+    owner: opentlc-mgr
+    mode: 0664
+
+- name: Read contents of htpasswd file
+  ansible.builtin.slurp:
+    src: /home/opentlc-mgr/users.htpasswd
+  register: r_htpasswd_file
+
+- name: Remove generated htpasswd file
+  ansible.builtin.file:
+    path: /home/opentlc-mgr/users.htpasswd
+    state: absent
+
+- name: Ensure secret htpasswd-{{ guid }} is absent
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Secret
+    name: "htpasswd-{{ guid }}"
+    namespace: local-cluster
+  register: r_htpasswd_secret_absent
+  retries: 5
+  delay: 10
+  until: r_htpasswd_secret_absent is success
+
+- name: Create secret htpasswd-{{ guid }}
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'secret-htpasswd.yaml.j2' ) | from_yaml }}"

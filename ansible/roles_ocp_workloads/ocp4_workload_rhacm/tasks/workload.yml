@@ -2,11 +2,11 @@
 # Implement your Workload deployment tasks here
 
 - name: Setting up workload for user
-  debug:
+  ansible.builtin.debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
 - name: Install RHACM operator
-  include_role:
+  ansible.builtin.include_role:
     name: install_operator
   vars:
     install_operator_action: install
@@ -28,6 +28,11 @@
   kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('file', 'multiclusterhub.yaml') }}"
+  retries: 60
+  delay: 10
+  register: r_mhc
+  until: r_mhc is succeeded
+
 
 - name: Wait until RHACM MultiClusterHub is ready
   kubernetes.core.k8s_info:
@@ -40,13 +45,73 @@
   delay: 10
   until:
   - rhacm_multiclusterhub is defined
+  - rhacm_multiclusterhub.resources is defined
   - rhacm_multiclusterhub.resources | length > 0
   - rhacm_multiclusterhub.resources[0].status is defined
   - rhacm_multiclusterhub.resources[0].status.phase is defined
   - rhacm_multiclusterhub.resources[0].status.phase == "Running"
 
+# RHACM Console route only exists for RHACM 2.6 and earlier
+- name: Get the RHACM console route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: multicloud-console
+    namespace: open-cluster-management
+  register: r_acm_console_route
+
+- name: Get Web Console route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: openshift-console
+    name: console
+  register: r_console_route
+
+- name: Get API server URL
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: r_api_url
+
+- name: For RHACM 2.6 and earlier save route to RHACM Console
+  when: r_acm_console_route.resources | length > 0
+  block:
+  - name: Set fact for RHACM route
+    ansible.builtin.set_fact:
+      acm_route: "{{ r_acm_console_route | json_query(route_query) }}"
+    vars:
+    - route_query: resources[].spec.host|[0]
+
+  - name: Print user info
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - ""
+    - "Your RHACM console is available at:"
+    - "  https://{{ acm_route }}"
+
+  - name: Save user data (RHACM Console)
+    agnosticd_user_info:
+      data:
+        acm_route: "https://{{ r_acm_console_route.resources[0].spec.host }}"
+
+- name: Save user data
+  agnosticd_user_info:
+    data:
+      web_console_url: "https://{{ r_console_route.resources[0].spec.host }}"
+      api_url: "{{ r_api_url.resources[0].status.apiServerURL }}"
+
+- name: Write out AWS credentials if deployed to EC2 sandbox
+  when:
+  - cloud_provider == 'ec2'
+  - hostvars.localhost.cloudformation_out_final.stack_outputs.StudentUserAccessKey is defined
+  - hostvars.localhost.cloudformation_out_final.stack_outputs.StudentUserSecretAccessKey is defined
+  ansible.builtin.include_tasks: aws_credentials.yml
+
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
-  debug:
+  ansible.builtin.debug:
     msg: "Workload Tasks completed successfully."
   when: not silent|bool
