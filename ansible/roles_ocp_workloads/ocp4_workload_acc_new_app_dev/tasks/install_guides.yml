@@ -1,0 +1,100 @@
+# --------------------------------------------------------
+# Deploy module guides
+# --------------------------------------------------------
+- name: Create prerequisites for guides
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) | from_yaml }}"
+  loop:
+  - guides/namespace.yaml.j2
+  - guides/imagestream_httpd.yaml.j2
+
+- name: Create module list
+  ansible.builtin.set_fact:
+    _ocp4_workload_acc_new_app_dev_guides_modules_list: "{{ ocp4_workload_acc_new_app_dev_guides_modules.split(';') | map('trim') | list }}"
+
+- name: Print selected modules
+  ansible.builtin.debug:
+    msg: "Selected list of modules: {{ _ocp4_workload_acc_new_app_dev_guides_modules_list }}"
+
+- name: Deploy guides
+  vars:
+    _ocp4_workload_acc_new_app_dev_guide: "{{ ocp4_workload_acc_new_app_dev_guides_repo_prefix }}-{{ module }}"
+  ansible.builtin.include_tasks: install_guides_modules.yml
+  loop: "{{ _ocp4_workload_acc_new_app_dev_guides_modules_list }}"
+  loop_control:
+    loop_var: module
+
+# --------------------------------------------------------
+# Deploy user distribution tool
+# --------------------------------------------------------
+
+- name: search for username distribution tool
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: get-a-username
+    namespace: "{{ ocp4_workload_acc_new_app_dev_guides_namespace }}"
+  register: r_gau
+
+- name: deploy redis
+  when: r_gau.resources | list | length == 0
+  block:
+  - name: Create redis instance
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', item) | from_yaml }}"
+    loop:
+    - "guides/redis/pvc.yaml.j2"
+    - "guides/redis/secret.yaml.j2"
+    - "guides/redis/service.yaml.j2"
+    - "guides/redis/deployment.yaml.j2"
+
+  - name: wait for Redis to be ready
+    kubernetes.core.k8s_info:
+      api_version: apps/v1
+      kind: Deployment
+      name: redis
+      namespace: "{{ ocp4_workload_acc_new_app_dev_guides_namespace }}"
+    register: r_redis
+    retries: 120
+    delay: 10
+    until:
+    - r_redis.resources | length > 0
+    - r_redis.resources[0].status is defined
+    - r_redis.resources[0].status.readyReplicas is defined
+    - r_redis.resources[0].spec.replicas == r_redis.resources[0].status.readyReplicas
+
+  - name: create empty guides_url array
+    ansible.builtin.set_fact:
+      _ocp4_workload_acc_new_app_dev_guides_urls: []
+
+  - name: construct URL parameter for username distribution
+    ansible.builtin.set_fact:
+      _ocp4_workload_acc_new_app_dev_guides_urls: >-
+        {{ _ocp4_workload_acc_new_app_dev_guides_urls + [item.url + ';' + item.title]
+        if (item.name in _ocp4_workload_acc_new_app_dev_guides_modules_list) else _ocp4_workload_acc_new_app_dev_guides_urls }}
+    loop: "{{ ocp4_workload_acc_new_app_dev_guides_module_titles }}"
+
+  - name: debug URLs
+    ansible.builtin.debug:
+      msg: "{{ _ocp4_workload_acc_new_app_dev_guides_urls }}"
+
+  - name: deploy username distribution tool
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', item) | from_yaml }}"
+    loop:
+    - guides/usertool/deployment.yaml.j2
+    - guides/usertool/service.yaml.j2
+    - guides/usertool/route.yaml.j2
+    vars:
+      _ocp4_workload_acc_new_app_dev_guides_lab_module_urls: "{{ _ocp4_workload_acc_new_app_dev_guides_urls | join(',') }}"
+      # yamllint disable-line rule:line-length
+      _ocp4_workload_acc_new_app_dev_guides_lab_extra_urls: "{{ (_ocp4_workload_acc_new_app_dev_console_url + ';OpenShift Console,https://codeserver-codeserver-%USERNAME%.' + _ocp4_workload_acc_new_app_dev_wildcard_domain + ';VS Code Server') }}"
+
+- name: save workshop info URL
+  agnosticd_user_info:
+    data:
+      # yamllint disable-line rule:line-length
+      user_distribution_url: "https://get-a-username-{{ ocp4_workload_acc_new_app_dev_guides_namespace }}.{{ _ocp4_workload_acc_new_app_dev_wildcard_domain }}"

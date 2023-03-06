@@ -1,0 +1,191 @@
+---
+- name: Clone application source code
+  block:
+  - name: Clone config repository
+    ansible.builtin.git:
+      accept_hostkey: true
+      force: true
+      repo: "{{ _ocp4_workload_devsecops_validated_pattern_gitea_repo_vault_url }}"
+      dest: "~/hashicorp-vault"
+      version: main
+    environment:
+      GIT_SSL_NO_VERIFY: "true"
+
+- name: Copy updated stateful set to repository
+  ansible.builtin.copy:
+    src: files/stateful-set-vault.yaml
+    dest: /home/ec2-user/hashicorp-vault/base/ss-vault.yaml
+
+- name: Add new files to the repository
+  command:
+    chdir: >-
+      /home/ec2-user/hashicorp-vault
+    cmd: "git add ."
+  ignore_errors: true
+
+- name: Commit changes to the repository
+  command:
+    chdir: >-
+      /home/ec2-user/hashicorp-vault
+    cmd: >-
+      git commit -a -m 'Updates for starting scenario.'
+  ignore_errors: true
+
+- name: Push all changes back to the project repository
+  command:
+    chdir: >-
+      /home/ec2-user/hashicorp-vault
+    cmd: >-
+      git push {{ _ocp4_workload_devsecops_validated_pattern_gitea_repo_vault_url }}
+
+- name: Process acm vault manifests
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - acm/common/acm-namespace-vault.yml.j2
+  - acm/infra/vault/acm-channel.yml.j2
+  - acm/infra/vault/acm-placement-rule.yml.j2
+  - acm/infra/vault/acm-subscription.yml.j2
+  - acm/infra/vault/acm-application.yml.j2
+  vars:
+    _purpose: "{{ ocp4_workload_devsecops_validated_pattern_hub_cluster.purpose }}"
+
+- name: Retrieve Vault Pod
+  kubernetes.core.k8s_info:
+    kind: Pod
+    name: vault-0
+    namespace: "{{ ocp4_workload_devsecops_validated_pattern_vault_namespace }}"
+  register: r_vault
+  retries: 60
+  delay: 5
+  until:
+  - r_vault.resources is defined
+  - r_vault.resources | length > 0
+  - r_vault.resources[0].status is defined
+  - r_vault.resources[0].status.phase is defined
+  - r_vault.resources[0].status.phase == 'Running'
+
+- name: Copy unsealing script to bastion
+  ansible.builtin.copy:
+    src: files/unseal.sh
+    dest: /home/ec2-user/unseal.sh
+
+- name: Initialize vault
+  shell: >-
+    oc exec vault-0 --namespace={{ ocp4_workload_devsecops_validated_pattern_vault_namespace }} \
+     --stdin --tty -- vault operator init -format=yaml > /home/ec2-user/vault-auto-unseal-keys.txt
+
+- name: Copy unsealing keys and unsealing script to vault
+  shell: >-
+    cat ./vault-auto-unseal-keys.txt | oc exec -i -n {{
+    ocp4_workload_devsecops_validated_pattern_vault_namespace }} vault-0 -c vault "--" sh -c "cat > /vault/data/vault-auto-unseal-keys.txt" &&
+    cat ./unseal.sh | oc exec -i -n {{
+    ocp4_workload_devsecops_validated_pattern_vault_namespace }} vault-0 -c vault "--" sh -c "cat > /vault/data/unseal.sh"
+
+- name: Unseal vault
+  shell: >-
+    oc exec vault-0 --namespace={{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} --stdin --tty -- /bin/sh /vault/data/unseal.sh
+
+- name: Get login token
+  shell: >-
+    grep -A 0 root_token /home/ec2-user/vault-auto-unseal-keys.txt | sed 's/root_token: //g'
+  register: r_token
+
+- name: Get unsealing key 1
+  shell: >-
+    grep -A 5 unseal_keys_b64 /home/ec2-user/vault-auto-unseal-keys.txt |head -2|tail -1|sed 's/- //g'
+  register: r_unsealing_key_1
+
+- name: Get unsealing key 2
+  shell: >-
+    grep -A 5 unseal_keys_b64 /home/ec2-user/vault-auto-unseal-keys.txt |head -3|tail -1|sed 's/- //g'
+  register: r_unsealing_key_2
+
+- name: Get unsealing key 3
+  shell: >-
+    grep -A 5 unseal_keys_b64 /home/ec2-user/vault-auto-unseal-keys.txt |head -4|tail -1|sed 's/- //g'
+  register: r_unsealing_key_3
+
+- name: Set vault token fact
+  set_fact:
+    ocp4_workload_devsecops_validated_pattern_vault_token: "{{ r_token.stdout }}"
+    ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_1: "{{ r_unsealing_key_1.stdout }}"
+    ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_2: "{{ r_unsealing_key_2.stdout }}"
+    ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_3: "{{ r_unsealing_key_3.stdout }}"
+
+- name: Login to vault
+  shell: >-
+    oc exec vault-0 --namespace={{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} --stdin --tty -- vault login token={{ ocp4_workload_devsecops_validated_pattern_vault_token }}
+
+- name: Enable Kubernetes Auth
+  shell: >-
+    oc exec vault-0 --namespace={{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} --stdin --tty -- vault auth enable kubernetes &&
+    TOKEN=$(oc exec vault-0 --namespace={{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} -- /bin/sh -c 'echo $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)') &&
+    KUBERNETES_PORT_443_TCP_ADDR=$(oc exec vault-0 --namespace={{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} -- /bin/sh -c 'echo $KUBERNETES_PORT_443_TCP_ADDR') &&
+    oc exec vault-0 --namespace={{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} --stdin --tty -- vault write auth/kubernetes/config kubernetes_host=https://$KUBERNETES_PORT_443_TCP_ADDR:443 &&
+    token_reviewer_jwt=$TOKEN kubernetes_ca_cert=@/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+
+- name: Label namespace and enable v2 of KV Secrets Engine
+  shell: >-
+    oc label namespace {{ ocp4_workload_devsecops_validated_pattern_vault_namespace }} vault.hashicorp.com/agent-webhook=enabled &&
+    oc exec vault-0 --namespace={{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} --stdin --tty -- vault secrets enable -path=secret kv-v2
+
+- name: Create the vault policy
+  shell: >-
+    oc exec -it vault-0 -n {{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} -- /bin/sh -c 'echo path \"secret/data/cosign/config\" {capabilities = [\"read\"]} > /tmp/my_policy.hcl' &&
+    oc exec -it vault-0 -n {{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} -- vault policy write cosign /tmp/my_policy.hcl &&
+    oc exec -it vault-0 -n {{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} -- vault write auth/kubernetes/role/cosign bound_service_account_names=pipeline bound_service_account_namespaces=ci policies=cosign ttl=96h
+
+- name: Create vault cosign secret
+  shell: >-
+    oc exec -it vault-0 -n {{ ocp4_workload_devsecops_validated_pattern_vault_namespace
+    }} -- vault kv put secret/cosign/config cosign_key="{{ lookup('file', 'files/cosign.key')
+    }}" cosign_password={{ ocp4_workload_devsecops_validated_pattern_cosign_password }}
+
+- name: Create token secret
+  k8s:
+    state: present
+    definition: "{{ lookup('template',  'acm-vault-token-secret.yaml.j2' ) | from_yaml }}"
+
+- name: Retrieve route
+  kubernetes.core.k8s_info:
+    kind: Route
+    name: vault
+    namespace: "{{ ocp4_workload_devsecops_validated_pattern_vault_namespace }}"
+  register: r_vault
+  retries: 60
+  delay: 5
+  until: r_vault.resources | length > 0
+
+- name: Print Access information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Hashicorp Vault url: https://{{ r_vault.resources[0].spec.host }}"
+  - "Hashicorp Vault token: {{ ocp4_workload_devsecops_validated_pattern_vault_token }}"
+  - "Hashicorp Vault namespace: {{ ocp4_workload_devsecops_validated_pattern_vault_namespace }}"
+  - "Hashicorp Vault Unsealing Key 1: {{ ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_1 }}"
+  - "Hashicorp Vault Unsealing Key 2: {{ ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_2 }}"
+  - "Hashicorp Vault Unsealing Key 3: {{ ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_3 }}"
+
+- name: Print Access information
+  agnosticd_user_info:
+    data:
+      hashicorp_vault_url: "https://{{ r_vault.resources[0].spec.host }}"
+      hashicorp_vault_token: "{{ ocp4_workload_devsecops_validated_pattern_vault_token }}"
+      hashicorp_vault_namespace: "{{ ocp4_workload_devsecops_validated_pattern_vault_namespace }}"
+      hashicorp_vault_unsealing_key_1: "{{ ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_1 }}"
+      hashicorp_vault_unsealing_key_2: "{{ ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_2 }}"
+      hashicorp_vault_unsealing_key_3: "{{ ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_3 }}"

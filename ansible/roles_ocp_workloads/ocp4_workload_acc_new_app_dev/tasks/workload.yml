@@ -1,0 +1,195 @@
+---
+# Remove this once vscode on bastion not needed.
+- name: set up bastion for code server
+  when: _ocp4_workload_acc_new_app_dev_setup_bastion | default(false) | bool
+  vars:
+    _ocp4_workload_acc_new_app_dev_gitea_user: "{{ ocp4_workload_acc_new_app_dev_user_prefix + '1' }}"
+  ansible.builtin.include_tasks: setup_bastion.yml
+
+- name: install operators
+  ansible.builtin.include_tasks: install_operators.yml
+
+- name: create demo namespaces for all users
+  vars:
+    _ocp4_workload_acc_new_app_dev_user: "{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}"
+  block:
+    - name: create demo namespaces for all users
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'namespace-demo.yaml.j2') | from_yaml }}"
+      loop: "{{ range(1, ocp4_workload_acc_new_app_dev_user_count | int + 1) | list }}"
+      loop_control:
+        loop_var: n
+        label: "{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}"
+    - name: create rolebindings for all users
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'namespace-demo-rolebinding.yaml.j2') | from_yaml }}"
+      loop: "{{ range(1, ocp4_workload_acc_new_app_dev_user_count | int + 1) | list }}"
+      loop_control:
+        loop_var: n
+        label: "{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}"
+
+  # yamllint disable rule:line-length
+- name: create argocd instances for all users
+  vars:
+    _ocp4_workload_acc_new_app_dev_gitea_svc: http://{{ ocp4_workload_acc_new_app_dev_gitea_instance }}.{{ ocp4_workload_acc_new_app_dev_gitea_project }}.svc:3000
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'applicationset-argocd.yaml.j2') | from_yaml }}"
+
+- name: create tekton pipelines for all users
+  vars:
+    _ocp4_workload_acc_new_app_dev_gitea_svc: http://{{ ocp4_workload_acc_new_app_dev_gitea_instance }}.{{ ocp4_workload_acc_new_app_dev_gitea_project }}.svc:3000
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'applicationset-tekton.yaml.j2') | from_yaml }}"
+
+- name: create kafka instances for all users
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'applicationset-kafka.yaml.j2') | from_yaml }}"
+
+- name: create monitoring instances for all users
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'applicationset-monitoring.yaml.j2') | from_yaml }}"
+
+- name: pause until applicationset sync and resources are created for all users
+  ansible.builtin.pause:
+    minutes: 5
+
+- name: create taskrun update-swagger for all users
+  block:
+    - name: set _ocp4_workload_acc_new_app_dev_wildcard_domain
+      ansible.builtin.set_fact:
+        _ocp4_workload_acc_new_app_dev_taskrun_name: "update-swagger-{{ lookup('community.general.random_string', upper=false, numbers=false, special=false) }}"
+    - name: create taskrun update-swagger for all users
+      vars:
+        _ocp4_workload_acc_new_app_dev_namespace: >-
+          {{ ocp4_workload_acc_new_app_dev_demo_namespace_prefix }}{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: tekton.dev/v1beta1
+          kind: TaskRun
+          metadata:
+            name: "{{ _ocp4_workload_acc_new_app_dev_taskrun_name }}"
+            namespace: "{{ ocp4_workload_acc_new_app_dev_tekton_namespace_prefix }}{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}"
+          spec:
+            taskRef:
+              name: update-swagger
+            params:
+              - name: restFightsOpenapiServers
+                value: http:\/\/rest-fights-{{ _ocp4_workload_acc_new_app_dev_namespace }}.{{ _ocp4_workload_acc_new_app_dev_wildcard_domain }}
+              - name: restHeroesOpenapiServers
+                value: http:\/\/rest-heroes-{{ _ocp4_workload_acc_new_app_dev_namespace }}.{{ _ocp4_workload_acc_new_app_dev_wildcard_domain }}
+              - name: restVillainsOpenapiServers
+                value: http:\/\/rest-villains-{{ _ocp4_workload_acc_new_app_dev_namespace }}.{{ _ocp4_workload_acc_new_app_dev_wildcard_domain }}
+      register: result
+      until: result is not failed
+      retries: 6
+      delay: 10
+      loop: "{{ range(1, ocp4_workload_acc_new_app_dev_user_count | int + 1) | list }}"
+      loop_control:
+        loop_var: n
+        label: "{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}"
+    # all tasks need to finish before starting pipeline to avoid conflicts
+    # wait on the last one to save time, others should have been finished by then
+    - name: wait taskrun update-swagger for the last user
+      kubernetes.core.k8s_info:
+        api_version: tekton.dev/v1beta1
+        kind: TaskRun
+        name: "{{ _ocp4_workload_acc_new_app_dev_taskrun_name }}"
+        namespace: "{{ ocp4_workload_acc_new_app_dev_tekton_namespace_prefix }}{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ ocp4_workload_acc_new_app_dev_user_count }}"
+      register: r_taskrun_upswagger
+      retries: 30
+      delay: 5
+      until:
+        - r_taskrun_upswagger.resources[0].status is defined
+        - r_taskrun_upswagger.resources[0].status.conditions[0].status is defined
+        - r_taskrun_upswagger.resources[0].status.conditions[0].reason is defined
+        - r_taskrun_upswagger.resources[0].status.conditions[0].status is match("True")
+        - r_taskrun_upswagger.resources[0].status.conditions[0].reason is match("Succeeded")
+    - name: another lazy pause to wait all taskrun finish
+      when: ocp4_workload_acc_new_app_dev_user_count | int > 1
+      ansible.builtin.pause:
+        minutes: 5
+
+- name: create pipelinerun triggers for all users
+  block:
+    - name: set _ocp4_workload_acc_new_app_dev_wildcard_domain
+      ansible.builtin.set_fact:
+        _ocp4_workload_acc_new_app_dev_pipelinerun_name: "quarkus-pipeline-{{ lookup('community.general.random_string', upper=false, numbers=false, special=false) }}"
+    - name: create pipelinerun triggers for all users
+      when: ocp4_workload_acc_new_app_dev_trigger_pipeline | default(false) | bool
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: tekton.dev/v1beta1
+          kind: PipelineRun
+          metadata:
+            name: "{{ _ocp4_workload_acc_new_app_dev_pipelinerun_name }}"
+            namespace: "{{ ocp4_workload_acc_new_app_dev_tekton_namespace_prefix }}{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}"
+          spec:
+            pipelineRef:
+              name: quarkus-pipeline
+            workspaces:
+              - name: app-source
+                persistentVolumeClaim:
+                  claimName: workspace-app-source
+              - name: maven-settings
+                emptyDir: {}
+      loop: "{{ range(1, ocp4_workload_acc_new_app_dev_user_count | int + 1) | list }}"
+      loop_control:
+        loop_var: n
+        label: "{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}"
+
+- name: create gitea webook for all users
+  vars:
+    _ocp4_workload_acc_new_app_dev_namespace: >-
+      {{ ocp4_workload_acc_new_app_dev_tekton_namespace_prefix }}{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}
+  ansible.builtin.uri:
+    url: "{{ _ocp4_workload_acc_new_app_dev_gitea_route }}/api/v1/repos/{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}/{{ ocp4_workload_acc_new_app_dev_demo_app_source }}/hooks"
+    method: POST
+    force_basic_auth: true
+    user: "{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}"
+    password: "{{ ocp4_workload_acc_new_app_dev_gitea_user_password }}"
+    headers:
+      accept: application/json
+    body_format: json
+    body: |
+      {
+        "active": true,
+        "branch_filter": "*",
+        "config": {
+          "url": "http://el-{{ _ocp4_workload_acc_new_app_dev_namespace }}.{{ _ocp4_workload_acc_new_app_dev_wildcard_domain }}",
+          "http_method": "POST",
+          "content_type": "json"
+        },
+        "events": [
+          "push"
+        ],
+        "type": "gitea"
+      }
+    status_code: [201]
+  loop: "{{ range(1, ocp4_workload_acc_new_app_dev_user_count | int + 1) | list }}"
+  loop_control:
+    loop_var: n
+    label: "{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}"
+  # yamllint enable rule:line-length
+
+- name: create ArgoCD applications for all users
+  vars:
+    _ocp4_workload_acc_new_app_dev_user: "{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'application-demo.yaml.j2') | from_yaml }}"
+  loop: "{{ range(1, ocp4_workload_acc_new_app_dev_user_count | int + 1) | list }}"
+  loop_control:
+    loop_var: n
+    label: "{{ ocp4_workload_acc_new_app_dev_user_prefix }}{{ n }}"
+
+- name: deploy module guides and user distribution
+  when: ocp4_workload_acc_new_app_dev_guides | bool
+  ansible.builtin.include_tasks: install_guides.yml

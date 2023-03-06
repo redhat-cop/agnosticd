@@ -1,0 +1,124 @@
+---
+- name: Process acm sonarqube manifests
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - acm/infra/sonarqube/acm-placement-rule.yml.j2
+  - acm/infra/sonarqube/acm-subscription.yml.j2
+  - acm/infra/sonarqube/acm-application.yml.j2
+  vars:
+    _purpose: "{{ ocp4_workload_devsecops_validated_pattern_hub_cluster.purpose }}"
+
+- name: Get Sonarqube deployment
+  k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ ocp4_workload_devsecops_validated_pattern_sonarqube_namespace }}"
+  register: r_deployment
+  until:
+  - r_deployment.resources is defined
+  - r_deployment.resources | length > 0
+  - r_deployment.resources[0].status is defined
+  - r_deployment.resources[0].status.readyReplicas is defined
+  - r_deployment.resources[0].status.readyReplicas > 0
+  delay: 5
+  retries: 30
+
+- name: Get the SonarQube Route
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Route
+    name: sonarqube
+    namespace: "{{ ocp4_workload_devsecops_validated_pattern_sonarqube_namespace }}"
+  register: r_route_sonar
+
+- name: Set sonarqube host url
+  set_fact:
+    _ocp4_workload_devsecops_validated_pattern_sonarqube_host_url: https://{{ r_route_sonar.resources[0].spec.host }}
+
+- name: Change admin password
+  uri:
+    url: "{{ _ocp4_workload_devsecops_validated_pattern_sonarqube_host_url }}/api/users/change_password?login=admin&password={{ common_password }}&previousPassword=admin" # yamllint disable-line rule:line-length
+    user: admin
+    password: admin
+    method: POST
+    body_format: json
+    headers:
+      Content-Type: application/json
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 204
+  register: result
+  until: result is not failed
+  retries: 60
+  delay: 5
+
+- name: Does globex-ui already exist in sonarqube?
+  uri:
+    url: "{{ _ocp4_workload_devsecops_validated_pattern_sonarqube_host_url }}/api/projects/search?projects=globex-ui" # yamllint disable-line rule:line-length
+    user: admin
+    password: "{{ common_password }}"
+    method: GET
+    body_format: json
+    headers:
+      Content-Type: application/json
+    force_basic_auth: true
+    validate_certs: false
+  register: _projects_list
+
+- name: Create globex-ui if necessary
+  when: _projects_list.json.components[0] is not defined
+  block:
+
+  - name: Create globex-ui project
+    uri:
+      url: "{{ _ocp4_workload_devsecops_validated_pattern_sonarqube_host_url }}/api/projects/create?name=globex-ui&project=globex-ui" # yamllint disable-line rule:line-length
+      user: admin
+      password: "{{ common_password }}"
+      method: POST
+      body_format: json
+      headers:
+        Content-Type: application/json
+      force_basic_auth: true
+      validate_certs: false
+    register: result
+    ignore_errors: true
+
+  - name: Create globex-ui project token
+    uri:
+      url: "{{ _ocp4_workload_devsecops_validated_pattern_sonarqube_host_url }}/api/user_tokens/generate?name=globex-ui_token&type=PROJECT_ANALYSIS_TOKEN&projectKey=globex-ui" # yamllint disable-line rule:line-length
+      user: admin
+      password: "{{ common_password }}"
+      method: POST
+      headers:
+        Content-Type: application/json
+      force_basic_auth: true
+      validate_certs: false
+    register: r_uri
+    ignore_errors: true
+
+  - name: Set sonarqube project token
+    set_fact:
+      _ocp4_workload_devsecops_validated_pattern_sonarqube_globex_ui_project_token: "{{ r_uri.json.token }}"
+
+  - name: Create sonarqube globex-ui secret
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'secret-sonarqube-project.yml.j2' ) | from_yaml }}"
+
+- name: Print Access information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "SonarQube url: https://{{ r_route_sonar.resources.0.spec.host }}"
+  - "SonarQube user: admin"
+  - "SonarQube password: {{ common_password }}"
+
+- name: Print Access information
+  agnosticd_user_info:
+    data:
+      sonarqube_url: "https://{{ r_route_sonar.resources.0.spec.host }}"
+      sonarqube_username: "admin"
+      sonarqube_password: "{{ common_password }}"
