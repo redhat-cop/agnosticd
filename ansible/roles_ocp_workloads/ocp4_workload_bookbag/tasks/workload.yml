@@ -1,116 +1,82 @@
 ---
 # Implement your Workload deployment tasks here
 
-# - name: Setting up workload for user
-#   debug:
-#     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
-
-- name: Save current context
-  shell: oc config current-context
-  register: r_context
-
-- name: Switch context and create project
+- name: Get current context
   shell: |
-    oc login -u {{ ocp4_workload_bookbag_username }} -p {{ ocp4_workload_bookbag_password }} {{ ocp4_workload_bookbag_openshift_api_endpoint }} && \
-    oc new-project {{ ocp4_workload_bookbag_namespace }} || oc project {{ ocp4_workload_bookbag_namespace }}
+    oc config current-context
+  register: r_current_context
+  ignore_errors: true
 
-- name: Removing bookbag base build template
-  kubernetes.core.k8s:
-    state: absent
-    definition: "{{ lookup('template', item ) | from_yaml }}"
-    namespace: "{{ ocp4_workload_bookbag_namespace }}"
-  loop:
-    - ./templates/bookbag-base-is.yml.j2
-    - ./templates/bookbag-base-bc.yml.j2
+- name: Preserving use-context
+  debug:
+    msg: "Context: {{ r_current_context.stdout }}"
 
-- name: Create bookbag base build template
-  kubernetes.core.k8s:
-    state: present
-    definition: "{{ lookup('template', item ) | from_yaml }}"
-    namespace: "{{ ocp4_workload_bookbag_namespace }}"
-  loop:
-    - ./templates/bookbag-base-is.yml.j2
-    - ./templates/bookbag-base-bc.yml.j2
+- name: Create bookbag {{ ocp4_workload_bookbag_name }}
+  block:
+    - name: Switch context and create project
+      shell: |
+        oc login --token {{ bookbag_openshift_api_token }} --insecure-skip-tls-verify=true {{ bookbag_openshift_api_url }} && \
+        oc new-project {{ ocp4_workload_bookbag_namespace }} || oc project {{ ocp4_workload_bookbag_namespace }}
 
-- name: Pause for 5 minutes to build app cache
-  ansible.builtin.pause:
-    seconds: 10
+    - name: Removing bookbag base build template
+      kubernetes.core.k8s:
+        state: absent
+        definition: "{{ lookup('template', item ) | from_yaml }}"
+        namespace: "{{ ocp4_workload_bookbag_namespace }}"
+      loop:
+        - ./templates/bookbag-base-is.yml.j2
+        - ./templates/bookbag-base-bc.yml.j2
 
-- name: Get {{ ocp4_workload_bookbag_name }}-base build
-  shell: |
-    oc get build -n {{ ocp4_workload_bookbag_namespace }} | \
-    grep {{ ocp4_workload_bookbag_name }}-base | \
-    grep -v NAME | \
-    grep Running | \
-    awk '{print $1}'
-  until: r_build.stdout | length == 0
-  delay: 5
-  retries: 60
-  register: r_build
+    - name: Create bookbag base build template
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', item ) | from_yaml }}"
+        namespace: "{{ ocp4_workload_bookbag_namespace }}"
+      loop:
+        - ./templates/bookbag-base-is.yml.j2
+        - ./templates/bookbag-base-bc.yml.j2
 
-# - name: Recreate ArgoCD TLS
-#   when: ocp4_workload_bookbag_recreate_argo_tls | bool
-#   block:
-#     - name: Recreate ArgoCD TLS to fix bug - fixed in 1.5.0+
-#       kubernetes.core.k8s:
-#         state: present
-#         definition: "{{ lookup('template', './templates/firefox-argocd-fix.yml.j2') | from_yaml }}"
-#         namespace: "{{ ocp4_workload_bookbag_argocd_namespace }}"
-#         merge_type:
-#           - strategic-merge
-#           - merge
+    - name: Wait for workshop image {{ ocp4_workload_bookbag_name }}-base:latest
+      kubernetes.core.k8s_info:
+        api_version: image.openshift.io/v1
+        kind: ImageStream
+        name: "{{ ocp4_workload_bookbag_name }}-base"
+        namespace: "{{ ocp4_workload_bookbag_namespace }}"
+      until:
+        - r_image_stream.resources is defined
+        - r_image_stream.resources | length > 0
+        - r_image_stream.resources[0].status is defined
+        - r_image_stream.resources[0].status.tags is defined
+        - r_image_stream.resources[0].status.tags | length > 0
+      delay: 5
+      retries: 60
+      register: r_image_stream
+      ignore_errors: true
 
-- name: Create firefox-{{ ocp4_workload_bookbag_name }}
-  kubernetes.core.k8s:
-    state: present
-    definition: "{{ lookup('template', item) | from_yaml }}"
-    namespace: "{{ ocp4_workload_bookbag_namespace }}"
-    merge_type:
-      - strategic-merge
-      - merge
-  loop:
-    - ./templates/firefox-bookbag-crb.yml.j2
-    - ./templates/firefox-bookbag-deployment.yml.j2
-    - ./templates/firefox-bookbag-route.yml.j2
-    - ./templates/firefox-bookbag-svc.yml.j2
-
-- name: Get firefox-{{ ocp4_workload_bookbag_name }} url
-  kubernetes.core.k8s_info:
-    api_version: route.openshift.io/v1
-    kind: Route
-    name: firefox-{{ ocp4_workload_bookbag_name }}
-    namespace: "{{ ocp4_workload_bookbag_namespace }}"
-  until: r_route.resources | length > 0
-  delay: 5
-  retries: 60
-  register: r_route
-
-- name: Create bookbag template
-  kubernetes.core.k8s:
-    state: present
-    definition: "{{ lookup('template', './templates/bookbag-template.yml.j2' ) | from_yaml }}"
-    namespace: "{{ ocp4_workload_bookbag_namespace }}"
-
-- name: Build bookbag image
-  shell: |
-    oc process bookbag-template -n {{ ocp4_workload_bookbag_namespace }} \
-    -p WORKSHOP_IMAGE="image-registry.openshift-image-registry.svc:5000/\
-    {{ ocp4_workload_bookbag_namespace }}/\
-    {{ ocp4_workload_bookbag_name }}-base:latest" \
-    -p APPLICATIONS_URL="https://{{ r_route.resources[0].spec.host }}" \
-    -p WORKSHOP_NAME={{ ocp4_workload_bookbag_name }} \
-    | oc apply -n {{ ocp4_workload_bookbag_namespace }} -f -
-
-# - name: Create other role bindings
-#   kubernetes.core.k8s:
-#     state: present
-#     definition: "{{ lookup('template', './templates/bookbag-rolebinding.yml.j2' ) | from_yaml }}"
-#     namespace: "{{ ocp4_workload_bookbag_namespace }}"
-#   loop:
-#     - gitea
-
-- name: Revert to previous context
-  shell: oc config use-context {{ r_context.stdout }}
+    - name: Create bookbag workshop
+      block:
+        - name: Create bookbag
+          include_role:
+            name: ocp4_workload_bookbag_user
+          vars:
+            ocp4_workload_bookbag_user_project: "{{ ocp4_workload_bookbag_name }}-bookbag-{{ guid }}"
+            ocp4_workload_bookbag_user_project_display: "Bookbag for user {{ ocp_username }}"
+            ocp4_workload_bookbag_user_deployment_name: "{{ ocp4_workload_bookbag_name }}"
+            ocp4_workload_bookbag_user_image_namespace: "{{ ocp4_workload_bookbag_namespace }}"
+            ocp4_workload_bookbag_user_image_name: >-
+              image-registry.openshift-image-registry.svc:5000/{{ ocp4_workload_bookbag_namespace }}/{{ ocp4_workload_bookbag_name }}-base
+            ocp4_workload_bookbag_user_image_tag: latest
+            ocp4_workload_bookbag_user_console_image_override: "quay.io/openshift/origin-console:4.9"
+            ocp4_workload_bookbag_user_auth_username: "{{ ocp4_workload_bookbag_auth_username }}"
+            ocp4_workload_bookbag_user_auth_password: "{{ ocp4_workload_bookbag_auth_password }}"
+            ocp4_workload_bookbag_user_console_deploy: "{{ ocp4_workload_bookbag_console_deploy | bool }}"
+  always:
+    - name: Restore context if defined
+      when: (r_current_context is defined) and (r_current_context.stdout | length > 0)
+      block:
+        - name: Restore context {{ r_current_context.stdout }}
+          shell: |
+            oc config use-context {{ r_current_context.stdout }}
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete

@@ -1,0 +1,225 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  ansible.builtin.debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+#############################################################################
+# Prerequisite Checks
+#############################################################################
+
+- name: Ensure RHACM MultiClusterHub is deployed
+  kubernetes.core.k8s_info:
+    api_version: operator.open-cluster-management.io/v1
+    kind: MultiClusterHub
+    name: multiclusterhub
+    namespace: open-cluster-management
+  register: r_rhacm_multiclusterhub
+
+- name: Assert that MultiClusterHub is available
+  ansible.builtin.assert:
+    that:
+    - r_rhacm_multiclusterhub.resources | length == 1
+    - r_rhacm_multiclusterhub.resources[0].status.phase is defined
+    - r_rhacm_multiclusterhub.resources[0].status is defined
+    - r_rhacm_multiclusterhub.resources[0].status.phase == "Running"
+    fail_msg: "MultiClusterHub not found on cluster. Can not continue."
+    success_msg: "MultiClusterHub found on cluster. Ready to set up Hypershift."
+
+#############################################################################
+# AWS S3 bucket setup
+#############################################################################
+
+# WK: amazon.aws.s3_bucket does not work because of unmet k8s virtualenv dependencies
+- name: Create AWS S3 bucket
+  # amazon.aws.s3_bucket:
+  s3_bucket:
+    name: "{{ ocp4_workload_rhacm_hypershift_s3_bucket_name }}"
+    region: "{{ ocp4_workload_rhacm_hypershift_s3_bucket_region }}"
+    state: present
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    # public_access:
+    #   block_public_acls: false
+    #   block_public_policy: false
+    #   ignore_public_acls: true
+    #   restrict_public_buckets: false
+
+#############################################################################
+# Enable HyperShift Tech Preview
+#############################################################################
+- name: Enable HyperShift Tech Preview
+  kubernetes.core.k8s:
+    state: patched
+    api_version: multicluster.openshift.io/v1
+    kind: MultiClusterEngine
+    name: multiclusterengine
+    definition:
+      spec:
+        overrides:
+          components:
+          - name: hypershift-preview
+            enabled: true
+          - name: hypershift-local-hosting
+            enabled: true
+
+- name: Create ManagedClusterAddon
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'managedclusteraddon.yaml') }}"
+
+#############################################################################
+# Configure HyperShift
+#############################################################################
+
+- name: Create s3 credentials secret
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'secret-s3-credentials.yaml.j2') }}"
+
+- name: Generate an OpenSSH keypair for HyperShift
+  community.crypto.openssh_keypair:
+    path: "~{{ ansible_user }}/.ssh/{{ ocp4_workload_rhacm_key_pair_name }}"
+  register: r_hypershift_key
+
+- name: Read private key from filesystem
+  ansible.builtin.slurp:
+    src: "~{{ ansible_user }}/.ssh/{{ ocp4_workload_rhacm_key_pair_name }}"
+  register: r_hypershift_private_key
+
+- name: Read public key from filesystem
+  ansible.builtin.slurp:
+    src: "~{{ ansible_user }}/.ssh/{{ ocp4_workload_rhacm_key_pair_name }}.pub"
+  register: r_hypershift_public_key
+
+- name: Create hypershift aws credentials secret
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'secret-aws-credentials.yaml.j2') }}"
+
+#############################################################################
+# Install Hypershift CLI
+#############################################################################
+
+- name: Wait until Hypershift CLI download deployment is ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: multicluster-engine
+    name: hypershift-cli-download
+  register: r_hypershift_cli_deployment
+  retries: 60
+  delay: 30
+  until:
+  - r_hypershift_cli_deployment.resources | length | int > 0
+  - r_hypershift_cli_deployment.resources[0].status.readyReplicas is defined
+  - r_hypershift_cli_deployment.resources[0].status.readyReplicas | int == r_hypershift_cli_deployment.resources[0].spec.replicas | int
+
+- name: Get Hypershift CLI download URl
+  kubernetes.core.k8s_info:
+    api_version: console.openshift.io/v1
+    kind: ConsoleCLIDownload
+    name: hypershift-cli-download
+  register: r_hypershift_cli_download
+  retries: 20
+  delay: 10
+  until: r_hypershift_cli_download.resources | length > 0
+
+- name: Set Hypershift CLI download URL
+  when: r_hypershift_cli_download.resources | length > 0
+  ansible.builtin.set_fact:
+    _ocp4_workload_rhacm_hypershift_cli_url: >-
+      {{ r_hypershift_cli_download.resources[0] | to_json | from_json
+       | json_query("spec.links[?contains(href,'/linux/amd64')].href") | first }}
+
+- name: Download Hypershift CLI tool
+  ansible.builtin.get_url:
+    url: "{{ _ocp4_workload_rhacm_hypershift_cli_url }}"
+    validate_certs: false
+    dest: /tmp/hypershift.tar.gz
+    mode: 0660
+  register: r_hypershift_cli
+  until: r_hypershift_cli is success
+  retries: 10
+  delay: 10
+
+# Archive contains `remote-source/app/bin/linux/amd64/hypershift`
+# Strip first 5 directories
+- name: Install Hypershift CLI on bastion
+  become: true
+  ansible.builtin.unarchive:
+    src: /tmp/hypershift.tar.gz
+    remote_src: true
+    dest: /usr/bin
+    mode: 0775
+    owner: root
+    group: root
+    extra_opts:
+      --strip-components=5
+  args:
+    creates: /usr/bin/hypershift
+
+- name: Remove downloaded file
+  ansible.builtin.file:
+    state: absent
+    path: /tmp/hypershift.tar.gz
+
+- name: Setup hypershift bash completion
+  become: true
+  ansible.builtin.shell: "/usr/bin/hypershift completion bash >/etc/bash_completion.d/hypershift"
+  args:
+    creates: /etc/bash_completion.d/hypershift
+
+#############################################################################
+# Deploy managed HyperShift clusters
+#############################################################################
+
+- name: Deploy Hypershift clusters
+  when: ocp4_workload_rhacm_hypershift_deploy_clusters | length > 0
+  ansible.builtin.include_tasks: create_hypershift_cluster.yml
+  vars:
+    _ocp4_workload_rhacm_hypershift_cluster_name: "{{ item.name }}"
+    _ocp4_workload_rhacm_hypershift_cluster_infra_id: "{{ item.infra_id }}"
+    _ocp4_workload_rhacm_hypershift_cluster_ocp_release: "{{ item.ocp_release }}"
+    _ocp4_workload_rhacm_hypershift_cluster_control_plane_availability: "{{ item.control_plane_availability | default('SingleReplica') }}"
+    _ocp4_workload_rhacm_hypershift_cluster_infra_availability: "{{ item.infra_availability | default('SingleReplica') }}"
+    _ocp4_workload_rhacm_hypershift_cluster_etc_storage_class: "{{ item.etcd_storage_class | default('gp3-csi') }}"
+    _ocp4_workload_rhacm_hypershift_cluster_nodepool_replicas: "{{ item.nodepool_replicas }}"
+    _ocp4_workload_rhacm_hypershift_cluster_instance_type: "{{ item.instance_type }}"
+    _ocp4_workload_rhacm_hypershift_cluster_root_volume_type: "{{ item.root_volume_type | default('gp3') }}"
+    _ocp4_workload_rhacm_hypershift_cluster_root_volume_size: "{{ item.root_volume_size | default('120') }}"
+    _ocp4_workload_rhacm_hypershift_cluster_network_type: "{{ item.network_type | default('OVNKubernetes') }}"
+    _ocp4_workload_rhacm_hypershift_cluster_region: "{{ item.region }}"
+    _ocp4_workload_rhacm_hypershift_cluster_zones: "{{ item.zones | default([]) }}"
+    _ocp4_workload_rhacm_hypershift_cluster_labels: "{{ item.labels | default([]) }}"
+  loop: "{{ ocp4_workload_rhacm_hypershift_deploy_clusters }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+#############################################################################
+# AgnosticD User Data
+#############################################################################
+
+- name: Save access information for all deployed clusters
+  when: ocp4_workload_rhacm_hypershift_deploy_clusters | length > 0
+  ansible.builtin.include_tasks:
+    file: get_cluster_credentials.yml
+  vars:
+    _ocp4_workload_rhacm_hypershift_cluster_name: "{{ item.name }}"
+  loop: "{{ ocp4_workload_rhacm_hypershift_deploy_clusters }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Save user data for S3 bucket
+  agnosticd_user_info:
+    data:
+      hypershift_s3_bucket_name: "{{ ocp4_workload_rhacm_hypershift_s3_bucket_name }}"
+      hypershift_s3_region: "{{ ocp4_workload_rhacm_hypershift_s3_bucket_region }}"
+      hypershift_s3_access_key_id: "{{ aws_access_key_id }}"
+      hypershift_s3_secret_access_key: "{{ aws_secret_access_key }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

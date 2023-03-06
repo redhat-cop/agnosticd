@@ -1,0 +1,699 @@
+- name: Check Required Parameters
+  fail: msg="This play requires 'num_users' to be defined"
+  when:
+    - num_users is not defined
+    - num_users | int > 0
+
+- name: usercount debug
+  debug:
+    msg: "Debugging num_users {{ num_users }}"
+
+- name: create usernames
+  set_fact:
+    users: "{{ users | default([]) + ['user'+item | string] }}"
+  loop: "{{ range(1,((num_users | int) + 1)) | list }}"
+
+# Figure out paths
+- name: Get openshift console
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    kind: Route
+    name: console
+    namespace: openshift-console
+    api_version: route.openshift.io/v1
+  register: openshift_console_route
+
+- name: Set openshift console
+  set_fact:
+    console_url: "https://{{ openshift_console_route.resources[0].status.ingress[0].host }}"
+
+- name: Define domain
+  set_fact:
+    domain: "{{ console_url | regex_replace('https://console-openshift-console.apps.') }}"
+
+- name: Set Subdomain
+  set_fact:
+    route_subdomain: "apps.{{ domain }}"
+
+- name: Set Server
+  set_fact:
+    server: "api.{{ domain }}:6443"
+
+# Provisioning 3scale
+- name: Evaluate {{ threescale_project }} namespace
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Namespace
+    name: '{{ threescale_project }}'
+    state: present
+
+- name: Evaluate 3scale Operator Group
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-operatorgroup.yaml.j2') }}"
+
+- name: Evaluate 3scale Subscription
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-subscription.yaml.j2') }}"
+
+- name: Wait for 3scale operator to install
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: apimanagers.apps.3scale.net
+  register: crd_threescale
+  until: crd_threescale.resources | list | length == 1
+  retries: 10
+  delay: 30
+
+# Provision Minio
+- name: Evaluate if Minio Stateful exists
+  when: minio_stateful|bool
+  k8s:
+    validate_certs: false
+    state: present
+    resource_definition: "{{ lookup('template', 'minio-stateful.yml.j2') }}"
+
+- name: Waiting for Minio instance to be running
+  k8s_info:
+    validate_certs: false
+    api_version: v1
+    kind: Pod
+    namespace: '{{ threescale_project }}'
+    label_selectors:
+      - app = minio
+    field_selectors:
+      - status.phase=Running
+  register: r_minio_pod
+  retries: 20
+  delay: 10
+  until: r_minio_pod.resources | list | length == 1
+
+# End Provision Minio
+
+- name: Deploy 3scale S3 auth secret
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-s3-auth-secret.yaml.j2') }}"
+
+- name: Deploy 3scale API Manager
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-apimanager.yaml.j2') }}"
+
+# wait to APIManager resource creation
+- name: Wait for 3scale pods to be ready
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: DeploymentConfig
+    namespace: "{{ threescale_project }}"
+    name: apicast-production
+  register: r_dc
+  until:
+    - r_dc is defined
+    - r_dc.resources is defined
+    - r_dc.resources | list | length > 0
+    - r_dc.resources[0].status is defined
+    - r_dc.resources[0].status.readyReplicas is defined
+    - r_dc.resources[0].status.readyReplicas | int >= 1
+  retries: 60
+  delay: 15
+
+- name: Wait for 3scale Master to be running
+  uri:
+    url: https://master.{{ route_subdomain }}
+    status_code: '200'
+  register: result
+  until: result.status == 200
+  retries: 90
+  delay: 30
+
+- name: Provision tenants
+  include_tasks: user_tenant.yaml
+  loop: "{{ range(1, num_users|int + 1, 1)|list }}"
+  when:
+    - num_users|int > 0
+
+- name: Provision 3scale OAuthClient
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'threescale-oauthclient.yaml.j2') }}"
+
+- name: Enable 3scale Service Discovery
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: system
+        namespace: '{{ threescale_project }}'
+      data:
+        service_discovery.yml: |
+          production:
+            enabled: true
+            authentication_method: oauth
+            oauth_server_type: builtin
+            client_id: '3scale'
+            client_secret: '{{ threescale_oauthclient_secret }}'
+
+- name: Bounce system-app
+  command: "oc rollout latest dc/system-app -n {{ threescale_project }}"
+  register: system_app_bounced
+
+- name: Bounce system-sidekiq
+  command: "oc rollout latest dc/system-sidekiq -n {{ threescale_project }}"
+  register: system_sidekiq_bounced
+
+# wait to system-app resource creation
+- name: Wait for 3scale pods to be ready
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: DeploymentConfig
+    namespace: "{{ threescale_project }}"
+    name: system-app
+  register: r_dc
+  until:
+    - r_dc is defined
+    - r_dc.resources is defined
+    - r_dc.resources | list | length > 0
+    - r_dc.resources[0].status is defined
+    - r_dc.resources[0].status.readyReplicas is defined
+    - r_dc.resources[0].status.readyReplicas | int >= 1
+  retries: 60
+  delay: 15
+
+# End Provision 3scale
+
+# Provision SSO
+- name: Evaluate {{sso_project }} namespace
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Namespace
+    name: '{{ sso_project }}'
+    state: present
+
+- name: Evaluate SSO Operator Group
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'sso-operatorgroup.yaml.j2') }}"
+
+- name: Evaluate SSO Subscription
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'sso-subscription.yaml.j2') }}"
+
+- name: Wait for SSO operator to install
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: keycloaks.keycloak.org
+  register: crd_sso
+  until: crd_sso.resources | list | length == 1
+  retries: 10
+  delay: 30
+
+- name: Evaluate the SSO Instance CR
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'sso-instance.yaml.j2') }}"
+
+- name: Wait for SSO to be running
+  uri:
+    url: https://keycloak-{{ sso_project }}.{{ route_subdomain }}
+    status_code: '200'
+  register: result
+  until: result.status == 200
+  retries: 90
+  delay: 30
+
+- name: Retrieve SSO admin credentials
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    kind: secret
+    name: credential-sso
+    namespace: '{{sso_project}}'
+  register: _sso_credentials
+
+- set_fact:
+    _sso_admin_user: '{{ _sso_credentials.resources[0].data.ADMIN_USERNAME | b64decode }}'
+    _sso_admin_password: '{{ _sso_credentials.resources[0].data.ADMIN_PASSWORD | b64decode }}'
+
+- name: Get SSO Token
+  uri:
+    url: 'https://keycloak-{{sso_project}}.{{route_subdomain}}/auth/realms/master/protocol/openid-connect/token'
+    method: POST
+    body_format: form-urlencoded
+    body:
+      username: '{{_sso_admin_user}}'
+      password: '{{_sso_admin_password}}'
+      grant_type: password
+      client_id: admin-cli
+    return_content: true
+    validate_certs: false
+    status_code: 200
+  register: token_text
+
+- set_fact:
+    TKN: '{{ token_text.json.access_token }}'
+
+- name: Increase Token Lifespan (60mins)
+  uri:
+    url: 'https://keycloak-{{ sso_project }}.{{ route_subdomain }}/auth/admin/realms/master'
+    method: PUT
+    body: "{\"realm\":\"master\", \"accessTokenLifespan\":\"3600\"}"
+    body_format: json
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer {{ TKN }}"
+    return_content: true
+    validate_certs: false
+    status_code: 204
+
+- name: Get Admin Token with Longer Lifespan
+  uri:
+    url: https://keycloak-{{ sso_project }}.{{ route_subdomain }}/auth/realms/master/protocol/openid-connect/token
+    method: POST
+    body_format: form-urlencoded
+    body:
+      username: '{{_sso_admin_user}}'
+      password: '{{_sso_admin_password}}'
+      grant_type: password
+      client_id: admin-cli
+    status_code: '200'
+    return_content: true
+    validate_certs: false
+  register: token_result
+
+- name: Extract Admin Token with Longer Lifespan from Keycloack from result
+  set_fact:
+    TKN: '{{token_result.json.access_token}}'
+
+- name: Create Threescale Realm
+  uri:
+    url: 'https://keycloak-{{sso_project}}.{{route_subdomain}}/auth/admin/realms'
+    method: POST
+    body_format: json
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer {{TKN}}"
+    body: "{{ lookup('file', 'threescale-realm.json') }}"
+    return_content: true
+    validate_certs: false
+    status_code: 201
+
+- name: Create User realms
+  include_tasks: user_sso_realm.yaml
+  loop: "{{ range(1, num_users|int + 1, 1)|list }}"
+  loop_control:
+    loop_var: __user_number
+  when:
+    - num_users|int > 0
+
+# End Provision SSO
+
+# Provision Apicurito
+- name: Evaluate {{apicurito_project }} namespace
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Namespace
+    name: '{{ apicurito_project }}'
+    state: present
+
+- name: Evaluate Apicurito Operator Group
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'apicurito-operatorgroup.yaml.j2') }}"
+
+- name: Evaluate Apicurito Subscription
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'apicurito-subscription.yaml.j2') }}"
+
+- name: Wait for Apicurito operator to install
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: apicuritoes.apicur.io
+  register: crd_apicurito
+  until: crd_apicurito.resources | list | length == 1
+  retries: 10
+  delay: 30
+
+- name: Evaluate the Apicurito CR
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'apicurito-resource.yaml.j2') }}"
+
+- name: Wait for Apicurito to be running
+  uri:
+    url: https://apicurito-ui-{{ apicurito_project }}.{{ route_subdomain }}
+    status_code: '200'
+  register: result
+  until: result.status == 200
+  retries: 90
+  delay: 30
+
+# End Provision Apicurito
+
+# Provision Microcks
+- name: Evaluate {{microcks_project }} namespace
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Namespace
+    name: '{{ microcks_project }}'
+    state: present
+
+- name: Evaluate Microcks Operator Group
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'microcks-operatorgroup.yaml.j2') }}"
+
+- name: Evaluate Microcks Subscription
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'microcks-subscription.yaml.j2') }}"
+
+- name: Wait for Microcks operator to install
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: microcksinstalls.microcks.github.io
+  register: crd_microcks
+  until: crd_microcks.resources | list | length == 1
+  retries: 10
+  delay: 30
+
+- name: Evaluate Microcks Install
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'microcks-install.yaml.j2') }}"
+
+- name: Wait for Microcks to be running
+  uri:
+    url: https://microcks-{{ microcks_project }}.{{ route_subdomain }}
+    status_code: '200'
+  register: result
+  until: result.status == 200
+  retries: 90
+  delay: 30
+
+- name: Wait for Microcks Keycloak to be running
+  uri:
+    url: https://microcks-keycloak-{{ microcks_project }}.{{ route_subdomain }}
+    status_code: '200'
+  register: result
+  until: result.status == 200
+  retries: 90
+  delay: 30
+
+- name: Extract key_cloak_admin_password
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    kind: Secret
+    name: microcks-keycloak-admin
+    namespace: '{{ microcks_project }}'
+  register: key_cloak_result
+
+- name: Set the username and password
+  set_fact:
+    key_cloak_admin_password: "{{ key_cloak_result.resources[0].data.password | b64decode }}"
+    key_cloak_admin_username: "{{ key_cloak_result.resources[0].data.username | b64decode }}"
+
+
+- name: Get Admin Token from Keycloack
+  uri:
+    url: https://microcks-keycloak-{{ microcks_project }}.{{ route_subdomain }}/auth/realms/master/protocol/openid-connect/token
+    method: POST
+    body_format: form-urlencoded
+    body:
+      client_id: admin-cli
+      username: "{{ key_cloak_admin_username }}"
+      password: "{{ key_cloak_admin_password }}"
+      grant_type: password
+    status_code: '200'
+  register: token_result
+
+- name: Extract Admin Token from Keycloack from result
+  set_fact:
+    admin_token: '{{token_result.json.access_token}}'
+
+
+- name: Increase Token Lifespan (60mins)
+  uri:
+    url: 'https://microcks-keycloak-{{ microcks_project }}.{{ route_subdomain }}/auth/admin/realms/master'
+    method: PUT
+    body:
+      realm: "master"
+      accessTokenLifespan: "3600"
+    body_format: json
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer {{ admin_token }}"
+    return_content: true
+    validate_certs: false
+    status_code: 204
+
+- name: Get Admin Token with Longer Lifespan
+  uri:
+    url: https://microcks-keycloak-{{ microcks_project }}.{{ route_subdomain }}/auth/realms/master/protocol/openid-connect/token
+    method: POST
+    body_format: form-urlencoded
+    body:
+      client_id: admin-cli
+      username: "{{ key_cloak_admin_username }}"
+      password: "{{ key_cloak_admin_password }}"
+      grant_type: password
+    status_code: '200'
+  register: token_result
+
+- name: Extract Admin Token with Longer Lifespan from Keycloack from result
+  set_fact:
+    admin_token: '{{token_result.json.access_token}}'
+
+- name: Create Microcks users
+  uri:
+    url: 'https://microcks-keycloak-{{ microcks_project }}.{{route_subdomain}}/auth/admin/realms/microcks/users'
+    method: POST
+    headers:
+      Content-Type: "application/json"
+      Authorization: "Bearer {{ admin_token }}"
+    body:
+      username: "user{{ item }}"
+      enabled: true
+      firstName: "user{{ item }}"
+      credentials:
+        - type: "password"
+          value: "openshift"
+          temporary: false
+    body_format: json
+    validate_certs: false
+    status_code: [201, 409]
+  loop: "{{ range(1, num_users|int + 1, 1)|list }}"
+  when:
+    - num_users|int > 0
+# End Provision Microcks
+
+# Provision Backend
+- name: Evaluate {{backend_project }} namespace
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Namespace
+    name: '{{ backend_project }}'
+    state: present
+
+- name: Create Backend Database
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ backend_project }}'
+    resource_definition: "{{ lookup('template', 'postgres-template.yml') }}"
+
+- name: Create Location API service
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ backend_project }}'
+    resource_definition: "{{ lookup('file', 'location-service-template.yml') }}"
+
+# End Provision Backend
+
+- name: Provision User Namespaces
+  include_tasks: provision_user.yml
+  loop: "{{ range(1, num_users|int + 1, 1)|list }}"
+  when:
+    - num_users|int > 0
+
+# Provision Solution Explorer
+- name: Evaluate {{ solution_explorer_namespace }} Project
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Namespace
+    name: '{{ solution_explorer_namespace }}'
+    state: present
+
+- name: Evaluate Solution Explorer PVC
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ solution_explorer_namespace }}'
+    resource_definition: '{{ lookup("file", "solution-explorer-pvc.yml") }}'
+
+- name: Evaluate Solution Explorer DeploymentConfig
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ solution_explorer_namespace }}'
+    resource_definition: '{{ lookup("template", "deployment.yml.j2") }}'
+
+- name: Evaluate Solution Explorer Service
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ solution_explorer_namespace }}'
+    resource_definition: '{{ lookup("file", "solution-explorer-svc.yml") }}'
+
+- name: Evaluate Solution Explorer Route
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ solution_explorer_namespace }}'
+    resource_definition: '{{ lookup("file", "solution-explorer-route.yml") }}'
+
+- name: Get webapp secure route
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    kind: Route
+    name: '{{ solution_explorer_client_id }}'
+    namespace: '{{ solution_explorer_namespace }}'
+    api_version: route.openshift.io/v1
+  register: webapp_secure_route
+  until: (webapp_secure_route.resources is defined) and (webapp_secure_route.resources|length>0)
+  retries: 10
+  delay: 30
+
+- name: Retrieve Route
+  set_fact:
+    webapp_secure_route: "{{ webapp_secure_route.resources[0].spec.host }}"
+
+- name: Create OpenShift OAuth client
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'oauth-client.yml.j2') }}"
+# End Provision Solution Explorer
+
+# Provision Registration
+- name: Evaluate {{ solution_explorer_namespace }} project
+  when: num_users | int > 0
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Namespace
+    name: '{{ solution_explorer_namespace }}'
+
+- name: Evaluate Redis
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ solution_explorer_namespace }}'
+    resource_definition: "{{ lookup('file', 'redis-list.yaml') }}"
+
+- name: Wait for redis to be ready
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Pod
+    namespace: '{{ solution_explorer_namespace }}'
+    label_selectors:
+      - name = redis
+      - deploymentconfig = redis
+    field_selectors:
+      - status.phase=Running
+  register: r_redis_pod
+  retries: 120
+  delay: 10
+  until: r_redis_pod.resources | list | length == 1
+
+- name: Evaluate username-distribution
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ solution_explorer_namespace }}'
+    resource_definition: "{{ lookup('template', 'username-distribution-list.yaml.j2') }}"
+
+- name: Get Registration Route
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    kind: Route
+    name: user-registration
+    namespace: '{{ solution_explorer_namespace }}'
+    api_version: route.openshift.io/v1
+  register: user_distribution_route
+
+- name: Set user_distribution_url
+  set_fact:
+    registration_url: "{{ user_distribution_route.resources[0].spec.host }}"
+# End Provision Registration
+
+# Provision APIcast
+- name: Evaluate APIcast Subscription
+  k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: Subscription
+    api_version: operators.coreos.com/v1alpha1
+    namespace: openshift-operators
+    definition:
+      metadata:
+        name: apicast-operator
+      spec:
+        channel: threescale-2.12
+        installPlanApproval: Automatic
+        name: apicast-operator
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait APIcast Operator to be Running
+  k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Pod
+    namespace: openshift-operators
+    label_selectors:
+      - app = apicast
+      - control-plane = controller-manager
+    field_selectors:
+      - status.phase=Running
+  register: r_apicast_operator_pod
+  retries: 120
+  delay: 10
+  until: r_apicast_operator_pod.resources | list | length == 1
+# End Provision APIcast

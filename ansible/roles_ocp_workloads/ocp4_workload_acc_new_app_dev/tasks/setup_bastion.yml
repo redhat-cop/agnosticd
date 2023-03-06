@@ -1,0 +1,118 @@
+---
+
+# Remove this file once vscode on bastion not needed.
+
+- name: Install Software
+  become: true
+  block:
+  - name: Install Java packages to bastion
+    ansible.builtin.command:
+      cmd: >-
+        dnf install -y podman-docker podman-remote
+        java-11-openjdk
+        java-11-openjdk-devel
+
+  - name: Create /usr/local/maven directory
+    file:
+      path: /usr/local/maven
+      state: directory
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Download and unarchive Maven Distribution
+    unarchive:
+      src: "https://gpte-public.s3.amazonaws.com/apache-maven-3.8.6-bin.tar.gz"
+      remote_src: true
+      dest: /usr/local/maven
+      owner: root
+      group: root
+      extra_opts:
+      - --strip=1
+
+  - name: Set up mvn link
+    file:
+      state: link
+      src: "/usr/local/maven/bin/mvn"
+      dest: /usr/local/bin/mvn
+      owner: root
+      group: root
+
+  - name: Copy podman user service setup script to bastion
+    ansible.builtin.copy:
+      src: setup_podman_user_service
+      dest: "/usr/bin/setup_podman_user_service"
+      owner: root
+      group: root
+      mode: 0775
+
+- name: "Set up bastion for user {{ ocp4_workload_vscode_bastion_user_name }}"
+  become: true
+  become_user: "{{ ocp4_workload_vscode_bastion_user_name }}"
+  block:
+  # - name: Execute podman user service setup script
+  #   ansible.builtin.command:
+  #     cmd: "/usr/bin/setup_podman_user_service"
+  # - name: Set up Podman socket
+  #   systemd:
+  #     scope: user
+  #     name: podman.socket
+  #     enabled: true
+  #     force: true
+  #     state: started
+
+  - name: Set up Podman docker
+    blockinfile:
+      dest: "/home/{{ ocp4_workload_vscode_bastion_user_name }}/.bashrc"
+      insertafter: EOF
+      marker: "# <!-- {mark} ANSIBLE MANAGED BLOCK (podman docker) -->"
+      block: |
+        loginctl enable-linger $USER
+        export XDG_RUNTIME_DIR=/run/user/$(id -u)
+        export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+        export DOCKER_HOST=unix:///run/user/${UID}/podman/podman.sock
+        export TESTCONTAINERS_RYUK_DISABLED=true
+        /usr/bin/setup_podman_user_service
+
+  - name: Clone application source code
+    ansible.builtin.git:
+      accept_hostkey: true
+      force: true
+      # yamllint disable-line rule:line-length
+      repo: https://{{ _ocp4_workload_acc_new_app_dev_gitea_user | urlencode }}:{{ ocp4_workload_acc_new_app_dev_gitea_user_password | urlencode }}@gitea.{{ _ocp4_workload_acc_new_app_dev_wildcard_domain }}/{{_ocp4_workload_acc_new_app_dev_gitea_user }}/{{ ocp4_workload_acc_new_app_dev_demo_app_source }}.git
+      dest: /home/{{ ocp4_workload_vscode_bastion_user_name }}/{{ ocp4_workload_acc_new_app_dev_demo_app_source }}
+      version: "rhbq-2.13"
+
+  - name: Fix repository ownership
+    ansible.builtin.file:
+      state: directory
+      recurse: true
+      path: /home/{{ ocp4_workload_vscode_bastion_user_name }}/{{ ocp4_workload_acc_new_app_dev_demo_app_source }}
+      owner: "{{ ocp4_workload_vscode_bastion_user_name }}"
+      group: users
+
+  - name: Prebuild projects to populate .m2 directory
+    ansible.builtin.shell:
+      cmd: "/usr/local/bin/mvn clean package -DskipTests"
+      chdir: "/home/{{ ocp4_workload_vscode_bastion_user_name }}/{{ ocp4_workload_acc_new_app_dev_demo_app_source }}/{{ item }}"
+    loop:
+    - rest-heroes
+    - rest-villains
+    - ui-super-heroes
+    - rest-fights
+
+- name: Set up git config
+  become: true
+  become_user: "{{ ocp4_workload_vscode_bastion_user_name }}"
+  block:
+  - name: Set the git config user name
+    community.general.git_config:
+      name: user.name
+      scope: global
+      value: "{{ _ocp4_workload_acc_new_app_dev_gitea_user }}"
+
+  - name: Set the git config email
+    community.general.git_config:
+      name: user.email
+      scope: global
+      value: "{{ _ocp4_workload_acc_new_app_dev_gitea_user }}@redhat.dev"

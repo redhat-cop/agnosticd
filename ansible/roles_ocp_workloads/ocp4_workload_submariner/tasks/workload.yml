@@ -1,0 +1,79 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- environment:
+    KUBECONFIG: "{{ tmp_kubeconfig }}"
+  block:
+    - name: Create rhacm clusterset
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './templates/managed-cluster-set.yaml.j2' ) | from_yaml }}"
+
+    - name: Submariner setup
+      k8s:
+        state: present
+        definition: "{{ lookup('template', item.1 ) | from_yaml }}"
+      loop: "{{ submariner_clusters |product([
+                  './templates/update-cluster-label.yaml.j2',
+                  './templates/aws-secret.yaml.j2',
+                  './templates/submariner-addon.yaml.j2',
+                  './templates/submariner-config.yaml.j2'
+                ])|list }}"
+
+    - name: Create submariner broker
+      k8s:
+        state: present
+        definition: "{{ lookup('template', './templates/submariner-broker.yaml.j2' ) | from_yaml }}"
+
+    - name: Wait until submariner is ready
+      k8s_info:
+        api_version: addon.open-cluster-management.io/v1alpha1
+        kind: ManagedClusterAddOn
+        name: submariner
+        namespace: "{{ item.name }}"
+      loop: "{{ submariner_clusters }}"
+      register: r_submariner
+      vars:
+        _connection: "[?type=='SubmarinerConnectionDegraded'].status"
+        _agent: "[?type=='SubmarinerAgentDegraded'].status"
+        _gateway: "[?type=='SubmarinerGatewayNodesLabeled'].status"
+      until:
+        - not r_submariner.resources.0.status.conditions |json_query(_connection) |join('') |bool
+        - not r_submariner.resources.0.status.conditions |json_query(_agent) | join('') |bool
+        - r_submariner.resources.0.status.conditions |json_query(_gateway) | join('') |bool
+      retries: 30
+      delay: 30
+
+    - name: Print query for primary
+      vars:
+        _connection: "[?type=='SubmarinerConnectionDegraded'].status"
+        _agent: "[?type=='SubmarinerAgentDegraded'].status"
+        _gateway: "[?type=='SubmarinerGatewayNodesLabeled'].status"
+      debug:
+        msg: |
+          "{{ r_submariner.results.0.resources.0.status.conditions |json_query(_connection) | join('')  }}"
+          "{{ r_submariner.results.0.resources.0.status.conditions |json_query(_agent) | join('') }}"
+           "{{ r_submariner.results.0.resources.0.status.conditions |json_query(_gateway) | join('') }}"
+        verbosity: 2
+
+    - name: Print query for secondary
+      vars:
+        _connection: "[?type=='SubmarinerConnectionDegraded'].status"
+        _agent: "[?type=='SubmarinerAgentDegraded'].status"
+        _gateway: "[?type=='SubmarinerGatewayNodesLabeled'].status"
+      debug:
+        msg: |
+          "{{ r_submariner.results.1.resources.0.status.conditions |json_query(_connection) | join('') }}"
+          "{{ r_submariner.results.1.resources.0.status.conditions |json_query(_agent) | join('') }}"
+           "{{ r_submariner.results.1.resources.0.status.conditions |json_query(_gateway) | join('') }}"
+        verbosity: 2
+
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

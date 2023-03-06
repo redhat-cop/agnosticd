@@ -1,0 +1,76 @@
+---
+
+- name: Determine cluster wildcard domain
+  kubernetes.core.k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: r_ingress_controller
+
+- name: Save cluster apps domain variable
+  ansible.builtin.set_fact:
+    _ocp4_workload_opentour_dach_2022_shared_apps_domain: "{{ r_ingress_controller.resources[0].status.domain }}"
+
+  # oc patch -n openshift-gitops argocd opepnshift-gitops  \
+  #   --type="json" -p='[{"op":"add","path":"/spec/resourceTrackingMethod","value":"annotation"}]'
+  # Based on https://coreos.slack.com/archives/CMP95ST2N/p1664180865087769
+- name: Patch GitOps, add resourceTrackingMethod=annotation
+  kubernetes.core.k8s_json_patch:
+    api_version: argoproj.io/v1alpha1
+    kind: ArgoCD
+    name: openshift-gitops
+    namespace: openshift-gitops
+    patch:
+      - op: add
+        path: "/spec/resourceTrackingMethod"
+        value: annotation
+
+- name: Set up cluster-configuratoin
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'apps/cluster-configuration.yaml.j2' ) | from_yaml }}"
+
+- name: Rollout helm
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'appsets/generic.yaml.j2' ) | from_yaml }}"
+  with_items:
+    - service-mesh-app
+    - service-mesh-system
+    - gitops
+    - pipeline
+    - hello-dev
+    - hello-main
+
+# Patch openshift pipelines because of
+#   https://access.redhat.com/solutions/6975952
+
+- name: Fetch crd resolutionrequests.resolution.tekton.dev
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: resolutionrequests.resolution.tekton.dev
+  register: crd_resolutionrequests
+
+# yamllint disable-line rule:line-length
+- name: Find out 'all' in /spec/names/categories
+  set_fact:
+  # yamllint disable-line rule:line-length
+    index_of_all: "{% set i=-1 -%}{%- for cat in crd_resolutionrequests.resources[0].spec.names.categories -%}{%- if cat == 'all' -%}{{ loop.index - 1 }}{%- endif -%}{%- endfor-%}"
+
+- name: Remove 'all' in /spec/names/categories
+  kubernetes.core.k8s_json_patch:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: resolutionrequests.resolution.tekton.dev
+    patch:
+      - op: remove
+        path: "/spec/names/categories/{{ index_of_all | int }}"
+  when:
+    - index_of_all is defined
+    - index_of_all | length > 0
+    - index_of_all | int > -1
+
+- name: OpenShift GitOps server info
+  include_tasks: argocd_info.yml

@@ -1,0 +1,128 @@
+---
+- name: Setting up workload for user
+  ansible.builtin.debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Setup htpasswd authentication
+  when: ocp4_workload_deploy_hosted_cluster_authentication | default('none') == 'htpasswd'
+  ansible.builtin.include_tasks: setup_htpasswd_authentication.yml
+
+- name: Setup oauth certificate
+  ansible.builtin.include_tasks: setup_oauth_certificate.yml
+
+- name: Ensure hosted cluster doesn't already exist
+  kubernetes.core.k8s_info:
+    api_version: hypershift.openshift.io/v1beta1
+    kind: HostedCluster
+    name: "{{ ocp4_workload_deploy_hosted_cluster_name }}"
+    namespace: local-cluster
+  register: r_hosted_cluster
+
+- name: Deploy hosted cluster {{ _ocp4_workload_rhacm_hypershift_cluster_name }}
+  when: r_hosted_cluster.resources | length == 0
+  block:
+  # This command expects AWS credentials, base domain, pull secret and SSH keys in
+  # secret `aws-credentials` in namespace `local-cluster` as set up by the
+  # workload `ocp4_workload_rhacm_hypershift`
+  - name: Run hypershift CLI to deploy hosted cluster
+    ansible.builtin.command: >-
+      hypershift create cluster aws
+        --name {{ ocp4_workload_deploy_hosted_cluster_name }}
+        --infra-id {{ ocp4_workload_deploy_hosted_cluster_infra_id }}
+        --region {{ ocp4_workload_deploy_hosted_cluster_aws_region }}
+        --zones {{ ocp4_workload_deploy_hosted_cluster_aws_zones }}
+        --instance-type {{ ocp4_workload_deploy_hosted_cluster_worker_instance_type }}
+        --root-volume-type {{ ocp4_workload_deploy_hosted_cluster_worker_root_volume_type }}
+        --root-volume-size {{ ocp4_workload_deploy_hosted_cluster_worker_root_volume_size }}
+        --etcd-storage-class {{ ocp4_workload_deploy_hosted_cluster_etc_storage_class }}
+        --control-plane-availability-policy {{ ocp4_workload_deploy_hosted_cluster_controlplane_availability }}
+        --infra-availability-policy {{ ocp4_workload_deploy_hosted_cluster_infra_availability }}
+        --network-type {{ ocp4_workload_deploy_hosted_cluster_network_type }}
+        --release-image quay.io/openshift-release-dev/ocp-release:{{ ocp4_workload_deploy_hosted_cluster_version }}-x86_64
+        --node-pool-replicas {{ ocp4_workload_deploy_hosted_cluster_nodepool_replicas }}
+        --namespace local-cluster
+        --secret-creds aws-credentials
+        --auto-repair
+        --generate-ssh
+    register: r_hypershift_create_cluster
+
+  - name: Debug and abort if necessary
+    when: r_hypershift_create_cluster.rc > 0
+    block:
+    - name: Debug output
+      ansible.builtin.debug:
+        msg: "{{ item }}"
+      loop:
+      - "STDOUT:"
+      - "{{ r_hypershift_create_cluster.stdout }}"
+      - ""
+      - "stderr:"
+      - "{{ r_hypershift_create_cluster.stderr }}"
+
+    - name: Abort
+      ansible.builtin.fail:
+        msg: "Cluster creation failed. Aborting."
+
+- name: Patch hosted cluster to add authentication and oauth certs
+  kubernetes.core.k8s:
+    state: patched
+    definition: "{{ lookup('template', 'hosted-cluster-auth.yaml.j2' ) | from_yaml }}"
+
+- name: Create managed cluster to add cluster to ACM
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'managed-cluster.yaml.j2' ) | from_yaml }}"
+
+- name: Create klusterlet-addon-config to allow policy deployment
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'klusterlet-addon-config.yaml.j2' ) | from_yaml }}"
+
+- name: Set hosted cluster console URL
+  ansible.builtin.set_fact:
+    _ocp4_workload_deploy_hosted_cluster_console_url: >-
+      https://console-openshift-console.apps.{{ ocp4_workload_deploy_hosted_cluster_name }}.{{ ocp4_workload_deploy_hosted_cluster_base_domain }}
+
+- name: Create cert-manager policy
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - certmanager/policy.yaml.j2
+  - certmanager/placementrule.yaml.j2
+  - certmanager/placementbinding.yaml.j2
+
+- name: Create clusterresourcequota application
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - clusterresourcequota/channel.yaml.j2
+  - clusterresourcequota/placementrule.yaml.j2
+  - clusterresourcequota/subscription.yaml.j2
+  - clusterresourcequota/application.yaml.j2
+
+- name: Save common user information
+  agnosticd_user_info:
+    data:
+      openshift_cluster_admin_username: "{{ ocp4_workload_deploy_hosted_cluster_admin_user }}"
+      openshift_cluster_admin_password: "{{ _ocp4_workload_deploy_hosted_cluster_admin_password }}"
+      openshift_cluster_num_users: "{{ ocp4_workload_deploy_hosted_cluster_user_count }}"
+      openshift_cluster_console_url: "{{ _ocp4_workload_deploy_hosted_cluster_console_url }}"
+
+- name: Save user information for each user
+  agnosticd_user_info:
+    user: "{{ ocp4_workload_deploy_hosted_cluster_user_base }}{{ n + 1 }}"
+    data:
+      openshift_cluster_console_url: "{{ _ocp4_workload_deploy_hosted_cluster_console_url }}"
+      password: "{{ _ocp4_workload_deploy_hosted_cluster_user_passwords[ n ] }}"
+  loop: "{{ range(0, ocp4_workload_deploy_hosted_cluster_user_count | int) | list }}"
+  loop_control:
+    loop_var: n
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

@@ -1,0 +1,240 @@
+- name: Configure all hosts with repositories, common files and set environment key
+  hosts:
+  - all:!windows
+  become: true
+  gather_facts: false
+  tags:
+  - step003
+  - common_tasks
+  roles:
+  - role: set-repositories
+    when: repo_method is defined
+  - role: common
+    when: install_common | bool
+  tasks:
+  - name: Add GUID to /etc/skel/.bashrc
+    lineinfile:
+      path: "/etc/skel/.bashrc"
+      regexp: "^export GUID"
+      line: "export GUID={{ guid }}"
+
+- name: Step 003.1 - Configuring Bastion Hosts
+  hosts: bastions
+  become: true
+  roles:
+#  - role: create_ssh_provision_key
+  - role: bastion-lite
+    when: install_bastion | bool
+  - role: bastion-student-user
+    when: install_student_user | bool
+  tags:
+  - step003.1
+  - bastion_tasks
+
+- name: Step 003.2 - Configure bastion for OCP4 UPI
+  hosts: bastions
+  become: true
+  tasks:
+  - name: Open firewallD services
+    ansible.posix.firewalld:
+      service: "{{ item }}"
+      permanent: yes
+      immediate: yes
+      state: enabled
+    loop:
+    - dns
+    - http
+    - https
+    - dhcp
+
+  - name: Open firewallD ports
+    ansible.posix.firewalld:
+      port: "{{ item }}"
+      permanent: yes
+      immediate: yes
+      state: enabled
+    loop:
+    - 81/tcp
+    - 22623/tcp
+    - 6443/tcp
+    - 5000/tcp
+
+  - name: Install required software
+    ansible.builtin.yum:
+      name: "{{ item }}"
+      state: present
+    loop:
+    - bind
+    - bind-utils
+    - httpd
+    - haproxy
+
+  - name: Get the IP segment
+    ansible.builtin.shell: hostname -I|cut -d. -f3
+    register: hostname_output
+
+  - name: Configure haproxy.cfg
+    ansible.builtin.template:
+      src: haproxy.j2
+      dest: /etc/haproxy/haproxy.cfg
+    vars:
+      labenv_segment: "{{ hostname_output.stdout }}"
+
+  - name: Allow HAproxy to listen on tcp port 22623
+    ansible.builtin.seport:
+      ports: 22623
+      proto: tcp
+      setype: http_port_t
+      state: present
+
+  - name: Allow HAproxy to listen on tcp port 6443
+    ansible.builtin.seport:
+      ports: 6443
+      proto: tcp
+      setype: http_port_t
+      state: present
+
+  - name: Enable haproxy
+    ansible.builtin.service:
+      name: haproxy
+      state: started
+      enabled: true
+
+  - name: Configure reverse domain DNS file
+    ansible.builtin.template:
+      src: 168.192.in-addr.arpa.j2
+      dest: "/var/named/{{ hostname_output.stdout }}.168.192.in-addr.arpa"
+
+  - name: Configure domain DNS file
+    ansible.builtin.template:
+      src: dynamic.opentlc.com.zone.j2
+      dest: "/var/named/dynamic.opentlc.com.zone"
+    vars:
+      labenv_segment: "{{ hostname_output.stdout }}"
+
+
+  - name: Configure named main config
+    ansible.builtin.template:
+      src: named.conf.j2
+      dest: "/etc/named.conf"
+    vars:
+      labenv_segment: "{{ hostname_output.stdout }}"
+
+  - name: Enable named
+    ansible.builtin.service:
+      name: named
+      state: started
+      enabled: true
+
+  - name: Configure resolv.conf
+    ansible.builtin.copy:
+      content: |
+        search {{ guid }}.dynamic.opentlc.com
+        nameserver 192.168.{{ hostname_output.stdout }}.10
+      dest: /etc/resolv.conf
+
+  - name: Download OC client and extract it
+    ansible.builtin.shell: curl -L -s {{ url }} | tar zxvf - -C /usr/local/bin/ oc
+    vars:
+      url: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_version }}/openshift-client-linux-{{ ocp_version }}.tar.gz
+
+  - name: Download OC installer and extract it
+    ansible.builtin.shell: curl -L -s {{ url }} | tar zxvf - -C /usr/local/bin/ openshift-install
+    vars:
+      url: https://mirror.openshift.com/pub/openshift-v4/clients/ocp/{{ ocp_version }}/openshift-install-linux.tar.gz
+
+  - name: Configure Listen syntax on httpd.conf
+    ansible.builtin.replace:
+      path: /etc/httpd/conf/httpd.conf
+      regexp: 'Listen 80'
+      replace: "Listen 192.168.{{ hostname_output.stdout }}.10:81"
+
+  - name: Enable httpd
+    ansible.builtin.service:
+      name: httpd
+      state: started
+      enabled: true
+
+  tags:
+  - step003.2
+  - bastion_tasks
+
+- name: Step 003.2 - Configure bastion for OCP4 install
+  hosts: bastions
+  become: true
+  become_user: "{{ student_name }}"
+  tasks:
+  - name: Create /home/{{ student_name }}/ocpinstall/install/
+    ansible.builtin.file:
+      path: /home/{{ student_name }}/ocpinstall/install/
+      state: directory
+
+  - name: Generate an OpenSSH keypair with the default values (4096 bits, rsa)
+    ansible.builtin.openssh_keypair:
+      path: /home/{{ student_name }}/ocpinstall/install/id_rsa
+    register: keypair
+
+  - name: Generate install-config.yaml
+    ansible.builtin.template:
+      src: install-config.yaml.j2
+      dest: /home/{{ student_name }}/ocpinstall/install/install-config.yaml
+    vars:
+      sshKey_content: "{{ keypair.public_key }}"
+
+  - name: Generate install-config.yaml.back
+    ansible.builtin.template:
+      src: install-config.yaml.j2
+      dest: /home/{{ student_name }}/ocpinstall/install/install-config.yaml.back
+    vars:
+      sshKey_content: "{{ keypair.public_key }}"
+
+  - name: Create maniferts and replace some content
+    ansible.builtin.shell:
+      cmd: "{{ item }}"
+      chdir: "/home/{{ student_name }}/ocpinstall/install/"
+    loop:
+    - "/usr/local/bin/openshift-install create manifests --dir ~/ocpinstall/install/ --log-level debug"
+    - "rm -f openshift/99_openshift-cluster-api_master-machines-*.yaml openshift/99_openshift-cluster-api_worker-machineset-*.yaml"
+    - "sed -i 's/mastersSchedulable: true/mastersSchedulable: false/' manifests/cluster-scheduler-02-config.yml"
+
+  - name: Copy set-vm-config.sh
+    ansible.builtin.template:
+      src: set-vm-config.sh.j2
+      dest: /home/{{ student_name }}/ocpinstall/install/set-vm-config.sh
+      mode: 0755
+
+  - name: Copy power-on.sh
+    ansible.builtin.template:
+      src: power-on.sh.j2
+      dest: /home/{{ student_name }}/ocpinstall/install/power-on.sh
+      mode: 0755
+
+  tags:
+  - step003.3
+  - bastion_tasks
+
+- name: Step 005.6 Print Student Info
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Report Access Information
+    when:
+    - install_student_user | bool
+    vars:
+      _bastion_inventory_name: "{{ groups['bastions'][0] }}"
+      _bastion_public_hostname: >-
+        {{ hostvars[_bastion_inventory_name].shortname }}.{{ guid }}.{{ cluster_dns_zone }}
+      _bastion_ssh_password: "{{ hostvars[bastion_hostname]['student_password'] }}"
+    block:
+    - name: Print access user info
+      agnosticd_user_info:
+        data:
+          bastion_public_hostname: "{{ _bastion_public_hostname }}"
+          bastion_ssh_password: "{{ _bastion_ssh_password }}"
+          bastion_ssh_user_name: "{{ student_name }}"
+        msg: |
+          You can access your bastion via SSH:
+          ssh {{ student_name }}@{{ _bastion_public_hostname }}
+          SSH password generated:
+          {{ _bastion_ssh_password }}

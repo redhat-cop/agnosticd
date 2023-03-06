@@ -1,0 +1,403 @@
+# vim: set ft=yaml.ansible
+---
+- name: Step 005 Post Software
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+  - step005
+  - post_software
+  tasks:
+  - name: Entering the devsecops-vld-framework-binder post_software.yml
+    debug:
+      msg:
+      - Entering the devsecops-vld-framework-binder post_software.yml
+
+###############################################################################
+#### Setup Cluster Connections
+###############################################################################
+
+  - name: add aws_hub to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_hub_provision_data.bastion_public_hostname }}"
+      groups: devsecops_hub
+      ansible_connection: ssh
+      ansible_ssh_private_key_file: "~/.ssh/opentlc_admin_backdoor.pem"
+      ansible_user: "ec2-user"
+      remote_user: "ec2-user"
+
+  - name: add aws_dev_cluster to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_dev_cluster_provision_data.bastion_public_hostname }}"
+      groups: aws_dev_cluster
+      ansible_connection: ssh
+      ansible_ssh_private_key_file: "~/.ssh/opentlc_admin_backdoor.pem"
+      ansible_user: "ec2-user"
+      remote_user: "ec2-user"
+
+  - name: add aws_prod_cluster to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_prod_cluster_provision_data.bastion_public_hostname }}"
+      groups: aws_prod_cluster
+      ansible_connection: ssh
+      ansible_ssh_private_key_file: "~/.ssh/opentlc_admin_backdoor.pem"
+      ansible_user: "ec2-user"
+      remote_user: "ec2-user"
+
+  - name: Log into Hub
+    k8s_auth:
+      host: "{{ aws_hub_provision_data.openshift_api_url }}"
+      username: "{{ aws_hub_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_aws_hub_cluster
+    retries: 240
+    delay: 15
+    until:
+    - __r_aws_hub_cluster.k8s_auth.api_key is defined
+
+  - name: Log into AWS OCP4 Prod Cluster
+    k8s_auth:
+      host: "{{ aws_prod_cluster_provision_data.openshift_api_url }}"
+      username: "{{ aws_prod_cluster_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_prod_cluster_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_aws_prod_cluster
+    retries: 240
+    delay: 15
+    until:
+    - __r_aws_prod_cluster.k8s_auth.api_key is defined
+
+  - name: Log into AWS OCP4 Dev Cluster
+    k8s_auth:
+      host: "{{ aws_dev_cluster_provision_data.openshift_api_url }}"
+      username: "{{ aws_dev_cluster_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_dev_cluster_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_aws_dev_cluster
+    retries: 240
+    delay: 15
+    until:
+    - __r_aws_dev_cluster.k8s_auth.api_key is defined
+
+###############################################################################
+#### Import Clusters into Hub
+###############################################################################
+
+  - name: Include Import tasks
+    include_tasks: import_clusters_to_hub.yaml
+
+- name: Login to bastion hub
+  hosts: devsecops_hub
+  tasks:
+  - name: Add label purpose=management
+    command: >-
+      oc patch ManagedCluster local-cluster
+      -p='[{"op": "add", "path": "/metadata/labels/purpose", "value":"management"}]'
+      -n open-cluster-management
+      --type json
+
+  - name: Add label purpose=development
+    command: >-
+      oc patch ManagedCluster aws-dev-cluster
+      -p='[{"op": "add", "path": "/metadata/labels/purpose", "value":"development"}]'
+      -n open-cluster-management
+      --type json
+
+  - name: Add label purpose=production
+    command: >-
+      oc patch ManagedCluster aws-prod-cluster
+      -p='[{"op": "add", "path": "/metadata/labels/purpose", "value":"production"}]'
+      -n open-cluster-management
+      --type json
+
+###############################################################################
+#### Setup RHACS secure cluster on Dev Cluster
+###############################################################################
+
+- name: Step 005 Post Software - Install RHACS Secured Cluster
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tasks:
+    - name: hybrid_cloud_binder_install_secured_cluster
+      when: hybrid_cloud_binder_install_secured_cluster is true
+      block:
+
+      - name: Get cluster init bundle
+        ansible.builtin.uri:
+          url: "{{ aws_hub_provision_data.acs_route }}/v1/cluster-init/init-bundles"
+          body: "{ \"name\": \"prod-{{ lookup('password', '/dev/null chars=ascii_lowercase,digits length=8') }}\"}"
+          method: POST
+          user: "{{ aws_hub_provision_data.openshift_cluster_admin_username }}"
+          password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+          body_format: json
+          force_basic_auth: true
+          validate_certs: false
+        register: __r_rhacs_cluster_init_response
+
+      - name: Store cluster init bundle as a fact
+        set_fact:
+          __rhacs_init_bundle: "{{ __r_rhacs_cluster_init_response.json.kubectlBundle | b64decode }}"
+
+      - name: Create stackrox namespace on Managed clusters
+        k8s:
+          host: "{{ item.k8s_auth.host }}"
+          username: "{{ item.k8s_auth.username }}"
+          api_key: "{{ item.k8s_auth.api_key }}"
+          validate_certs: false
+          state: present
+          kind: Namespace
+          name: "stackrox"
+          api_version: v1
+        loop:
+          - "{{ __r_aws_prod_cluster }}"
+          - "{{ __r_aws_dev_cluster }}"
+
+      - name: Create init-bundle on Managed clusters
+        k8s:
+          host: "{{ item.k8s_auth.host }}"
+          username: "{{ item.k8s_auth.username }}"
+          api_key: "{{ item.k8s_auth.api_key }}"
+          validate_certs: false
+          namespace: stackrox
+          state: present
+          definition: "{{ __rhacs_init_bundle }}"
+        loop:
+          - "{{ __r_aws_prod_cluster }}"
+          - "{{ __r_aws_dev_cluster }}"
+
+      - name: Install Secured Cluster on managed AWS Prod Cluster
+        k8s:
+          host: "{{ __r_aws_prod_cluster.k8s_auth.host }}"
+          username: "{{ __r_aws_prod_cluster.k8s_auth.username }}"
+          api_key: "{{ __r_aws_prod_cluster.k8s_auth.api_key }}"
+          validate_certs: false
+          state: present
+          definition: "{{ lookup('template', 'prod_secured_cluster.yaml.j2') }}"
+
+      - name: Install Secured Cluster on managed AWS Dev Cluster
+        k8s:
+          host: "{{ __r_aws_dev_cluster.k8s_auth.host }}"
+          username: "{{ __r_aws_dev_cluster.k8s_auth.username }}"
+          api_key: "{{ __r_aws_dev_cluster.k8s_auth.api_key }}"
+          validate_certs: false
+          state: present
+          definition: "{{ lookup('template', 'dev_secured_cluster.yaml.j2') }}"
+
+###############################################################################
+#### Setup Multi-Cluster Workload
+###############################################################################
+
+- name: Setup devsecops_pipeline
+  hosts: devsecops_hub
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Multicluster devsecops validated pattern
+      when: multicluster_devsecops_validated_pattern is true
+      block:
+
+      - name: Check if desired virtualenv is available on the host
+        stat:
+          path: "/opt/virtualenvs/k8s/bin/python"
+        register: r_virtualenv
+
+      - name: Set Ansible Python interpreter to virtualenv
+        when: r_virtualenv.stat.exists
+        set_fact:
+          ansible_python_interpreter: "/opt/virtualenvs/k8s/bin/python"
+
+      - name: Setup multicluster_devsecops_validated_pattern
+        include_role:
+          name: ocp4_workload_devsecops_validated_pattern
+
+- name: Recreate ArgoCD instance
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Get Dev/Prod ArgoCD Instance
+      k8s_info:
+        host: "{{ item.k8s_auth.host }}"
+        username: "{{ item.k8s_auth.username }}"
+        api_key: "{{ item.k8s_auth.api_key }}"
+        validate_certs: false
+        kind: ArgoCD
+        name: openshift-gitops
+        namespace: openshift-gitops
+        api_version: argoproj.io/v1alpha1
+      register: r_argocd_inst
+      retries: 60
+      delay: 5
+      until: r_argocd_inst.resources | length > 0
+      loop:
+        - "{{ __r_aws_dev_cluster }}"
+        - "{{ __r_aws_prod_cluster }}"
+
+    - name: Delete Dev/Prod ArgoCD instance
+      k8s:
+        host: "{{ item.k8s_auth.host }}"
+        username: "{{ item.k8s_auth.username }}"
+        api_key: "{{ item.k8s_auth.api_key }}"
+        validate_certs: false
+        state: absent
+        definition:
+          apiVersion: argoproj.io/v1alpha1
+          kind: ArgoCD
+          metadata:
+            namespace: openshift-gitops
+            name: openshift-gitops
+      loop:
+        - "{{ __r_aws_dev_cluster }}"
+        - "{{ __r_aws_prod_cluster }}"
+
+- name: Get argocd access details from prod
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tasks:
+  - name: Get Hub Argocd Route
+    k8s_info:
+      host: "{{ __r_aws_hub_cluster.k8s_auth.host }}"
+      username: "{{ __r_aws_hub_cluster.k8s_auth.username }}"
+      api_key: "{{ __r_aws_hub_cluster.k8s_auth.api_key }}"
+      validate_certs: false
+      kind: Route
+      name: openshift-gitops-server
+      namespace: openshift-gitops
+    register: r_hub_argocd
+    retries: 60
+    delay: 5
+    until: r_hub_argocd.resources | length > 0
+
+  - name: Set common password for Hub ArgoCD
+    k8s:
+      host: "{{ __r_aws_hub_cluster.k8s_auth.host }}"
+      username: "{{ __r_aws_hub_cluster.k8s_auth.username }}"
+      api_key: "{{ __r_aws_hub_cluster.k8s_auth.api_key }}"
+      validate_certs: false
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          namespace: openshift-gitops
+          name: openshift-gitops-cluster
+        data:
+          admin.password: "{{ common_password | b64encode }}"
+
+  - name: Setfact for Hub Argocd
+    set_fact:
+      _hub_cluster_argocd_console_url: "https://{{ r_hub_argocd.resources[0].spec.host }}"
+      _hub_cluster_argocd_admin_username: admin
+      _hub_cluster_argocd_admin_password: "{{ common_password }}"
+
+  - name: Get Dev Argo Route
+    k8s_info:
+      host: "{{ __r_aws_dev_cluster.k8s_auth.host }}"
+      username: "{{ __r_aws_dev_cluster.k8s_auth.username }}"
+      api_key: "{{ __r_aws_dev_cluster.k8s_auth.api_key }}"
+      validate_certs: false
+      kind: Route
+      name: openshift-gitops-server
+      namespace: openshift-gitops
+    register: r_dev_argocd
+    retries: 60
+    delay: 5
+    until: r_dev_argocd.resources | length > 0
+
+  - name: Set common password for Dev ArgoCD
+    k8s:
+      host: "{{ __r_aws_dev_cluster.k8s_auth.host }}"
+      username: "{{ __r_aws_dev_cluster.k8s_auth.username }}"
+      api_key: "{{ __r_aws_dev_cluster.k8s_auth.api_key }}"
+      validate_certs: false
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          namespace: openshift-gitops
+          name: openshift-gitops-cluster
+        data:
+          admin.password: "{{ common_password | b64encode }}"
+
+  - name: Setfact for Dev Argocd
+    set_fact:
+      _dev_cluster_argocd_console_url: "https://{{ r_dev_argocd.resources[0].spec.host }}"
+      _dev_cluster_argocd_admin_username: admin
+      _dev_cluster_argocd_admin_password: "{{ common_password }}"
+
+  - name: Get Prod Argo Route
+    k8s_info:
+      host: "{{ __r_aws_prod_cluster.k8s_auth.host }}"
+      username: "{{ __r_aws_prod_cluster.k8s_auth.username }}"
+      api_key: "{{ __r_aws_prod_cluster.k8s_auth.api_key }}"
+      validate_certs: false
+      kind: Route
+      name: openshift-gitops-server
+      namespace: openshift-gitops
+    register: r_prod_argocd
+    retries: 60
+    delay: 5
+    until: r_prod_argocd.resources | length > 0
+
+  - name: Set common password for Prod ArgoCD
+    k8s:
+      host: "{{ __r_aws_prod_cluster.k8s_auth.host }}"
+      username: "{{ __r_aws_prod_cluster.k8s_auth.username }}"
+      api_key: "{{ __r_aws_prod_cluster.k8s_auth.api_key }}"
+      validate_certs: false
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          namespace: openshift-gitops
+          name: openshift-gitops-cluster
+        data:
+          admin.password: "{{ common_password | b64encode }}"
+
+  - name: Setfact for Prod Argocd
+    set_fact:
+      _prod_cluster_argocd_console_url: "https://{{ r_prod_argocd.resources[0].spec.host }}"
+      _prod_cluster_argocd_admin_username: admin
+      _prod_cluster_argocd_admin_password: "{{ common_password }}"
+
+  - name: Print Prod/Dev cluster user data
+    agnosticd_user_info:
+      data:
+        hub_argocd_console_url: "{{ _hub_cluster_argocd_console_url }}"
+        hub_argocd_admin_password: "{{ _hub_cluster_argocd_admin_username }}"
+        hub_argocd_admin_username: "{{ _hub_cluster_argocd_admin_password }}"
+        prod_argocd_console_url: "{{ _prod_cluster_argocd_console_url }}"
+        prod_argocd_admin_password: "{{ _prod_cluster_argocd_admin_username }}"
+        prod_argocd_admin_username: "{{ _prod_cluster_argocd_admin_password }}"
+        dev_argocd_console_url: "{{ _dev_cluster_argocd_console_url }}"
+        dev_argocd_admin_password: "{{ _dev_cluster_argocd_admin_username }}"
+        dev_argocd_admin_username: "{{ _dev_cluster_argocd_admin_password }}"
+
+- name: Step 005 Post Software - Report to Cloudforms
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+  - step005
+  - post_software
+  tasks:
+
+  - name: Print string expected by Cloudforms
+    debug:
+      msg: "Post-Software checks completed successfully"
+
+  - name: Exiting the open-hybrid-cloud-binder post_software.yml
+    debug:
+      msg:
+      - Exiting the open-hybrid-cloud-binder post_software.yml
+...

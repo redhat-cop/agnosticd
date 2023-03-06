@@ -1,3 +1,4 @@
+# vim: set ft=yaml.ansible
 ---
 - name: Step 005 Post Software
   hosts: localhost
@@ -8,152 +9,353 @@
   - step005
   - post_software
   tasks:
-
   - name: Entering the open-hybrid-cloud-binder post_software.yml
     debug:
       msg:
       - Entering the open-hybrid-cloud-binder post_software.yml
 
-  - name: Import clusters into hub
-    when:
-      - hyhbrid_cloud_binder_import_clusters_enable is true
+###############################################################################
+#### Setup Cluster Connections
+###############################################################################
+
+  - name: add aws_hub to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_hub_provision_data.bastion_public_hostname }}"
+      groups: ohc_hub
+      ansible_connection: ssh
+      # need full path to key because not creating ssh_config file
+      ansible_ssh_private_key_file: "~/.ssh/opentlc_admin_backdoor.pem"
+      ansible_user: "ec2-user"
+      remote_user: "ec2-user"
+        # ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|d() }} -F {{output_dir}}/{{ env_type }}_{{ guid }}_ssh_conf"
+
+  - name: add aws_dev_a to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_dev_a_provision_data.bastion_public_hostname }}"
+      groups: ohc_aws_dev_a
+      ansible_connection: ssh
+        # ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|d() }} -F {{output_dir}}/{{ env_type }}_{{ guid }}_ssh_conf"
+      ansible_ssh_private_key_file: "~/.ssh/opentlc_admin_backdoor.pem"
+      ansible_user: "ec2-user"
+      remote_user: "ec2-user"
+
+  - name: Log into Hub
+    k8s_auth:
+      host: "{{ aws_hub_provision_data.openshift_api_url }}"
+      username: "{{ aws_hub_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_hub
+    retries: 240
+    delay: 15
+    until:
+    - __r_hub.k8s_auth.api_key is defined
+
+  - name: Log into Azure OCP4 Dev A
+    k8s_auth:
+      host: "{{ azure_dev_a_provision_data.openshift_api_url }}"
+      username: "{{ aws_dev_a_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_dev_a_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_azure_dev_a
+    retries: 240
+    delay: 15
+    until:
+    - __r_azure_dev_a.k8s_auth.api_key is defined
+
+  - name: Log into AWS OCP4 Dev A
+    k8s_auth:
+      host: "{{ aws_dev_a_provision_data.openshift_api_url }}"
+      username: "{{ aws_dev_a_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_dev_a_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_aws_dev_a
+    retries: 240
+    delay: 15
+    until:
+    - __r_aws_dev_a.k8s_auth.api_key is defined
+
+###############################################################################
+#### Import Clusters into Hub
+###############################################################################
+
+  - name: Include Import tasks
+    include_tasks: import_clusters_to_hub.yaml
+
+###############################################################################
+#### Setup Bookbag
+###############################################################################
+
+  - name: Call bookbag workload with just the defaults
+    when: hybrid_cloud_binder_bookbag_deploy is true | default(true) | bool
+    include_role:
+      name: ocp4_workload_bookbag_ohc_demo
+    vars:
+      ocp4_workload_bookbag_ohc_demo_target_ocp_api_url: "{{ aws_dev_a_provision_data.openshift_api_url }}"
+      ocp4_workload_bookbag_ohc_demo_target_ocp_api_key: "{{ __r_aws_dev_a.k8s_auth.api_key }}"
+      ocp4_workload_bookbag_ohc_demo_vars:
+        guid: "{{ guid }}"
+        ocp_username: "{{ ocp_username }}"
+        aws_dev_a_provision_data: "{{ aws_dev_a_provision_data }}"
+        aws_hub_provision_data: "{{ aws_hub_provision_data }}"
+
+###############################################################################
+#### UPI log output
+###############################################################################
+
+  - name: Make directory for UPI file exchange
+    file:
+      path: "{{ output_dir }}/upi-install"
+      state: directory
+      mode: 0755
+
+- name: Step 005 Post Software - Fetch UPI files from AWS Dev A
+  hosts: ohc_aws_dev_a
+  become: true
+  gather_facts: false
+  tasks:
+
+  - name: fetch UPI logs?
+    when: hybrid_cloud_binder_upi_logs_enable is true | default(false) | bool
     block:
 
-    - name: Logging into Hub
-      k8s_auth:
-        host: "{{ aws_hub_provision_data.openshift_api_url }}"
-        username: "{{ aws_hub_provision_data.openshift_cluster_admin_username }}"
-        password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
-        validate_certs: false
-      register: __r_hub
+    - name: fetch the install logs
+      ansible.builtin.fetch:
+        flat: true
+        src: "/home/ec2-user/cluster-{{ aws_dev_a_provision_data.guid }}/.openshift_install.log"
+        dest: "{{ output_dir }}/upi-install/openshift_install.log"
 
-    - name: create namespaces on hub for dev clusters
-      k8s:
-        host: "{{ __r_hub.k8s_auth.host }}"
-        username: "{{ __r_hub.k8s_auth.username }}"
-        api_key: "{{ __r_hub.k8s_auth.api_key }}"
-        validate_certs: false
-        state: present
-        kind: Namespace
-        name: "{{ item }}"
-        api_version: v1
-      loop:
-      - 'aws-dev-a'
-      - 'azure-dev-a'
+    - name: fetch the install config
+      ansible.builtin.fetch:
+        flat: true
+        src: "/home/ec2-user/cluster-{{ aws_dev_a_provision_data.guid }}/install-config.yaml.bak"
+        dest: "{{ output_dir }}/upi-install/install-config.yaml.bak"
 
-    - name: Logging into AWS OCP4 Dev A
-      k8s_auth:
-        host: "{{ aws_dev_a_provision_data.openshift_api_url }}"
-        username: "{{ aws_dev_a_provision_data.openshift_cluster_admin_username }}"
-        password: "{{ aws_dev_a_provision_data.openshift_cluster_admin_password }}"
-        validate_certs: false
-      register: __r_aws_dev_a
+- name: Step 005 Post Software - Copy UPI files to Hub
+  hosts: ohc_hub
+  become: true
+  gather_facts: false
+  tasks:
 
-    - name: Logging into Azure OCP4 Dev A
-      k8s_auth:
-        host: "{{ azure_dev_a_provision_data.openshift_api_url }}"
-          # TODO: Azure env_type doesn't have cluster_admin_username/password reported
-          # report the user.data
-          #  azure_dev_a_provision_data:
-          #    openshift_api_url: https://api.ocp4-xz9vx-2-ipi.azure.opentlc.com:6443
-          #    openshift_client_download_url: http://d3s3zqyaz8cp2d.cloudfront.net/pub/openshift-v4/clients/ocp/stable-4.9/openshift-client-linux.tar.gz
-          #    openshift_console_url: https://console-openshift-console.apps.ocp4-xz9vx-2-ipi.azure.opentlc.com
-          #    users:
-          #      admin:
-        username: "{{ aws_dev_a_provision_data.openshift_cluster_admin_username }}"
-        password: "{{ aws_dev_a_provision_data.openshift_cluster_admin_password }}"
-        validate_certs: false
-      register: __r_azure_dev_a
+  - name: put UPI logs?
+    when: hybrid_cloud_binder_upi_logs_enable is true | default(false) | bool
+    block:
 
-    - name: Import AWS OCP4 Cluster A to Hub
-      vars:
-        __managed_cluster_name: 'aws-dev-a'
-        __managed_cluster_token: "{{ __r_aws_dev_a.k8s_auth.api_key }}"
-        __managed_cluster_api_url: "{{ __r_aws_dev_a.k8s_auth.host }}"
-      k8s:
-        host: "{{ __r_hub.k8s_auth.host }}"
-        username: "{{ __r_hub.k8s_auth.username }}"
-        api_key: "{{ __r_hub.k8s_auth.api_key }}"
-        validate_certs: false
-        state: present
-        definition: "{{ lookup('template', item ) | from_yaml }}"
-      loop:
-      - './templates/managed-cluster.yaml.j2'
-      - './templates/auto-import-secret.yaml.j2'
-      - './templates/klusterlet-addon-config.yaml.j2'
+    - name: Make directory for UPI file exchange
+      file:
+        path: "/home/{{ aws_dev_a_provision_data.bastion_ssh_user_name }}/cluster-{{ aws_dev_a_provision_data.guid }}/"
+        state: directory
+        owner: "{{ aws_dev_a_provision_data.bastion_ssh_user_name }}"
+        mode: 0755
 
-    - name: Import Azure OCP4 Cluster A to Hub
-      vars:
-        __managed_cluster_name: 'azure-dev-a'
-        __managed_cluster_token: "{{ __r_azure_dev_a.k8s_auth.api_key }}"
-        __managed_cluster_api_url: "{{ __r_azure_dev_a.k8s_auth.host }}"
-      k8s:
-        host: "{{ __r_hub.k8s_auth.host }}"
-        username: "{{ __r_hub.k8s_auth.username }}"
-        api_key: "{{ __r_hub.k8s_auth.api_key }}"
-        validate_certs: false
-        state: present
-        definition: "{{ lookup('template', item ) | from_yaml }}"
-      loop:
-      - './templates/managed-cluster.yaml.j2'
-      - './templates/auto-import-secret.yaml.j2'
-      - './templates/klusterlet-addon-config.yaml.j2'
+    - name: copy the install logs
+      ansible.builtin.copy:
+        src: "{{ output_dir }}/upi-install/openshift_install.log"
+        dest: "/home/{{ aws_dev_a_provision_data.bastion_ssh_user_name }}/cluster-{{ aws_dev_a_provision_data.guid }}/openshift_install.log"
+        owner: "{{ aws_dev_a_provision_data.bastion_ssh_user_name }}"
+        mode: 0666
 
-    - name: Validate Clusters Joined - aws-dev-a
-      k8s_info:
-        host: "{{ __r_hub.k8s_auth.host }}"
-        username: "{{ __r_hub.k8s_auth.username }}"
-        api_key: "{{ __r_hub.k8s_auth.api_key }}"
-        validate_certs: false
-        api_version: cluster.open-cluster-management.io/v1
-        kind: managedcluster
-        name: aws-dev-a
-        namespace: aws-dev-a
-      register: __r_wait_aws_dev_a
-      retries: 8
-      delay: 15
-      until:
-      - __r_wait_aws_dev_a.resources is defined
-      - __r_wait_aws_dev_a.resources | length | int > 0
-      - __r_wait_aws_dev_a.resources[0].status is defined
-      - __r_wait_aws_dev_a.resources[0].status.conditions is defined
-      - ( __r_wait_aws_dev_a.resources[0].status | to_json | from_json |
-        json_query('conditions[?type == `ManagedClusterConditionAvailable`].status') | join ) == "True"
+    - name: copy the install config
+      ansible.builtin.copy:
+        src: "{{ output_dir }}/upi-install/install-config.yaml.bak"
+        dest: "/home/{{ aws_dev_a_provision_data.bastion_ssh_user_name }}/cluster-{{ aws_dev_a_provision_data.guid }}/install-config.yaml.bak"
+        owner: "{{ aws_dev_a_provision_data.bastion_ssh_user_name }}"
+        mode: 0666
 
-    - name: Validate Clusters Joined - azure-dev-a
-      k8s_info:
-        host: "{{ __r_hub.k8s_auth.host }}"
-        username: "{{ __r_hub.k8s_auth.username }}"
-        api_key: "{{ __r_hub.k8s_auth.api_key }}"
-        validate_certs: false
-        api_version: cluster.open-cluster-management.io/v1
-        kind: managedcluster
-        name: azure-dev-a
-        namespace: azure-dev-a
-      register: __r_wait_azure_dev_a
-      retries: 8
-      delay: 15
-      until:
-      - __r_wait_azure_dev_a.resources is defined
-      - __r_wait_azure_dev_a.resources | length | int > 0
-      - __r_wait_azure_dev_a.resources[0].status is defined
-      - __r_wait_azure_dev_a.resources[0].status.conditions is defined
-      - ( __r_wait_azure_dev_a.resources[0].status | to_json | from_json |
-        json_query('conditions[?type == `ManagedClusterConditionAvailable`].status') | join ) == "True"
+###############################################################################
+#### Setup RHACS secure cluster on Dev Cluster
+###############################################################################
 
-    - name: Call bookbag workload with just the defaults
-      when: hyhbrid_cloud_binder_bookbag_deploy is true | default(true)
-      include_role:
-        name: ocp4_workload_bookbag_ohc_demo
-      vars:
-        ocp4_workload_bookbag_ohc_demo_target_ocp_api_url: "{{ __r_aws_dev_a.k8s_auth.openshift_api_url }}"
-        ocp4_workload_bookbag_ohc_demo_target_ocp_api_key: "{{ __r_aws_dev_a.k8s_auth.api_key }}"
+- name: Step 005 Post Software - Install RHACS Secured Cluster
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tasks:
+    - name: hybrid_cloud_binder_install_secured_cluster
+      when: hybrid_cloud_binder_install_secured_cluster is true | default(true) | bool
+      block:
 
-    - name: Report User Data  # TODO: add more
-      agnosticd_user_info:
-        data:
-          cluster_admin_username: "{{ aws_hub_provision_data.openshift_cluster_admin_username }}"
-          cluster_admin_password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+      - name: Get cluster init bundle
+        ansible.builtin.uri:
+          url: "{{ aws_hub_provision_data.acs_route }}/v1/cluster-init/init-bundles"
+          body: "{ \"name\": \"prod-{{ lookup('password', '/dev/null chars=ascii_lowercase,digits length=8') }}\"}"
+          method: POST
+          user: "{{ aws_dev_a_provision_data.openshift_cluster_admin_username }}"
+          password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+          body_format: json
+          force_basic_auth: true
+          validate_certs: false
+        register: __r_rhacs_cluster_init_response
+
+      - name: Store cluster init bundle as a fact
+        set_fact:
+          __rhacs_init_bundle: "{{ __r_rhacs_cluster_init_response.json.kubectlBundle | b64decode }}"
+
+      - name: Create stackrox namespace on AWS Dev A
+        k8s:
+          host: "{{ __r_aws_dev_a.k8s_auth.host }}"
+          username: "{{ __r_aws_dev_a.k8s_auth.username }}"
+          api_key: "{{ __r_aws_dev_a.k8s_auth.api_key }}"
+          validate_certs: false
+          state: present
+          kind: Namespace
+          name: "stackrox"
+          api_version: v1
+
+      - name: Create init-bundle on AWS Dev A
+        k8s:
+          host: "{{ __r_aws_dev_a.k8s_auth.host }}"
+          username: "{{ __r_aws_dev_a.k8s_auth.username }}"
+          api_key: "{{ __r_aws_dev_a.k8s_auth.api_key }}"
+          validate_certs: false
+          namespace: stackrox
+          state: present
+          definition: "{{ __rhacs_init_bundle }}"
+
+      - name: Install Secured Cluster on AWS Dev A
+        k8s:
+          host: "{{ __r_aws_dev_a.k8s_auth.host }}"
+          username: "{{ __r_aws_dev_a.k8s_auth.username }}"
+          api_key: "{{ __r_aws_dev_a.k8s_auth.api_key }}"
+          validate_certs: false
+          state: present
+          definition: "{{ lookup('template', 'secured_cluster.yaml.j2') }}"
+
+###############################################################################
+#### Setup RHACS demo components
+###############################################################################
+
+- name: Create the Demo Pipelines, get roxctl, create token
+  hosts: ohc_aws_dev_a
+  become: true
+  gather_facts: false
+  tasks:
+
+    - name: hybrid_cloud_binder_install_secured_cluster
+      when: hybrid_cloud_binder_install_secured_cluster is true | default(true) | bool
+      block:
+
+      - name: Check if desired virtualenv is available on the host
+        stat:
+          path: "/opt/virtualenvs/k8s/bin/python"
+        register: r_virtualenv
+
+      - name: Set Ansible Python interpreter to virtualenv
+        when: r_virtualenv.stat.exists
+        set_fact:
+          ansible_python_interpreter: "/opt/virtualenvs/k8s/bin/python"
+
+      - name: Call the OCP4 RHACS Apps role
+        ansible.builtin.include_role:
+          name: ocp4_workload_rhacs_demo_apps
+        vars:
+          ocp4_workload_rhacs_central_admin_password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+
+      - name: Call the OCP4 pipelines role
+        ansible.builtin.include_role:
+          name: ocp4_workload_rhacs_demo_pipeline
+        vars:
+          ocp4_workload_rhacs_central_admin_password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+
+      - name: Get roxctl onto AWS Dev A
+        become: true
+        get_url:
+          url: https://mirror.openshift.com/pub/rhacs/assets/latest/bin/Linux/roxctl
+          dest: /usr/local/bin/roxctl
+          mode: '0755'
+
+            #- name: Logging into Hub
+            #shell: oc login -u {{ aws_hub_provision_data.openshift_cluster_admin_username }} -p {{ aws_hub_provision_data.openshift_cluster_admin_password }} {{ aws_hub_provision_data.openshift_api_url }} --insecure-skip-tls-verify=true # yamllint disable-line rule:line-length
+
+      - name: Create API token of role Admin
+        uri:
+          url: "{{ aws_hub_provision_data.acs_route }}/v1/apitokens/generate"
+          body: '{"name":"pipelines-ci-token-aws-dev-a","role":null,"roles":["Admin"]}'
+          method: POST
+          user: admin
+          password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+          body_format: json
+          force_basic_auth: true
+          validate_certs: false
+        register: __r_ci_token_json
+
+      - name: Get API token from response
+        set_fact:
+          __rhacs_api_token: "{{ __r_ci_token_json.json.token }}"
+
+      - name: Write Rox Central API address to bastion env
+        lineinfile:
+          path: "/home/{{ aws_dev_a_provision_data.bastion_ssh_user_name }}/.bashrc"
+          regexp: "^export ROX_CENTRAL_ADDRESS="
+          line: "export ROX_CENTRAL_ADDRESS={{ aws_hub_provision_data.acs_route | urlsplit('hostname') + ':443' }}"
+
+      - name: Write API token to bastion environment env
+        lineinfile:
+          path: "/home/{{ aws_dev_a_provision_data.bastion_ssh_user_name }}/.bashrc"
+          regexp: "^export ROX_API_TOKEN="
+          line: "export ROX_API_TOKEN={{ __rhacs_api_token }}"
+
+      - name: Write API token to file
+        ansible.builtin.copy:
+          content: "{{ __rhacs_api_token }}"
+          dest: "/home/{{ aws_dev_a_provision_data.bastion_ssh_user_name }}/.rox_api_token"
+
+      rescue:
+        - name: Dev A cluster RHACS secure cluster setup failed
+          ansible.builtin.debug:
+            msg: "Dev A cluster RHACS secure cluster setup failed"
+
+###############################################################################
+#### Setup Cool Store Apps
+###############################################################################
+
+- name: Setup coolstore
+  hosts: ohc_aws_dev_a
+  become: true
+  gather_facts: false
+  tasks:
+
+    - name: hybrid_cloud_binder_setup_coolstore
+      when: hybrid_cloud_binder_setup_coolstore is true | default(true) | bool
+      block:
+
+      - name: Check if desired virtualenv is available on the host
+        stat:
+          path: "/opt/virtualenvs/k8s/bin/python"
+        register: r_virtualenv
+
+      - name: Set Ansible Python interpreter to virtualenv
+        when: r_virtualenv.stat.exists
+        set_fact:
+          ansible_python_interpreter: "/opt/virtualenvs/k8s/bin/python"
+
+      - name: Setup CoolStore
+        vars:
+          ocp4_workload_coolstore_backoffice_demo_ohc_central_stackrox_host: "{{ aws_hub_provision_data.acs_route | urlsplit('hostname') }}"
+        include_role:
+          name: ocp4_workload_coolstore_backoffice_demo_ohc
+
+      - name: Object detection AI ML OHC role
+        vars:
+          ocp4_workload_object_detection_ai_ml_ohc_central_stackrox_host: "{{ aws_hub_provision_data.acs_route | urlsplit('hostname') }}"
+        include_role:
+          name: ocp4_workload_object_detection_ai_ml_ohc
+
+      rescue:
+        - name: Dev A cluster Cool Store Setup failed
+          ansible.builtin.debug:
+            msg: "Dev A cluster Cool Store setup failed"
+
+- name: Step 005 Post Software - Report to Cloudforms
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+  - step005
+  - post_software
+  tasks:
 
   - name: Print string expected by Cloudforms
     debug:

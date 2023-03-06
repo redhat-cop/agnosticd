@@ -1,108 +1,106 @@
 ---
-# Setting the stack_tag
-- set_fact:
+- name: Set stack tag
+  set_fact:
     stack_tag: "{{env_type | replace('-', '_')}}_{{guid}}"
   tags:
     - create_inventory
     - must
 
-# use command line 'az' to validate template and deploy
 - name: Login to Azure
-  command: >-
-    az login --service-principal
-    -u {{ azure_service_principal | quote }}
-    -p {{ azure_password | quote }}
-    --tenant {{ azure_tenant | quote }}
   environment:
     AZURE_CONFIG_DIR: "{{ output_dir }}/.azure-{{project_tag}}"
   tags:
     - validate_azure_template
     - create_inventory
     - must
+  no_log: True
+  command: >-
+    az login --service-principal
+    -u {{ azure_service_principal | quote }}
+    -p {{ azure_password | quote }}
+    --tenant {{ azure_tenant | quote }}
 
-# use '--show-details' feature from the cli, it groups instances and their public IPs.
-# It saves us API calls.
-- name: Get list of VMs
-  command: az vm list --resource-group "{{az_resource_group}}" --show-details
-  # specify path to use azure-cli from system and not from python virtualenv
+- name: Switch Subscriptions
   environment:
     AZURE_CONFIG_DIR: "{{ output_dir }}/.azure-{{project_tag}}"
-  changed_when: false
-  register: result_list
+  tags:
+    - validate_azure_template
+    - create_inventory
+    - must
+  command: az account set -s "{{azure_subscription_id}}"
+
+- name: Check if Resource Group exists
+  environment:
+    AZURE_CLIENT_ID: "{{ azure_service_principal }}"
+    AZURE_TENANT: "{{ azure_tenant }}"
+    AZURE_SECRET: "{{ azure_password }}"
+    AZURE_SUBSCRIPTION_ID: "{{ azure_subscription_id }}"
+    AZURE_CONFIG_DIR: "{{ output_dir }}/.azure-{{ project_tag }}"
   tags:
     - create_inventory
     - must
+  azure.azcollection.azure_rm_resourcegroup_info:
+    auth_source: env
+    name: "{{ az_resource_group }}"
+    tenant: "{{ azure_tenant }}"
+  register: azrg
 
-- name: Translate JSON output from 'az vm list' to ansible variable
-  set_fact:
-    vm_list: "{{ result_list.stdout | from_json }}"
+- name: If Resource Group exists, create inventory
+  when: azrg.resourcegroups|length>0
+  environment:
+    AZURE_CONFIG_DIR: "{{ output_dir }}/.azure-{{project_tag}}"
   tags:
     - create_inventory
     - must
-
-- debug:
-    var: vm_list
-    verbosity: 2
-  tags:
-    - create_inventory
-    - must
-
-- name: Build inventory
-  add_host:
-    name: "{{item.osProfile.computerName|default(item.name)}}"
-    shortname: "{{item.tags.Name|default(item.name)}}"
-    groups:
-      - "tag_Project_{{stack_tag}}"
-      - "tag_{{stack_tag}}_{{item.tags.AnsibleGroup | default('unknowns')}}"
-      - "tag_{{stack_tag}}_ostype_{{item.tags.ostype | default('unknown')}}"
-      - "{{item.tags.ostype | default('unknowns')}}"
-      - "{{ 'newnodes' if (item.tags.newnode|d()|bool) else 'all'}}"
-    ansible_user: "{{ remote_user }}"
-    remote_user: "{{ remote_user | d('azure') }}"
-    state: "{{item.powerState|d('unknown')}}"
-    internaldns: "{{item.tags.internaldns | d(item.osProfile.computerName) |d(item.name)}}"
-    instance_id: "{{ item.vmId | d('unknown')}}"
-    region: "{{azure_region}}"
-    public_dns_name: "{{item.fqdns|d(item.publicIps)|d('')}}"
-    private_dns_name: "{{item.tags.internaldns|d(item.name)}}"
-    private_ip_address: "{{item.privateIps}}"
-    public_ip_address: "{{item.publicIps}}"
-    placement: "{{item.zones}}"
-    image_id: "{{item.storageProfile.osDisk.image|d('unknown')}}"
-    ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
-    instance_canonical_name: "{{ item.tags.canonical_name }}"
-  with_items: "{{vm_list}}"
-  when:
-    - item.tags is defined
-    - item.tags.Project is defined
-    - item.tags.Project == project_tag
-  loop_control:
-    label: "{{ item.name }}"
-  tags:
-    - create_inventory
-    - must
-
-# AnsibleGroup tag can have several comma-separated values. Ex: activedirectories,windows
-- add_host:
-    name: "{{item.osProfile.computerName|default(item.name)}}"
-    groups: "{{item.tags.AnsibleGroup}}"
-  with_items: "{{vm_list}}"
-  when:
-    - item.tags is defined
-    - item.tags.Project is defined
-    - item.tags.Project == project_tag
-  loop_control:
-    label: "{{ item.name }}"
-  tags:
-    - create_inventory
-    - must
-
-- name: debug hostvars
-  debug:
-    var: hostvars
-    verbosity: 2
-
-- name: debug groups
-  debug:
-    var: groups
-    verbosity: 2
+  block:
+    - name: Get list of VMs
+      command: >-
+        az vm list --resource-group "{{ az_resource_group }}"
+        --show-details
+      changed_when: false
+      register: result_list
+    - name: Translate JSON output from 'az vm list' to ansible variable
+      set_fact:
+        vm_list: "{{ result_list.stdout | from_json }}"
+    - name: Build inventory
+      when:
+        - item.tags is defined
+        - item.tags.Project is defined
+        - item.tags.Project == project_tag
+      add_host:
+        name: "{{item.osProfile.computerName|default(item.name)}}"
+        shortname: "{{item.tags.Name|default(item.name)}}"
+        groups:
+          - "tag_Project_{{stack_tag}}"
+          - "tag_{{stack_tag}}_{{item.tags.AnsibleGroup | default('unknowns')}}"
+          - "tag_{{stack_tag}}_ostype_{{item.tags.ostype | default('unknown')}}"
+          - "{{item.tags.ostype | default('unknowns')}}"
+          - "{{ 'newnodes' if (item.tags.newnode|d()|bool) else 'all'}}"
+        ansible_user: "{{ remote_user }}"
+        remote_user: "{{ remote_user | d('azure') }}"
+        state: "{{item.powerState|d('unknown')}}"
+        internaldns: "{{item.tags.internaldns | d(item.osProfile.computerName) |d(item.name)}}"
+        instance_id: "{{ item.vmId | d('unknown')}}"
+        region: "{{azure_region}}"
+        public_dns_name: "{{item.fqdns|d(item.publicIps)|d('')}}"
+        private_dns_name: "{{item.tags.internaldns|d(item.name)}}"
+        private_ip_address: "{{item.privateIps}}"
+        public_ip_address: "{{item.publicIps}}"
+        placement: "{{item.zones}}"
+        image_id: "{{item.storageProfile.osDisk.image|d('unknown')}}"
+        ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+        instance_canonical_name: "{{ item.tags.canonical_name }}"
+      with_items: "{{vm_list}}"
+      loop_control:
+        label: "{{ item.name }}"
+    - name: Add host to inventory
+      when:
+        - item.tags is defined
+        - item.tags.Project is defined
+        - item.tags.Project == project_tag
+      add_host:
+        name: "{{item.osProfile.computerName|default(item.name)}}"
+        groups: "{{item.tags.AnsibleGroup}}"
+      with_items: "{{vm_list}}"
+      loop_control:
+        label: "{{ item.name }}"

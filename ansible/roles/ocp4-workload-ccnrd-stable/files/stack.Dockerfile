@@ -7,8 +7,8 @@ FROM registry.redhat.io/codeready-workspaces/plugin-java11-rhel8:latest
 ENV MANDREL_VERSION=22.1.0.0-Final
 ENV QUARKUS_VERSION=2.2.5.Final-redhat-00007
 ENV TKN_VERSION=0.21.0
-ENV KN_VERSION=0.25.1
-ENV OC_VERSION=4.9
+ENV KN_VERSION=0.26.0
+ENV OC_VERSION=4.10
 ENV MVN_VERSION=3.8.3
 ENV GRAALVM_HOME="/usr/local/mandrel-java11-${MANDREL_VERSION}"
 ENV PATH="/usr/local/maven/apache-maven-${MVN_VERSION}/bin:${PATH}"
@@ -17,7 +17,7 @@ USER root
 
 RUN wget -O /tmp/mvn.tar.gz https://archive.apache.org/dist/maven/maven-3/${MVN_VERSION}/binaries/apache-maven-${MVN_VERSION}-bin.tar.gz && sudo tar -xvzf /tmp/mvn.tar.gz && rm -rf /tmp/mvn.tar.gz && mkdir /usr/local/maven && mv apache-maven-${MVN_VERSION}/ /usr/local/maven/ && alternatives --install /usr/bin/mvn mvn /usr/local/maven/apache-maven-${MVN_VERSION}/bin/mvn 1
 
-RUN wget -O /tmp/oc.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OC_VERSION}.12/openshift-client-linux-${OC_VERSION}.12.tar.gz && cd /usr/bin && sudo tar -xvzf /tmp/oc.tar.gz && sudo chmod a+x /usr/bin/oc && rm -f /tmp/oc.tar.gz
+RUN wget -O /tmp/oc.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OC_VERSION}.4/openshift-client-linux-${OC_VERSION}.4.tar.gz && cd /usr/bin && sudo tar -xvzf /tmp/oc.tar.gz && sudo chmod a+x /usr/bin/oc && rm -f /tmp/oc.tar.gz
 
 RUN wget -O /tmp/kn.tar.gz https://mirror.openshift.com/pub/openshift-v4/clients/serverless/${KN_VERSION}/kn-linux-amd64.tar.gz && cd /usr/bin && sudo tar -xvzf /tmp/kn.tar.gz && sudo chmod a+x kn && rm -f /tmp/kn.tar.gz
 
