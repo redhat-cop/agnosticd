@@ -16,4 +16,7 @@ diff -u \
     --entrypoint=/tmp/a/ee-report.sh $v1) \
     <(podman run  -v ./:/tmp/a \
     --entrypoint=/tmp/a/ee-report.sh $v2) \
-    | gh gist create --public -f "ee-report.diff" -d "ee-report ee-multicloud ${v1} to ${v2}"
+    | gh gist create --public -f "ee-report.diff" -d "ee-report ${v1} to ${v2}"
+
+podman run -v ./:/tmp/a --entrypoint=/tmp/a/ee-report.sh $v2 \
+	| gh gist create --public -f "ee-report.txt" -d "ee-report ${v2}"
