@@ -5,10 +5,11 @@ OUTPUT_DIR=/tmp/output_dir
 PLAYBOOK_DIR=ansible
 
 # AWS Uses Sandbox creds typically
-CREDS=1
+SANDBOX=1
 SECRETS_DIR=~/secrets
-SECRETS_FILE=$(SECRETS_DIR)/secret-base-aap2-infra-aws-sandbox0$(CREDS).yml
+SECRETS_FILE=$(SECRETS_DIR)/secret-base-aap2-infra-aws-sandbox0$(SANDBOX).yml
 TARGET=bastion
+EXTRA_ARGS=
 # Adjust to taste
 
 : ## TIP! make supports tab completion with *modern* shells e.g. zsh etc
@@ -44,6 +45,7 @@ deploy: ## Deploy ent-demo-automate-the-enterprise
 deploy: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
 deploy: ## 
 	cd ../../.. ; \
+	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log; \
 	ansible-playbook $(PLAYBOOK_DIR)/main.yml \
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
@@ -53,10 +55,13 @@ deploy-no-controller: ## Deploy ent-demo-automate-the-enterprise without AAP2 Co
 deploy-no-controller: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
 deploy-no-controller: ## 
 	cd ../../.. ; \
+	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/$(GUID)/base-app2-infra-sbox0$(SANDBOX).log; \
 	ansible-playbook $(PLAYBOOK_DIR)/main.yml \
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
-		-e agd_deploy_automationcontroller=false \
+		-e agd_deploy_automationplatform=false \
+		-e agd_automationcontroller_cert=false \
+		-e agd_automationhub_cert=false \
 		$(EXTRA_ARGS)
 
 		# -e guid=$(GUID) \
@@ -64,10 +69,13 @@ deploy-fast: ## Deploy ent-demo-automate-the-enterprise without AAP2 Controller,
 deploy-fast: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
 deploy-fast: ## 
 	cd ../../.. ; \
+	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log; \
 	ansible-playbook $(PLAYBOOK_DIR)/main.yml \
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
-		-e agd_deploy_automationcontroller=false \
+		-e agd_deploy_automationplatform=false \
+		-e agd_automationcontroller_cert=false \
+		-e agd_automationhub_cert=false \
 		-e update_packages=false \
 		$(EXTRA_ARGS)
 
@@ -75,6 +83,7 @@ destroy: ## Destroy ent-demo-automate-the-enterprise
 destroy: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
 destroy: ## 
 	cd ../../.. ; \
+	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log; \
 	ansible-playbook $(PLAYBOOK_DIR)/destroy.yml \
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
@@ -83,26 +92,24 @@ ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hos
 ssh-target: ## Assumes an existing output_dir
 ssh-target: ## 
 	echo "\n\nYou may want to 'sudo su - devops' - the primary user if you are on bastion\n\n"
-	ssh -F $(OUTPUT_DIR)/$(GUID)/$(ENV_TYPE)_$(GUID)_ssh_conf $(TARGET)
+	ssh -F $(OUTPUT_DIR)/sbox0$(SANDBOX)/$(ENV_TYPE)_sbox0$(SANDBOX)_ssh_conf $(TARGET)
 
 last-status: ## Output last status file
 last-status: ## Update status file via make status
 last-status: ## 
-	ls -l $(OUTPUT_DIR)/$(GUID)-status.txt
-	cat $(OUTPUT_DIR)/$(GUID)-status.txt
+	ls -l $(OUTPUT_DIR)/sbox0$(SANDBOX)/status.txt
+	cat $(OUTPUT_DIR)/sbox0$(SANDBOX)/status.txt
 
 # | awk '{ print \$6 " " $7 " " $8 " " $9 " " $10 }'
-status: ## Generate status
-status: ## Update status file
-status: ## 
+update-status: ## Generate status
+update-status: ## Update status file
+update-status: ## 
 	cd ../../.. ; \
+	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log; \
 	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
 		-e ACTION=status \
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
- 		# grep -A5 "Report status in user info" | \
- 		# awk '{ print $1 " "$2 " " $3 }'
-
 
 #	ansible-playbook ../../../ansible/lifecycle_entry_point.yml \
 stop: ## Suspend, stop, instances
@@ -110,6 +117,7 @@ stop: ## Restart with make start
 stop: ## 
 stop:
 	cd ../../.. ; \
+	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log; \
 	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
 			-e ACTION=stop \
 			-e @$(SECRETS_FILE) \
@@ -119,6 +127,7 @@ start: ## Suspend, start, instances
 start: ## Restart with make start
 start: ## 
 	cd ../../.. ; \
+	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log; \
 	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
 			-e ACTION=start \
 			-e @$(SECRETS_FILE) \
