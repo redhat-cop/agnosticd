@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+set -ex
 # example ❯ ./compare.sh quay.io/agnosticd/ee-multicloud:v0.0.10 ee-multicloud:v0.0.11
 
 v1=$1
@@ -11,12 +12,16 @@ if [ -z "${v1}" ] || [ -z "${v2}" ]; then
 	exit 1
 fi
 
-diff -u \
-    <(podman run  -v ./:/tmp/a \
-    --entrypoint=/tmp/a/ee-report.sh $v1) \
-    <(podman run  -v ./:/tmp/a \
-    --entrypoint=/tmp/a/ee-report.sh $v2) \
-    | gh gist create --public -f "ee-report.diff" -d "ee-report ${v1} to ${v2}"
+v1out=$(mktemp)
+v2out=$(mktemp)
+podman run  -v ./:/tmp/a --entrypoint=/tmp/a/ee-report.sh $v1 > $v1out
+podman run  -v ./:/tmp/a --entrypoint=/tmp/a/ee-report.sh $v2 > $v2out
 
-podman run -v ./:/tmp/a --entrypoint=/tmp/a/ee-report.sh $v2 \
-	| gh gist create --public -f "ee-report.txt" -d "ee-report ${v2}"
+podman images $v1 --format "* ${v1} size: {{ .Size }}"
+podman images $v2 --format "* ${v2} size: {{ .Size }}"
+echo
+echo "diff between ${v1} and ${v2}:"
+echo
+echo '```diff'
+diff -u $v1out $v2out
+echo '```'
