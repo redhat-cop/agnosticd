@@ -13,6 +13,49 @@
   ansible.builtin.pip:
     name: kubernetes, passlib
 
+- name: Find an extra disk for libvirt folder
+  set_fact:
+    _disks: "{{ _disks|default([]) + [ item ] }}"
+    _diskname: "{{ '/dev/' + item.key }}"
+  when:
+    - not item.value.partitions
+    - item.key is search ("nvme*")
+    - min_value|int <= item.value.sectors|int * item.value.sectorsize|int
+    - extra_disk_libvirt_images is true
+  vars:
+    min_value: '{{ 500 * 1024 * 1024 * 1024  }}' #500GB
+  with_dict: "{{ ansible_devices }}"
+
+- name: The device selected to store libvirt files
+  debug:
+    msg: "{{ item }}"
+  with_dict: "{{ _disks }}"
+  when:
+    - _diskname is defined
+
+- name: Create a xfs filesystem on {{ _diskname }}
+  community.general.filesystem:
+    fstype: "xfs"
+    dev: "{{ _diskname }}"
+    force: true
+    state: present
+    resizefs: true
+  when:
+    - _diskname is defined
+
+- name: Mount up device in /var/lib/libvirt
+  ansible.posix.mount:
+    path: /var/lib/libvirt
+    src: "{{ _diskname }}"
+    fstype: xfs
+    state: mounted
+  when:
+    - _diskname is defined
+
+- name: Ensure libvirt file applies the proper SELinux context
+  ansible.builtin.shell:
+    cmd: restorecon /var/lib/libvirt
+
 - name: Ensure lab dependencies are installed
   ansible.builtin.dnf:
     name: libvirt, libvirt-daemon-driver-qemu, qemu-kvm, git
@@ -143,6 +186,12 @@
   ansible.builtin.shell:
     cmd: /tmp/deploy-sushy-tools.sh
 
+- name: Ensure sushy tools are running
+  ansible.builtin.systemd:
+    state: restarted
+    enabled: true
+    name: sushy-tools
+
 - name: Ensure disconnected registry dependencies are installed
   ansible.builtin.dnf:
     name: podman, httpd-tools
@@ -197,6 +246,21 @@
 - name: Ensure trusted certs are updated
   ansible.builtin.shell:
     cmd: update-ca-trust
+
+#- name: Ensure firewalld is disabled
+#  ansible.builtin.systemd:
+#    state: stopped
+#    masked: true
+#    enabled: false
+#    name: firewalld
+
+- name: Wait for registry port {{ lab_registry_host.split(":")[1] }} to become open on the host, do not start checking for 10 seconds
+  ansible.builtin.wait_for:
+    port: "{{ lab_registry_host.split(':')[1] }}"
+    host: "{{ lab_registry_host.split(':')[0] }}"
+    delay: 10
+    sleep: 10
+    timeout: 60
 
 - name: Ensure registry is running by login into it
   containers.podman.podman_login:
