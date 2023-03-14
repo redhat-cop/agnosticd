@@ -1,0 +1,500 @@
+---
+- name: Install client and OpenShift Installer binaries
+  import_tasks: install_installer.yml
+
+- name: Generate install_config.yaml
+  import_tasks: generate_install_config.yml
+
+
+- name: Installation and getting the logs
+  tags:
+  - run_installer
+  when: purpose == "build" or purpose == "development"
+  block:
+  - name: Create openshift-install manifests
+    include_tasks: create-manifests.yml
+
+  - name: Replace cluster-ingress-default-ingresscontroller.yaml to use HostNetwork
+    copy:
+      src: cluster-ingress-default-ingresscontroller.yaml
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/manifests/cluster-ingress-default-ingresscontroller.yaml
+
+  - name:  Remove the Kubernetes manifest files that define the control plane machines
+    shell: rm /home/{{ ansible_user }}/{{ cluster_name }}/openshift/99_openshift-cluster-api_master-machines-*.yaml
+
+  - name: Remove the Kubernetes manifest files that define the control plane machine set
+    shell: rm /home/{{ ansible_user }}/{{ cluster_name }}/openshift/99_openshift-machine-api_master-control-plane-machine-set.yaml
+
+  - name: Remove the Kubernetes manifest files that define the worker machines
+    shell: rm /home/{{ ansible_user }}/{{ cluster_name }}/openshift/99_openshift-cluster-api_worker-machineset-*.yaml
+
+  - name: Create the Ignition configuration files
+    command: openshift-install create ignition-configs --dir /home/{{ ansible_user }}/{{ cluster_name }}
+
+  - name: Extracting the infrastructure name
+    command: jq -r .infraID /home/{{ ansible_user }}/{{ cluster_name }}/metadata.json
+    register: infraID
+
+  - name: Copy the parameter files for Route53
+    template:
+      src: route53.json
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/route53.json
+
+  - name: Copy the AWS Cloudformation for Route53
+    copy:
+      src: route53.yaml
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/route53.yaml
+
+  - name: Install boto 3python package
+    pip:
+      name: boto3
+    become: true
+
+  - name: Run aws cloudformation create-stack for Route53
+    command: aws cloudformation create-stack --stack-name ocp-route53-{{guid}} --template-body file://route53.yaml --parameters file://route53.json --capabilities CAPABILITY_NAMED_IAM --region {{ aws_region_final | default(aws_region) }}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  - name: Wait till stack ocp-route53 finishes
+    command: aws cloudformation wait stack-create-complete --stack-name ocp-route53-{{guid}} --region {{ aws_region_final | default(aws_region) }}
+
+  - name: Option information of stack ocp-secgroup
+    cloudformation_info:
+      stack_name: ocp-route53-{{ guid }}
+    register: r_stack_route53
+
+  - debug: var=r_stack_route53
+
+  - name: Copy the parameter files for Security Group
+    template:
+      src: secgroup.json
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/secgroup.json
+
+  - name: Copy the AWS Cloudformation for Security Group
+    copy:
+      src: secgroup.yaml
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/secgroup.yaml
+
+  - name: Run aws cloudformation create-stack for secgroup
+    command: aws cloudformation create-stack --stack-name ocp-secgroup-{{ guid }} --template-body file://secgroup.yaml --parameters file://secgroup.json --capabilities CAPABILITY_NAMED_IAM --region {{ aws_region_final | default(aws_region) }}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  - name: Wait till stack ocp-secgroup finishes
+    command: aws cloudformation wait stack-create-complete --stack-name ocp-secgroup-{{ guid }} --region {{ aws_region_final | default(aws_region) }}
+
+  #- name: Obtain outputs from stack ocp-secgroup
+  #  command: aws cloudformation describe-stacks --stack-name ocp-secgroup-{{ guid }} --region {{ aws_region_final | default(aws_region) }}
+  #  register: r_stack_secgroup
+
+  - name: Option information of stack ocp-secgroup
+    cloudformation_info:
+      stack_name: ocp-secgroup-{{ guid }}
+    register: r_stack_secgroup
+
+  - debug: var=r_stack_secgroup
+
+
+  - name: Create a bucket
+    command: aws s3 mb s3://ocp-{{guid}}-infra
+
+  - name: Copy bootstrap.ign to the bucket
+    command: aws s3 cp bootstrap.ign s3://ocp-{{guid}}-infra/bootstrap.ign
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+
+  - name: Get the AMI id for RHCOS
+    shell: openshift-install coreos print-stream-json | jq -r '.architectures.x86_64.images.aws.regions["{{ aws_region_final | default(aws_region) }}"].image'
+    register: amiID
+
+  - name: Copy the parameter files for Bootstrap
+    template:
+      src: bootstrap.json
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/bootstrap.json
+
+  - name: Copy the AWS Cloudformation for Bootstrap
+    copy:
+      src: bootstrap.yaml
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/bootstrap.yaml
+
+  - name: Run aws cloudformation create-stack for bootstrap
+    command: aws cloudformation create-stack --stack-name ocp-bootstrap-{{ guid }} --template-body file://bootstrap.yaml --parameters file://bootstrap.json --capabilities CAPABILITY_NAMED_IAM --region {{ aws_region_final | default(aws_region) }}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  - name: Wait till stack ocp-bootstrap finishes
+    command: aws cloudformation wait stack-create-complete --stack-name ocp-bootstrap-{{ guid }} --region {{ aws_region_final | default(aws_region) }}
+
+
+  - name: Get control plane certificate from master.ign
+    shell: cat master.ign |jq -r ".ignition.security.tls.certificateAuthorities[0].source"
+    register: master_certificate
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  - name: Copy the parameter files for ControlPlane
+    template:
+      src: controlplane.json
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/controlplane.json
+
+  - name: Copy the AWS Cloudformation for Controlplane
+    copy:
+      src: controlplane.yaml
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/controlplane.yaml
+
+  - name: Run aws cloudformation create-stack for controlplane
+    command: aws cloudformation create-stack --stack-name ocp-controlplane-{{ guid }} --template-body file://controlplane.yaml --parameters file://controlplane.json --capabilities CAPABILITY_NAMED_IAM --region {{ aws_region_final | default(aws_region) }}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  #- name: Wait till stack ocp-controlplane finishes
+  #  command: aws cloudformation wait stack-create-complete --stack-name ocp-controlplane-{{ guid }} --region {{ aws_region_final | default(aws_region) }}
+
+  - name: Get control plane certificate from master.ign
+    shell: cat worker.ign |jq -r ".ignition.security.tls.certificateAuthorities[0].source"
+    register: worker_certificate
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  - name: Copy the parameter files for Worker
+    template:
+      src: worker.json
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/worker.json
+
+  - name: Copy the AWS Cloudformation for Worker
+    copy:
+      src: worker.yaml
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/worker.yaml
+
+  - name: run aws cloudformation create-stack for worker
+    command: aws cloudformation create-stack --stack-name ocp-worker-{{ guid }} --template-body file://worker.yaml --parameters file://worker.json --capabilities capability_named_iam --region {{ aws_region_final | default(aws_region) }}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  #- name: Wait till stack ocp-worker finishes
+  #  command: aws cloudformation wait stack-create-complete --stack-name ocp-worker-{{ guid }} --region {{ aws_region_final | default(aws_region) }}
+
+  - name: Wait for the bootstrap is completed
+    command: openshift-install wait-for bootstrap-complete
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+
+  #- name: Approve all pending CSR
+  #  command: oc get csr -o go-template='{{range .items}}{{if not .status}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' | xargs --no-run-if-empty oc adm certificate approve
+  #  args:
+  #    chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  - name: Delete bootstrap stack
+    command: aws cloudformation delete-stack --stack-name ocp-bootstrap-{{ guid }}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  - name: Wait 2 minutes to obtain pending CSR
+    pause:
+      minutes: 2
+
+  - name: Approve pending CSR
+    shell: oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+
+  - name: Wait 2 minutes to obtain more pending CSR
+    pause:
+      minutes: 2
+
+  - name: Approve pending CSR (again)
+    shell: oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+
+
+  - name: Wait till the cluster installation is completed
+    command: openshift-install wait-for install-complete
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+    async: 100000
+    poll: 0
+    register: install_ocp
+
+  - name: 'wait for ocp install - check on async task'
+    async_status:
+      jid: "{{ install_ocp.ansible_job_id }}"
+    register: job_result
+    until: job_result.finished
+    retries: 600
+
+  - name: Reboot nodes
+    script: files/reboot_nodes.sh
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+    register: reboot_nodes
+
+
+- name: Running predeployed OCP
+  tags:
+  - run_installer
+  when: purpose != "build" and purpose != "development"
+  block:
+
+  - debug:
+      msg: "{{ hostvars['localhost'].custom_ami_images_tags }}"
+
+  - name: Extracting the infrastructure name
+    set_fact:
+      infraID: "{{ item.value.split('-')[-1] }}"
+    when: item.key.startswith("kubernetes.io/cluster")
+    loop: "{{  hostvars['localhost'].custom_ami_images_tags[master01_instance_image] | dict2items}}"
+
+  - name: Copy the parameter files for Route53
+    template:
+      src: route53.json
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/route53.json
+
+  - name: Copy the AWS Cloudformation for Route53
+    copy:
+      src: route53.yaml
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/route53.yaml
+
+  - name: Install boto 3python package
+    pip:
+      name: boto3
+    become: true
+
+  - name: Run aws cloudformation create-stack
+    command: aws cloudformation create-stack --stack-name ocp-route53-{{guid}} --template-body file://route53.yaml --parameters file://route53.json --capabilities CAPABILITY_NAMED_IAM --region {{ aws_region_final | default(aws_region) }}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  - name: Wait till stack ocp-route53 finishes
+    command: aws cloudformation wait stack-create-complete --stack-name ocp-route53-{{guid}} --region {{ aws_region_final | default(aws_region) }}
+
+  - name: Option information of stack ocp-secgroup
+    cloudformation_info:
+      stack_name: ocp-route53-{{ guid }}
+    register: r_stack_route53
+
+  - debug: var=r_stack_route53
+
+  - name: Copy the parameter files for Security Group
+    template:
+      src: secgroup.json
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/secgroup.json
+
+  - name: Copy the AWS Cloudformation for Security Group
+    copy:
+      src: secgroup.yaml
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/secgroup.yaml
+
+  - name: Run aws cloudformation create-stack
+    command: aws cloudformation create-stack --stack-name ocp-secgroup-{{ guid }} --template-body file://secgroup.yaml --parameters file://secgroup.json --capabilities CAPABILITY_NAMED_IAM --region {{ aws_region_final | default(aws_region) }}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  - name: Wait till stack ocp-secgroup finishes
+    command: aws cloudformation wait stack-create-complete --stack-name ocp-secgroup-{{ guid }} --region {{ aws_region_final | default(aws_region) }}
+
+  - name: Option information of stack ocp-secgroup
+    cloudformation_info:
+      stack_name: ocp-secgroup-{{ guid }}
+    register: r_stack_secgroup
+
+  - debug: var=r_stack_secgroup
+
+
+  - name: Copy the parameter files for ControlPlane
+    template:
+      src: custom-controlplane.json
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/controlplane.json
+
+  - name: Copy the AWS Cloudformation for Controlplane
+    copy:
+      src: custom-controlplane.yaml
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/controlplane.yaml
+
+  - name: Run aws cloudformation create-stack
+    command: aws cloudformation create-stack --stack-name ocp-controlplane-{{ guid }} --template-body file://controlplane.yaml --parameters file://controlplane.json --capabilities CAPABILITY_NAMED_IAM --region {{ aws_region_final | default(aws_region) }}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  - name: Wait till stack ocp-controlplane finishes
+    command: aws cloudformation wait stack-create-complete --stack-name ocp-controlplane-{{ guid }} --region {{ aws_region_final | default(aws_region) }}
+
+  - name: Copy the parameter files for Worker
+    template:
+      src: custom-worker.json
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/worker.json
+
+  - name: Copy the AWS Cloudformation for Worker
+    copy:
+      src: custom-worker.yaml
+      dest: /home/{{ ansible_user }}/{{ cluster_name }}/worker.yaml
+
+  - name: Run aws cloudformation create-stack
+    command: aws cloudformation create-stack --stack-name ocp-worker-{{ guid }} --template-body file://worker.yaml --parameters file://worker.json --capabilities CAPABILITY_NAMED_IAM --region {{ aws_region_final | default(aws_region) }}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+
+  - name: Wait till stack ocp-worker finishes
+    command: aws cloudformation wait stack-create-complete --stack-name ocp-worker-{{ guid }} --region {{ aws_region_final | default(aws_region) }}
+
+  - name: Wait 1 minutes to obtain pending CSR
+    pause:
+      minutes: 1
+
+  - name: Approve pending CSR
+    shell: oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+
+  - name: Wait 1 minutes to obtain more pending CSR
+    pause:
+      minutes: 1
+
+  - name: Approve pending CSR (again)
+    shell: oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+
+#  - name: Reboot nodes
+#    script: files/reboot_nodes.sh
+#    environment:
+#      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+#    register: reboot_nodes
+
+  - name: Change default domain for the apps
+    shell: |
+      oc patch ingresses.config cluster --type merge -p '{"spec":{"appsDomain": "apps.{{ guid }}{{ subdomain_base_suffix }}"}}'
+    register: ocresult
+    until: ocresult.rc == 0
+    retries: 15
+    delay: 10
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+
+  - name: Create CredentialsRequest files
+    shell: oc adm release extract quay.io/openshift-release-dev/ocp-release:$(oc version -o json | jq  -r ".openshiftVersion")-x86_64 --credentials-requests --cloud=aws
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+
+  - name: Replace the CredentialsRequest
+    shell: ls -1 0000_*credentials-request.yaml | xargs -i oc replace --force -f {}
+    register: ocresult
+    until: ocresult.rc == 0
+    retries: 15
+    delay: 10
+    args:
+      chdir: /home/{{ ansible_user }}/{{ cluster_name }}/
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+
+  - name: Remove not needed Credential
+    shell: oc delete CredentialsRequest -n openshift-cloud-credential-operator openshift-cluster-api-aws
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+
+  - name: Scale to 0 the image registry
+    shell: oc scale deployment.apps/image-registry --replicas=0 -n openshift-image-registry
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+
+  - name: Wait 30 seconds
+    pause:
+      seconds: 30
+
+  - name: Scale to 2 the image registry
+    shell: oc scale deployment.apps/image-registry --replicas=2 -n openshift-image-registry
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+
+  - name: Change the S3 Bucket
+    shell: |
+      oc patch configs.imageregistry.operator.openshift.io cluster --type merge --patch '{"spec":{"storage":{"s3":{"bucket":"ocp-{{ guid }}"}}, "managementState": "Managed"}}'
+    environment:
+      KUBECONFIG: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+
+
+- name: Fetch kube config
+  fetch:
+    flat: true
+    src: /home/{{ ansible_user }}/{{ cluster_name }}/auth/{{ item }}
+    dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_{{ item }}"
+  loop:
+  - kubeconfig
+  - kubeadmin-password
+
+- name: Make sure .kube directory exists for {{ ansible_user }}
+  file:
+    state: directory
+    path: /home/{{ ansible_user }}/.kube
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0700
+
+- name: Make sure .kube directory exists for root
+  become: true
+  file:
+    state: directory
+    path: /root/.kube
+    owner: root
+    group: root
+    mode: 0700
+
+- name: Copy cluster kubeconfig to /home/{{ ansible_user }}/.kube/config
+  copy:
+    remote_src: true
+    src: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+    dest: "/home/{{ ansible_user }}/.kube/config"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: 0600
+
+- name: Copy cluster kubeconfig to /root/.kube/config
+  become: true
+  copy:
+    remote_src: true
+    src: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+    dest: /root/.kube/config
+    owner: root
+    group: root
+    mode: 0600
+
+- name: Set up Student User
+  when: install_student_user | bool
+  block:
+  - name: Make sure .kube directory exists in /home/{{ student_name }}
+    become: true
+    file:
+      state: directory
+      path: "/home/{{ student_name }}/.kube"
+      owner: "{{ student_name }}"
+      group: users
+      mode: 0700
+
+  - name: Copy /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig to /home/{{ student_name }}/.kube
+    become: true
+    copy:
+      src: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+      dest: /home/{{ student_name }}/.kube/config
+      remote_src: true
+      owner: "{{ student_name }}"
+      group: users
+      mode: 0600
+
+- name: Create OpenShift Bash completion file
+  become: true
+  shell: oc completion bash >/etc/bash_completion.d/openshift
+
+- name: Gather and Print cluster info
+  import_tasks: print_cluster_info.yml
