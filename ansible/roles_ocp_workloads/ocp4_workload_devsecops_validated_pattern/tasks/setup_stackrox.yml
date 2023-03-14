@@ -1,0 +1,207 @@
+---
+- name: Get stackrox route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: "{{ ocp4_workload_devsecops_validated_pattern_stackrox_namespace }}"
+    name: central
+  register: r_route
+
+- name: Set stackrox endpoint and url
+  set_fact:
+    _ocp4_workload_devsecops_validated_pattern_central_stackrox_endpoint: "{{ r_route.resources[0].spec.host }}:443" # yamllint disable-line rule:line-length
+    _ocp4_workload_devsecops_validated_pattern_centeral_stackrox_url: https://{{ r_route.resources[0].spec.host }} # yamllint disable-line rule:line-length
+
+- name: Create stackrox token
+  uri:
+    url: "{{ _ocp4_workload_devsecops_validated_pattern_centeral_stackrox_url }}/v1/apitokens/generate"
+    user: admin
+    password: "{{ common_password }}"
+    method: POST
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body: {"name":"admin", "role":"Admin"}
+  register: r_uri
+
+- name: Set stackrox token
+  set_fact:
+    _ocp4_workload_devsecops_validated_pattern_central_stackrox_token: "{{ r_uri.json.token }}"
+
+- name: Create secret (token)
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: stackrox-secret
+        namespace: "{{ ocp4_workload_devsecops_validated_pattern_ci_namespace }}"
+      type: Opaque
+      data:
+        rox_api_token: "{{ _ocp4_workload_devsecops_validated_pattern_central_stackrox_token | string | b64encode }}"
+
+- name: Create secret (endpoint)
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: stackrox-endpoint
+        namespace: "{{ ocp4_workload_devsecops_validated_pattern_ci_namespace }}"
+      type: Opaque
+      data:
+        rox_central_endpoint: "{{ _ocp4_workload_devsecops_validated_pattern_central_stackrox_endpoint | string | b64encode }}"
+
+- name: Stackrox imagestream integration - add registry integration
+  uri:
+    url: "{{ _ocp4_workload_devsecops_validated_pattern_centeral_stackrox_url }}/v1/imageintegrations"
+    user: admin
+    password: "{{ common_password }}"
+    method: POST
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body: >-
+      {
+      "name": "registry-admin-{{ guid }}",
+      "type": "docker",
+      "categories": ["REGISTRY"],
+      "docker": {
+      "endpoint": "{{ ocp4_workload_devsecops_validated_pattern_docker_registry }}",
+      "username": "{{ ocp4_workload_devsecops_validated_pattern_docker_username }}",
+      "password": "{{ ocp4_workload_devsecops_validated_pattern_docker_password }}",
+      "insecure": true
+      },
+      "skipTestIntegration": false
+      }
+
+- name: Read cosign public key
+  set_fact:
+    _ocp4_workload_devsecops_validated_pattern_cosign_pub: "{{ lookup('file', 'files/cosign.pub') | replace('\n', '\\n') }}"
+
+- name: Stackrox imagestream integration - add signature integration
+  uri:
+    url: "{{ _ocp4_workload_devsecops_validated_pattern_centeral_stackrox_url }}/v1/signatureintegrations"
+    user: admin
+    password: "{{ common_password }}"
+    method: POST
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body: >-
+      {
+        "name": "cosign",
+        "cosign": {
+          "publicKeys": [
+            {
+              "name": "cosign.pub",
+              "publicKeyPemEnc": "{{ _ocp4_workload_devsecops_validated_pattern_cosign_pub }}"
+            }
+          ]
+        }
+      }
+  register: r_integration_response
+
+- name: Set integration id
+  set_fact:
+    _signature_integration_id: "{{ r_integration_response.json.id }}"
+
+- name: Get Clusters
+  uri:
+    url: "{{ _ocp4_workload_devsecops_validated_pattern_centeral_stackrox_url }}/v1/clusters"
+    user: admin
+    password: "{{ common_password }}"
+    method: GET
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+  register: r_cluster_response
+  retries: 60
+  delay: 10
+  until:
+  - r_cluster_response.json is defined
+  - r_cluster_response.json.clusters is defined
+  - r_cluster_response.json.clusters | length > 2
+
+- name: Cluster response data
+  debug:
+    var: r_cluster_response
+
+- name: Set JSON Query (dev)
+  set_fact:
+    _jsonQuery: "[?name=='{{ ocp4_workload_devsecops_validated_pattern_dev_cluster.acs }}']"
+
+- name: Set dev cluster id {{ _jsonQuery }}
+  set_fact:
+    _cluster_dev_id: "{{ selected[0].id }}"
+  vars:
+    selected: >-
+      {{
+        r_cluster_response.json.clusters | json_query(_jsonQuery)
+      }}
+
+- name: Set JSON Query (prod)
+  set_fact:
+    _jsonQuery: "[?name=='{{ ocp4_workload_devsecops_validated_pattern_prod_cluster.acs }}']"
+
+- name: Set prod cluster id {{ _jsonQuery }}
+  set_fact:
+    _cluster_prod_id: "{{ selected[0].id }}"
+  vars:
+    selected: >-
+      {{
+        r_cluster_response.json.clusters | json_query(_jsonQuery)
+      }}
+
+- name: Read policy payload
+  set_fact:
+    _ocp4_workload_devsecops_validated_pattern_signature_policy: "{{ lookup('template', 'templates/acs-signature-policy.json.j2', convert_data=False) | string }}" # yamllint disable-line rule:line-length
+  vars:
+    _cluster_namespace: "{{ ocp4_workload_devsecops_validated_pattern_app_namespace }}"
+
+- name: Create stackrox image signature policy
+  uri:
+    url: "{{ _ocp4_workload_devsecops_validated_pattern_centeral_stackrox_url }}/v1/policies"
+    user: admin
+    password: "{{ common_password }}"
+    method: POST
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body: "{{ _ocp4_workload_devsecops_validated_pattern_signature_policy }}"
+  ignore_errors: true
+
+- name: Get Stackrox policies
+  uri:
+    url: "{{ _ocp4_workload_devsecops_validated_pattern_centeral_stackrox_url }}/v1/policies"
+    user: admin
+    password: "{{ common_password }}"
+    method: GET
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+  register: r_policies
+  retries: 60
+  delay: 5
+  until:
+  - r_policies.json is defined
+  - r_policies.json.policies is defined
+  - r_policies.json.policies | length > 0
+
+- name: Inform only policies
+  include_tasks: inform_only_policy_tasks.yml
+  loop: "{{ ocp4_workload_devsecops_validated_pattern_inform_only_policies }}"

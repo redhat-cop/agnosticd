@@ -1,0 +1,226 @@
+---
+- name: Setting up workload
+  ansible.builtin.debug:
+    msg: "Setting up OpenShift Data Foundation"
+
+- name: Discovering worker nodes
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+    label_selectors:
+    - node-role.kubernetes.io/worker
+  register: r_worker_nodes
+
+- name: Fail for less than 3 worker nodes
+  when: r_worker_nodes.resources | length < 3
+  ansible.builtin.fail:
+    msg: "Less than 3 worker nodes detected. Cannot install Ceph..."
+
+- name: Set variables
+  ansible.builtin.set_fact:
+    _ocp4_workload_openshift_data_foundation_worker_nodes: "{{ r_worker_nodes | json_query('resources[*].metadata.name') }}"
+
+- name: Adding Ceph labels to worker nodes
+  kubernetes.core.k8s:
+    state: patched
+    api_version: v1
+    kind: Node
+    name: "{{ worker_node }}"
+    definition:
+      apiVersion: v1
+      kind: Node
+      name: "{{ worker_node }}"
+      metadata:
+        labels:
+          cluster.ocs.openshift.io/openshift-storage: ''
+  loop: "{{ _ocp4_workload_openshift_data_foundation_worker_nodes }}"
+  loop_control:
+    loop_var: worker_node
+    label: "{{ worker_node }}"
+
+- name: Create namespace openshift-storage
+  kubernetes.core.k8s:
+    state: present
+    api_version: v1
+    kind: Namespace
+    name: openshift-storage
+
+- name: Create CatalogSource
+  when: ocp4_workload_openshift_data_foundation_catalogsource_setup | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'catalogsource.yaml.j2' ) | from_yaml }}"
+
+- name: Create OperatorGroup
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'operatorgroup.yaml.j2' ) | from_yaml }}"
+
+- name: Create operator subscription
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'subscription.yaml.j2' ) | from_yaml }}"
+
+- name: Wait for the operator managed CRD to become available
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: storagesystems.odf.openshift.io
+  register: r_crd_check
+  retries: 200
+  delay: 10
+  until: r_crd_check.resources | list | length == 1
+
+- name: Wait for the console plugin to become available
+  kubernetes.core.k8s_info:
+    api_version: console.openshift.io/v1alpha1
+    kind: ConsolePlugin
+    name: odf-console
+  register: r_crd_check
+  retries: 200
+  delay: 10
+  until: r_crd_check.resources | list | length == 1
+
+- name: Enable ODF console plugin
+  kubernetes.core.k8s:
+    state: patched
+    kind: Console
+    api_version: operator.openshift.io/v1
+    name: cluster
+    definition:
+      spec:
+        plugins:
+        - odf-console
+
+- name: Create the ODF StorageCluster
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'storagecluster.yaml.j2' ) | from_yaml }}"
+
+- name: Create the ODF StorageSystem
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'storagesystem.yaml.j2' ) | from_yaml }}"
+  register: r_k8s_run
+  until: r_k8s_run is not failed
+  delay: 10
+  retries: 3
+
+- name: Wait for ODF Storage System to finish deploying
+  kubernetes.core.k8s_info:
+    api_version: odf.openshift.io/v1alpha1
+    kind: StorageSystem
+    name: ocs-storagecluster-storagesystem
+    namespace: openshift-storage
+    wait: true
+    wait_condition:
+      reason: ReconcileCompleted
+      status: 'True'
+      type: Available
+    wait_sleep: 10
+    wait_timeout: 600
+
+- name: Wait for ODF Storage Cluster to finish deploying
+  kubernetes.core.k8s_info:
+    api_version: ocs.openshift.io/v1
+    kind: StorageCluster
+    name: ocs-storagecluster
+    namespace: openshift-storage
+    wait: true
+    wait_condition:
+      reason: ReconcileCompleted
+      status: "True"
+      type: ReconcileComplete
+    wait_sleep: 10
+    wait_timeout: 600
+
+- name: Update Tolerations for CSI DaemonSets
+  when: ocp4_workload_openshift_data_foundation_tolerations | length > 0
+  block:
+  - name: Update Config Map rook-ceph-operator-config
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'configmap-rook-ceph-operator-config.yaml.j2' ) | from_yaml }}"
+
+  - name: Delete DaemonSets to pick up modified ConfigMap
+    kubernetes.core.k8s:
+      state: absent
+      api_version: v1
+      kind: DaemonSet
+      name: "{{ item }}"
+      namespace: openshift-storage
+    loop:
+    - csi-cephfsplugin
+    - csi-rbdplugin
+
+  - name: Restart Rook Ceph operator to redeploy DaemonSets
+    kubernetes.core.k8s:
+      state: absent
+      api_version: v1
+      kind: Pod
+      namespace: openshift-storage
+      label_selectors:
+      - app = rook-ceph-operator
+
+- name: Update default storage class
+  when: ocp4_workload_openshift_data_foundation_update_default_storage_class | bool
+  block:
+  - name: Wait for the StorageClasses to become available
+    kubernetes.core.k8s_info:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+      name: "{{ ocp4_workload_openshift_data_foundation_new_default_storage_class_name }}"
+    register: sc_crd
+    retries: 200
+    delay: 10
+    until: sc_crd.resources | list | length == 1
+
+  - name: Get all storage classes
+    kubernetes.core.k8s_info:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+    register: r_sc
+
+  - name: Remove default from previous default storage class
+    when: storage_class.metadata.annotations['storageclass.kubernetes.io/is-default-class'] is defined
+    kubernetes.core.k8s:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+      name: "{{ storage_class.metadata.name }}"
+      definition:
+        kind: StorageClass
+        apiVersion: v1
+        name: "{{ ocp4_workload_openshift_data_foundation_new_default_storage_class_name }}"
+        metadata:
+          annotations:
+            storageclass.kubernetes.io/is-default-class: "false"
+    loop: "{{ r_sc.resources }}"
+    loop_control:
+      loop_var: storage_class
+      label: "{{ storage_class.metadata.name }}"
+
+  - name: Set new default storage class
+    kubernetes.core.k8s:
+      api_version: v1
+      kind: StorageClass
+      name: "{{ ocp4_workload_openshift_data_foundation_new_default_storage_class_name }}"
+      definition:
+        kind: StorageClass
+        apiVersion: v1
+        name: "{{ ocp4_workload_openshift_data_foundation_new_default_storage_class_name }}"
+        metadata:
+          annotations:
+            storageclass.kubernetes.io/is-default-class: "true"
+
+- name: Deploy Ceph toolbox
+  when: ocp4_workload_openshift_data_foundation_install_toolbox | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'toolbox.yaml.j2') }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

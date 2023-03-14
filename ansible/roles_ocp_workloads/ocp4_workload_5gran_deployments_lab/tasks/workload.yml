@@ -1,0 +1,279 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Ensure hub cluster is deployed via kcli
+  ansible.builtin.shell:
+    cmd: kcli create plan --pf hub.yml
+  args:
+    chdir: /root/kcli-openshift4-baremetal/
+  register: result
+  failed_when: result.rc != 0 or ("skipped on local" not in result.stdout and "deployed on local" not in result.stdout)
+
+- name: Wait for hub cluster to be deployed via kcli
+  ansible.builtin.shell:
+    cmd: oc login https://{{ lab_api_host }} -u admin -p admin --insecure-skip-tls-verify=true > /dev/null
+  register: result
+  until: result.rc == 0
+  retries: 120
+  delay: 60
+
+- name: Ensure we have the kubeconfig file for the hub cluster copied in the bastion
+  ansible.builtin.shell:
+    cmd: "{{ item }}"
+  with_items:
+    - 'kcli ssh hub-installer -- "sudo cp /root/ocp/auth/kubeconfig /tmp/kubeconfig && sudo chmod 644 /tmp/kubeconfig"'
+    - 'kcli scp hub-installer:/tmp/kubeconfig /root/hub-kubeconfig'
+
+- name: Ensure kubernetes manifests are downloaded
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.destination }}"
+    mode: "{{ item.mode }}"
+  # yamllint disable rule:line-length
+  with_items:
+    - {url: "https://raw.githubusercontent.com/RHsyseng/5g-ran-deployments-on-ocp-lab/main/lab-materials/lab-env-data/hub-cluster/lvmcluster.yaml", destination: "/tmp/lvmcluster.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/RHsyseng/5g-ran-deployments-on-ocp-lab/main/lab-materials/lab-env-data/hub-cluster/argocd-patch.json", destination: "/tmp/argocd-openshift-gitops-patch.json", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/RHsyseng/5g-ran-deployments-on-ocp-lab/main/lab-materials/lab-env-data/hub-cluster/hub-operators-argoapps.yaml", destination: "/tmp/hub-operators-argoapps.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/RHsyseng/5g-ran-deployments-on-ocp-lab/main/lab-materials/lab-env-data/hub-cluster/sno1-argoapp.yaml", destination: "/tmp/sno1-argoapp.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/RHsyseng/5g-ran-deployments-on-ocp-lab/main/lab-materials/lab-env-data/hub-cluster/argocd-clusterrolebinding.yaml", destination: "/tmp/argocd-clusterrolebinding.yaml", mode: "0644"}
+  # yamllint enable rule:line-length
+
+- name: Apply LVMCluster manifest to the cluster
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    state: present
+    src: /tmp/lvmcluster.yaml
+
+- name: Wait until LVMCluster is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: lvm.topolvm.io/v1alpha1
+    kind: LVMCluster
+    name: odf-lvmcluster
+    namespace: openshift-storage
+  register: lvmcluster
+  retries: 60
+  delay: 10
+  until:
+    - lvmcluster is defined
+    - lvmcluster.resources | length > 0
+    - lvmcluster.resources[0].status.ready == true
+
+- name: Ensure LVMCLuster storageclass is set as default
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    state: patched
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    name: odf-lvm-vg1
+    definition:
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+
+- name: Ensure ArgoCD instance is patched for ZTP support
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: argoproj.io/v1alpha1
+    kind: ArgoCD
+    name: openshift-gitops
+    namespace: openshift-gitops
+    state: patched
+    src: /tmp/argocd-openshift-gitops-patch.json
+    merge_type: merge
+
+- name: Wait until ArgoCD Pods are ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    kind: Pod
+    namespace: openshift-gitops
+    label_selectors:
+      - app.kubernetes.io/name = openshift-gitops-repo-server
+  register: result
+  until:
+    - result.resources[0].status.phase == "Running"
+    - result.resources[0].status.containerStatuses[0].ready == true
+  retries: 25
+  delay: 5
+
+- name: Apply ArgoCD ClusterRoleBinding manifest to the cluster
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    state: present
+    src: /tmp/argocd-clusterrolebinding.yaml
+
+- name: Apply HUB Cluster Operators APPs
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    state: present
+    src: /tmp/hub-operators-argoapps.yaml
+
+- name: Wait until ArgoCD APP for HUB Cluster Operators deployment is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    name: hub-operators-deployment
+    namespace: openshift-gitops
+  register: argocd_app_hub_operators
+  retries: 60
+  delay: 10
+  until:
+    - argocd_app_hub_operators is defined
+    - argocd_app_hub_operators.resources | length > 0
+    - argocd_app_hub_operators.resources[0].status is defined
+    - argocd_app_hub_operators.resources[0].status.health.status == "Healthy"
+    - argocd_app_hub_operators.resources[0].status.sync.status == "Synced"
+
+- name: Wait until ArgoCD APP for HUB Cluster Operators config is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    name: hub-operators-config
+    namespace: openshift-gitops
+  register: argocd_app_hub_operators
+  retries: 60
+  delay: 10
+  until:
+    - argocd_app_hub_operators is defined
+    - argocd_app_hub_operators.resources | length > 0
+    - argocd_app_hub_operators.resources[0].status is defined
+    - argocd_app_hub_operators.resources[0].status.health.status == "Healthy"
+    - argocd_app_hub_operators.resources[0].status.sync.status == "Synced"
+
+- name: Wait until MultiClusterHub is ready
+  kubernetes.core.k8s_info:
+    api_version: operator.open-cluster-management.io/v1
+    kind: MultiClusterHub
+    name: multiclusterhub
+    namespace: open-cluster-management
+  register: rhacm_multiclusterhub
+  retries: 60
+  delay: 10
+  until:
+    - rhacm_multiclusterhub is defined
+    - rhacm_multiclusterhub.resources | length > 0
+    - rhacm_multiclusterhub.resources[0].status is defined
+    - rhacm_multiclusterhub.resources[0].status.phase is defined
+    - rhacm_multiclusterhub.resources[0].status.phase == "Running"
+
+- name: Wait until MultiClusterEngine is ready
+  kubernetes.core.k8s_info:
+    api_version: multicluster.openshift.io/v1
+    kind: MultiClusterEngine
+    name: multiclusterengine
+    namespace: multicluster-engine
+  register: mce_multiclusterengine
+  retries: 60
+  delay: 10
+  until:
+    - mce_multiclusterengine is defined
+    - mce_multiclusterengine.resources | length > 0
+    - mce_multiclusterengine.resources[0].status is defined
+    - mce_multiclusterengine.resources[0].status.phase is defined
+    - mce_multiclusterengine.resources[0].status.phase == "Available"
+
+- name: Ensure SNO ssh key is downloaded
+  ansible.builtin.get_url:
+    url: "http://infra.5g-deployment.lab:3000/student/5g-ran-deployments-on-ocp-lab/raw/branch/main/lab-materials/lab-env-data/hypervisor/ssh-key"
+    dest: "/root/.ssh/snokey"
+    mode: "0400"
+
+- name: Apply SNO1 Cluster Deployment APPs
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    state: present
+    src: /tmp/sno1-argoapp.yaml
+
+- name: Wait until ArgoCD APP for SNO1 Cluster deployment is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    name: sno1-deployment
+    namespace: openshift-gitops
+  register: argocd_app_sno1_deployment
+  retries: 60
+  delay: 10
+  until:
+    - argocd_app_sno1_deployment is defined
+    - argocd_app_sno1_deployment.resources | length > 0
+    - argocd_app_sno1_deployment.resources[0].status is defined
+    - argocd_app_sno1_deployment.resources[0].status.health.status == "Healthy"
+    - argocd_app_sno1_deployment.resources[0].status.sync.status == "Synced"
+
+- name: Wait for SNO1 cluster to start deploying
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: extensions.hive.openshift.io/v1beta1
+    kind: AgentClusterInstall
+    name: sno1
+    namespace: sno1
+  register: sno1_agentclusterinstall
+  retries: 20
+  delay: 60
+  until:
+    - sno1_agentclusterinstall is defined
+    - sno1_agentclusterinstall.resources | length > 0
+    - sno1_agentclusterinstall.resources[0].status is defined
+    # yamllint disable rule:line-length
+    - sno1_agentclusterinstall.resources[0].status.debugInfo.state == "preparing-for-installation" or sno1_agentclusterinstall.resources[0].status.debugInfo.state == "adding-hosts"
+    # yamllint enable rule:line-length
+
+- name: Wait for SNO1 cluster to be deployed
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: extensions.hive.openshift.io/v1beta1
+    kind: AgentClusterInstall
+    name: sno1
+    namespace: sno1
+  register: sno1_agentclusterinstall
+  retries: 120
+  delay: 60
+  until:
+    - sno1_agentclusterinstall is defined
+    - sno1_agentclusterinstall.resources | length > 0
+    - sno1_agentclusterinstall.resources[0].status is defined
+    - sno1_agentclusterinstall.resources[0].status.debugInfo.state == "adding-hosts"
+
+- name: Extract SNO1 kubeconfig
+  ansible.builtin.shell:
+    cmd: oc --kubeconfig /root/hub-kubeconfig -n sno1 extract secret/sno1-admin-kubeconfig --to=- > /root/sno1kubeconfig
+  register: result
+  until: result.rc == 0
+  retries: 3
+  delay: 10
+
+- name: Ensure HAProxy is installed
+  ansible.builtin.dnf:
+    name: haproxy
+    state: present
+
+- name: Ensure HAProxy can listen on port 6443
+  ansible.builtin.shell:
+    cmd: semanage port -a -t http_port_t -p tcp 6443
+  retries: 5
+  delay: 10
+  register: result
+  until: result.rc == 0 or "6443 already defined" in result.stderr
+  failed_when: result.rc != 0 and "6443 already defined" not in result.stderr
+
+- name: Ensure HAProxy config is downloaded
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/RHsyseng/5g-ran-deployments-on-ocp-lab/main/lab-materials/lab-env-data/haproxy/haproxy.cfg"
+    dest: "/etc/haproxy/haproxy.cfg"
+    mode: "0644"
+
+- name: Ensure HAProxy service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: haproxy
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

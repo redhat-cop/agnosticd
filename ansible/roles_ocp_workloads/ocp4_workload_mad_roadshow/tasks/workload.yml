@@ -1,0 +1,405 @@
+---
+# Create rhv VM from existing rhv template
+# Needs ovirt collection https://github.com/ovirt/ovirt-ansible-collection
+#   ansible-galaxy collection install ovirt.ovirt # Version 1.6.6
+# New Virtualenv:
+#   virtualenv -p $(which python3) ~/virtualenvs/ovirt
+#   source ~/virtualenvs/ovirt/bin/activate
+#
+#   export PYCURL_SSL_LIBRARY=openssl
+#   export LDFLAGS=-L/usr/local/opt/openssl/lib
+#   export CPPFLAGS=-I/usr/local/opt/openssl/include
+#   pip install pycurl --compile --no-cache-dir
+#   pip install -U pip ovirt-engine-sdk-python netaddr jmespath ansible==2.9.27
+
+# Requirements:
+# ansible==2.9.27
+# cffi==1.15.0
+# cryptography==36.0.1
+# Jinja2==3.0.3
+# jmespath==0.10.0
+# MarkupSafe==2.0.1
+# netaddr==0.8.0
+# ovirt-engine-sdk-python==4.5.0
+# pycparser==2.21
+# pycurl==7.44.1
+# PyYAML==6.0
+# six==1.16.0
+
+# Setup:
+# Clone Template rhel85-empty to create the VM
+# That template contains a user rhv-user with opentlc_admin_backdoor key
+# Create a new user, lab-user, with password as specified
+
+# To set up AgnosticV with all prereqs use the following variables:
+# -----------------------------------------------------------------
+# requirements_content:
+#   collections:
+#   - name: kubernetes.core
+#     version: 2.3.2
+#   - name: amazon.aws
+#     version: 2.3.0
+#   - name: community.general
+#     version: 5.3.0
+#   - name: ansible.posix
+#     version: 1.4.0
+#   - name: ovirt.ovirt
+#     version: 2.2.0
+
+# host_virtualenv_package_prereqs:
+# - gcc
+# - python3
+# - python3-devel
+# - python3-libselinux
+# - python3-pip
+# - libcurl-devel
+# - openssl-devel
+# - libxml2-devel
+
+# host_virtualenv_requirements_override:
+# - ovirt-engine-sdk-python==4.5.0
+# - passlib==1.7.4
+
+- name: Determine cluster wildcard domain
+  kubernetes.core.k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: r_ingress_controller
+
+- name: Save cluster apps domain variable
+  ansible.builtin.set_fact:
+    _ocp4_workload_mad_roadshow_apps_domain: "{{ r_ingress_controller.resources[0].status.domain }}"
+
+- name: Get Gitea instance
+  kubernetes.core.k8s_info:
+    api_version: gpte.opentlc.com/v1
+    kind: Gitea
+    name: "{{ ocp4_workload_mad_roadshow_gitea_instance }}"
+    namespace: "{{ ocp4_workload_mad_roadshow_gitea_project }}"
+  register: r_gitea
+
+- name: Setup RHV credentials
+  when: ocp4_workload_mad_roadshow_rhv_user_setup | bool
+  block:
+  - name: Generate VM user password if no password specified
+    when: ocp4_workload_mad_roadshow_vm_user_password | default('') | length == 0
+    ansible.builtin.set_fact:
+      ocp4_workload_mad_roadshow_vm_user_password: >-
+        {{ lookup('password', '/dev/null length={{ ocp4_workload_mad_roadshow_vm_user_password_length }} chars=ascii_letters,digits') }}
+
+  - name: Generate RHV user password if no password specified
+    when: rhv_user_password | default('') | length == 0
+    ansible.builtin.set_fact:
+      ocp4_workload_mad_roadshow_rhv_user_password: >-
+        {{ lookup('password', '/dev/null length={{ ocp4_workload_mad_roadshow_rhv_user_password_length }} chars=ascii_letters,digits') }}
+
+  - name: Write private key for root account on RHV to /tmp/rhv.pem
+    delegate_to: localhost
+    ansible.builtin.copy:
+      content: "{{ ocp4_workload_mad_roadshow_rhv_root_private_key }}"
+      dest: /tmp/rhv.pem
+      mode: 0600
+
+  - name: Add RHV host to inventory
+    ansible.builtin.add_host:
+      groupname: rhvhosts
+      name: "{{ ocp4_workload_mad_roadshow_rhv_host }}"
+      ansible_ssh_host: "{{ ocp4_workload_mad_roadshow_rhv_host }}"
+      ansible_ssh_user: root
+      ansible_ssh_private_key_file: /tmp/rhv.pem
+
+- name: Create a new user in RHV Identity Management
+  when: ocp4_workload_mad_roadshow_rhv_user_setup | bool
+  delegate_to: "{{ ocp4_workload_mad_roadshow_rhv_host }}"
+  vars:
+    ansible_ssh_user: root
+    ansible_ssh_private_key_file: /tmp/rhv.pem
+  block:
+  - name: Set up RHV IM user
+    ansible.builtin.include_tasks: rhv-setup-im-user.yml
+
+- name: Create a VMs in RHV
+  environment:
+    OVIRT_URL: "{{ ocp4_workload_mad_roadshow_rhv_url }}"
+    OVIRT_USERNAME: "{{ ocp4_workload_mad_roadshow_rhv_admin_user_name }}"
+    OVIRT_PASSWORD: "{{ ocp4_workload_mad_roadshow_rhv_admin_user_password }}"
+  block:
+  # Create Oracle VM
+  - name: Create and start Oracle VM
+    when: ocp4_workload_mad_roadshow_oracle_vm_setup | bool
+    ansible.builtin.include_tasks: rhv-setup-oracle-vm.yml
+
+  # Create Tomcat VM
+  - name: Create and start Tomcat VM
+    when: ocp4_workload_mad_roadshow_tomcat_vm_setup | bool
+    ansible.builtin.include_tasks: rhv-setup-tomcat-vm.yml
+
+  # Create the user in rhv after the VMs have been created
+  - name: Create new user in RHV
+    when: ocp4_workload_mad_roadshow_rhv_user_setup | bool
+    ansible.builtin.include_tasks: rhv-setup-user.yml
+
+# Oracle host gets added to inventory by rhv-setup-vm.yaml
+- name: Set up Oracle VM
+  delegate_to: "{{ _ocp4_workload_mad_roadshow_oracle_ip }}"
+  when: ocp4_workload_mad_roadshow_oracle_vm_setup | bool
+  become: true
+  vars:
+    ansible_ssh_user: "{{ ocp4_workload_mad_roadshow_vm_user_name }}"
+    _ocp4_workload_mad_roadshow_name: "{{ ocp4_workload_mad_roadshow_oracle_vm_name }}"
+  block:
+  - name: Configure Oracle database VM (packages)
+    when: ocp4_workload_mad_roadshow_oracle_vm_install_from_scratch | bool
+    ansible.builtin.include_tasks: vm-common-install-packages.yml
+
+  - name: Configure Oracle database VM (common tasks)
+    ansible.builtin.include_tasks: vm-common-configure.yml
+
+  - name: Configure Oracle database VM
+    when: ocp4_workload_mad_roadshow_oracle_vm_install_from_scratch | bool
+    ansible.builtin.include_tasks: vm-oracledb-install-and-configure.yml
+
+# Tomcat host gets added to inventory by rhv-setup-vm.yaml
+# Tomcat needs to be configured after Oracle because it needs
+# to connect to Oracle
+- name: Set up Tomcat VM
+  delegate_to: "{{ _ocp4_workload_mad_roadshow_tomcat_ip }}"
+  when: ocp4_workload_mad_roadshow_tomcat_vm_setup | bool
+  become: true
+  vars:
+    ansible_ssh_user: "{{ ocp4_workload_mad_roadshow_vm_user_name }}"
+    _ocp4_workload_mad_roadshow_name: "{{ ocp4_workload_mad_roadshow_tomcat_vm_name }}"
+  block:
+  - name: Configure Tomcat VM (packages)
+    when: ocp4_workload_mad_roadshow_tomcat_vm_install_from_scratch | bool
+    ansible.builtin.include_tasks: vm-common-install-packages.yml
+
+  - name: Configure Tomcat VM (common tasks)
+    ansible.builtin.include_tasks: vm-common-configure.yml
+
+  - name: Configure Tomcat VM
+    ansible.builtin.include_tasks: vm-tomcat-install-and-configure.yml
+
+- name: Set up GitOps environment
+  when: ocp4_workload_mad_roadshow_gitops_setup | bool
+  block:
+  - name: Create demo namespaces for all users
+    vars:
+      _ocp4_workload_mad_roadshow_namespace: >-
+        {{ ocp4_workload_mad_roadshow_demo_namespace_prefix }}{{
+           ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'apps/namespace.yaml.j2' ) | from_yaml }}"
+    loop: "{{ range(1, ocp4_workload_mad_roadshow_gitea_user_count | int + 1) | list }}"
+    loop_control:
+      loop_var: n
+      label: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+
+  - name: Create cicd namespaces for all users
+    vars:
+      _ocp4_workload_mad_roadshow_namespace: >-
+        {{ ocp4_workload_mad_roadshow_pipeline_namespace_prefix }}{{
+           ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'apps/namespace.yaml.j2' ) | from_yaml }}"
+    loop: "{{ range(1, ocp4_workload_mad_roadshow_gitea_user_count | int + 1) | list }}"
+    loop_control:
+      loop_var: n
+      label: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+
+  - name: Create ArgoCD and Tekton environment for all users
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'cicd/applicationset.yaml.j2' ) | from_yaml }}"
+
+  - name: Create PostgreSQL database 'orders' for all users
+    vars:
+      _ocp4_workload_mad_roadshow_db_app_name: "{{ ocp4_workload_mad_roadshow_orders_db_app_name }}"
+      _ocp4_workload_mad_roadshow_db_name: "{{ ocp4_workload_mad_roadshow_orders_db_name }}"
+      _ocp4_workload_mad_roadshow_db_user: "{{ ocp4_workload_mad_roadshow_orders_db_user }}"
+      _ocp4_workload_mad_roadshow_db_password: "{{ ocp4_workload_mad_roadshow_orders_db_password }}"
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'postgresql/applicationset.yaml.j2' ) | from_yaml }}"
+
+  - name: Create PostgreSQL database 'inventory' for all users
+    vars:
+      _ocp4_workload_mad_roadshow_db_app_name: "{{ ocp4_workload_mad_roadshow_inventory_db_app_name }}"
+      _ocp4_workload_mad_roadshow_db_name: "{{ ocp4_workload_mad_roadshow_inventory_db_name }}"
+      _ocp4_workload_mad_roadshow_db_user: "{{ ocp4_workload_mad_roadshow_inventory_db_user }}"
+      _ocp4_workload_mad_roadshow_db_password: "{{ ocp4_workload_mad_roadshow_inventory_db_password }}"
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'postgresql/applicationset.yaml.j2' ) | from_yaml }}"
+
+  # Don't use ApplicationSet -> users can change their applications
+  - name: Create ArgoCD Applications for all users
+    vars:
+      _ocp4_workload_mad_roadshow_namespace: >-
+        {{ ocp4_workload_mad_roadshow_demo_namespace_prefix }}{{
+           ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}
+      _ocp4_workload_mad_roadshow_user: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'apps/application.yaml.j2' ) | from_yaml }}"
+    loop: "{{ range(1, ocp4_workload_mad_roadshow_gitea_user_count | int + 1) | list }}"
+    loop_control:
+      loop_var: n
+      label: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+
+- name: Import database image and deploy VM for all users
+  when: ocp4_workload_mad_roadshow_kubevirt_vm_deploy | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  # Database image
+  - kubevirt/namespace.yaml.j2
+  - kubevirt/datavolume.yaml.j2
+  - kubevirt/clusterrole.yaml.j2
+  # VMs for all users
+  - kubevirt/applicationset.yaml.j2
+
+- name: Save Save AgnosticD information (RHV)
+  when: ocp4_workload_mad_roadshow_rhv_user_setup | bool
+  agnosticd_user_info:
+    data:
+      rhv_url: "https://{{ ocp4_workload_mad_roadshow_rhv_host }}"
+      rhv_hostname: "{{ ocp4_workload_mad_roadshow_rhv_host }}"
+      rhv_user: "{{ ocp4_workload_mad_roadshow_rhv_user_name }}"
+      rhv_profile: "{{ ocp4_workload_mad_roadshow_rhv_user_postfix }}"
+      rhv_mtv_user: "{{ ocp4_workload_mad_roadshow_rhv_user_name }}@{{ ocp4_workload_mad_roadshow_rhv_user_postfix }}"
+      rhv_password: "{{ ocp4_workload_mad_roadshow_rhv_user_password }}"
+
+- name: Save AgnosticD information (Tomcat VM)
+  when: ocp4_workload_mad_roadshow_tomcat_vm_setup | bool
+  agnosticd_user_info:
+    data:
+      rhv_tomcat_vm_name: "{{ ocp4_workload_mad_roadshow_tomcat_vm_name }}"
+      rhv_tomcat_vm_ip: "{{ _ocp4_workload_mad_roadshow_tomcat_ip }}"
+      rhv_tomcat_vm_user: "{{ ocp4_workload_mad_roadshow_vm_user_name }}"
+      rhv_tomcat_vm_password: "{{ ocp4_workload_mad_roadshow_vm_user_password }}"
+
+- name: Save AgnosticD information (Oracle VM)
+  when: ocp4_workload_mad_roadshow_oracle_vm_setup | bool
+  agnosticd_user_info:
+    data:
+      rhv_oracle_vm_name: "{{ ocp4_workload_mad_roadshow_oracle_vm_name }}"
+      rhv_oracle_vm_ip: "{{ _ocp4_workload_mad_roadshow_oracle_ip }}"
+      rhv_oracle_vm_user: "{{ ocp4_workload_mad_roadshow_vm_user_name }}"
+      rhv_oracle_vm_password: "{{ ocp4_workload_mad_roadshow_vm_user_password }}"
+      rhv_oracle_vm_ssh_command: "ssh {{ ocp4_workload_mad_roadshow_vm_user_name }}@{{ _ocp4_workload_mad_roadshow_oracle_ip }}"
+      rhv_oracle_vm_database_name: customer
+      rhv_oracle_vm_database_user: "{{ ocp4_workload_mad_roadshow_oracle_db_user }}"
+      rhv_oracle_vm_database_password: "{{ ocp4_workload_mad_roadshow_oracle_db_password }}"
+      rhv_oracle_vm_database_admin_password: "{{ ocp4_workload_mad_roadshow_oracle_dba_password }}"
+
+- name: Deploy RedHat OpenShift Data Science
+  when: ocp4_workload_mad_roadshow_rhods_setup | bool
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: "{{ ocp4_workload_mad_roadshow_rhods_operator_name }}"
+    install_operator_namespace: redhat-ods-operator
+    install_operator_channel: "{{ ocp4_workload_mad_roadshow_rhods_channel }}"
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_mad_roadshow_rhods_automatic_install_plan_approval }}"
+    install_operator_starting_csv: "{{ ocp4_workload_mad_roadshow_rhods_install_operator_starting_csv }}"
+    install_operator_manage_namespaces: []
+    install_operator_catalogsource_setup: "{{ ocp4_workload_mad_roadshow_rhods_use_catalogsource_setup }}"
+    install_operator_catalogsource_name: "{{ ocp4_workload_mad_roadshow_rhods_catalogsource_name }}"
+    install_operator_catalogsource_image: "{{ ocp4_workload_mad_roadshow_rhods_catalogsource_image }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_mad_roadshow_rhods_catalogsource_image_tag }}"
+
+# --------------------------------------------------------
+# Deploy Module Guides and User Distribution for Dev Track
+# --------------------------------------------------------
+
+- name: Deploy module guides and user distribution tool
+  when: ocp4_workload_mad_roadshow_guides_deploy | bool
+  block:
+  - name: Retrieve OpenShift Console URL
+    kubernetes.core.k8s_info:
+      api_version: config.openshift.io/v1
+      kind: Console
+      name: cluster
+    register: r_console
+
+  - name: Set console variable
+    ansible.builtin.set_fact:
+      _ocp4_workload_mad_roadshow_console_url: "{{ r_console.resources[0].status.consoleURL }}"
+
+  - name: Create prerequisites for guides
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - guides/namespace.yaml.j2
+    - guides/imagestream_httpd.yaml.j2
+
+  - name: Setting up module_type for workshop
+    debug:
+      msg: "Setting up module_type for workshop module_type = {{ ocp4_workload_mad_roadshow_guides_module_type }}"
+
+  - name: Create module list
+    ansible.builtin.set_fact:
+      _ocp4_workload_mad_roadshow_guides_modules: "{{ ocp4_workload_mad_roadshow_guides_module_type.split(';') | map('trim') | list }}"
+
+  - name: Print selected modules
+    debug:
+      msg: "Selected list of modules: {{ _ocp4_workload_mad_roadshow_guides_modules }}"
+
+  - name: Deploy guides
+    ansible.builtin.include_tasks: dev-module-guides-install.yml
+    vars:
+      guide: "{{ module }}"
+    loop: "{{ _ocp4_workload_mad_roadshow_guides_modules }}"
+    loop_control:
+      loop_var: module
+
+  - name: Install username distribution tool
+    include_tasks: dev-username-distribution-install.yml
+
+# -------------------
+# AgnosticD User Info
+# -------------------
+
+- name: Save AgnosticD information for all users (AMA Shared Demo)
+  when: ocp4_workload_mad_roadshow_gitops_setup | bool
+  agnosticd_user_info:
+    user: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+    data:
+      user: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+      gitea_url: >-
+        {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
+           r_gitea.resources[0].status.giteaHostname }}/{{
+           ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}/{{
+           ocp4_workload_mad_roadshow_gitea_repo }}
+      retail_namespace: "{{ ocp4_workload_mad_roadshow_demo_namespace_prefix }}{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+      cicd_namespace: "{{ ocp4_workload_mad_roadshow_pipeline_namespace_prefix }}{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+  loop: "{{ range(1, ocp4_workload_mad_roadshow_gitea_user_count | int + 1) | list }}"
+  loop_control:
+    loop_var: n
+    label: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+
+- name: Save AgnosticD information for all users (Tomcat IP)
+  when: ocp4_workload_mad_roadshow_tomcat_vm_setup | bool
+  agnosticd_user_info:
+    user: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+    data:
+      tomcat_ip: "{{ _ocp4_workload_mad_roadshow_tomcat_ip }}"
+  loop: "{{ range(1, ocp4_workload_mad_roadshow_gitea_user_count | int + 1) | list }}"
+  loop_control:
+    loop_var: n
+    label: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+
+# Cleanup Private Key
+- name: Remove private key
+  delegate_to: localhost
+  ansible.builtin.file:
+    state: absent
+    path: /tmp/rhv.pem

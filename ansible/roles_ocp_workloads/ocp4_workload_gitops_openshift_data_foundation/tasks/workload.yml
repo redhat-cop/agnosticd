@@ -1,0 +1,97 @@
+---
+- name: Setting up workload
+  debug:
+    msg: "Setting up OpenShift Data Foundation"
+
+- name: Set Git url if not already set
+  when: ocp4_workload_gitops_openshift_data_foundation_git_repo_url | default("") | length == 0
+  block:
+    - name: Retrieve Gitea instance
+      kubernetes.core.k8s_info:
+        api_version: gpte.opentlc.com/v1
+        kind: Gitea
+        name: gitea
+        namespace: gitea
+      register: r_gitea
+
+    - name: Construct Gitea repository details
+      set_fact:
+        ocp4_workload_gitops_openshift_data_foundation_git_repo_url: >-
+          {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
+          ocp4_workload_gitops_openshift_data_foundation_git_username | urlencode }}:{{
+          ocp4_workload_gitops_openshift_data_foundation_git_password | urlencode }}@{{
+          r_gitea.resources[0].status.giteaHostname }}/{{
+          ocp4_workload_gitops_openshift_data_foundation_git_username }}/agnosticg
+
+- name: Discovering worker nodes
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+    label_selectors:
+      - node-role.kubernetes.io/worker
+  register: r_worker_nodes
+
+- name: Fail for less than 3 worker nodes
+  when: r_worker_nodes.resources | length < 3
+  fail:
+    msg: "Less than 3 worker nodes detected. Cannot install Ceph..."
+
+- name: Create Namespace
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+    - object-storage-namespace.yml.j2
+    - acm-namespace.yml.j2
+
+- name: Clone application source code
+  ansible.builtin.git:
+    accept_hostkey: true
+    force: true
+    repo: "{{ ocp4_workload_gitops_openshift_data_foundation_git_repo_url }}"
+    dest: "~/agnosticg"
+    version: main
+  environment:
+    GIT_SSL_NO_VERIFY: "true"
+
+- name: Fetch template from remote host
+  include_tasks: fetch_and_apply_template.yml
+  loop:
+    - odf-application.yaml
+  vars:
+    _folder: /home/ec2-user/agnosticg//kustomize/odf/openshift-gitops
+
+- name: Add new files to the repository
+  command:
+    chdir: >-
+      /home/ec2-user/agnosticg
+    cmd: "git add ."
+  ignore_errors: true
+
+- name: Commit changes to the repository
+  command:
+    chdir: >-
+      /home/ec2-user/agnosticg
+    cmd: >-
+      git commit -a -m 'Updates for starting scenario.'
+  ignore_errors: true
+
+- name: Push all changes back to the project repository
+  command:
+    chdir: >-
+      /home/ec2-user/agnosticg
+    cmd: >-
+      git push {{ ocp4_workload_gitops_openshift_data_foundation_git_repo_url }}
+
+- name: Create ACM application
+  include_tasks: files/create_acm_application.yml
+  loop: "{{ ocp4_workload_gitops_openshift_data_foundation_acm_clusters }}"
+  loop_control:
+    loop_var: cluster
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

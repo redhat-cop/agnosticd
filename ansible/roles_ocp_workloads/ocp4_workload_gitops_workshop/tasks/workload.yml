@@ -1,0 +1,129 @@
+---
+# Implement your Workload deployment tasks here
+# deploy individual argo instances for users
+- name: Install dev workspace operator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: devworkspace-operator
+    install_operator_channel: "fast"
+    install_operator_catalog: redhat-operators
+    install_operator_use_catalog_snapshot: false
+
+- name: Wait for DevWorkspaceTemplate CRD to exist
+  kubernetes.core.k8s_info:
+    api_version: "apiextensions.k8s.io/v1"
+    kind: CustomResourceDefinition
+    name: devworkspacetemplates.workspace.devfile.io
+    wait: true
+    wait_condition:
+      reason: InitialNamesAccepted
+      status: 'True'
+      type: Established
+    wait_sleep: 20
+    wait_timeout: 180
+
+- name: Install web terminal operator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: web-terminal
+    install_operator_channel: "fast"
+    install_operator_catalog: redhat-operators
+    install_operator_use_catalog_snapshot: false
+
+- name: Pause for 5 minutes to let the web terminal operator installation settle
+  ansible.builtin.pause:
+    minutes: 5
+
+# modify the custom web terminal operator image
+# only needed until the image with kustomize goes GA
+- name: Modify the web terminal DevWorkspaceTemplate with a custom tools image
+  kubernetes.core.k8s:
+    definition: "{{ lookup('file', 'devworkspacetemplate.yaml' ) | from_yaml }}"
+    state: present
+  retries: 10
+  delay: 30
+
+- name: Wait for web-terminal-exec CR to exist
+  kubernetes.core.k8s_info:
+    kind: DevWorkspaceTemplate
+    namespace: openshift-operators
+    name: web-terminal-exec
+    api_version: workspace.devfile.io/v1alpha2
+  register: r_web_exec_cr
+  retries: 10
+  delay: 30
+  until: r_web_exec_cr.resources | length > 0
+
+- name: Modify the web terminal timeout
+  kubernetes.core.k8s_json_patch:
+    kind: DevWorkspaceTemplate
+    namespace: openshift-operators
+    name: web-terminal-exec
+    api_version: workspace.devfile.io/v1alpha2
+    patch:
+    - op: replace
+      path: /spec/components/0/container/env/0/value
+      value: "6h"
+
+- name: Deploy ArgoCD instances for users
+  vars:
+    _ocp4_workload_gitops_workshop_namespacename: >-
+      user{{ item }}-argocd
+    _ocp4_workload_gitops_workshop_argo_instance_name: >-
+      user{{ item }}-argo
+    _ocp4_workload_gitops_workshop_user: >-
+      user{{ item }}
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'argocd_cr.yaml.j2' ) | from_yaml }}"
+  loop: "{{ range(1, num_users | int + 1) | list }}"
+
+- name: Wait for ArgoCD instances to successfully deploy
+  kubernetes.core.k8s_info:
+    api_version: argoproj.io/v1alpha1
+    kind: ArgoCD
+    name: "user{{ item }}-argo"
+    namespace: "user{{ item }}-argocd"
+  loop: "{{ range(1, num_users | int + 1) | list }}"
+  register: r_argo_cr
+  retries: 10
+  delay: 30
+  until: r_argo_cr.resources[0].status.phase == "Available"
+
+# label the workshop namespaces for argo
+- name: Label user namespaces with argo ownership
+  vars:
+    _ocp4_workload_gitops_workshop_namespacename: >-
+      user{{ item[0] }}-{{ item[1] }}
+    _ocp4_workload_gitops_workshop_argo_instance_name: >-
+      user{{ item[0] }}-argocd
+  kubernetes.core.k8s:
+    state: patched
+    kind: Namespace
+    name: "{{ _ocp4_workload_gitops_workshop_namespacename }}"
+    definition:
+      metadata:
+        labels:
+          argocd.argoproj.io/managed-by: "{{ _ocp4_workload_gitops_workshop_argo_instance_name }}"
+  loop: "{{ range(1, num_users | int + 1) | product(ocp4_workload_namespace_generator_list) | list }}"
+
+- name: Output user information for workshop
+  agnosticd_user_info:
+    user: "user{{ n }}"
+    data:
+      user: "user{{ n }}"
+      password: "{{ ocp4_workload_authentication_htpasswd_user_password }}"
+      lab_guide_link: "https://openshiftdemos.github.io/openshift-gitops-workshop/openshift-gitops-workshop/index.html?USERNUM={{ n }}"
+  loop: "{{ range(1, num_users | int + 1) | list }}"
+  loop_control:
+    loop_var: n
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
