@@ -4,11 +4,6 @@
   become: True
   gather_facts: False
   vars:
-    baseos_baseurl: "https://labsat-ha.opentlc.com/pulp/repos/Red_Hat_GPTE_Labs/Library/rhel-9_0/content/dist/rhel9/9.0/x86_64/baseos/os"
-    appstream_baseurl: "https://labsat-ha.opentlc.com/pulp/repos/Red_Hat_GPTE_Labs/Library/rhel-9_0/content/dist/rhel9/9.0/x86_64/appstream/os"
-    enabled_services:
-      - cockpit
-      - osbuild-composer
     imagebuilder_packages:
       - osbuild-composer
       - composer-cli
@@ -34,7 +29,18 @@
         owner: root
         group: root
         mode: '0644'
-    
+
+    - name: Get /etc/yum.repos.d/redhat.repo
+      fetch:
+        src: /etc/yum.repos.d/redhat.repo
+        dest: /tmp/redhat.repo
+        flat: yes
+
+    - name: Dynamically grab repository baseurls
+      set_fact:
+        appstream_baseurl: "{{ lookup('ansible.builtin.ini', 'baseurl file=/tmp/redhat.repo section=rhel-9-for-x86_64-appstream-rpms') }}"
+        baseos_baseurl: "{{ lookup('ansible.builtin.ini', 'baseurl file=/tmp/redhat.repo section=rhel-9-for-x86_64-baseos-rpms') }}"
+
     - name: Modify hard coded baseos content path
       ansible.builtin.replace:
         path: /etc/osbuild-composer/repositories/rhel-90.json
@@ -60,16 +66,35 @@
         group: root
         state: link
     
-    - name: Enable Related Services
-      ansible.builtin.service:
-        name: osbuild-composer
+    - name: Fix cockpit.service
+      blockinfile:
+        dest: /usr/lib/systemd/system/cockpit.service
+        content: |
+          [Install]
+          WantedBy=multi-user.target
+  
+    - name: Enable cockpit and osbuild-composer
+      systemd:
+        daemon_reload: true
+        name: "{{ item }}"
+        enabled: true
         state: started
-        enabled: True
-    
-    - name: Reboot bastion for osbuild-composer
-      ansible.builtin.reboot:
+      loop:
+        - cockpit
+        - osbuild-composer
 
-    - name: Restart cockpit after reboot
-      ansible.builtin.service:
-        name: cockpit
-        state: started
+    - name: Check services  
+      service_facts:
+      register: services_state
+
+    - name: Restart required services
+      retries: 3
+      delay: 2
+      service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - osbuild-local-worker.socket
+        - osbuild-composer.socket
+      when:
+        - ansible_facts.services['osbuild-composer.service']['state']|default('') != 'running'
