@@ -88,6 +88,10 @@
   - name: Include Import tasks
     include_tasks: import_clusters_to_hub.yaml
 
+###############################################################################
+#### Change Label of Imported Clusters
+###############################################################################
+
 - name: Login to bastion hub
   hosts: devsecops_hub
   tasks:
@@ -111,6 +115,63 @@
       -p='[{"op": "add", "path": "/metadata/labels/purpose", "value":"production"}]'
       -n open-cluster-management
       --type json
+
+###############################################################################
+#### Set OpenShift GitOps and ACM with Managed Clusters
+###############################################################################
+
+- name: Login to bastion hub
+  hosts: devsecops_hub
+  tasks:
+    - name: Create Managed Cluster Set Bindings
+      k8s:
+        validate_certs: false
+        definition:
+          apiVersion: cluster.open-cluster-management.io/v1beta1
+          kind: ManagedClusterSetBinding
+          metadata:
+            namespace: openshift-gitops
+            name: global
+          spec:
+            clusterSet: global
+
+    - name: Create Placement
+      k8s:
+        validate_certs: false
+        definition:
+          apiVersion: cluster.open-cluster-management.io/v1beta1
+          kind: Placement
+          metadata:
+            name: global
+            namespace: openshift-gitops
+          spec:
+            predicates:
+            - requiredClusterSelector:
+                labelSelector:
+                  matchExpressions:
+                  - key: vendor
+                    operator: "In"
+                    values:
+                    - OpenShift
+
+    - name: Create a GitOpsCluster
+      k8s:
+        validate_certs: false
+        definition:
+          apiVersion: apps.open-cluster-management.io/v1beta1
+          kind: GitOpsCluster
+          metadata:
+            name: argo-acm-clusters
+            namespace: openshift-gitops
+          spec:
+            argoServer:
+              cluster: local-cluster
+              argoNamespace: openshift-gitops
+            placementRef:
+              kind: Placement
+              apiVersion: cluster.open-cluster-management.io/v1beta1
+              name: global
+              namespace: openshift-gitops
 
 ###############################################################################
 #### Setup RHACS secure cluster on Dev Cluster
@@ -188,6 +249,95 @@
           definition: "{{ lookup('template', 'dev_secured_cluster.yaml.j2') }}"
 
 ###############################################################################
+#### Setup Gitops Workloads
+###############################################################################
+
+- name: Setup Gitops Workloads
+  hosts: devsecops_hub
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Gitops Workload Installation
+      block:
+      - name: Check if desired virtualenv is available on the host
+        stat:
+          path: "/opt/virtualenvs/k8s/bin/python"
+        register: r_virtualenv
+
+      - name: Set Ansible Python interpreter to virtualenv
+        when: r_virtualenv.stat.exists
+        set_fact:
+          ansible_python_interpreter: "/opt/virtualenvs/k8s/bin/python"
+
+      - name: Setup Openshift Data Foundation
+        include_role:
+          name: ocp4_workload_gitops_openshift_data_foundation
+
+      # - name: Check ODF is ready
+      #   k8s_info:
+      #     validate_certs: false
+      #     api_version: ocs.openshift.io/v1
+      #     kind: StorageCluster
+      #     name: ocs-storagecluster
+      #     namespace: openshift-storage
+      #   register: r_storagecluster
+      #   until:
+      #   - r_storagecluster.resources | length > 0
+      #   - r_storagecluster.resources[0].status.phase == "Ready"
+      #   retries: 120
+      #   delay: 10
+      # - name: Check NooBaa is ready
+      #   k8s_info:
+      #     validate_certs: false
+      #     api_version: noobaa.io/v1alpha1
+      #     kind: NooBaa
+      #     name: noobaa
+      #     namespace: openshift-storage
+      #   register: r_noobaa
+      #   until:
+      #   - r_noobaa.resources | length > 0
+      #   retries: 60
+      #   delay: 10
+
+      - name: Check ODF / Noobaa is ready
+        include_role:
+          name: ocp_application_validation
+        vars:
+          ocp_application_validation_list:
+            - cluster:
+                name: hub
+              validations:
+                - kind: StorageCluster
+                  name: ocs-storagecluster
+                  namespace: openshift-storage
+                  retries: 120
+                  delay: 10
+                  conditions:
+                  - _r_validate_universal.resources is defined
+                  - _r_validate_universal.resources | length > 0
+                  - _r_validate_universal.resources[0].status is defined
+                  - _r_validate_universal.resources[0].status.phase is defined
+                  - _r_validate_universal.resources[0].status.phase == "Ready"
+                - kind: NooBaa
+                  name: noobaa
+                  namespace: openshift-storage
+                  delay: 10
+
+      - name: Setup remainin pre-requisite gitops roles
+        include_role:
+          name: "{{ included_roles }}"
+        loop:
+          - ocp4_workload_gitops_quay_registry
+          - ocp4_workload_gitops_sonarqube
+          - ocp4_workload_gitops_hashicorp_vault
+          - ocp4_workload_gitops_amqstreams
+          - ocp4_workload_pipelines
+          - ocp4_workload_codeserver
+          - ocp4_workload_acm_multicluster_observability
+        loop_control:
+            loop_var: included_roles
+
+###############################################################################
 #### Setup Multi-Cluster Workload
 ###############################################################################
 
@@ -214,43 +364,70 @@
         include_role:
           name: ocp4_workload_devsecops_validated_pattern
 
-- name: Recreate ArgoCD instance
+- name: Reduce sync time for ArgoCD instance
   hosts: localhost
   connection: local
   become: false
   gather_facts: false
   tasks:
-    - name: Get Dev/Prod ArgoCD Instance
-      k8s_info:
-        host: "{{ item.k8s_auth.host }}"
-        username: "{{ item.k8s_auth.username }}"
-        api_key: "{{ item.k8s_auth.api_key }}"
-        validate_certs: false
-        kind: ArgoCD
-        name: openshift-gitops
-        namespace: openshift-gitops
-        api_version: argoproj.io/v1alpha1
-      register: r_argocd_inst
-      retries: 60
-      delay: 5
-      until: r_argocd_inst.resources | length > 0
-      loop:
-        - "{{ __r_aws_dev_cluster }}"
-        - "{{ __r_aws_prod_cluster }}"
+    # - name: Get Dev/Prod ArgoCD Instance
+    #   k8s_info:
+    #     host: "{{ item.k8s_auth.host }}"
+    #     username: "{{ item.k8s_auth.username }}"
+    #     api_key: "{{ item.k8s_auth.api_key }}"
+    #     validate_certs: false
+    #     kind: ArgoCD
+    #     name: openshift-gitops
+    #     namespace: openshift-gitops
+    #     api_version: argoproj.io/v1alpha1
+    #   register: r_argocd_inst
+    #   retries: 60
+    #   delay: 5
+    #   until: r_argocd_inst.resources | length > 0
+    #   loop:
+    #     - "{{ __r_aws_dev_cluster }}"
+    #     - "{{ __r_aws_prod_cluster }}"
 
-    - name: Delete Dev/Prod ArgoCD instance
+    - name: include ocp_application_validation role
+      include_role:
+        name: ocp_application_validation
+      vars:
+        ocp_application_validation_list:
+        - cluster:
+            name: prod
+            host: "{{ aws_prod_cluster_provision_data.openshift_api_url }}"
+            username: "{{ aws_prod_cluster_provision_data.openshift_cluster_admin_username }}"
+            password: "{{ aws_prod_cluster_provision_data.openshift_cluster_admin_password }}"
+          validations:
+            - kind: ArgoCD
+              name: openshift-gitops
+              namespace: openshift-gitops
+        - cluster:
+            name: dev
+            host: "{{ aws_dev_cluster_provision_data.openshift_api_url }}"
+            username: "{{ aws_dev_cluster_provision_data.openshift_cluster_admin_username }}"
+            password: "{{ aws_dev_cluster_provision_data.openshift_cluster_admin_password }}"
+          validations:
+            - kind: ArgoCD
+              name: openshift-gitops
+              namespace: openshift-gitops
+
+    - name: Patch Dev/Prod ArgoCD instance
       k8s:
         host: "{{ item.k8s_auth.host }}"
         username: "{{ item.k8s_auth.username }}"
         api_key: "{{ item.k8s_auth.api_key }}"
         validate_certs: false
-        state: absent
+        state: present
         definition:
           apiVersion: argoproj.io/v1alpha1
           kind: ArgoCD
           metadata:
             namespace: openshift-gitops
             name: openshift-gitops
+          spec:
+            controller:
+              appSync: 15s
       loop:
         - "{{ __r_aws_dev_cluster }}"
         - "{{ __r_aws_prod_cluster }}"
@@ -381,6 +558,147 @@
         dev_argocd_console_url: "{{ _dev_cluster_argocd_console_url }}"
         dev_argocd_admin_password: "{{ _dev_cluster_argocd_admin_username }}"
         dev_argocd_admin_username: "{{ _dev_cluster_argocd_admin_password }}"
+
+- name: run ocp application validation
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tasks:
+    - name: include validation role
+      include_role:
+        name: ocp_application_validation
+      vars:
+        ocp_application_validation_list:
+          - cluster:
+              name: hub
+              host: "{{ aws_hub_provision_data.openshift_api_url }}"
+              username: "{{ aws_hub_provision_data.openshift_cluster_admin_username }}"
+              password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+            validations:
+              - kind: StorageCluster
+                name: ocs-storagecluster
+                namespace: openshift-storage
+
+              - kind: Route
+                name: openshift-gitops-server
+                namespace: openshift-gitops
+
+              - kind: NooBaa
+                name: noobaa
+                namespace: openshift-storage
+
+              - kind: Route
+                name: gitea
+                namespace: gitea
+                port: https
+
+              - kind: Route
+                name: sonarqube
+                namespace: sonarqube
+                port: https
+
+              - kind: Route
+                name: quay-quay
+                namespace: quay-enterprise
+
+              - kind: Route
+                name: vault
+                namespace: vault
+
+              - kind: Route
+                name: central
+                namespace: stackrox
+
+              - kind: InstallPlan
+                operator: openshift-pipelines-operator-rh
+                namespace: openshift-operators
+
+              - kind: Pipeline
+                name: app-globex-ui-pipeline
+                namespace: ci
+
+              - kind: Pipeline
+                name: app-globex-ui-unsigned-pipeline
+                namespace: ci
+
+              - kind: PipelineRun
+                pipeline: app-globex-ui-unsigned-pipeline
+                state: "Failed"
+                namespace: ci
+
+              - kind: PipelineRun
+                pipeline: app-globex-ui-pipeline
+                state: "Succeeded"
+                namespace: ci
+
+          - cluster:
+              name: dev
+              host: "{{ aws_dev_cluster_provision_data.openshift_api_url }}"
+              username: "{{ aws_dev_cluster_provision_data.openshift_cluster_admin_username }}"
+              password: "{{ aws_dev_cluster_provision_data.openshift_cluster_admin_password }}"
+            validations:
+              - kind: InstallPlan
+                operator: openshift-gitops-operator
+                namespace: openshift-operators
+
+              - kind: Route
+                name: openshift-gitops-server
+                namespace: openshift-gitops
+
+              - kind: InstallPlan
+                operator: amqstreams
+                namespace: openshift-operators
+
+              - kind: Kafka
+                name: kafka-cluster
+                namespace: kafka
+
+              - kind: KafkaTopic
+                name: globex.orders
+                namespace: kafka
+
+              - kind: KafkaTopic
+                name: globex.tracking
+                namespace: kafka
+
+              - kind: Route
+                name: globex-ui
+                namespace: globex
+
+          - cluster:
+              name: prod
+              host: "{{ aws_prod_cluster_provision_data.openshift_api_url }}"
+              username: "{{ aws_prod_cluster_provision_data.openshift_cluster_admin_username }}"
+              password: "{{ aws_prod_cluster_provision_data.openshift_cluster_admin_password }}"
+            validations:
+              - kind: InstallPlan
+                operator: openshift-gitops-operator
+                namespace: openshift-operators
+
+              - kind: Route
+                name: openshift-gitops-server
+                namespace: openshift-gitops
+
+              - kind: InstallPlan
+                operator: amqstreams
+                namespace: openshift-operators
+
+              - kind: Kafka
+                name: kafka-cluster
+                namespace: kafka
+
+              - kind: KafkaTopic
+                name: globex.orders
+                namespace: kafka
+
+              - kind: KafkaTopic
+                name: globex.tracking
+                namespace: kafka
+
+              - kind: Route
+                name: globex-ui
+                namespace: globex
 
 - name: Step 005 Post Software - Report to Cloudforms
   hosts: localhost
