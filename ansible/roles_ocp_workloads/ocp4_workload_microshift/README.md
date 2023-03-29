@@ -60,6 +60,3 @@ sudo subscription-manager unregister
 sudo subscription-manager clean
 
 history -c
-
-
-
