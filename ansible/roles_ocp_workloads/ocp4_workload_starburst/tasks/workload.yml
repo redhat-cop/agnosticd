@@ -1,0 +1,164 @@
+---
+
+- name: creating {{ ocp4_workload_starburst_namespace }} namespace
+  kubernetes.core.k8s:
+    name: "{{ ocp4_workload_starburst_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create {{ ocp4_workload_starburst_namespace }} operatorgroup
+  kubernetes.core.k8s:
+    state: present
+    template: starburst-operatorgroup.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: extract console URL
+  k8s_info:
+    kind: DNSRecord
+  register: ocp4_workload_starburst_route_subdomain_r
+
+- set_fact:
+    # yamllint disable-line rule:line-length
+    ocp4_workload_starburst_route_url: "{{ ocp4_workload_starburst_route }}{{ ocp4_workload_starburst_route_subdomain_r.resources[0].spec.dnsName | trim | regex_search ('\\.apps.*[^.]') }}"
+
+- name: Starburst UI URL
+  debug:
+    # yamllint disable-line rule:line-length
+    msg: "http://{{ ocp4_workload_starburst_route }}{{ ocp4_workload_starburst_route_subdomain_r.resources[0].spec.dnsName | trim | regex_search ('\\.apps.*[^.]') }}/ui/insights"
+
+- name: Create {{ ocp4_workload_starburst_postgres_service_name }} secret
+  kubernetes.core.k8s:
+    state: present
+    template: postgres-secret.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create objects for {{ ocp4_workload_starburst_postgres_service_name }} from deployment config
+  kubernetes.core.k8s:
+    state: present
+    template: postgres-deploymentconfig.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create {{ ocp4_workload_starburst_postgres_service_name }} service
+  kubernetes.core.k8s:
+    state: present
+    template: postgres-service.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Get {{ ocp4_workload_starburst_postgres_service_name }} service info
+  kubernetes.core.k8s_info:
+    kind: Service
+    namespace: "{{ ocp4_workload_starburst_namespace }}"
+    name: "{{ ocp4_workload_starburst_postgres_service_name }}"
+  register: ocp4_workload_starburst_postgresql_service
+
+- name: Set the {{ ocp4_workload_starburst_postgres_service_name }} IP and Port
+  set_fact:
+    postgresql_service_ip: "{{ ocp4_workload_starburst_postgresql_service.resources[0].spec.clusterIP }}"
+    postgresql_service_port: "{{ ocp4_workload_starburst_postgresql_service.resources[0].spec.ports[0].port }}"
+
+- name: Create {{ ocp4_workload_starburst_namespace }} secret
+  kubernetes.core.k8s:
+    state: present
+    template: starburst-secret.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create {{ ocp4_workload_starburst_namespace }} subscription
+  kubernetes.core.k8s:
+    state: present
+    template: starburst-subscription.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create {{ ocp4_workload_starburst_namespace }} enterprise custom resource
+  kubernetes.core.k8s:
+    state: present
+    template: starburst-enterprise.j2
+  register: result
+  until: result is not failed
+  retries: 20
+  delay: 6
+
+- name: Create {{ ocp4_workload_starburst_namespace }} hive custom resource
+  kubernetes.core.k8s:
+    state: present
+    template: starburst-hive.j2
+  register: result
+  until: result is not failed
+  retries: 20
+  delay: 6
+
+- name: Sleep for {{ ocp4_workload_starburst_wait }} seconds before continuing so pods have time to start
+  ansible.builtin.wait_for:
+    timeout: "{{ ocp4_workload_starburst_wait }}"
+
+- name: Verify worker pod is created
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ ocp4_workload_starburst_namespace }}"
+    label_selectors:
+      - app=starburst-enterprise
+      - role=worker
+  register: pod_info
+  until: pod_info.resources | length > 0
+  retries: 30
+  delay: 6
+
+- name: Extract worker pod name
+  set_fact:
+    pod_name: "{{ pod_info.resources[0].metadata.name }}"
+  when: pod_info.resources | length > 0
+
+- name: Make sure worker pod is ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ ocp4_workload_starburst_namespace }}"
+    name: "{{ pod_name }}"
+  register: new_pod_info
+  until:
+    - new_pod_info.resources | length > 0
+    - new_pod_info.resources[0].status.phase == 'Running'
+    - new_pod_info.resources[0].status.containerStatuses[0].ready
+  retries: 30
+  delay: 6
+  ignore_errors: true
+
+- name: Sleep for {{ ocp4_workload_starburst_wait // 10 }} seconds before continuing so all pods have time to start
+  ansible.builtin.wait_for:
+    timeout: "{{ ocp4_workload_starburst_wait // 10 }}"
+
+- name: Create route for {{ ocp4_workload_starburst_namespace }}
+  kubernetes.core.k8s:
+    state: present
+    template: starburst-route.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete

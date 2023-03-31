@@ -1,0 +1,398 @@
+- name: Step 005 Post Software
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+  - step005
+  - post_software
+  tasks:
+  - name: Entering the odf-dr-binder post_software
+    debug:
+      msg:
+      - Entering the odf-dr-binder post_software
+
+  # In-Memory inventory
+  - name: add aws-hub to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_hub_a_provision_data.bastion_public_hostname }}"
+      groups: ohc_hub
+      ansible_connection: ssh
+      ansible_ssh_private_key_file: "~/.ssh/opentlc_admin_backdoor.pem"
+      ansible_user: "ec2-user"
+      remote_user: "ec2-user"
+
+  - name: add aws-primary to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_primary_a_provision_data.bastion_public_hostname }}"
+      groups: ohc_aws_primary_a
+      ansible_connection: ssh
+      ansible_ssh_private_key_file: "~/.ssh/opentlc_admin_backdoor.pem"
+      ansible_user: "ec2-user"
+      remote_user: "ec2-user"
+
+  - name: add aws-secondary to inventory
+    ansible.builtin.add_host:
+      name: "{{ aws_secondary_a_provision_data.bastion_public_hostname }}"
+      groups: ohc_aws_secondary_a
+      ansible_connection: ssh
+      ansible_ssh_private_key_file: "~/.ssh/opentlc_admin_backdoor.pem"
+      ansible_user: "ec2-user"
+      remote_user: "ec2-user"
+
+ # Loggin into Cluster's bastion
+  - name: Logging into Hub
+    k8s_auth:
+      host: "{{ aws_hub_a_provision_data.openshift_api_url }}"
+      username: "{{ aws_hub_a_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_hub_a_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_hub
+    retries: 240
+    delay: 15
+    until:
+    - __r_hub.k8s_auth.api_key is defined 
+
+  - name: Logging into AWS OCP4 Primary Cluster - Site 1
+    k8s_auth:
+      host: "{{ aws_primary_a_provision_data.openshift_api_url }}"
+      username: "{{ aws_primary_a_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_primary_a_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_aws_primary_a
+    retries: 240
+    delay: 15
+    until:
+    - __r_aws_primary_a.k8s_auth.api_key is defined
+
+  - name: Logging into AWS OCP4 Secondary Cluster - Site 2
+    k8s_auth:
+      host: "{{ aws_secondary_a_provision_data.openshift_api_url }}"
+      username: "{{ aws_secondary_a_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_secondary_a_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_aws_secondary_a
+    retries: 240
+    delay: 15
+    until:
+    - __r_aws_secondary_a.k8s_auth.api_key is defined
+
+  - name: Import clusters into hub
+    when:
+      - hybrid_cloud_binder_import_clusters_enable is true
+    block:
+
+    - name: create namespaces on hub for both clusters
+      k8s:
+        host: "{{ __r_hub.k8s_auth.host }}"
+        username: "{{ __r_hub.k8s_auth.username }}"
+        api_key: "{{ __r_hub.k8s_auth.api_key }}"
+        validate_certs: false
+        state: present
+        kind: Namespace
+        name: "{{ item }}"
+        api_version: v1
+      loop:
+      - 'aws-primary'         #aws_primary_a
+      - 'aws-secondary'       #aws_secondary_a
+
+    # Import Clusters to Hub
+    - name: Import AWS Primary to Hub
+      vars:
+        __managed_cluster_name: 'primary'
+        __managed_cluster_token: "{{ __r_aws_primary_a.k8s_auth.api_key }}"
+        __managed_cluster_api_url: "{{ __r_aws_primary_a.k8s_auth.host }}"
+      k8s:
+        host: "{{ __r_hub.k8s_auth.host }}"
+        username: "{{ __r_hub.k8s_auth.username }}"
+        api_key: "{{ __r_hub.k8s_auth.api_key }}"
+        validate_certs: false
+        state: present
+        definition: "{{ lookup('template', item ) | from_yaml }}"
+      loop:
+      - './templates/managed-cluster.yaml.j2'
+      - './templates/auto-import-secret.yaml.j2'
+      - './templates/klusterlet-addon-config.yaml.j2'
+      register: __r_import_aws_primary_a
+      retries: 240
+      delay: 15
+
+    - name: Import AWS Secondary to Hub
+      vars:
+        __managed_cluster_name: 'secondary'
+        __managed_cluster_token: "{{ __r_aws_secondary_a.k8s_auth.api_key }}"
+        __managed_cluster_api_url: "{{ __r_aws_secondary_a.k8s_auth.host }}"
+      k8s:
+        host: "{{ __r_hub.k8s_auth.host }}"
+        username: "{{ __r_hub.k8s_auth.username }}"
+        api_key: "{{ __r_hub.k8s_auth.api_key }}"
+        validate_certs: false
+        state: present
+        definition: "{{ lookup('template', item ) | from_yaml }}"
+      loop:
+      - './templates/managed-cluster.yaml.j2'
+      - './templates/auto-import-secret.yaml.j2'
+      - './templates/klusterlet-addon-config.yaml.j2'
+      register: __r_import_aws_secondary_a
+      retries: 240
+      delay: 15
+
+
+    # Validate clusters
+    - name: Validate Clusters Joined - Primary
+      k8s_info:
+        host: "{{ __r_hub.k8s_auth.host }}"
+        username: "{{ __r_hub.k8s_auth.username }}"
+        api_key: "{{ __r_hub.k8s_auth.api_key }}"
+        validate_certs: false
+        api_version: cluster.open-cluster-management.io/v1
+        kind: managedcluster
+        name: primary
+        namespace: aws-primary
+      register: __r_wait_aws_primary_a
+      ignore_errors: true
+      retries: 240
+      delay: 15
+      until:
+      - __r_wait_aws_primary_a.resources is defined
+      - __r_wait_aws_primary_a.resources | length | int > 0
+      - __r_wait_aws_primary_a.resources[0].status is defined
+      - __r_wait_aws_primary_a.resources[0].status.conditions is defined
+      - ( __r_wait_aws_primary_a.resources[0].status | to_json | from_json |
+        json_query('conditions[?type == `ManagedClusterConditionAvailable`].status') | join ) == "True"
+
+    - name: Validate Clusters Joined - Secondary
+      k8s_info:
+        host: "{{ __r_hub.k8s_auth.host }}"
+        username: "{{ __r_hub.k8s_auth.username }}"
+        api_key: "{{ __r_hub.k8s_auth.api_key }}"
+        validate_certs: false
+        api_version: cluster.open-cluster-management.io/v1
+        kind: managedcluster
+        name: secondary
+        namespace: aws-secondary
+      register: __r_wait_aws_secondary_a
+      ignore_errors: true
+      retries: 240
+      delay: 15
+      until:
+      - __r_wait_aws_secondary_a.resources is defined
+      - __r_wait_aws_secondary_a.resources | length | int > 0
+      - __r_wait_aws_secondary_a.resources[0].status is defined
+      - __r_wait_aws_secondary_a.resources[0].status.conditions is defined
+      - ( __r_wait_aws_secondary_a.resources[0].status | to_json | from_json |
+        json_query('conditions[?type == `ManagedClusterConditionAvailable`].status') | join ) == "True"
+
+    - name: Increase oAuth Token age - Primary
+      k8s:
+        host: "{{ __r_aws_primary_a.k8s_auth.host }}"
+        username: "{{ __r_aws_primary_a.k8s_auth.username }}"
+        api_key: "{{ __r_aws_primary_a.k8s_auth.api_key }}"
+        validate_certs: false
+        state: present
+        definition: "{{ lookup('template', './templates/set_oauth_token_age.yml.j2' ) | from_yaml }}"
+
+    - name: Increase oAuth Token age - Secondary
+      k8s:
+        host: "{{ __r_aws_secondary_a.k8s_auth.host }}"
+        username: "{{ __r_aws_secondary_a.k8s_auth.username }}"
+        api_key: "{{ __r_aws_secondary_a.k8s_auth.api_key }}"
+        validate_certs: false
+        state: present
+        definition: "{{ lookup('template', './templates/set_oauth_token_age.yml.j2' ) | from_yaml }}"
+
+    - name: Print Primary info
+      agnosticd_user_info:
+        data:
+          aws_primary_a_cluster_name: 'primary'
+          aws_primary_a_cluster_token: "{{ __r_aws_primary_a.k8s_auth.api_key }}"
+          aws_primary_a_cluster_api_url: "{{ __r_aws_primary_a.k8s_auth.host }}"
+        msg: |
+          aws_primary_a_cluster_name: primary
+          aws_primary_a_cluster_token: {{ __r_aws_primary_a.k8s_auth.api_key }}
+          aws_primary_a_cluster_api_url: {{ __r_aws_primary_a.k8s_auth.host }}
+
+    - name: Print Secondary info
+      agnosticd_user_info:
+        data:
+          aws_secondary_a_cluster_name: 'secondary'
+          aws_secondary_a_cluster_token: "{{ __r_aws_secondary_a.k8s_auth.api_key }}"
+          aws_secondary_a_cluster_api_url: "{{ __r_aws_secondary_a.k8s_auth.host }}"
+        msg: |
+          aws_secondary_a_cluster_name: secondary
+          aws_secondary_a_cluster_token: {{ __r_aws_secondary_a.k8s_auth.api_key }}
+          aws_secondary_a_cluster_api_url: {{ __r_aws_secondary_a.k8s_auth.host }}
+
+- name: Step 005 Post Software - Cloud name
+  hosts: ohc_hub
+  gather_facts: false
+  environment:
+    KUBECONFIG: /home/{{ ansible_user }}/.kube/config
+  tasks:
+  - name: Change local-cloud to hub cluster
+    command: >-
+      oc patch ManagedCluster local-cluster
+      -p='[{"op": "replace", "path": "/metadata/labels/cloud", "value":"hub-cluster"}]'
+      -n open-cluster-management
+      --type json
+
+  - name: Set Ansible Python interpreter to k8s virtualenv
+    set_fact:
+      ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+ # Loggin into Cluster's bastion
+  - name: Logging into Hub
+    k8s_auth:
+      host: "{{ aws_hub_a_provision_data.openshift_api_url }}"
+      username: "{{ aws_hub_a_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_hub_a_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_hub
+    retries: 240
+    delay: 15
+    until:
+    - __r_hub.k8s_auth.api_key is defined 
+
+  - name: Logging into AWS OCP4 Primary Cluster - Site 1
+    k8s_auth:
+      host: "{{ aws_primary_a_provision_data.openshift_api_url }}"
+      username: "{{ aws_primary_a_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_primary_a_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_aws_primary_a
+    retries: 240
+    delay: 15
+    until:
+    - __r_aws_primary_a.k8s_auth.api_key is defined
+
+  - name: Logging into AWS OCP4 Secondary Cluster - Site 2
+    k8s_auth:
+      host: "{{ aws_secondary_a_provision_data.openshift_api_url }}"
+      username: "{{ aws_secondary_a_provision_data.openshift_cluster_admin_username }}"
+      password: "{{ aws_secondary_a_provision_data.openshift_cluster_admin_password }}"
+      validate_certs: false
+    register: __r_aws_secondary_a
+    retries: 240
+    delay: 15
+    until:
+    - __r_aws_secondary_a.k8s_auth.api_key is defined
+
+  - name: Increase oAuth Token age - Primary
+    k8s:
+      host: "{{ __r_aws_primary_a.k8s_auth.host }}"
+      username: "{{ __r_aws_primary_a.k8s_auth.username }}"
+      api_key: "{{ __r_aws_primary_a.k8s_auth.api_key }}"
+      validate_certs: false
+      state: present
+      definition: "{{ lookup('template', './templates/set_oauth_token_age.yml.j2' ) | from_yaml }}"
+
+  - name: Increase oAuth Token age - Secondary
+    k8s:
+      host: "{{ __r_aws_secondary_a.k8s_auth.host }}"
+      username: "{{ __r_aws_secondary_a.k8s_auth.username }}"
+      api_key: "{{ __r_aws_secondary_a.k8s_auth.api_key }}"
+      validate_certs: false
+      state: present
+      definition: "{{ lookup('template', './templates/set_oauth_token_age.yml.j2' ) | from_yaml }}"
+
+  - name: Print Primary info
+    agnosticd_user_info:
+      data:
+        aws_primary_a_cluster_name: 'primary'
+        aws_primary_a_cluster_token: "{{ __r_aws_primary_a.k8s_auth.api_key }}"
+        aws_primary_a_cluster_api_url: "{{ __r_aws_primary_a.k8s_auth.host }}"
+      msg: |
+        aws_primary_a_cluster_name: primary
+        aws_primary_a_cluster_token: {{ __r_aws_primary_a.k8s_auth.api_key }}
+        aws_primary_a_cluster_api_url: {{ __r_aws_primary_a.k8s_auth.host }}
+
+  - name: Print Secondary info
+    agnosticd_user_info:
+      data:
+        aws_secondary_a_cluster_name: 'secondary'
+        aws_secondary_a_cluster_token: "{{ __r_aws_secondary_a.k8s_auth.api_key }}"
+        aws_secondary_a_cluster_api_url: "{{ __r_aws_secondary_a.k8s_auth.host }}"
+      msg: |
+        aws_secondary_a_cluster_name: secondary
+        aws_secondary_a_cluster_token: {{ __r_aws_secondary_a.k8s_auth.api_key }}
+        aws_secondary_a_cluster_api_url: {{ __r_aws_secondary_a.k8s_auth.host }}
+
+  - name: ocp key and url for primary
+    debug:
+      msg: "ocp primary key {{ __r_aws_primary_a.k8s_auth.api_key }}"
+      msg: "ocp primary url {{ __r_aws_primary_a.k8s_auth.host }}"
+
+  - name: ocp key and url for secondary
+    debug:
+      msg: "ocp secondary key {{ __r_aws_secondary_a.k8s_auth.api_key }}"
+      msg: "ocp secondary url {{ __r_aws_secondary_a.k8s_auth.host }}"
+
+  - name: Submariner Setup
+    vars:
+      # Change value according to requirements
+      ocp_key_primary: "{{ __r_aws_primary_a.k8s_auth.api_key }}"
+      ocp_primary_api_url: "{{ __r_aws_primary_a.k8s_auth.host }}"
+      ocp_key_secondary: "{{ __r_aws_secondary_a.k8s_auth.api_key }}"
+      ocp_secondary_api_url: "{{ __r_aws_secondary_a.k8s_auth.host }}"
+      submariner_clusterset_name: clusterset1
+      submariner_clusters:
+        - name: primary
+          aws_access_key_id: "{{ aws_primary_a_provision_data.aws_access_key_id }}"
+          aws_secret_access_key: "{{ aws_primary_a_provision_data.aws_secret_access_key }}"
+        - name: secondary
+          aws_access_key_id: "{{ aws_secondary_a_provision_data.aws_access_key_id }}"
+          aws_secret_access_key: "{{ aws_secondary_a_provision_data.aws_secret_access_key }}"
+    include_role:
+      name: ocp4_workload_submariner    
+
+  - name: ocp key and url for primary
+    debug:
+      msg: "ocp primary key {{ __r_aws_primary_a.k8s_auth.api_key }}"
+      msg: "ocp primary url {{ __r_aws_primary_a.k8s_auth.host }}"
+
+  - name: ocp key and url for secondary
+    debug:
+      msg: "ocp secondary key {{ __r_aws_secondary_a.k8s_auth.api_key" 
+      msg: "ocp secondary url {{ __r_aws_secondary_a.k8s_auth.host }}"
+
+  - name: ODF RDR Setup
+    vars:
+      # Change value according to requirements
+      ocp_key_primary: "{{ __r_aws_primary_a.k8s_auth.api_key }}"
+      ocp_primary_api_url: "{{ __r_aws_primary_a.k8s_auth.host }}"
+      ocp_key_secondary: "{{ __r_aws_secondary_a.k8s_auth.api_key }}"
+      ocp_secondary_api_url: "{{ __r_aws_secondary_a.k8s_auth.host }}"
+    include_role:
+      name: ocp4_workload_odf_rdr
+
+  - name: Add sample busybox application for RDR test
+    k8s:
+      state: present
+      definition: "{{ lookup('template',  item ) | from_yaml }}"
+    loop:
+    - busybox-app-namespace.yaml.j2
+    - busybox-app-sub.yaml.j2
+    - busybox-meta-ramen.yaml.j2
+    - busybox-channel.yaml.j2
+    - busybox-placement-rule.yaml.j2
+    - busybox-placement-primary.yaml.j2
+    - busybox-drpc.yaml.j2
+
+- name: Step 005 Post Software - Report to Cloudforms
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+  - step005
+  - post_software
+  tasks:
+
+  - name: Print string expected by Cloudforms
+    debug:
+      msg: "Post-Software checks completed successfully"
+
+  - name: Exiting the odf-dr-binder post_software.yml
+    debug:
+      msg:
+      - Exiting the odf-dr-binder post_software.yml
+...

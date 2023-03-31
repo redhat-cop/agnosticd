@@ -24,40 +24,96 @@
     install_operator_catalogsource_image: "{{ ocp4_workload_pipelines_catalog_snapshot_image | default('') }}"
     install_operator_catalogsource_image_tag: "{{ ocp4_workload_pipelines_catalog_snapshot_image_tag }}"
 
-- name: Install OpenShift Pipelines CLI (tkn)
-  become: true
-  unarchive:
-    src: >-
-      {{ ocp4_installer_root_url }}/pipeline/{{
-      ocp4_workload_pipelines_tkn_version }}/tkn-linux-amd64-{{ ocp4_workload_pipelines_tkn_version }}.tar.gz
-    remote_src: true
-    dest: /usr/local/bin
-    mode: 0755
-    owner: root
-    group: root
-  args:
-    creates: /usr/local/bin/tkn
-
-# command: does not work here - somehow the parameters don't get passed properly
-- name: Setup tkn bash completion
-  become: true
-  shell: "/usr/local/bin/tkn completion bash >/etc/bash_completion.d/tkn"
-  args:
-    creates: /etc/bash_completion.d/tkn
-
-- name: Wait until Pipelines Pods are ready
-  k8s_info:
+- name: Wait until pipeline controller pods are ready
+  kubernetes.core.k8s_info:
     api_version: v1
     kind: Deployment
     namespace: openshift-pipelines
     name: tekton-pipelines-controller
   register: r_pipeline_controller_deployment
-  retries: 30
+  retries: 40
   delay: 10
   until:
   - r_pipeline_controller_deployment.resources | length | int > 0
   - r_pipeline_controller_deployment.resources[0].status.readyReplicas is defined
   - r_pipeline_controller_deployment.resources[0].status.readyReplicas | int == r_pipeline_controller_deployment.resources[0].spec.replicas | int
+
+- name: Wait until tkn cli download deployment is ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: openshift-pipelines
+    name: tkn-cli-serve
+  register: r_pipeline_tkn_cli_deployment
+  retries: 60
+  delay: 30
+  until:
+  - r_pipeline_tkn_cli_deployment.resources | length | int > 0
+  - r_pipeline_tkn_cli_deployment.resources[0].status.readyReplicas is defined
+  - r_pipeline_tkn_cli_deployment.resources[0].status.readyReplicas | int == r_pipeline_controller_deployment.resources[0].spec.replicas | int
+
+- name: Get tkn ConsoleCLIDownload
+  kubernetes.core.k8s_info:
+    api_version: console.openshift.io/v1
+    kind: ConsoleCLIDownload
+    name: tkn
+  register: r_tkn_cli_download
+  retries: 20
+  delay: 10
+  ignore_errors: true
+  until:
+  - r_tkn_cli_download.resources is defined
+  - r_tkn_cli_download.resources | length > 0
+
+- name: Get tkn download URL from ConsoleCLIDownload
+  when: r_tkn_cli_download.resources | length > 0
+  set_fact:
+    _ocp4_workload_pipelines_tkn_url: >-
+      {{ r_tkn_cli_download.resources[0] | to_json | from_json
+       | json_query("spec.links[?contains(href,'-linux-amd64')].href") | first }}
+
+- name: Download tkn cli tool
+  get_url:
+    url: "{{ _ocp4_workload_pipelines_tkn_url }}"
+    validate_certs: false
+    dest: /tmp/tkn-linux-amd64.tar.gz
+    mode: 0660
+  register: r_tkn
+  until: r_tkn is success
+  retries: 10
+  delay: 10
+
+- name: Install tkn CLI on bastion
+  become: true
+  unarchive:
+    src: /tmp/tkn-linux-amd64.tar.gz
+    remote_src: true
+    dest: /usr/bin
+    mode: 0775
+    owner: root
+    group: root
+  args:
+    creates: /usr/bin/tkn
+
+- name: Remove downloaded file
+  file:
+    state: absent
+    path: /tmp/tkn-linux-amd64.tar.gz
+
+# command: does not work here - somehow the parameters don't get passed properly
+- name: Setup tkn bash completion
+  become: true
+  shell: "/usr/bin/tkn completion bash >/etc/bash_completion.d/tkn"
+  args:
+    creates: /etc/bash_completion.d/tkn
+
+- name: Setup tkn-pac bash completion
+  become: true
+  shell: "/usr/bin/tkn-pac completion bash >/etc/bash_completion.d/tkn-pac"
+  args:
+    creates: /etc/bash_completion.d/tkn-pac
+  # Ignore errors for older pipelines versions
+  ignore_errors: true
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
