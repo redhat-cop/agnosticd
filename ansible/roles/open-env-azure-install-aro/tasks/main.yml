@@ -1,6 +1,36 @@
 ---
+- name: Generate arouser password
+  command: openssl rand -base64 25
+  register: password_gen_r
+- set_fact: generated_arouser_password="{{ password_gen_r.stdout }}"
+- name: Retrieving an available arouser and locking it in CosmosDB
+  ansible.builtin.uri:
+    return_content: true
+    url: "{{ az_function_get }}{{ project_tag }}?code={{ azure_pool_api_secret }}"
+  register: arouser
+- name: Get arouser object from Active Directory
+  register: arouserobj
+  azure.azcollection.azure_rm_aduser_info:
+    auth_source: cli
+    user_principal_name: "{{ arouser.content }}@{{ azure_user_domain }}"
+    tenant: "{{ azure_tenant }}"
+- name: Update arouser password
+  azure.azcollection.azure_rm_aduser:
+    auth_source: cli
+    user_principal_name: "{{ arouser.content }}@{{ azure_user_domain }}"
+    state: "present"
+    password_profile: "{{ generated_arouser_password }}"
+    tenant: "{{ azure_tenant }}"
+- name: Make arouser owner of resource group
+  azure.azcollection.azure_rm_roleassignment:
+    auth_source: cli
+    scope: "{{ azrg['resourcegroups'][0].id }}"
+    assignee_object_id: "{{ arouserobj['ad_users'][0].object_id }}"
+    role_definition_id:
+      "{{ azownerrd['roledefinitions'][0].id }}"
+
 - name: Login with azure root user
-  no_log: True
+  no_log: true
   command: >-
     az login -u "{{ azure_user }}"
     -p="{{ azure_user_password }}" --tenant="{{ azure_tenant }}"
@@ -50,3 +80,33 @@
     az aro list-credentials --resource-group "openenv-{{ guid }}" --name "aro-cluster-{{ guid }}"
     --query kubeadminPassword -o tsv
   register: az_aro4_kubeadmin_password
+
+- name: Wait 5 minutes for the x509 certificate to be signed before attempting to log in
+  pause:
+    minutes: 5
+
+- set_fact: kubeconfigdir="{{ output_dir }}/.kube"
+
+- set_fact: kubeconfig="{{ kubeconfigdir }}/config"
+
+- name: Make sure .kube directory exists
+  file:
+    state: directory
+    path: "{{ kubeconfigdir }}"
+    mode: 0700
+
+- name: Login to the resulting ARO cluster as kubeadmin
+  command: >
+      oc login {{ az_aro4_public_api.stdout }} -u kubeadmin -p {{ az_aro4_kubeadmin_password.stdout }} --config {{ kubeconfig }}
+
+- name: Create a secret to store the azureAD App ID password in the cluster
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
+    state: present
+    definition: "{{ lookup('template', 'secret-azuread.yaml.j2' ) | from_yaml }}"
+
+- name: Update OAuth configuration on the cluster to add AAD
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
+    state: present
+    definition: "{{ lookup('template', 'aad_oidc.yaml.j2' ) | from_yaml }}"
