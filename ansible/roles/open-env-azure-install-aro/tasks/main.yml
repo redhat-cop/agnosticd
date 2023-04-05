@@ -123,54 +123,105 @@
   retries: 10
   delay: 10
 
-- name: Check if ARO is already installed
-  azure.azcollection.azure_rm_openshiftmanagedcluster_info:
-    auth_source: cli
-    tenant: "{{ azure_tenant }}"
-    resource_group: "openenv-{{ guid }}"
-    name: "aro-cluster-{{ guid }}"
-  ignore_errors: true
-  register: check_aro_install
+- name: Install ARO using azcollection
+  when: install_aro_with_azcollection | default(false) | bool
+  block:
+    - name: Check if ARO is already installed
+      azure.azcollection.azure_rm_openshiftmanagedcluster_info:
+        auth_source: cli
+        tenant: "{{ azure_tenant }}"
+        resource_group: "openenv-{{ guid }}"
+        name: "aro-cluster-{{ guid }}"
+      ignore_errors: true
+      register: check_aro_install
 
-- name: Create ARO cluster
-  when: check_aro_install.clusters | length == 0
-  azure.azcollection.azure_rm_openshiftmanagedcluster:
-    auth_source: cli
-    tenant: "{{ azure_tenant }}"
-    resource_group: "openenv-{{ guid }}"
-    name: "aro-cluster-{{ guid }}"
-    location: "{{ azure_region }}"
-    cluster_profile:
-      pull_secret: "{{ ocp4_pull_secret | to_json }}"
-    service_principal_profile:
-      client_id: "{{ azaroappsp.service_principals[0].app_id }}"
-      client_secret: "{{ az_aro_pass }}"
-    worker_profiles:
-      - vm_size: "Standard_D4s_v3"
-        subnet_id: "{{ worker_subnet.subnets[0].id }}"
-        disk_size: 128
-        count: 3
-    master_profile:
-      vm_size : "Standard_D8s_v3"
-      subnet_id: "{{ master_subnet.subnets[0].id }}"
-    state: present
+    - name: Create ARO cluster
+      when: check_aro_install.clusters | length == 0
+      azure.azcollection.azure_rm_openshiftmanagedcluster:
+        auth_source: cli
+        tenant: "{{ azure_tenant }}"
+        resource_group: "openenv-{{ guid }}"
+        name: "aro-cluster-{{ guid }}"
+        location: "{{ azure_region }}"
+        cluster_profile:
+          pull_secret: "{{ ocp4_pull_secret | to_json }}"
+        service_principal_profile:
+          client_id: "{{ azaroappsp.service_principals[0].app_id }}"
+          client_secret: "{{ az_aro_pass }}"
+        worker_profiles:
+          - vm_size: "Standard_D4s_v3"
+            subnet_id: "{{ worker_subnet.subnets[0].id }}"
+            disk_size: 128
+            count: 3
+        master_profile:
+          vm_size : "Standard_D8s_v3"
+          subnet_id: "{{ master_subnet.subnets[0].id }}"
+        state: present
 
-- name: Wait for ARO to deploy
-  azure.azcollection.azure_rm_openshiftmanagedcluster_info:
-    auth_source: cli
-    tenant: "{{ azure_tenant }}"
-    resource_group: "openenv-{{ guid }}"
-    name: "aro-cluster-{{ guid }}"
-  register: aro_cluster
-  until: "aro_cluster.clusters.properties.provisioningState == 'Succeeded'"
-  retries: 60
-  delay: 60
+    - name: Wait for ARO to deploy
+      azure.azcollection.azure_rm_openshiftmanagedcluster_info:
+        auth_source: cli
+        tenant: "{{ azure_tenant }}"
+        resource_group: "openenv-{{ guid }}"
+        name: "aro-cluster-{{ guid }}"
+      register: aro_cluster
+      until: "aro_cluster.clusters.properties.provisioningState == 'Succeeded'"
+      retries: 60
+      delay: 60
 
-- name: Grab the console URL for ARO
-  ansible.builtin.set_fact: az_aro4_public_hostname="{{ aro_cluster.clusters.properties.consoleProfile.url }}"
+    - name: Grab the console URL for ARO
+      ansible.builtin.set_fact: az_aro4_console_url="{{ aro_cluster.clusters.properties.consoleProfile.url }}"
 
-- name: Grab the API Server URL for ARO
-  ansible.builtin.set_fact: az_aro4_public_api="{{ aro_cluster.clusters.properties.apiserverProfile.url }}"
+    - name: Grab the API Server URL for ARO
+      ansible.builtin.set_fact: az_aro4_public_api_url="{{ aro_cluster.clusters.properties.apiserverProfile.url }}"
+
+    - name: Build the ARO reply URL
+      ansible.builtin.set_fact: az_aro4_reply_url="https://oauth-openshift.apps.{{ aro_cluster.clusters.properties.clusterProfile.domain }}.{{ aro_cluster.clusters.location }}.aroapp.io/oauth2callback/AAD"
+
+- name: Install ARO using az commands
+  when: not install_aro_with_azcollection | default(false) | bool
+  block:
+    - name: Create token file for ARO installer
+      copy:
+        dest: "{{ output_dir }}/token.txt"
+        content: "{{ ocp4_pull_secret }}"
+
+    - name: Create ARO cluster
+      command: >-
+        az aro create --resource-group "openenv-{{ guid }}" --name "aro-cluster-{{ guid }}" --vnet "aro-vnet-{{ guid }}" --master-subnet master-subnet --worker-subnet worker-subnet --client-id "{{ azaroappsp.service_principals[0].app_id }}" --client-secret '{{ az_aro_pass }}' --pull-secret "@{{ output_dir }}/token.txt"
+
+    - name: Grab the console URL for ARO
+      command: >
+        az aro show --resource-group "openenv-{{ guid }}" --name "aro-cluster-{{ guid }}"
+        --query consoleProfile -o tsv
+      register: console_url
+
+    - name: Grab the console URL for ARO
+      ansible.builtin.set_fact: az_aro4_console_url="{{ console_url.stdout }}"
+
+    - name: Grab the API Server URL for ARO
+      command: >
+        az aro show --resource-group "openenv-{{ guid }}" --name "aro-cluster-{{ guid }}"
+        --query apiserverProfile.url -o tsv
+      register: public_api_url
+
+    - name: Grab the API Server URL for ARO
+      ansible.builtin.set_fact: az_aro4_public_api_url="{{ public_api_url.stdout }}"
+
+    - name: Grab ARO domain
+      command: >
+        az aro show --resource-group "openenv-{{ guid }}" --name "aro-cluster-{{ guid }}"
+        --query clusterProfile.domain -o tsv
+      register: aro_domain
+
+    - name: Grab ARO location
+      command: >
+        az aro show --resource-group "openenv-{{ guid }}" --name "aro-cluster-{{ guid }}"
+        --query location -o tsv
+      register: aro_location
+
+    - name: Build the ARO reply URL
+      ansible.builtin.set_fact: az_aro4_reply_url="https://oauth-openshift.apps.{{ aro_domain.stdout }}.{{ aro_location.stdout }}.aroapp.io/oauth2callback/AAD"
 
 - name: Grabbing the kubeadmin password for ARO
   ansible.builtin.command: >-
@@ -180,10 +231,10 @@
 
 - name: Add redirect URI to service principal
   ansible.builtin.command: >-
-    az ad app update --id "api://openenv-{{ guid }}" --reply-urls "https://oauth-openshift.apps.{{ aro_cluster.clusters.properties.clusterProfile.domain }}.{{ aro_cluster.clusters.location }}.aroapp.io/oauth2callback/AAD"
+    az ad app update --id "api://openenv-{{ guid }}" --reply-urls "{{ az_aro4_reply_url }}"
 
 - name: Wait 5 minutes for the x509 certificate to be signed before attempting to log in
-  when: "'clusters' not in check_aro_install"
+  when: check_aro_install.clusters | length == 0
   ansible.builtin.pause:
     minutes: 5
 
@@ -199,7 +250,7 @@
 
 - name: Login to the resulting ARO cluster as kubeadmin
   ansible.builtin.command: >-
-      oc login {{ az_aro4_public_api }} -u kubeadmin -p {{ az_aro4_kubeadmin_password.stdout }} --kubeconfig {{ kubeconfig }} --insecure-skip-tls-verify
+      oc login {{ az_aro4_public_api_url }} -u kubeadmin -p {{ az_aro4_kubeadmin_password.stdout }} --kubeconfig {{ kubeconfig }} --insecure-skip-tls-verify
 
 - name: Create a secret to store the azureAD App ID password in the cluster
   kubernetes.core.k8s:
