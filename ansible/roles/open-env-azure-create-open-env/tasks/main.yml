@@ -1,7 +1,7 @@
 ---
 - name: Login with azure root user
-  no_log: True
-  command: >-
+  no_log: true
+  ansible.builtin.command: >-
     az login -u "{{ azure_user }}"
     -p="{{ azure_user_password }}" --tenant="{{ azure_tenant }}"
 - name: Get internal user from Active Directory
@@ -14,9 +14,10 @@
 - name: Create OPEN environment resource group
   azure.azcollection.azure_rm_resourcegroup:
     auth_source: cli
+    tenant: "{{ azure_tenant }}"
     subscription_id: "{{ azure_subscription_id }}"
     name: "openenv-{{ guid }}"
-    location: eastus
+    location: "{{ azure_region }}"
     state: present
     tags:
       guid: "{{ guid }}"
@@ -29,17 +30,17 @@
 - name: Get Owner Role Definition
   azure.azcollection.azure_rm_roledefinition_info:
     auth_source: cli
-    scope: "{{ azrg['resourcegroups'][0].id }}"
+    scope: "{{ azrg.resourcegroups[0].id }}"
     role_name: Owner
   register: azownerrd
 - name: Make internal user owner of resource group
   when: not external_user | bool
   azure.azcollection.azure_rm_roleassignment:
     auth_source: cli
-    scope: "{{ azrg['resourcegroups'][0].id }}"
-    assignee_object_id: "{{ azuser['ad_users'][0].object_id }}"
+    scope: "{{ azrg.resourcegroups[0].id }}"
+    assignee_object_id: "{{ azuser.ad_users[0].object_id }}"
     role_definition_id:
-      "{{ azownerrd['roledefinitions'][0].id }}"
+      "{{ azownerrd.roledefinitions[0].id }}"
 - name: See if application already exists
   azure.azcollection.azure_rm_adapplication_info:
     identifier_uri: "api://openenv-{{ guid }}"
@@ -47,19 +48,15 @@
   ignore_errors: true
   register: azappcheck
 - name: Create the Application and SP
-  when: azappcheck['applications']|length==0
-  command: >-
+  when: azappcheck.applications | length == 0
+  ansible.builtin.command: >-
     az ad sp create-for-rbac
     --name "api://openenv-{{ guid }}"
     --role Owner
-    --scopes "{{ azrg['resourcegroups'][0].id }}"
+    --scopes "{{ azrg.resourcegroups[0].id }}"
   register: azappcreate
-- name: Get password
-  when: azappcreate.changed
-  block:
-    - set_fact: azpass="{{ azappcreate.stdout | from_json | json_query('password') }}"
 - name: Wait 60 seconds for Azure to create application
-  when: azappcreate.changed
+  when: azappcreate.changed | bool
   ansible.builtin.wait_for:
     timeout: 60
 - name: Get application info
@@ -68,42 +65,62 @@
     identifier_uri: "api://openenv-{{ guid }}"
     tenant: "{{ azure_tenant }}"
   register: azapp
+- name: Get az app SP info
+  azure.azcollection.azure_rm_adserviceprincipal_info:
+    auth_source: cli
+    app_id: "{{ azapp.applications[0].app_id }}"
+    tenant: "{{ azure_tenant }}"
+  register: azappsp
+- name: Get app password
+  when: azappcreate.changed | bool
+  block:
+    - ansible.builtin.set_fact: azpass="{{ azappcreate.stdout | from_json | json_query('password') }}"
+- name: Save app password
+  when: not azappcreate.changed | bool
+  block:
+    - name: Reset app secret
+      ansible.builtin.command: >-
+        az ad sp credential reset --name {{ azappsp.service_principals[0].app_id }} --query "password" --out tsv
+      register: app_sp_reset
+    - debug:
+        msg: "{{app_sp_reset}}"
+    - ansible.builtin.set_fact: azpass="{{ app_sp_reset.stdout }}"
 - name: Add API Application.ReadWrite.All permissions to SP
-  when: azappcheck['applications']|length==0
-  command: >-
+  when: azappcheck.applications | length == 0
+  ansible.builtin.command: >-
     az ad app permission add
-    --id "{{ azapp['applications'][0].app_id }}"
+    --id "{{ azapp.applications[0].app_id }}"
     --api 00000003-0000-0000-c000-000000000000
     --api-permissions bdfbf15f-ee85-4955-8675-146e8e5296b5=Scope
   register: azpermsupdate
 - name: Wait 60 seconds for Azure to apply permission
-  when: azpermsupdate.changed
+  when: azpermsupdate.changed | bool
   ansible.builtin.wait_for:
     timeout: 60
 - name: Authorize admin consent to service principal
-  when: azpermsupdate.changed
-  command: >-
+  when: azpermsupdate.changed | bool
+  ansible.builtin.command: >-
     az ad app permission admin-consent
-    --id "{{ azapp['applications'][0].app_id }}"
-- name: Get SP info
-  command: >-
-    az ad sp show --id "api://openenv-{{ guid }}"
-  register: azappinfo
+    --id "{{ azapp.applications[0].app_id }}"
 - name: Build payload for service principal role assignment
-  set_fact:
+  ansible.builtin.set_fact:
     payload:
       {
         '@odata.type': '#microsoft.graph.unifiedRoleAssignment',
-        'principalId': "{{ azappinfo.stdout | from_json | json_query('objectId') }}",
+        'principalId': "{{ azappsp.service_principals[0].object_id }}",
         'roleDefinitionId': '8e2e22ca-bde6-4977-bc67-7f189cc47557',
         'directoryScopeId': '/'
       }
 - name: Assign Application Administrator role to service principal
-  command: >-
+  ansible.builtin.command: >-
     az rest -m post
     --headers Content-type=application/json
     -u https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments
     -b "{{ payload }}"
+  register: rest_post
+  failed_when:
+    - rest_post.rc != 0
+    - '"A conflicting object with one or more of the specified property values is present in the directory" not in rest_post.stderr'
 - name: See if ARO SP already exists
   azure.azcollection.azure_rm_adapplication_info:
     auth_source: cli
@@ -112,33 +129,52 @@
   ignore_errors: true
   register: azaroappcheck
 - name: Create the Service Principal for ARO
-  when: azaroappcheck['applications']|length==0
-  command: >-
+  when: azaroappcheck.applications | length == 0
+  ansible.builtin.command: >-
     az ad sp create-for-rbac
     --name "api://openenv-aro-{{ guid }}"
     --role Contributor
-    --scopes "{{ azrg['resourcegroups'][0].id }}"
+    --scopes "{{ azrg.resourcegroups[0].id }}"
   register: azaroappcreate
-- name: Save ARO SP password
-  when: azaroappcreate.changed
-  block:
-    - set_fact: az_aro_pass="{{ azaroappcreate.stdout | from_json | json_query('password') }}"
-- name: Get ARO SP info
-  command: >-
-    az ad sp show --id "api://openenv-aro-{{ guid }}"
-  register: azaroappinfo
+- name: Get ARO app info
+  azure.azcollection.azure_rm_adapplication_info:
+    auth_source: cli
+    identifier_uri: "api://openenv-aro-{{ guid }}"
+    tenant: "{{ azure_tenant }}"
+  register: azaroapp
+- name: Get ARO app SP info
+  azure.azcollection.azure_rm_adserviceprincipal_info:
+    auth_source: cli
+    app_id: "{{ azaroapp.applications[0].app_id }}"
+    tenant: "{{ azure_tenant }}"
+  register: azaroappsp
 - name: Build payload for role assignment
-  set_fact:
+  ansible.builtin.set_fact:
     payload:
       {
         '@odata.type': '#microsoft.graph.unifiedRoleAssignment',
-        'principalId': "{{ azaroappinfo.stdout | from_json | json_query('objectId') }}",
+        'principalId': "{{ azaroappsp.service_principals[0].object_id }}",
         'roleDefinitionId': '8e2e22ca-bde6-4977-bc67-7f189cc47557',
         'directoryScopeId': '/'
       }
 - name: Assign Application Administrator role to ARO SP
-  command: >-
+  ansible.builtin.command: >-
     az rest -m post
     --headers Content-type=application/json
     -u https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments
     -b "{{ payload }}"
+  register: rest_post
+  failed_when:
+    - rest_post.rc != 0
+    - '"A conflicting object with one or more of the specified property values is present in the directory" not in rest_post.stderr'
+- name: Save ARO SP password
+  when: azaroappcreate.changed | bool
+  ansible.builtin.set_fact: az_aro_pass="{{ azaroappcreate.stdout | from_json | json_query('password') }}"
+- name: Save ARO SP password
+  when: not azaroappcreate.changed | bool
+  block:
+    - name: Reset ARO SP secret
+      ansible.builtin.command: >-
+        az ad sp credential reset --name {{ azaroappsp.service_principals[0].app_id }} --query "password" --out tsv
+      register: aro_sp_reset
+    - ansible.builtin.set_fact: az_aro_pass="{{ aro_sp_reset.stdout }}"
