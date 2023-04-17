@@ -1,0 +1,104 @@
+---
+# Implement your Workload deployment tasks here
+- name: Create the projects
+  kubernetes.core.k8s:
+    state: present
+    kind: Namespace
+    name: "{{ item }}"
+  loop: "{{ ocp4_workload_rhods_self_managed_namespace_list }}"
+
+- name: Create RHODS Operator Group
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/redhat-ods-operator-group.yaml.j2' ) | from_yaml  }}"
+
+- name: Create RHODS Operator
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', './templates/redhat-ods-operator.yaml.j2' ) | from_yaml  }}"
+
+# - debug: var=r_storagecluster2
+
+- name: Update the RHODS config to allow all users
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: ConfigMap
+    namespace: "{{ item }}"
+    name: rhods-groups-config
+    definition:
+      labels:
+        opendatahub.io/modified: "true"
+      data:
+        allowed_groups: system:authenticated
+  loop: "{{ ocp4_workload_rhods_self_managed_namespace_list }}"
+
+- name: Get the RHODS dashboard route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: rhods-dashboard
+    namespace: "{{ ocp4_workload_rhods_self_managed_applications_namespace }}"
+  register: r_odh_dashboard_route
+  until:
+    - r_odh_dashboard_route.resources is defined
+    - r_odh_dashboard_route.resources | length > 0
+    - r_odh_dashboard_route.resources.0.status.ingress.0.host is defined
+    - r_odh_dashboard_route.resources.0.status.ingress.0.host | length > 0
+  retries: 30
+  delay: 30
+
+- debug: var=r_odh_dashboard_route.resources.0.status.ingress.0.host
+
+- name: Get the OpenShift console route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: console
+    namespace: openshift-console
+  register: r_console_route
+
+- name: Remove core-resource-limits for rhods related projects.
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: LimitRange
+    name: rhods-notebooks-core-resource-limits
+    namespace: rhods-notebooks
+    state: absent
+
+- name: Report demo user info (for provisioner)
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+    - ""
+    - "RedHat OpenShift Data Science Dashboard: https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
+
+- name: Report demo user info (for student)
+  agnosticd_user_info:
+    msg: |
+      Your username is: userX
+      Password: 'openshift'
+#      ODH Dddashboard: https://{{ r_odh_dashboard_route.resources[0].spec.host }}
+    data:
+      rhodh_dashboard: "https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
+      rhodh_password: openshift
+
+- name: Report demo user info (for multi-user)
+  when: ocp4_workload_rhods_self_managed_is_workshop | bool
+  agnosticd_user_info:
+    user: "{{ ocp4_workload_authentication_htpasswd_user_base }}{{ item }}"
+    msg:
+      - "Please open the lab guide first, and follow the instructions you find there."
+      - ""
+      - "Red Hat OpenShift Data Science Dashboard:     https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
+      - "OpenShift console: https://{{ r_console_route.resources[0].spec.host }}"
+      - ""
+      - "Username:          {{ ocp4_workload_rhods_self_managed_workshop_username_base }}{{ item }}"
+      - "Password:          {{ ocp4_workload_rhods_self_managed_workshop_password }}"
+      - "GUID:              {{ guid }}"
+  loop: "{{ range(1, 1 + ocp4_workload_rhods_self_managed_workshop_num_users | int) | list }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
