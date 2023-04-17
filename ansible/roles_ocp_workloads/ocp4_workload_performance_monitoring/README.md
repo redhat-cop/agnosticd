@@ -21,4 +21,4 @@ In this session lab, you will:
  ## Team behind the Lab content
  * Rafael Soares, Senior Specialist Solution Architect, Red Hat
  * Giovani Fontana, Specialist Solution Architect, Red Hat
- * Guilherme Camposa, Senior Specialist Solution Architect, Red Hat
+ * Guilherme Camposo, Senior Specialist Solution Architect, Red Hat
