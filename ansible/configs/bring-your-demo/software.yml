@@ -1,0 +1,84 @@
+---
+- name: Step 004 Software
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+    - step004
+    - deploy_software
+  tasks:
+    - name: Log in (obtain access token)
+      community.okd.openshift_auth:
+        username: "{{ openshift_cnv_username }}"
+        password: "{{ openshift_cnv_password }}"
+        host: "{{ openshift_cnv_api_uri }}"
+      register: k8s_auth_results
+
+    - name: Create ArgoCD instance and the Application
+      module_defaults:
+        group/k8s:
+          host: "{{ openshift_cnv_api_uri }}"
+          api_key: "{{ k8s_auth_results.k8s_auth.api_key }}"
+          validate_certs: False
+      block:
+        - name: Create ArgoCD instance
+          k8s:
+            definition: "{{ lookup('template', './argocd.yaml.j2') | from_yaml }}"
+
+        - name: Check if Deployment finished
+          k8s_info:
+            api_version: v1
+            kind: Deployment
+            name: "{{ item }}"
+            namespace: "{{ env_type }}-{{ guid }}"
+          register: deployment_status
+          until: (deployment_status.resources[0].status.readyReplicas | default(0) == 1)
+          retries: 10
+          delay: 20
+          loop:
+            - "{{ guid }}-argocd-redis"
+            - "{{ guid }}-argocd-repo-server"
+            - "{{ guid }}-argocd-server"
+
+        - name: Deploy the Application on ArgoCD
+          k8s:
+            definition: "{{ lookup('template', './application.yaml.j2') | from_yaml }}"
+
+        - name: Wait till the Application is ready
+          k8s_info:
+            api_version: argoproj.io/v1alpha1
+            kind: Application
+            name: "{{ application_name }}"
+            namespace: "{{ env_type }}-{{ guid }}"
+          until: (argocd_app.resources[0].status.sync.status == "Synced")
+          retries: 10
+          delay: 20
+          register: argocd_app
+
+        - name: Get the URL for ArgoCD
+          k8s_info:
+            api_version: v1
+            kind: Route 
+            name: "{{ guid }}-argocd-server"
+            namespace: "{{ env_type }}-{{ guid }}"
+          register: argocd_route
+      
+        - name: Get the admin password for ArgoCD
+          k8s_info:
+            api_version: v1
+            kind: Secret
+            name: "{{ guid }}-argocd-cluster"
+            namespace: "{{ env_type }}-{{ guid }}"
+          register: argocd_secret
+
+        - name: Test agnosticd_user_info from post_software with random string
+          agnosticd_user_info:
+            msg: |
+              ArgoCD URL:  https://{{ argocd_route.resources[0].status.ingress[0].host }}
+              ArgoCD user: admin
+              ArgoCD password: {{ argocd_secret.resources[0].data['admin.password'] | b64decode }}
+            data:
+              argocd_url: "https://{{ argocd_route.resources[0].status.ingress[0].host }}"
+              argocd_user: "admin"
+              argocd_password: "{{ argocd_secret.resources[0].data['admin.password'] | b64decode }}"
