@@ -1,0 +1,169 @@
+---
+- name: create namespace {{ ocp4_workload_microshift_vm_namespace }}
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ocp4_workload_microshift_vm_namespace }}"
+        annotations:
+          openshift.io/description: "MicroShift Virtual Machine"
+          openshift.io/display-name: "MicroShift Virtual Machine"
+
+- name: register pull-secret from openshift-config
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: pull-secret
+    namespace: openshift-config
+  register: ocp_pull_secret
+
+- name: create pull-secret in {{ ocp4_workload_microshift_vm_namespace }}
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: openshift-pull-secret
+        namespace: "{{ ocp4_workload_microshift_vm_namespace }}"
+      type: Opaque
+      data:
+        openshift-pull-secret: "{{ ocp_pull_secret.resources[0].data['.dockerconfigjson'] }}"
+
+- name: openssh key pair for the microshift vm
+  become: true
+  become_user: "{{ ocp4_workload_microshift_bastion_user }}"
+  block:
+  - name: create openssh key pair for the microshift vm
+    community.crypto.openssh_keypair:
+      path: "{{ ocp4_workload_microshift_vm_ssh_key }}"
+      owner: "{{ ocp4_workload_microshift_bastion_user }}"
+      group: users
+      mode: 0600
+    register: r_microshift_key
+  - name: read the public key from filesystem
+    ansible.builtin.slurp:
+      src: "{{ ocp4_workload_microshift_vm_ssh_key }}.pub"
+    register: r_microshift_public_key
+
+- name: create microshfit vm
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) | from_yaml }}"
+  loop:
+  - kubevirt/vm-microshift-pvc.yaml.j2
+  - kubevirt/vm-microshift.yaml.j2
+  - kubevirt/vm-microshift-service.yaml.j2
+  - kubevirt/vm-microshift-route-ingress.yaml.j2
+  - kubevirt/vm-microshift-route-api.yaml.j2
+
+# The download of the vm image takes too long when the cluster is not
+# colocated in the same region as the s3 bucket (us-east-2).
+# One possible solution is to set up bucket cross replication.
+- name: wait for vm microshift is ready
+  kubernetes.core.k8s_info:
+    api_version: kubevirt.io/v1
+    kind: VirtualMachine
+    name: "{{ ocp4_workload_microshift_name }}"
+    namespace: "{{ ocp4_workload_microshift_vm_namespace }}"
+  register: vm_microshift
+  retries: 100
+  delay: 30
+  until:
+  - vm_microshift.resources[0].status is defined
+  - vm_microshift.resources[0].status.ready is true
+
+# needs a pause here or better wait / readiness probe for vm
+- name: pause until microshift vm is ready
+  ansible.builtin.pause:
+    seconds: 90
+
+- name: microshift .kube/config on bastion
+  become: true
+  become_user: "{{ ocp4_workload_microshift_bastion_user }}"
+  block:
+  - name: setup microshift .kube/config
+    ansible.builtin.shell: >-
+      virtctl ssh
+      cloud-user@{{ ocp4_workload_microshift_name }}.{{ ocp4_workload_microshift_vm_namespace }}
+      --identity-file={{ ocp4_workload_microshift_vm_ssh_key }}
+      --local-ssh-opts="-o StrictHostKeyChecking=no"
+      --command='{{ item }}'
+    loop:
+    - sudo cat /var/lib/microshift/resources/kubeadmin/kubeconfig > /home/cloud-user/.kube/config
+    - chmod go-r /home/cloud-user/.kube/config
+  - name: copy microshift .kube/config to the bastion
+    ansible.builtin.shell: >-
+      virtctl scp
+      cloud-user@{{ ocp4_workload_microshift_name }}.{{ ocp4_workload_microshift_vm_namespace }}:/home/cloud-user/.kube/config
+      {{ ocp4_workload_microshift_vm_kubeconfig }}
+      --identity-file={{ ocp4_workload_microshift_vm_ssh_key }}
+      --local-ssh-opts="-o StrictHostKeyChecking=no"
+  - name: setup microshift .kube/config in the bastion
+    ansible.builtin.replace:
+      path: "{{ ocp4_workload_microshift_vm_kubeconfig }}"
+      regexp: 'https://127.0.0.1:6443'
+      # yamllint disable-line rule:line-length
+      replace: "https://api-{{ ocp4_workload_microshift_vm_namespace }}.{{ _ocp4_workload_microshift_wildcard_domain }}"
+
+- name: create namespace {{ ocp4_workload_microshift_cluster_name }}
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ ocp4_workload_microshift_cluster_name }}"
+        annotations:
+          openshift.io/description: "MicroShift Managed Cluster"
+          openshift.io/display-name: "MicroShift Managed Cluster"
+
+- name: create cluster management resources
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) | from_yaml }}"
+  loop:
+  - rhacm/managed-clusterset.yaml.j2
+  - rhacm/managed-clusterset-binding.yaml.j2
+  - rhacm/placement.yaml.j2
+  - rhacm/gitops-cluster.yaml.j2
+  - rhacm/managed-cluster.yaml.j2
+  - rhacm/klusterlet-addon-config.yaml.j2
+
+# yamllint disable rule:line-length
+- name: obtain klusterlet-crd.yaml and import.yaml from hub cluster
+  ansible.builtin.shell: |-
+    set -euxo pipefail
+    mkdir -p /tmp/microshift
+    oc get secret {{ ocp4_workload_microshift_cluster_name }}-import -n {{ ocp4_workload_microshift_cluster_name }} -o jsonpath={.data.crds\\.yaml} | base64 --decode > /tmp/microshift/klusterlet-crd.yaml
+    oc get secret {{ ocp4_workload_microshift_cluster_name }}-import -n {{ ocp4_workload_microshift_cluster_name }} -o jsonpath={.data.import\\.yaml} | base64 --decode > /tmp/microshift/import.yaml
+# yamllint enable rule:line-length
+
+- name: microshift .kube/config on bastion
+  become: true
+  become_user: "{{ ocp4_workload_microshift_bastion_user }}"
+  block:
+  - name: copy klusterlet-crd.yaml and import.yaml to microshift
+    ansible.builtin.shell: >-
+      virtctl scp -r
+      /tmp/microshift
+      cloud-user@{{ ocp4_workload_microshift_name }}.{{ ocp4_workload_microshift_vm_namespace }}:/tmp/microshift
+      --identity-file={{ ocp4_workload_microshift_vm_ssh_key }}
+      --local-ssh-opts="-o StrictHostKeyChecking=no"
+  - name: oc apply klusterlet-crd.yaml and import.yaml to microshift
+    ansible.builtin.shell: >-
+      virtctl ssh
+      cloud-user@{{ ocp4_workload_microshift_name }}.{{ ocp4_workload_microshift_vm_namespace }}
+      --identity-file={{ ocp4_workload_microshift_vm_ssh_key }}
+      --local-ssh-opts="-o StrictHostKeyChecking=no"
+      --command='oc apply -f {{ item }}'
+    loop:
+    - /tmp/microshift/klusterlet-crd.yaml
+    - /tmp/microshift/import.yaml
+
+- name: create rhacm application hello microshift
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'rhacm/acm-application.yaml.j2') | from_yaml_all | list }}"
