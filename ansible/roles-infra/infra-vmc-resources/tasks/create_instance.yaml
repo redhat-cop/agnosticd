@@ -1,0 +1,99 @@
+---
+- name: Create instance(s) "{{ _instance.name }}"
+  register: r_vmc_instance
+  vars:
+    _instance_name: "{{ _instance.name }}{{ _index+1 if _instance.count|d(1)|int > 1 }}"
+    _instance_userdata: |-
+      #cloud-config
+      ssh_authorized_keys:
+        - {{ lookup('file', ssh_provision_pubkey_path) }}
+      {{ _instance.userdata | default({'disable_ec2_metadata': 'true'}) | to_nice_yaml | default("") }}
+
+  community.vmware.vmware_guest:
+    state: present
+    folder: "/Workloads/{{env_type}}-{{ guid }}"
+    template: "{{ _instance.template }}"
+    name: "{{ _instance_name }}"
+    wait_for_ip_address: True
+    wait_for_ip_address_timeout: 600
+    disk: 
+      - datastore: "{{ vcenter_datastore }}"
+        size_gb: "{{ _instance.rootfs_size }}"
+        type: "thin"
+    networks:
+      - name: "segment-{{ env_type }}-{{ guid }}"
+    advanced_settings:
+      - key: "guestinfo.metadata"
+        value: ""
+      - key: "guestinfo.metadata.encoding"
+        value: "base64"
+      - key: "guestinfo.userdata"
+        value: "{{ _instance_userdata | b64encode }}"
+      - key: "guestinfo.userdata.encoding"
+        value: "base64"
+  loop: "{{ range(1, _instance.count|default(1)|int+1) | list }}"
+  loop_control:
+    index_var: _index
+  until: r_vmc_instance is success
+  retries: 5
+  delay: 10
+
+- name: Add virtual machine custom attributes
+  register: r_vm_attributes
+  vars:
+    _instance_name: "{{ _instance.name }}{{ _index+1 if _instance.count|d(1)|int > 1 }}"
+  community.vmware.vmware_guest_custom_attributes:
+    folder: "/Workloads/{{env_type}}-{{ guid }}"
+    name: "{{ _instance_name }}"
+    state: present
+    attributes: "{{ _instance.attributes + [{'name':'public_dns', 'value': _instance.public_dns|default(False)}]  }}"
+  loop: "{{ range(1, _instance.count|default(1)|int+1) | list }}"
+  loop_control:
+    index_var: _index
+  until: r_vm_attributes is success
+  retries: 5
+  delay: 10
+
+- name: Restart VM after create it
+  register: r_vm_reboot
+  when: r_vm_attributes.changed
+  vars:
+    _instance_name: "{{ _instance.name }}{{ _index+1 if _instance.count|d(1)|int > 1 }}"
+  community.vmware.vmware_guest:
+    folder: "/Workloads/{{env_type}}-{{ guid }}"
+    state: rebootguest
+    wait_for_ip_address: True
+    name: "{{ _instance_name }}"
+  loop: "{{ range(1, _instance.count|default(1)|int+1) | list }}"
+  loop_control:
+    index_var: _index
+  until: r_vm_reboot is success
+  retries: 5
+  delay: 10
+
+- name: Pause 5 seconds before get information
+  pause:
+    seconds: 5
+
+- name: Get VM Info after create it
+  register: r_vmc_instance
+  vars:
+    _instance_name: "{{ _instance.name }}{{ _index+1 if _instance.count|d(1)|int > 1 }}"
+  community.vmware.vmware_guest_info:
+    folder: "/Workloads/{{env_type}}-{{ guid }}"
+    name: "{{ _instance_name }}"
+  loop: "{{ range(1, _instance.count|default(1)|int+1) | list }}"
+  loop_control:
+    index_var: _index
+  until: r_vmc_instance is success
+  retries: 5
+  delay: 10
+
+- name: Create public IP and NAT
+  include_tasks: create_public_ip_and_nat.yaml
+  when: item.instance.customvalues.public_dns|default("") == "True"
+  loop: "{{ r_vmc_instance.results | list }}"
+
+#- set_fact:
+#    r_vmc_instances: "{{ r_vmc_instances + [item] }}"
+#  loop: "{{ r_vmc_instance.results | list }}"

@@ -1,0 +1,128 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: "image-builder"
+  labels:
+    app.kubernetes.io/version: "0.1"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.0"
+    tekton.dev/displayName: task-image-build-file
+    tekton.dev/categories: Build Tools
+    tekton.dev/tags: ansible, ansible-builder, build-tool, automation
+    tekton.dev/platforms: "linux/amd64"
+spec:
+  description: >-
+    Creates a build context (including a Containerfile) from an execution environment spec.
+    This build context is populated with dependencies including requirements files.
+    It builds and pushes images to internal registry.
+  workspaces:
+    - name: source
+  params:
+    - description: Execution environment file definition.
+      name: FILENAME
+      type: string
+      default: execution-environment.yml
+    - description: Execution environment build context.
+      name: BUILD_CONTEXT
+      type: string
+      default: context
+    - description: Name of file to write image definition to. Either Dockerfile or Containerfile.
+      name: OUTPUT_FILENAME
+      type: string
+      default: Containerfile
+    - description: ansible-builder output verbosity.
+      name: VERBOSITY
+      type: string
+      default: "2"
+    - description: The location of the ansible-builder image.
+      name: BUILDER_IMAGE
+      type: string
+      default: quay.io/ansible/ansible-builder:latest
+    - description: Reference of the image buildah will produce.
+      name: IMAGE
+      type: string
+    - description: The location of the ansible-builder image.
+      name: BUILDAH_IMAGE
+      type: string
+      default: >-
+        registry.redhat.io/rhel8/buildah@sha256:23fb7971ea6ac4aaaaa1139473a602df0df19222a3b5a76b551b2b9ddd92e927
+    - description: Set buildah storage driver
+      name: STORAGE_DRIVER
+      default: vfs
+      type: string
+    - description: Path to the Dockerfile to build.
+      name: DOCKERFILE
+      default: ./Dockerfile
+      type: string
+    - description: Path to the directory to use as context.
+      name: CONTEXT
+      default: .
+      type: string
+    - description: Verify the TLS on the registry endpoint (for push/pull to a non-TLS registry)
+      name: TLSVERIFY
+      default: 'true'
+      type: string
+    - description: 'The format of the built container, oci or docker'
+      name: FORMAT
+      default: oci
+      type: string
+    - description: Extra parameters passed for the build command when building images.
+      name: BUILD_EXTRA_ARGS
+      default: ''
+      type: string
+    - description: Extra parameters passed for the push command when pushing images.
+      name: PUSH_EXTRA_ARGS
+      default: ''
+      type: string  
+  results:
+    - description: Digest of the image just built.
+      name: IMAGE_DIGEST
+  steps:
+    - name: create-build-file
+      image: $(params.BUILDER_IMAGE)
+      workingDir: $(workspaces.source.path)
+      script: |
+        #!/bin/sh
+        set -eux -o
+        ansible-builder create \
+         -f "$(params.FILENAME)" \
+         -c "$(params.BUILD_CONTEXT)" \
+         --output-filename "$(params.OUTPUT_FILENAME)" \
+         -v "$(params.VERBOSITY)"
+
+    - name: build
+      image: $(params.BUILDAH_IMAGE)
+      workingDir: $(workspaces.source.path)
+      resources: {}
+      script: |
+        buildah --storage-driver=$(params.STORAGE_DRIVER) bud \
+          $(params.BUILD_EXTRA_ARGS) --format=$(params.FORMAT) \
+          --tls-verify=$(params.TLSVERIFY) --no-cache \
+          -f $(params.DOCKERFILE) -t $(params.IMAGE) $(params.CONTEXT)
+      volumeMounts:
+        - mountPath: /var/lib/containers
+          name: varlibcontainers
+
+    - name: push
+      image: $(params.BUILDAH_IMAGE)
+      workingDir: $(workspaces.source.path)
+      resources: {}
+      script: |
+        buildah --storage-driver=$(params.STORAGE_DRIVER) push \
+          --tls-verify=$(params.TLSVERIFY) \
+          --digestfile $(workspaces.source.path)/image-digest \
+          $(params.IMAGE) docker://$(params.IMAGE)
+      volumeMounts:
+        - mountPath: /var/lib/containers
+          name: varlibcontainers
+
+    - name: digest-to-results
+      image: $(params.BUILDAH_IMAGE)
+      workingDir: $(workspaces.source.path)
+      resources: {}
+      script: >-
+        cat $(workspaces.source.path)/image-digest | tee
+        /tekton/results/IMAGE_DIGEST
+  volumes:
+    - name: varlibcontainers
+      emptyDir: {}
