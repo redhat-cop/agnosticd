@@ -14,6 +14,9 @@ DOCUMENTATION = """
       _terms:
         description: Data keys set in agnosticd_user_info.
         required: True
+      user:
+        description: User name to fetch data for specific user.
+        required: False
 """
 
 EXAMPLES = """
@@ -21,6 +24,11 @@ EXAMPLES = """
   set_fact:
     admin_password: "{{ lookup('agnosticd_user_data', 'admin_password') }}"
   when: admin_password is undefined
+
+- name: "Set user_password from value set with agnosticd_user_info for user1"
+  set_fact:
+    user_password: "{{ lookup('agnosticd_user_data', 'password', user='user1') }}"
+  when: user_password is undefined
 """     
 
 RETURN = """
@@ -38,7 +46,7 @@ from ansible.errors import AnsibleError
 from ansible.plugins.lookup import LookupBase
 
 class LookupModule(LookupBase): 
-    def run(self, terms, **kwargs):
+    def run(self, terms, user=None, **kwargs):
         self.set_options(direct=kwargs)
         ret = []
 
@@ -50,6 +58,9 @@ class LookupModule(LookupBase):
             fh.close()
         except FileNotFoundError:
             pass
+
+        if user:
+            user_data = user_data.get('users', {}).get(user)
 
         for term in terms:
             ret.append(user_data.get(term) if user_data else None)

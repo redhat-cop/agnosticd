@@ -1,0 +1,226 @@
+- name: Install NooBaa
+  ansible.builtin.include_tasks: install_noobaa.yml
+
+- name: Evaluate Loki Namespace
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: Namespace
+    api_version: v1
+    definition:
+      metadata:
+        name: openshift-operators-redhat
+        annotations:
+          openshift.io/node-selector: ""
+        labels:
+          openshift.io/cluster-monitoring: "true"
+
+- name: Check if Operator Group for openshift-operators-redhat already exists
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: OperatorGroup
+    namespace: openshift-operators-redhat
+  register: r_op
+
+- name: Creating openshift-operators-redhat OperatorGroup if not exists yet
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: OperatorGroup
+    api_version: operators.coreos.com/v1
+    definition:
+      metadata:
+        name: openshift-operators-redhat
+        namespace: openshift-operators-redhat
+      spec: {}
+  when: r_op is undefined or r_op.resources is undefined or (r_op.resources | length == 0)
+
+- name: Evaluate Loki Subscription
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: Subscription
+    api_version: operators.coreos.com/v1alpha1
+    definition:
+      metadata:
+        name: "loki-operator"
+        namespace: "openshift-operators-redhat"
+      spec:
+        channel: stable
+        installPlanApproval: Automatic
+        name: loki-operator
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Evaluate Logging Operator Namespace
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: Namespace
+    api_version: v1
+    definition:
+      metadata:
+        name: openshift-logging
+        annotations:
+          openshift.io/node-selector: ""
+        labels:
+          openshift.io/cluster-monitoring: "true"
+
+- name: Evaluate openshift-logging OperatorGroup
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: OperatorGroup
+    api_version: operators.coreos.com/v1
+    definition:
+      metadata:
+        name: cluster-logging
+        namespace: openshift-logging
+      spec:
+        targetNamespaces:
+          - openshift-logging
+
+- name: Evaluate logging Subscription
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: Subscription
+    api_version: operators.coreos.com/v1alpha1
+    definition:
+      metadata:
+        name: cluster-logging
+        namespace: openshift-logging
+      spec:
+        channel: "stable"
+        name: cluster-logging
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait Logging Operator
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Pod
+    namespace: openshift-logging
+    label_selectors:
+      - name = cluster-logging-operator
+    field_selectors:
+      - status.phase=Running
+  register: r_logging_pod
+  retries: 20
+  delay: 10
+  until: r_logging_pod.resources | list | length == 1
+
+- name: Wait Loki Operator is ready
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: apps/v1
+    kind: Deployment
+    name: loki-operator-controller-manager
+    namespace: openshift-operators-redhat
+  register: r_es_deploy
+  retries: 50
+  delay: 10
+  until:
+    - r_es_deploy.resources[0].status.readyReplicas is defined
+    - r_es_deploy.resources[0].status.readyReplicas == 1
+
+- name: Enable Console Plugins
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: Console
+    api_version: operator.openshift.io/v1
+    definition:
+      metadata:
+        name: cluster
+        namespace: openshift-storage
+      spec:
+        plugins:
+          - odf-console
+          - logging-view-plugin
+
+- name: Evaluate Loki ObjectBucketClaim
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('file', 'loki_obc.yml') }}"
+
+- name: Get Object Bucket data
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: ConfigMap
+    name: loki-obc
+    namespace: openshift-logging
+  register: r_loki_bucket_data
+  retries: 50
+  delay: 10
+  until:
+    - r_loki_bucket_data.resources[0].data is defined
+
+- name: Get Object Bucket secret
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Secret
+    name: loki-obc
+    namespace: openshift-logging
+  register: r_loki_bucket_secret
+  retries: 10
+  delay: 2
+  until:
+    - r_loki_bucket_secret.resources[0].data is defined
+
+- name: Create S3 secret for Loki
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'loki_s3-secret.yml.j2') }}"
+  vars:
+    s3_access_key_id: "{{ r_loki_bucket_secret.resources[0].data.AWS_ACCESS_KEY_ID | b64decode }}"
+    s3_access_key_secret: "{{ r_loki_bucket_secret.resources[0].data.AWS_SECRET_ACCESS_KEY | b64decode }}"
+    s3_bucket_name: "{{ r_loki_bucket_data.resources[0].data.BUCKET_NAME }}"
+    s3_url: "http://{{ r_loki_bucket_data.resources[0].data.BUCKET_HOST }}"
+    s3_region: ""
+
+- name: Evaluate Loki Instance
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('template', 'loki-instance.yml.j2') }}"
+
+- name: Evaluate Loki Instance is ready
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: apps/v1
+    kind: Deployment
+    name: logging-loki-distributor
+    namespace: openshift-logging
+  register: r_loki_deploy
+  retries: 50
+  delay: 10
+  until:
+    - r_loki_deploy.resources[0].status.readyReplicas is defined
+    - r_loki_deploy.resources[0].status.readyReplicas == 1
+
+- name: Evaluate Logging Instance
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    resource_definition: "{{ lookup('file', 'cluster_logging_loki.yml') }}"
+
+- name: Evaluate Logging Instance is ready
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: apps/v1
+    kind: Deployment
+    name: logging-view-plugin
+    namespace: openshift-logging
+  register: r_logging_deploy
+  retries: 50
+  delay: 10
+  until:
+    - r_logging_deploy.resources[0].status.readyReplicas is defined
+    - r_logging_deploy.resources[0].status.readyReplicas == 1
