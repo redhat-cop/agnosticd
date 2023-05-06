@@ -11,25 +11,94 @@
   - name: Set Ansible Python interpreter to k8s virtualenv
     set_fact:
       ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
-  - name: Install ocp-infra workloads
-    when:
-    - infra_workloads | default("") | length > 0
-    tags:
-    - infra_workloads
-    block:
-    - name: Install ocp-infra-workloads
-      when:
-      - infra_workloads | default("") | length >0
-      block:
-      - name: Deploy ocp-infra workloads
-        include_role:
-          name: "{{ workload_loop_var }}"
-        vars:
-          ocp_username: "system:admin"
-          ACTION: "provision"
-        loop: "{{ infra_workloads }}"
-        loop_control:
-          loop_var: workload_loop_var
+
+  - name: Generate cluster api
+    set_fact:
+      rosa_api_server_url: "https://api{{ rosa_console_url.stdout | regex_search('(?<=\\.apps).*') }}:6443"
+
+  - name: Run authentication
+    k8s_auth:
+      host: "{{ rosa_api_server_url }}"
+      username: cluster-admin
+      password: "{{ rosa_admin_result.stdout }}"
+      validate_certs: false
+    register: _r_kube_auth
+    retries: 30
+    delay: 120
+    until:
+      - _r_kube_auth is defined
+      - _r_kube_auth.k8s_auth is defined
+      - _r_kube_auth.k8s_auth.api_key is defined
+
+  - name: Get api token
+    command: oc whoami -t
+    register: _r_auth_token
+    retries: 30
+    delay: 120
+    until:
+      - _r_auth_token is defined
+      - _r_auth_token.stdout is defined
+
+  - name: generate kubeconfig
+    template:
+      src: templates/kubeconfig.j2
+      dest: ~/.kube/config
+
+  # Deploy Workloads
+  - name: Deploy demo operator
+    k8s:
+      state: present
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - templates/demo-operator-namespace.yaml
+    - templates/demo-operator-catalog-source.yaml
+    - templates/demo-operator-operator-group.yaml
+    - templates/demo-operator-subscription.yaml
+    register: r_operator_install
+    retries: 240
+    delay: 10
+    until:
+      - r_operator_install is defined
+      - r_operator_install is not failed
+
+  - name: Pause for 5 minutes for demo operator to install
+    ansible.builtin.pause:
+      minutes: 5
+
+  - name: Deploy demo
+    k8s:
+      state: present
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - templates/demo-workshop-install.yaml.j2
+    register: r_demo
+    retries: 240
+    delay: 10
+    until:
+      - r_demo is defined
+      - r_demo is not failed
+
+  - name: Check if demo has completed install
+    k8s_info:
+      api_version: demos.redhat.com/v1
+      kind: Demo
+      name: demo-getting-started-ocp
+      namespace: demo-provisioner-operator-system
+    register: result_demo_install
+    retries: 480
+    delay: 15
+    until:
+      - result_demo_install is defined
+      - result_demo_install.resources is defined
+      - result_demo_install.resources | length > 0
+      - result_demo_install.resources[0].status is defined
+      - result_demo_install.resources[0].status.phase is defined
+      - result_demo_install.resources[0].status.phase != 'Running'
+
+  - name: Check if demo failed installation
+    ansible.builtin.fail:
+      msg: The demo did not provision successfully.  Please view the logs on the demo pod.
+    when: result_demo_install.resources[0].status.phase == 'Failed'
 
   - name: Install ocp-student-workloads
     when:
