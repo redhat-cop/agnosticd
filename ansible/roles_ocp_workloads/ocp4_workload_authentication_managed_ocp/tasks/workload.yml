@@ -1,0 +1,204 @@
+---
+- name: Get the openshift console route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: openshift-console
+    field_selectors:
+      - spec.to.name=console
+  register: r_dc
+  until:
+    - r_dc is defined
+    - r_dc.resources is defined
+    - r_dc.resources | list | length > 0
+  retries: 60
+  delay: 15
+
+- name: Save OpenShift access facts
+  vars:
+    _apps_domain: "{{ r_dc.resources[0].spec.host | regex_search('(?<=\\.).*') }}"
+    _api_domain: "{{ r_dc.resources[0].spec.host | regex_search('(?<=\\.apps).*') }}"
+  ansible.builtin.set_fact:
+    _ocp4_workload_authentication_managed_ocp_cluster_ingress_domain: "{{ _apps_domain }}"
+    _ocp4_workload_authentication_managed_ocp_console_route: "https://console-openshift-console.{{ _apps_domain }}"
+    _ocp4_workload_authentication_managed_ocp_api_server: "https://api{{ _api_domain }}:6443"
+
+- name: Get htpasswd secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: htpasswd-secret
+    namespace: openshift-config
+  register: r_htpasswd_secret
+  retries: 60
+  delay: 10
+  until:
+  - r_htpasswd_secret is defined
+  - r_htpasswd_secret.resources is defined
+  - r_htpasswd_secret.resources | length > 0
+
+-  name: Write htpasswd file
+   ansible.builtin.copy:
+    content: "{{ r_htpasswd_secret.resources[0].data.htpasswd | b64decode }}"
+    dest: "{{ ocp4_workload_authentication_managed_ocp_htpasswd_directory }}/htpasswd.txt"
+
+- name: Set up randomized user password array
+  when: ocp4_workload_authentication_managed_ocp_htpasswd_user_password_randomized | bool
+  ansible.builtin.set_fact:
+    _ocp4_workload_authentication_managed_ocp_htpasswd_user_passwords: >-
+      {{ _ocp4_workload_authentication_managed_ocp_htpasswd_user_passwords + [ lookup('password',
+        '/dev/null chars=ascii_letters,digits '
+        ~ 'length=' ~ ocp4_workload_authentication_managed_ocp_htpasswd_user_password_length ) ] }}
+  loop: "{{ range(0, ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int, 1) | list }}"
+
+- name: Set up common user password array
+  when: not ocp4_workload_authentication_managed_ocp_htpasswd_user_password_randomized | bool
+  block:
+  - name: Generate common user password
+    when: ocp4_workload_authentication_managed_ocp_htpasswd_user_password | default('') | length == 0
+    ansible.builtin.set_fact:
+      _ocp4_workload_authentication_managed_ocp_htpasswd_user_password: >-
+        {{ lookup('password', '/dev/null chars=ascii_letters,digits '
+            ~ 'length=' ~ ocp4_workload_authentication_managed_ocp_htpasswd_user_password_length
+        ) }}
+
+  - name: Use provided user password
+    when: ocp4_workload_authentication_managed_ocp_htpasswd_user_password | default('') | length > 0
+    ansible.builtin.set_fact:
+      _ocp4_workload_authentication_managed_ocp_htpasswd_user_password: >-
+        {{ ocp4_workload_authentication_managed_ocp_htpasswd_user_password }}
+
+  - name: Generate user passwords array for common password
+    ansible.builtin.set_fact:
+      _ocp4_workload_authentication_managed_ocp_htpasswd_user_passwords: >-
+        {{ _ocp4_workload_authentication_managed_ocp_htpasswd_user_passwords + [ _ocp4_workload_authentication_managed_ocp_htpasswd_user_password ] }}
+    loop: "{{ range(0, ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int, 1) | list }}"
+
+- name: Add users and passwords to htpasswd file
+  community.general.htpasswd:
+    path: "{{ ocp4_workload_authentication_managed_ocp_htpasswd_directory }}/htpasswd.txt"
+    name: >-
+      {%- if ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int == 1 -%}
+      {{ ocp4_workload_authentication_managed_ocp_htpasswd_user_name }}
+      {%- else -%}
+      {{ ocp4_workload_authentication_managed_ocp_htpasswd_user_base }}{{ item + 1 }}
+      {%- endif -%}
+    password: "{{ _ocp4_workload_authentication_managed_ocp_htpasswd_user_passwords[ item ] }}"
+  loop: "{{ range(0, ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int, 1) | list }}"
+
+- name: Read contents of htpasswd file
+  ansible.builtin.slurp:
+    src: "{{ ocp4_workload_authentication_managed_ocp_htpasswd_directory }}/htpasswd.txt"
+  register: r_htpasswd_file
+
+- name: Print htpasswd
+  debug:
+    msg: "{{ r_htpasswd_file.content }}"
+
+- name: Update htpasswd secret
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      api_version: v1
+      kind: Secret
+      metadata:
+        name: htpasswd-secret
+        namespace: openshift-config
+      data:
+        htpasswd: "{{ r_htpasswd_file.content }}"
+
+- name: Print user information messages
+  when: ocp4_workload_authentication_managed_ocp_enable_user_info_messages | bool
+  block:
+  - name: Print common user information messages
+    agnosticd_user_info:
+      msg: >-
+        Authentication via htpasswd is enabled on this cluster.
+
+
+        User `{{ ocp4_workload_authentication_managed_ocp_admin_user }}`
+        with password `{{ ocp4_workload_authentication_managed_ocp_admin_password }}`
+        is cluster admin.
+
+  - name: Print user information for common password
+    when:
+    - ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int > 0
+    - not ocp4_workload_authentication_managed_ocp_htpasswd_user_password_randomized | bool
+    agnosticd_user_info:
+      msg: >-
+        {%- if ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int == 1 -%}
+        Normal user `{{ ocp4_workload_authentication_managed_ocp_htpasswd_user_name }}`
+        created with password `{{ _ocp4_workload_authentication_managed_ocp_htpasswd_user_password }}`
+        {%- else -%}
+        Users `{{ ocp4_workload_authentication_managed_ocp_htpasswd_user_base }}1` ..
+        `{{ ocp4_workload_authentication_managed_ocp_htpasswd_user_base ~ ocp4_workload_authentication_managed_ocp_htpasswd_user_count }}`
+        created with password `{{ _ocp4_workload_authentication_managed_ocp_htpasswd_user_password }}`
+        {%- endif -%}
+
+  - name: Print user information for randomized password
+    when:
+    - ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int > 0
+    - ocp4_workload_authentication_managed_ocp_htpasswd_user_password_randomized | bool
+    agnosticd_user_info:
+      msg: >-
+        {%- if ocp4_workload_authentication_managed_ocp_htpasswd_user_count  | int== 1 -%}
+        Normal user `{{ ocp4_workload_authentication_managed_ocp_htpasswd_user_name }}`
+        created with password `{{ _ocp4_workload_authentication_managed_ocp_htpasswd_user_passwords[0] }}`
+        {%- else -%}
+        User `{{ ocp4_workload_authentication_managed_ocp_htpasswd_user_base }}{{ n + 1 }}`,
+        Password: `{{ _ocp4_workload_authentication_managed_ocp_htpasswd_user_passwords[ n ] }}`
+        {%- endif -%}
+    loop: "{{ range(0, ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int) | list }}"
+    loop_control:
+      loop_var: n
+
+- name: Save common user and cluster admin information
+  agnosticd_user_info:
+    # Pass data as dict to preserve integer type for openshift_cluster_user_count
+    data: >-
+      {{
+        {
+          "openshift_api_server_url": _ocp4_workload_authentication_managed_ocp_api_server,
+          "openshift_cluster_admin_username": ocp4_workload_authentication_managed_ocp_admin_user,
+          "openshift_cluster_admin_password": ocp4_workload_authentication_managed_ocp_admin_password,
+          "openshift_cluster_console_url": _ocp4_workload_authentication_managed_ocp_console_route,
+          "openshift_cluster_num_users": ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int,
+          "openshift_cluster_user_base": ocp4_workload_authentication_managed_ocp_htpasswd_user_base,
+          "openshift_cluster_user_count": ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int,
+        }
+      }}
+
+- name: Save user name for single user configuration
+  when:
+  - ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int == 1
+  agnosticd_user_info:
+    data:
+      openshift_cluster_user_name: "{{ ocp4_workload_authentication_managed_ocp_htpasswd_user_name }}"
+
+- name: Save common user password if not randomized
+  when: not ocp4_workload_authentication_managed_ocp_htpasswd_user_password_randomized | bool
+  agnosticd_user_info:
+    data:
+      openshift_cluster_user_password: "{{ _ocp4_workload_authentication_managed_ocp_htpasswd_user_password }}"
+
+- name: Save user information
+  when: ocp4_workload_authentication_managed_ocp_enable_user_info_data | bool
+  block:
+  - name: Save user information for user access
+    agnosticd_user_info:
+      user: "{{ ocp4_workload_authentication_managed_ocp_htpasswd_user_base }}{{ n +1 }}"
+      data:
+        user: "{{ ocp4_workload_authentication_managed_ocp_htpasswd_user_base }}{{ n +1 }}"
+        password: "{{ _ocp4_workload_authentication_managed_ocp_htpasswd_user_passwords[ n ] }}"
+        console_url: "{{ _ocp4_workload_authentication_managed_ocp_console_route }}"
+        openshift_console_url: "{{ _ocp4_workload_authentication_managed_ocp_console_route }}"
+        openshift_cluster_ingress_domain: "{{ _ocp4_workload_authentication_managed_ocp_cluster_ingress_domain }}"
+        login_command: >-
+          oc login --insecure-skip-tls-verify=false
+          -u {{ ocp4_workload_authentication_managed_ocp_htpasswd_user_base }}{{ n +1 }}
+          -p {{ _ocp4_workload_authentication_managed_ocp_htpasswd_user_passwords[ n ] }}
+          {{ _ocp4_workload_authentication_managed_ocp_api_server }}
+    loop: "{{ range(0, ocp4_workload_authentication_managed_ocp_htpasswd_user_count | int) | list }}"
+    loop_control:
+      loop_var: n
+
