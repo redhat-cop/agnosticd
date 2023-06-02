@@ -1,0 +1,103 @@
+---
+- name: Handle GH timeouts
+  block:
+    - name: Download code-server 3 rpm
+      ansible.builtin.get_url:
+        url: "{{ codeserver_url }}"
+        dest: /tmp/code-server.rpm
+        mode: '0440'
+  rescue:
+    - name: Download code-server 3 rpm from AWS s3
+      ansible.builtin.get_url:
+        url: "{{ codeserver_rescue_url }}"
+        dest: /tmp/code-server.rpm
+        mode: '0440'
+
+- name: Install code-server 3 rpm from local rpm and certbot
+  ansible.builtin.dnf:
+    name:
+      - /tmp/code-server.rpm
+      - certbot
+    state: present
+    disable_gpg_check: true
+
+# solves error
+# pkg_resources.DistributionNotFound: The 'requests>=2.14.2' distribution was not found and is required by acme
+- name: Install requests python package
+  ansible.builtin.pip:
+    name: requests>=2.14.2
+
+- name: Apply our systemd service file (instead of RPM file)
+  ansible.builtin.template:
+    src: code-server.service.j2
+    dest: /etc/systemd/system/code-server.service
+    owner: "{{ username }}"
+    group: wheel
+    mode: '0744'
+
+    # source: https://vscode.readthedocs.io/en/latest/getstarted/settings/
+- name: ensure custom facts directory exists
+  ansible.builtin.file:
+    path: "/home/{{ username }}/.local/share/code-server/User/"
+    recurse: true
+    state: directory
+    owner: "{{ username }}"
+
+- name: Apply code server defaults
+  ansible.builtin.template:
+    src: settings.json
+    dest: "/home/{{ username }}/.local/share/code-server/User/settings.json"
+    owner: "{{ username }}"
+
+- name: Create a directory if it does not exist
+  ansible.builtin.file:
+    path: /home/{{ username }}/.local/share/code-server/extensions/
+    state: directory
+    owner: "{{ username }}"
+    group: "{{ username }}"
+
+- name: Download files for vscode
+  ansible.builtin.get_url:
+    url: "{{ item }}"
+    dest: /home/{{ username }}/.local/share/code-server/extensions/
+    owner: "{{ username }}"
+    group: "{{ username }}"
+  loop:
+    - https://github.com/ansible/workshops/raw/devel/files/bierner.markdown-preview-github-styles-0.1.6.vsix
+    - https://github.com/ansible/workshops/raw/devel/files/hnw.vscode-auto-open-markdown-preview-0.0.4.vsix
+    - https://github.com/ansible/workshops/raw/devel/files/redhat.ansible-0.4.5.vsix
+  register: download_extension
+  until: download_extension is not failed
+  retries: 5
+
+- name: install ansible and markdown extensions
+  become_user: "{{ username }}"
+  ansible.builtin.command: "/bin/code-server --install-extension /home/{{ username }}/.local/share/code-server/extensions/{{ item }}"
+  loop:
+    - bierner.markdown-preview-github-styles-0.1.6.vsix
+    - hnw.vscode-auto-open-markdown-preview-0.0.4.vsix
+    - redhat.ansible-0.4.5.vsix
+  ignore_errors: true
+  register: install_extension
+  until: install_extension is not failed
+  retries: 5
+
+- name: daemon-reload, enable and start code-server
+  ansible.builtin.systemd:
+    name: code-server
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: editor block - update nginx configuration to support code server
+  blockinfile:
+    block: "{{ lookup('template', 'nginx_instruqt.conf') }}"
+    dest: /etc/nginx/conf.d/automation-controller.nginx.conf
+    insertbefore: "location / "
+
+# Make sure we can re-run the automation platform installer during a lab without killing code-server access
+- name: update Ansible installer nginx configuration template to support code server
+  blockinfile:
+    block: "{{ lookup('template', 'nginx_instruqt.conf') }}"
+    dest: "{{ aap_dir }}/collections/ansible_collections/ansible/automation_platform_installer/roles/automationcontroller/templates/automation-controller.nginx.conf.j2"
+    insertbefore: "location / "
