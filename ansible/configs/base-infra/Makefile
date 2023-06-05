@@ -1,4 +1,4 @@
-ENV_TYPE=base-rhel-infra
+ENV_TYPE=base-infra
 SANDBOX=1
 # Adjust GUID to taste e.g. make deploy GUID=foo-01
 GUID=rhelsbox0$(SANDBOX)
