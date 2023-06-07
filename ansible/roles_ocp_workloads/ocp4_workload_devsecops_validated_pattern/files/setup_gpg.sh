@@ -21,6 +21,7 @@ EOF
 cat <<EOF > ~/.gpg
 #!/usr/bin/bash
 
+sh ~/init_gpg_passphrase.sh
 gpg --pinentry-mode loopback \$@
 EOF
 chmod +x ~/.gpg
