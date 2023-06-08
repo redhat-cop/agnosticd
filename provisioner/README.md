@@ -128,6 +128,7 @@ developer_mode: true
 
 # SHA value of targeted AAP bundle setup files.
 provided_sha_value: ea2843fae672274cb1b32447c9a54c627aa5bdf5577d9a6c7f957efe68be8c01
+provided_sha_value: 7456b98f2f50e0e1d4c93fb4e375fe8a9174f397a5b1c0950915224f7f020ec4
 
 # Automation controller install setup command. Default: "./setup.sh -e gpgcheck=0" if undefined or empty
 controller_install_command: './setup.sh -e gpgcheck=0'
