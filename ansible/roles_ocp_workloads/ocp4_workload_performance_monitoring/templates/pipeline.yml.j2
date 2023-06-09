@@ -1,0 +1,245 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: build-and-deploy-apps
+spec:
+  params:
+    - name: git-url
+      description: Your Git repo fork, such as {{ workshop_app_git }}
+      type: string
+    - name: app-name
+      description: 'App Name (maven project: quarkus-app | micronaut-app | springboot-app)'      
+      type: string
+    - name: registry-repo
+      description: Repository name in your Container Registry (usually your username)
+      type: string
+    - name: maven-mirror-url
+      default: http://nexus-sonatype-nexus-service.shared-maven-mirror.svc.cluster.local:8081/repository/maven-public
+      description: Maven Mirror Repo URL
+      type: string
+    - name: clone-subdir
+      default: code-repo
+      description: sub-directory where the repo will be cloned into
+      type: string
+    - name: git-revision
+      default: main
+      description: 'branch, tag, revision'
+      type: string
+    - name: registry-url
+      default: quay.io
+      description: Container Registry URL
+      type: string
+  tasks:
+    - name: git-clone
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+        - name: submodules
+          value: 'true'
+        - name: depth
+          value: '1'
+        - name: sslVerify
+          value: 'true'
+        - name: crtFileName
+          value: ca-bundle.crt
+        - name: subdirectory
+          value: $(params.clone-subdir)
+        - name: deleteExisting
+          value: 'true'
+        - name: verbose
+          value: 'true'
+        - name: gitInitImage
+          value: >-
+            registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel8@sha256:a538c423e7a11aae6ae582a411fdb090936458075f99af4ce5add038bb6983e8
+        - name: userHome
+          value: /tekton/home
+      taskRef:
+        kind: ClusterTask
+        name: git-clone
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+    - name: maven-package
+      params:
+        - name: MAVEN_IMAGE
+          value: >-
+            image-registry.openshift-image-registry.svc:5000/openshift/java:latest
+        - name: GOALS
+          value:
+            - clean
+            - package
+            - '-DskipTests'
+            - '-e'
+            - '-B'
+            - '-Dmaven.repo.local=$(workspaces.source.path)/.m2'
+        - name: CONTEXT_DIR
+          value: $(params.clone-subdir)/$(params.app-name)
+        - name: MAVEN_MIRROR_URL
+          value: $(params.maven-mirror-url)
+      runAfter:
+        - git-clone
+      taskRef:
+        kind: ClusterTask
+        name: maven
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+        - name: maven-settings
+          workspace: maven-settings
+    - name: image-build
+      params:
+        - name: IMAGE
+          value: >-
+            $(params.registry-url)/$(params.registry-repo)/$(params.app-name):$(tasks.git-clone.results.commit)
+        - name: BUILDER_IMAGE
+          value: >-
+            registry.redhat.io/rhel8/buildah@sha256:ac0b8714cc260c94435cab46fe41b3de0ccbc3d93e38c395fa9d52ac49e521fe
+        - name: STORAGE_DRIVER
+          value: vfs
+        - name: DOCKERFILE
+          value: ./src/main/docker/Dockerfile.jvm
+        - name: CONTEXT
+          value: $(params.clone-subdir)/$(params.app-name)
+        - name: TLSVERIFY
+          value: 'true'
+        - name: FORMAT
+          value: oci
+        - name: SKIP_PUSH
+          value: 'false'
+      runAfter:
+        - maven-package
+      taskRef:
+        kind: ClusterTask
+        name: buildah
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: image-tag
+      params:
+        - name: srcImageURL
+          value: >-
+            docker://$(params.registry-url)/$(params.registry-repo)/$(params.app-name):$(tasks.git-clone.results.commit)
+        - name: destImageURL
+          value: >-
+            docker://$(params.registry-url)/$(params.registry-repo)/$(params.app-name):latest
+      runAfter:
+        - image-build
+      taskRef:
+        kind: ClusterTask
+        name: skopeo-copy
+      workspaces:
+        - name: images-url
+          workspace: image-urls-cm
+
+    - name: deploy-quarkus
+      params:
+        - name: kn-image
+          value: >-
+            gcr.io/knative-releases/knative.dev/client/cmd/kn@sha256:ca767fde54bd76caf5654bc60a8447784f0989676b92ca8ff338f6bf8f00e2b6
+        - name: ARGS
+          value:
+            - service
+            - create
+            - $(params.app-name)
+            - '--image=$(params.registry-url)/$(params.registry-repo)/$(params.app-name)@$(tasks.image-build.results.IMAGE_DIGEST)'
+            - '--pull-policy=Always'
+            - '--probe-liveness=http:::/q/health/live'
+            - '--probe-liveness-opts=initialDelaySeconds=3,periodSeconds=30,failureThreshold=5,successThreshold=1,timeoutSeconds=10'
+            - '--probe-readiness=http:::/q/health/ready'
+            - '--probe-readiness-opts=initialDelaySeconds=3,periodSeconds=10,failureThreshold=5,successThreshold=1,timeoutSeconds=10' 
+            - '--request=cpu={{ serverless_app_cpu_request }},memory={{ serverless_app_memory_request }}'
+            - '--limit=cpu={{ serverless_app_cpu_limit }},memory={{ serverless_app_memory_limit }}'
+            - '--env=JAVA_MAX_MEM_RATIO=75.0'
+            - '--env=GC_MAX_HEAP_FREE_RATIO=25'
+            - '--label=app.openshift.io/runtime=quarkus'
+            - '--scale=0..3'
+            - --no-wait
+            - --force
+            - '--namespace={{ user }}-staging'
+      taskRef:
+        kind: ClusterTask
+        name: kn
+      runAfter:
+        - image-tag
+      when:
+        - input: "$(params.app-name)"
+          operator: in
+          values: ["quarkus-app"]
+
+    - name: deploy-micronaut
+      params:
+        - name: kn-image
+          value: >-
+            gcr.io/knative-releases/knative.dev/client/cmd/kn@sha256:ca767fde54bd76caf5654bc60a8447784f0989676b92ca8ff338f6bf8f00e2b6
+        - name: ARGS
+          value:
+            - service
+            - create
+            - $(params.app-name)
+            - '--image=$(params.registry-url)/$(params.registry-repo)/$(params.app-name)@$(tasks.image-build.results.IMAGE_DIGEST)'
+            - '--pull-policy=Always'
+            - '--probe-liveness=http:::/health'
+            - '--probe-liveness-opts=initialDelaySeconds=3,periodSeconds=30,failureThreshold=5,successThreshold=1,timeoutSeconds=10'
+            - '--probe-readiness=http:::/health'
+            - '--probe-readiness-opts=initialDelaySeconds=3,periodSeconds=10,failureThreshold=5,successThreshold=1,timeoutSeconds=10' 
+            - '--request=cpu={{ serverless_app_cpu_request }},memory={{ serverless_app_memory_request }}'
+            - '--limit=cpu={{ serverless_app_cpu_limit }},memory={{ serverless_app_memory_limit }}'
+            - '--env=JAVA_MAX_MEM_RATIO=75.0'
+            - '--env=GC_MAX_HEAP_FREE_RATIO=25'
+            - '--label=app.openshift.io/runtime=java'
+            - '--scale=0..3'
+            - --no-wait
+            - --force
+            - '--namespace={{ user }}-staging'
+      taskRef:
+        kind: ClusterTask
+        name: kn
+      runAfter:
+        - image-tag
+      when:
+        - input: "$(params.app-name)"
+          operator: in
+          values: ["micronaut-app"]
+
+    - name: deploy-springboot
+      params:
+        - name: kn-image
+          value: >-
+            gcr.io/knative-releases/knative.dev/client/cmd/kn@sha256:ca767fde54bd76caf5654bc60a8447784f0989676b92ca8ff338f6bf8f00e2b6
+        - name: ARGS
+          value:
+            - service
+            - create
+            - $(params.app-name)
+            - '--image=$(params.registry-url)/$(params.registry-repo)/$(params.app-name)@$(tasks.image-build.results.IMAGE_DIGEST)'
+            - '--pull-policy=Always'
+            - '--probe-liveness=http:::/actuator/health/liveness'
+            - '--probe-liveness-opts=initialDelaySeconds=5,periodSeconds=30,failureThreshold=5,successThreshold=1,timeoutSeconds=10'
+            - '--probe-readiness=http:::/actuator/health/readiness'
+            - '--probe-readiness-opts=initialDelaySeconds=5,periodSeconds=10,failureThreshold=5,successThreshold=1,timeoutSeconds=10' 
+            - '--request=cpu={{ serverless_app_cpu_request }},memory={{ serverless_app_memory_request }}'
+            - '--limit=cpu={{ serverless_app_cpu_limit }},memory={{ serverless_app_memory_limit }}'
+            - '--env=JAVA_MAX_MEM_RATIO=75.0'
+            - '--env=GC_MAX_HEAP_FREE_RATIO=25'
+            - '--env=SPRING_PROFILES_ACTIVE=production'
+            - '--label=app.openshift.io/runtime=spring-boot'
+            - '--scale=0..3'
+            - --no-wait
+            - --force
+            - '--namespace={{ user }}-staging'
+      taskRef:
+        kind: ClusterTask
+        name: kn
+      runAfter:
+        - image-tag
+      when:
+        - input: "$(params.app-name)"
+          operator: in
+          values: ["springboot-app"]
+
+  workspaces:
+    - name: shared-workspace
+    - name: maven-settings
+    - name: image-urls-cm

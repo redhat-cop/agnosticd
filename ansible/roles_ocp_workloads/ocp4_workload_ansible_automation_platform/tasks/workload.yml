@@ -1,0 +1,186 @@
+---
+
+- name: Setup environment vars
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_ansible_automation_platform_tmp_kubeconfig }}"
+  block:
+
+    - name: Extend OCP Bearer Token life for AAP cred use
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'ocp_bearer_token_lifecycle.j2') }}"
+      register: r_extend_token_lifecycle
+      until: r_extend_token_lifecycle is succeeded
+      retries: 5
+
+    - name: Create Project {{ ocp4_workload_ansible_automation_platform_project }}
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'namespace.j2') }}"
+      register: r_createproject
+      until: r_createproject is succeeded
+      retries: 5
+
+    - name: Create Operator group, secret and Install operator
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', __definition) }}"
+      loop:
+        - operatorgroup.j2
+        - subscription.j2
+        - admin_secret.j2
+      loop_control:
+        loop_var: __definition
+
+    - name: Wait until subscription is created
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        namespace: "{{ ocp4_workload_ansible_automation_platform_project }}"
+      register: r_aap_operator
+      vars:
+        _query: >-
+          [?starts_with(spec.clusterServiceVersionNames[0], 'aap-operator')]
+      retries: 30
+      delay: 10
+      until:
+        - r_aap_operator.resources | length > 0
+        - r_aap_operator.resources | to_json | from_json | json_query(_query)
+
+- name: Wait until all AAP2 Operators are running
+  block:
+
+    - name: Wait until the Automation Controller Manager operator is running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Deployment
+        name: automation-controller-operator-controller-manager
+        namespace: "{{ ocp4_workload_ansible_automation_platform_project }}"
+      register: r_aap_controller_manager_operator
+      until:
+        - r_aap_controller_manager_operator.resources[0].status.readyReplicas is defined
+        - "r_aap_controller_manager_operator.resources[0].status.replicas == \
+            r_aap_controller_manager_operator.resources[0].status.readyReplicas"
+      retries: 30
+      delay: 10
+
+    - name: Wait until the Automation Hub Manager operator is running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Deployment
+        name: automation-hub-operator-controller-manager
+        namespace: "{{ ocp4_workload_ansible_automation_platform_project }}"
+      register: r_aap_hub_manager_operator
+      until:
+        - r_aap_hub_manager_operator.resources[0].status.readyReplicas is defined
+        - "r_aap_hub_manager_operator.resources[0].status.replicas == \
+            r_aap_hub_manager_operator.resources[0].status.readyReplicas"
+      retries: 30
+      delay: 10
+
+    - name: Wait until the Automation Resource Manager operator is running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Deployment
+        name: resource-operator-controller-manager
+        namespace: "{{ ocp4_workload_ansible_automation_platform_project }}"
+      register: r_aap_resource_manager_operator
+      until:
+        - r_aap_resource_manager_operator.resources[0].status.readyReplicas is defined
+        - "r_aap_resource_manager_operator.resources[0].status.replicas == \
+            r_aap_resource_manager_operator.resources[0].status.readyReplicas"
+      retries: 30
+      delay: 10
+
+- name: Deploy Ansible Automation Platform 2 (AAP2)
+  block:
+
+    - name: Create Automation Controller
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'automationcontroller.j2') }}"
+
+    - name: Retrieve created route
+      kubernetes.core.k8s_info:
+        api_version: "route.openshift.io/v1"
+        kind: Route
+        name: "{{ ocp4_workload_ansible_automation_platform_app_name }}"
+        namespace: "{{ ocp4_workload_ansible_automation_platform_project }}"
+      register: r_route
+      until: r_route.resources[0].spec.host is defined
+      retries: 30
+      delay: 45
+
+    - name: Get automation_controller route hostname
+      ansible.builtin.set_fact:
+        automation_controller_hostname: "{{ r_route.resources[0].spec.host }}"
+
+    - name: Wait for automation_controller to be running
+      ansible.builtin.uri:
+        url: http://{{ automation_controller_hostname }}/api/v2/ping/
+        status_code: 200
+      register: r_result
+      until: r_result.json.version is defined
+      retries: 60
+      delay: 45
+
+- name: Inject AAP2 Manifest if provided
+  when: ocp4_workload_ansible_automation_platform_manifest.inject | default(false) | bool
+  block:
+
+    - name: Fetch Automation Controller manifest file
+      ansible.builtin.get_url:
+        url: "{{ ocp4_workload_ansible_automation_platform_manifest.url }}"
+        dest: /tmp/aap-manifest.zip
+        username: "{{ ocp4_workload_ansible_automation_platform_manifest.username | default(omit) }}"
+        password: "{{ ocp4_workload_ansible_automation_platform_manifest.password | default(omit) }}"
+
+    - name: Inject AAP2 Controller manifest
+      awx.awx.license:
+        manifest: /tmp/aap-manifest.zip
+        controller_host: "{{ automation_controller_hostname }}"
+        controller_username: admin
+        controller_password: "{{ ocp4_workload_ansible_automation_platform_admin_password }}"
+        validate_certs: true
+
+    - name: Remove AAP manifest
+      ansible.builtin.file:
+        path: /tmp/aap-manifest.zip
+        state: absent
+
+- name: Display Version and credentials
+  when: not silent | bool
+  ansible.builtin.debug:
+    msg:
+      - "{{ r_result.json.version }}"
+      - "Automation Controller URL: https://{{ automation_controller_hostname }}"
+      - "Automation Controller Admin Login: admin"
+      - "Automation Controller Admin Password: {{ ocp4_workload_ansible_automation_platform_admin_password }}"
+
+- name: Print Access information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+    - "Automation Controller URL: https://{{ automation_controller_hostname }}"
+    - "Automation Controller Admin Login: admin"
+    - "Automation Controller Admin Password: {{ ocp4_workload_ansible_automation_platform_admin_password }}"
+
+- name: Print Access information
+  agnosticd_user_info:
+    data:
+      aap_controller_web_url: "https://{{ automation_controller_hostname }}"
+      aap_controller_admin_user: "{{ ocp4_workload_ansible_automation_platform_admin_username | default('admin') }}"
+      aap_controller_admin_password: "{{ ocp4_workload_ansible_automation_platform_admin_password }}"
+
+- name: Set facts for Access information
+  ansible.builtin.set_fact:
+    aap_controller_web_url: "https://{{ automation_controller_hostname }}"
+    aap_controller_admin_user: "{{ ocp4_workload_ansible_automation_platform_admin_username | default('admin') }}"
+    aap_controller_admin_password: "{{ ocp4_workload_ansible_automation_platform_admin_password }}"
+
+# Leave this as the last task in the playbook.
+
+- name: workload tasks complete
+  when: not silent | bool
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."

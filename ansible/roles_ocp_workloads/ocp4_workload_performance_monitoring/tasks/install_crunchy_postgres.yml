@@ -1,0 +1,152 @@
+- name: Check Crunchy Postgres Subscription
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: Subscription
+    api_version: operators.coreos.com/v1alpha1
+    definition:
+      metadata:
+        labels:
+          operators.coreos.com/crunchy-postgres-operator.openshift-operators: ''
+        name: crunchy-postgres-operator
+        namespace: openshift-operators
+      spec:
+        channel: v5
+        installPlanApproval: Automatic
+        name: crunchy-postgres-operator
+        source: certified-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait Crunchy Postgres Operator
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Pod
+    namespace: openshift-operators
+    label_selectors:
+      - postgres-operator.crunchydata.com/control-plane=postgres-operator
+    field_selectors:
+      - status.phase=Running
+  register: r_crunchy_pod
+  retries: 20
+  delay: 10
+  until: r_crunchy_pod.resources | list | length == 1
+
+- name: Create the DB Init Script for the PG Instance
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    api_version: v1
+    kind: ConfigMap
+    definition:
+      metadata:
+        name: db-init
+        namespace: '{{ user }}-staging'
+      data:
+        init-sql: |
+          DROP TABLE IF EXISTS Statistics_Quarkus;
+          DROP TABLE IF EXISTS Statistics_Micronaut;
+          DROP TABLE IF EXISTS Statistics_Springboot;
+          DROP SEQUENCE IF EXISTS hibernate_sequence;
+          DROP SEQUENCE IF EXISTS statistics_springboot_seq;
+
+          create sequence hibernate_sequence start 1 increment 1;
+
+          create sequence statistics_springboot_seq start 1 increment 50;
+
+          create table Statistics_Quarkus
+          (
+              id          int8 not null,
+              description varchar(255),
+              done_at     timestamp,
+              duration    int8,
+              framework   int4,
+              parameter   varchar(255),
+              type        int4,
+              primary key (id)
+          );
+
+          create table Statistics_Micronaut
+          (
+              id          int8 not null,
+              description varchar(255),
+              done_at     timestamp,
+              duration    int8,
+              framework   int4,
+              parameter   varchar(255),
+              type        int4,
+              primary key (id)
+          );
+
+
+          create table Statistics_Springboot
+          (
+              id          int8 not null,
+              description varchar(255),
+              done_at     timestamp,
+              duration    numeric(21,0),
+              framework   int4,
+              parameter   varchar(255),
+              type        int4,
+              primary key (id)
+          );
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user
+
+- name: Deploy a PG Cluster Instance for Users
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ user }}-staging'
+    resource_definition: "{{ lookup('file', 'crunchy-instance.yml') }}"
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user
+
+- name: Patch Postgres Instance Secret
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: patched
+    api_version: v1
+    kind: Secret
+    name: postgres-pguser-postgres
+    namespace: "{{ user }}-staging"
+    merge_type:
+      - strategic-merge
+    definition:
+      stringData:
+        password: "password"
+        verifier: ""
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user
+
+- name: Create a Route for PGAdmin
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: pgadmin
+    namespace: "{{ user }}-staging"
+    definition:
+      metadata:
+        labels:
+          postgres-operator.crunchydata.com/cluster: postgres
+          postgres-operator.crunchydata.com/role: pgadmin
+        annotations:
+          openshift.io/host.generated: 'true'
+      spec:
+        to:
+          kind: Service
+          name: postgres-pgadmin
+          weight: 100
+        port:
+          targetPort: pgadmin
+        tls:
+          termination: edge
+        wildcardPolicy: None
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user
