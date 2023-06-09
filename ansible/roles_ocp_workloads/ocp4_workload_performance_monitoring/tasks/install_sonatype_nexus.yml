@@ -1,0 +1,106 @@
+- name: Check Sonatype Nexus namespace
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Namespace
+    name: shared-maven-mirror
+    state: present
+  register: _namespace
+  retries: 10
+  delay: 5
+  until:
+    - _namespace is succeeded
+
+- name: Evaluate Operator Group
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    api_version: operators.coreos.com/v1
+    kind: OperatorGroup
+    definition:
+      metadata:
+        name: 'shared-maven-mirror-operatorgroup'
+        namespace: 'shared-maven-mirror'
+      spec:
+        targetNamespaces:
+          - 'shared-maven-mirror'
+
+- name: Check Sonatype Nexus Subscription
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: Subscription
+    api_version: operators.coreos.com/v1alpha1
+    definition:
+      metadata:
+        name: nxrm-operator-certified
+        namespace: shared-maven-mirror
+      spec:
+        channel: stable
+        installPlanApproval: Automatic
+        name: nxrm-operator-certified
+        source: certified-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait Sonatype Nexus Operator
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Pod
+    namespace: shared-maven-mirror
+    label_selectors:
+      - name=nxrm-operator-certified
+    field_selectors:
+      - status.phase=Running
+  register: r_sonatype_nexus_pod
+  retries: 20
+  delay: 10
+  until: r_sonatype_nexus_pod.resources | list | length == 1
+
+- name: Check Sonatype Nexus Instance
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: shared-maven-mirror
+    resource_definition: "{{ lookup('file', 'sonatype-nexus.yml') }}"
+  register: _nexus
+  retries: 10
+  delay: 10
+  until: not _nexus.failed
+
+- name: Wait Sonatype Nexus Instance to be Running
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Pod
+    namespace: shared-maven-mirror
+    label_selectors:
+      - app = sonatype-nexus
+    field_selectors:
+      - status.phase=Running
+  register: r_nexus_pod
+  retries: 120
+  delay: 10
+  until: r_nexus_pod.resources | list | length == 1
+
+- name: Create Sonatype Nexus Route
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: Route
+    api_version: route.openshift.io/v1
+    definition:
+      metadata:
+        name: nexus
+        namespace: shared-maven-mirror
+      spec:
+        to:
+          kind: Service
+          name: nexus-sonatype-nexus-service
+          weight: 100
+        port:
+          targetPort: application
+        tls:
+          termination: edge
+          insecureEdgeTerminationPolicy: Allow
+        wildcardPolicy: None

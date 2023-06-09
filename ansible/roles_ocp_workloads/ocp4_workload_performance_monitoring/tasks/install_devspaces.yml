@@ -1,0 +1,106 @@
+- name: Evaluate DevSpaces Subscription
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    definition:
+      metadata:
+        name: devspaces
+        namespace: openshift-operators
+      spec:
+        channel: stable
+        installPlanApproval: Automatic
+        name: devspaces
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait DevSpaces Operator To Be Running
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Pod
+    namespace: openshift-operators
+    label_selectors:
+      - app = devspaces-operator
+      - app.kubernetes.io/component = devspaces-operator
+    field_selectors:
+      - status.phase=Running
+  register: r_devspace_pod
+  retries: 120
+  delay: 10
+  until: r_devspace_pod.resources | list | length == 1
+
+- name: Check Devspaces namespace
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Namespace
+    name: openshift-devspaces
+    state: present
+  register: _namespace
+  retries: 10
+  delay: 5
+  until:
+    - _namespace is succeeded
+
+- name: Check Che Cluster
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: openshift-devspaces
+    resource_definition: "{{ lookup('template', 'devspace_cluster.yml.j2') }}"
+  register: _che
+  retries: 10
+  delay: 10
+  until: not _che.failed
+
+- name: Wait DevSpaces Instance To Be Running
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Pod
+    namespace: openshift-devspaces
+    label_selectors:
+      - app = devspaces
+      - component = che-gateway
+    field_selectors:
+      - status.phase=Running
+  register: r_devspace_pod
+  retries: 120
+  delay: 10
+  until: r_devspace_pod.resources | list | length == 1
+
+- name: Check DevSpaces plugin-registry devfile endpoint readiness
+  ansible.builtin.uri:
+    validate_certs: '{{ verify_tls }}'
+    url: https://devspaces.{{ route_subdomain }}/plugin-registry/v3/plugins/che-incubator/che-code/insiders/devfile.yaml
+    method: GET
+    return_content: false
+    status_code: 200
+    timeout: 3
+  register: api_response
+  retries: 120
+  delay: 10
+  until: api_response.status == 200
+
+- name: Wait DevSpaces container-build scc
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: security.openshift.io/v1
+    kind: SecurityContextConstraints
+    name: container-build
+  register: r_devspace_scc
+  retries: 120
+  delay: 10
+  until: (r_devspace_scc.api_found is true and r_devspace_scc.resources | list | length == 1)
+
+- name: Check Workspaces for Users
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ user }}-devspaces'
+    resource_definition: "{{ lookup('template', 'devspace_workspace.yml.j2') }}"
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user

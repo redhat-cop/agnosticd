@@ -1,0 +1,62 @@
+- name: Get DevWorkspace pods in users' namespaces
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: '{{ user }}-devspaces'
+    label_selectors:
+      - controller.devfile.io/devworkspace_name=workshop-performance-monitoring-apps
+    field_selectors:
+      - status.phase=Running
+  register: running_workspaces
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user
+  retries: 60
+  delay: 10
+  until: (running_workspaces.resources | list | length) == 1
+
+- name: Number of Running workspaces
+  ansible.builtin.debug:
+    msg: "{{ running_workspaces.results | length }}"
+
+- name: Extract Pod metadata
+  ansible.builtin.set_fact:
+    workspaces: "{{ workspaces | default([]) + [{'podName': item.resources[0].metadata.name, 'namespace': item.resources[0].metadata.namespace}] }}"
+  with_items: "{{ running_workspaces.results }}"
+  no_log: true
+
+- name: Running Workspaces Metadata
+  ansible.builtin.debug:
+    msg: "{{ workspaces }}"
+
+- name: Check Nexus maven-public endpoint readiness
+  ansible.builtin.uri:
+    validate_certs: '{{ verify_tls }}'
+    url: http://nexus-shared-maven-mirror.{{ route_subdomain }}/service/rest/repository/browse/maven-public/
+    method: GET
+    return_content: false
+    status_code: 200
+    timeout: 3
+  register: endpoint_response
+  retries: 30
+  delay: 10
+  until: endpoint_response.status == 200
+
+- name: Attempt to warm up users' devspaces by running 'mvn package -DskipTests'
+  kubernetes.core.k8s_exec:
+    namespace: "{{ item.namespace }}"
+    pod: "{{ item.podName }}"
+    container: "tools"
+    command: /bin/bash -c 'nohup mvn package -q -f "$PROJECT_SOURCE" -DskipTests &>/dev/null &'
+  register: command_status
+  with_items: "{{ workspaces }}"
+  ignore_errors: true
+
+- name: Add user-profile secret for Users devspaces
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ user }}-devspaces'
+    resource_definition: "{{ lookup('template', 'devspaces_user_profile_secret.yml.j2') }}"
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user
