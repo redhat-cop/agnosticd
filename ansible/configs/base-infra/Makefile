@@ -5,6 +5,7 @@ SANDBOX=1
 GUID=showroom0$(SANDBOX)
 OUTPUT_DIR=/tmp/output_dir/$(GUID)
 # TODO: ~/tmp seems to fail, related to accessing tha ssh file at least in aws's ping during post_infra
+# ~/tmp persists through reboots which can be useful
 # showroom0$(SANDBOX)
 PLAYBOOK_DIR=ansible
 
@@ -87,6 +88,11 @@ destroy: ##
 		-e @$(SECRETS_FILE) \
 		-e env_type=$(ENV_TYPE) \
 		$(EXTRA_ARGS)
+
+user-data: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
+user-data: ## Assumes an existing output_dir
+user-data: ## 
+	cat $(OUTPUT_DIR)/user-data.yaml
 
 ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
 ssh-target: ## Assumes an existing output_dir
