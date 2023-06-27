@@ -1,0 +1,450 @@
+#!/bin/bash
+#
+# kc-XXX	Knowledge Checkpoint break script for XXXX
+#
+# description: This utility will make local system changes  \
+#              that reproduce XXXX issues.  The broken system \
+#	       can then be used by GSS support engineers and \
+#	       Red Hat support partners along with self-paced \
+#	       training modules to grow XXXX troubleshooting knowledge.
+#
+# processname: kc-XXXX
+#
+#
+# Last Modified:
+#	xxxxxxx <xxxx@redhat.com> xx/xx/2014
+#
+# Usage: ./kc-XXXX <KCID>
+# <KCID> can be one of the following:
+# break1 - used to reproduce a system that has issue XXXX
+# grade1 - used to grade a system after resolving the XXXX issue
+#
+# Error exit codes:
+# 0: exited successfully
+# 1: wrong hostname
+# 2: syntax command usage
+# 3: need to run as root user
+
+bold=`tput bold`
+normal=`tput sgr0`
+black=`tput setaf 0`
+red=`tput setaf 1`
+green=`tput setaf 2`
+yellow=`tput setaf 3`
+blue=`tput setaf 4`
+magenta=`tput setaf 5`
+cyan=`tput setaf 6`
+white=`tput setaf 7`
+
+
+MYHOSTNAME=`hostname`
+MYNAME=`whoami`
+
+if [[ ! "$MYNAME" == "lab-user" ]]
+then
+	echo "${cyan}$0 needs to be run by the lab-user.${normal}"
+	exit 3
+fi
+
+# startup
+logger -p local0.notice "Initiating $0 with option(s) $@"
+echo "Initiating $0 with option(s) $@"
+
+
+get_creds() {
+
+
+        #check to see if login is working
+        export GUID=`hostname | awk -F. '{print $2}'`
+	myrelativekube=`find . | grep kubeconfig | head -1`
+	mykube=`readlink -f $myrelativekube`
+        if [[ -f ${mykube} ]]; then
+                echo "Using ${mykube}"
+                export KUBECONFIG=${mykube}
+        else
+                echo "Couldn't locate kubeconfig, tried ${mykube}"
+                read -p "Enter the absolute path to the kubeconfig to use: " KUBECONFIG
+                if [[ -f $KUBECONFIG ]]; then
+                        export KUBECONFIG=$KUBECONFIG
+                else
+                        echo "Couldn't locate kubeconfig $KUBECONFIG"
+                        exit 7
+                fi
+        fi
+
+        # determining kubeadmin password from install log
+
+        myrelativeinstall=`find . | grep openshift_install.log | head -1`
+        myinstall=`readlink -f $myrelativeinstall`
+
+
+        if [[ -f ${myinstall} ]]; then
+                echo "Inspecting $myinstall"
+                KUBEPASS=`grep "kubeadmin, password:" $myinstall | awk '{print substr($NF,1,length($NF)-1)}'`
+        else
+                echo "Couldn't locate openshift_install.log, tried $myinstall"
+                read -p "Enter the full path to the openshift_install.log: " INSTALL_LOG
+                if [[ -f "${INSTALL_LOG}" ]]; then
+                        KUBEPASS=`grep "kubeadmin, password:" $INSTALL_LOG | awk '{print substr($NF,1,length($NF)-1)}'`
+                else
+                        echo "Couldn't locate openshift_install.log, tried ${INSTALL_LOG}"
+                        read -p "Enter the kubeadmin password to use: " KUBEPASS
+                fi
+        fi
+
+
+}
+
+
+
+setup() {
+	# insert your break code here
+INSTALLER_VERSION=v0.16.1
+OC_CLI_VERSION=4.0.22
+
+
+export GUID=`hostname | awk -F. '{print $2}'`
+echo "GUID=${GUID}" >>$HOME/.bashrc
+curl "https://s3.amazonaws.com/aws-cli/awscli-bundle.zip" -o "awscli-bundle.zip"
+unzip awscli-bundle.zip
+sudo ./awscli-bundle/install -i /usr/local/aws -b /bin/aws
+aws --version
+if [[ $? -eq 0 ]]; then
+	rm -rf ./awscli-bundle ./awscli-bundle.zip
+else
+	echo "aws --version failed to run."
+	exit 1
+fi
+sudo wget https://github.com/openshift/installer/releases/download/${INSTALLER_VERSION}/openshift-install-linux-amd64 -O /usr/bin/openshift-install
+sudo chmod +x /usr/bin/openshift-install
+wget https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/linux/oc.tar.gz
+sudo tar zxvf oc.tar.gz -C /usr/bin
+rm -f oc.tar.gz
+sudo chmod +x /usr/bin/oc
+sudo ls -l /usr/bin/{oc,openshift-install}
+oc completion bash >/tmp/openshift.tmp
+sudo cp /tmp/openshift.tmp /etc/bash_completion.d/openshift
+rm -f /tmp/openshift.tmp
+export GUID=`hostname | awk -F. '{print $2}'`
+echo "export GUID=${GUID}" >>$HOME/.bashrc
+read -p "Enter the 'aws_access_key_id' from email: " AWSKEY
+read -p "Enter the 'aws_secret_access_key' from email: " AWSSECRETKEY
+export REGION=us-east-2
+mkdir $HOME/.aws
+
+cat << EOF >  $HOME/.aws/credentials
+[default]
+aws_access_key_id = ${AWSKEY}
+aws_secret_access_key = ${AWSSECRETKEY}
+region = $REGION
+EOF
+
+cat $HOME/.aws/credentials
+
+
+aws sts get-caller-identity
+
+ssh-keygen -f ~/.ssh/cluster-${GUID}-key -N ''
+
+TopLevelDomain=`aws route53 list-hosted-zones | grep Name | grep -oh 'sandbox....opentlc.com' | head -1`
+
+if [[ -z "$TopLevelDomain" ]]; then
+read -p "Enter the 'Top level domain' from email: " TopLevelDomain
+fi
+
+mkdir -p ${HOME}/cluster-${GUID}
+
+cat << EOF > ${HOME}/cluster-${GUID}/install-config.yaml
+apiVersion: v1beta4
+baseDomain: ${TopLevelDomain}
+compute:
+- name: worker
+  platform: {}
+  replicas: 3
+controlPlane:
+  name: master
+  platform: {}
+  replicas: 3
+metadata:
+  creationTimestamp: null
+  name: cluster-${GUID}
+networking:
+  clusterNetwork:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  machineCIDR: 10.0.0.0/16
+  networkType: OpenShiftSDN
+  serviceNetwork:
+  - 172.30.0.0/16
+platform:
+  aws:
+    region: us-east-2
+pullSecret: '{"auths":{"cloud.openshift.com":{"auth":"b3BlbnNoaWZ0LXJlbGVhc2UtZGV2K2NlZXRyYWluaW5nMWtocmYxN3J6YzViM2xpNXV2N3Z3d2h0d2lwOkVQSEU0VU5TNEwwWVBGWFdIVkZRNkVIMVdCWDVaMk85OVJMRE00TkpKVFIwQThYRFY5SktMRTRZN1c3ODRCTFo=","email":"gss-training-dev+breakfix@redhat.com"},"quay.io":{"auth":"b3BlbnNoaWZ0LXJlbGVhc2UtZGV2K2NlZXRyYWluaW5nMWtocmYxN3J6YzViM2xpNXV2N3Z3d2h0d2lwOkVQSEU0VU5TNEwwWVBGWFdIVkZRNkVIMVdCWDVaMk85OVJMRE00TkpKVFIwQThYRFY5SktMRTRZN1c3ODRCTFo=","email":"gss-training-dev+breakfix@redhat.com"},"registry.connect.redhat.com":{"auth":"NTEwMjU1MDJ8dWhjLTFLSFJmMTdSemM1QjNMaTV1djd2d3dodFdJUDpleUpoYkdjaU9pSlNVelV4TWlKOS5leUp6ZFdJaU9pSTNaR1JrTlRVMU0yWmhNamMwTjJZd1lqVTRaVGs0WlRsbE1qWXdPV0ZtWkNKOS5QeWw3eXduOEZfa0c2SE54MHJXc0VHSnk3WnBEb2dhTTdYdERHTnVDcXB0SXlMTUpxQVlYOF9mMk5uUlc5RE1MQnlGS09XMFppSXA4Yy1SODRtWlNhUW1VbEZ2eXVWYXRzY0dDbl9ONDlVdkdHQlhRdzRMb2xETzBjTnNtcmdZYVo1UllycWZxTnU2V3IyUVdDdmxMbWhNM1JDVFFKNHAzQ3luTEVrWHRDZGpHaXVrd05PSERLcXI1VXQ5dE54OTdvRHVoajRQMEk0WUlMUmswTDdHZHpwSm85cHRNQVRkcHpHSDdpUEdQalR4RlVuaVFhajJQc3hzakZwWi15R1VuVVRRQWN2SWVHTEtGNW5ISlF4QnNwU2FXcGpGQ2tiQm56QnB5NFJGOElOOHNBU0VpaXRwZWlManQxRDBab0ZYR2Iwak94Q3lFU3duQ2RZemVkMDdzYndhbTBrZFhJWExzcGdfYTJCSldLV2VoWVNRNFBmM0JpdEpHZzJEVDdWV2pLMUJLQnlXTTV5UTJPQWYwUzJXMTdncnlPcGdVOUJOcW5CbjNycjY0d3U2U1lUZUNaXzVoR1JTd0RkN0NHX0dBakdPdUVJRGxuYzVVYlNfWDBCZ1k3Um9DbHRCYzFYNTFBdnBzenF3S2JsQ0JBNUlPWmxPT0oyUDk3SWpCTDhJZ3hqd2FXS3ltZWk0Sk9YemptM0dad2xUUVlFTFhjX2tNcnhacHdvVjR2bDlLZTZXcFN1RzRHc2ZFNWxFSlRDMy0wcUEtWEFleHNnSndHR1VMZG0zTVV0ZFhZMURwTkc4LWVDNktvYVBTVTdiTDRfX2p4NHU3VWxqcFpnV1NmZnlmaTVDbk9vanFRRVBva1JzVmY2LUFHN3FTOGlkUTNkRThoa1ZHRUY0NThRWQ==","email":"gss-training-dev+breakfix@redhat.com"},"registry.redhat.io":{"auth":"NTEwMjU1MDJ8dWhjLTFLSFJmMTdSemM1QjNMaTV1djd2d3dodFdJUDpleUpoYkdjaU9pSlNVelV4TWlKOS5leUp6ZFdJaU9pSTNaR1JrTlRVMU0yWmhNamMwTjJZd1lqVTRaVGs0WlRsbE1qWXdPV0ZtWkNKOS5QeWw3eXduOEZfa0c2SE54MHJXc0VHSnk3WnBEb2dhTTdYdERHTnVDcXB0SXlMTUpxQVlYOF9mMk5uUlc5RE1MQnlGS09XMFppSXA4Yy1SODRtWlNhUW1VbEZ2eXVWYXRzY0dDbl9ONDlVdkdHQlhRdzRMb2xETzBjTnNtcmdZYVo1UllycWZxTnU2V3IyUVdDdmxMbWhNM1JDVFFKNHAzQ3luTEVrWHRDZGpHaXVrd05PSERLcXI1VXQ5dE54OTdvRHVoajRQMEk0WUlMUmswTDdHZHpwSm85cHRNQVRkcHpHSDdpUEdQalR4RlVuaVFhajJQc3hzakZwWi15R1VuVVRRQWN2SWVHTEtGNW5ISlF4QnNwU2FXcGpGQ2tiQm56QnB5NFJGOElOOHNBU0VpaXRwZWlManQxRDBab0ZYR2Iwak94Q3lFU3duQ2RZemVkMDdzYndhbTBrZFhJWExzcGdfYTJCSldLV2VoWVNRNFBmM0JpdEpHZzJEVDdWV2pLMUJLQnlXTTV5UTJPQWYwUzJXMTdncnlPcGdVOUJOcW5CbjNycjY0d3U2U1lUZUNaXzVoR1JTd0RkN0NHX0dBakdPdUVJRGxuYzVVYlNfWDBCZ1k3Um9DbHRCYzFYNTFBdnBzenF3S2JsQ0JBNUlPWmxPT0oyUDk3SWpCTDhJZ3hqd2FXS3ltZWk0Sk9YemptM0dad2xUUVlFTFhjX2tNcnhacHdvVjR2bDlLZTZXcFN1RzRHc2ZFNWxFSlRDMy0wcUEtWEFleHNnSndHR1VMZG0zTVV0ZFhZMURwTkc4LWVDNktvYVBTVTdiTDRfX2p4NHU3VWxqcFpnV1NmZnlmaTVDbk9vanFRRVBva1JzVmY2LUFHN3FTOGlkUTNkRThoa1ZHRUY0NThRWQ==","email":"gss-training-dev+breakfix@redhat.com"}}}'
+sshKey: |
+  ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEA50f2ekfSLEGD1lAjEZVBrja8RxhccBgiuTukjdua/Eng3ZjN/olvlUb3yBWJhc0VYIOVR2RVI15W/x2DgWtkB/8QZ0tY3HFQn5i9heHcv5ZQx6IFCwlVUtm0CdJDQAPuJShqu/4U1g++rQKw38d8dSwnXSYrKR9IuJu5W7D2T+hKVw+Q6uAZr0cAfuLFh+GciTb3cI34DnbDIK5glKOKA5QkIjY29VFB9xWrs48QL7Eb3PkLW8UxzV9QCp9chEceqokOrNziec8M6iV8zOx3ErKwL6WRxjyvx/gBaqaKyNht7T/OF31vQL5X09tcSJ/a/NQewMgCs7wp19Dv7u0pSw== root@instructor.example.com
+EOF
+
+
+echo "Installing using ${HOME}/cluster-${GUID}/install-config.yaml"
+cat ${HOME}/cluster-${GUID}/install-config.yaml
+
+openshift-install create cluster --dir ${HOME}/cluster-${GUID}
+
+
+        # end your break code here
+	echo "Your system has been modified."
+
+}
+
+
+break() {
+        mkdir -p /var/tmp/cee-cf-110
+
+	get_creds
+	
+	KUBEPASS=`cat /home/lab-user/cluster-$GUID/auth/kubeadminpassword`
+	
+	# trying oc login else fail
+	echo -ne "Trying to login..\t\t"
+	oc login -u system:admin >/dev/null 2>failed-login
+	if [[ $? -eq 0 ]]; then
+                echo "${green}SUCCESS${normal}"
+        else
+                echo "${red}FAILED${normal}"
+                echo "Make sure your cluster was successfully installed and available."
+		echo "Tried to run oc login -u kubeadmin -p ${KUBEPASS} but got:"
+		cat failed-login 2>/dev/null
+		rm -f failed-login
+                exit 7
+	fi
+	defaultCert=`oc get -n openshift-ingress-operator ingresscontroller/default -o jsonpath='{.spec.defaultCertificate.name}'`
+	if [[ -z "$defaultCert" ]]; then
+		# save the tls cert with "GOOD" to use later if a restore is needed
+		oc get secret router-certs-default -n openshift-ingress -o jsonpath='{.data.tls\.crt}' | base64 -d  > /var/tmp/cee-cf-110/.GOOD.crt 2>/dev/null
+		oc get secret router-certs-default -n openshift-ingress -o jsonpath='{.data.tls\.key}' | base64 -d > /var/tmp/cee-cf-110/.GOOD.key 2>/dev/null
+	else
+		# save the tls cert under a different name
+		oc get secret ${defaultCert} -n openshift-ingress -o jsonpath='{.data.tls\.crt}' | base64 -d > /var/tmp/cee-cf-110/${defaultCert}.crt 2>/dev/null
+		oc get secret ${defaultCert} -n openshift-ingress -o jsonpath='{.data.tls\.key}' | base64 -d > /var/tmp/cee-cf-110/${defaultCert}.key 2>/dev/null
+	fi
+
+	# create a cert and tell the cluster to use it.  note: it wont be a wild card (*) cert
+	echo -ne "Applying break.."
+	oc delete secret tls cee-cf-110 -n openshift-ingress &>/dev/null
+	DOMAIN=`oc get ingresscontroller.operator default -n openshift-ingress-operator -o jsonpath='{.status.domain}{"\n"}' | sed 's/apps/gears/'`
+	openssl req -new -newkey rsa:2048 -days 5 -nodes -x509 -subj "/C=US/ST=NC/L=Raleigh/O=Red Hat Inc./OU=CEE/CN=$DOMAIN" -keyout server.key -out server.crt &>/dev/null
+	oc create secret tls cee-cf-110 --cert=server.crt --key=server.key -n openshift-ingress &>/dev/null
+	oc patch ingresscontroller.operator default --type=merge -p "{\"spec\":{\"defaultCertificate\":{\"name\": \"cee-cf-110\"}}}" -n openshift-ingress-operator &>/dev/null
+
+	echo -n "." && sleep 1
+
+        # remove ingress-operator pod and redeploy it
+        ingressOP=`oc get pod -n openshift-ingress-operator -o jsonpath='{.items[0].metadata.name}'`
+        oc delete pod $ingressOP -n openshift-ingress-operator &>/dev/null
+
+        mySTATE=`oc get pod -n openshift-ingress-operator | grep ingress-operator`
+        while [[ ! "$mySTATE" =~ "Running" ]];do
+                echo -n "." && sleep 1
+                mySTATE=`oc get pod -n openshift-ingress-operator | grep ingress-operator`
+        done
+
+        # remove router pods so they are redeployed
+        for ROUTER in `oc get pod -n openshift-ingress | grep ^router | awk '{print $1}'`
+        do
+                 oc delete pod $ROUTER -n openshift-ingress &>/dev/null
+        done
+
+
+
+
+        # check to see if the cert is properly applied.  If it has then oc login will fail with error "x509: certificate is valid for gears...." or "net/http: TLS handshake timeout"
+	COUNT=0
+	STATUS="failed"
+	while [[ $COUNT -lt 10 ]];
+	do
+		echo -ne "." && sleep 10
+
+		oc login -u kubeadmin -p $KUBEPASS &>/dev/null
+		if [[ $? -eq 0 ]]; then
+                        COUNT=$((COUNT + 1))
+		else
+                        echo -e "\t${green}DONE${normal}"
+                        STATUS="success"
+                        COUNT=10
+		fi
+	done
+
+	if [[ $STATUS == "failed" ]]; then
+	        echo -e "\t${red}FAILED${normal}"
+        	echo "Make sure your cluster was successfully installed and available."
+        	exit 7
+	fi
+
+
+	# if you make it here then it worked, mark break and clean up
+	touch /var/tmp/cee-cf-110/.break_ceecf110
+	rm -f server.crt
+	rm -f server.key
+	rm -f failed-login
+}
+
+grade() {
+        STATUS="failed"
+        echo "Grading.  Please wait."
+
+	if  ! [ -f  /var/tmp/cee-cf-110/.break_ceecf110 ]
+	then
+		echo "It seems like break was not run successfully.  Run $0 break first."
+		exit 7
+	fi
+
+
+        # insert your grade code here and set STATUS="success" if the lesson criteria is met.
+	get_creds
+
+        KUBEPASS=`cat /home/lab-user/cluster-$GUID/auth/kubeadminpassword`
+	
+        echo -ne "Testing login using oc..\t\t"
+        oc login -u kubeadmin -p $KUBEPASS &>/dev/null
+        if [[ $? -eq 0 ]]; then
+                echo "${green}SUCCESS${normal}"
+		STATUS="success"
+	else
+                echo "${red}FAILED${normal}"
+                echo "Still unable to login using oc login -u kubeadmin -p $KUBEPASS"
+        fi
+
+        # end your grading code here
+
+        if [[ $STATUS == "success" ]]
+        then
+                echo "Success."
+                echo "${bold}COMPLETION CODE: GAINFUL12ACTION${normal}"
+        else
+                echo "Sorry.  There still seems to be a problem"
+        fi
+}
+
+
+fix() {
+	# checking to make sure we have the .GOOD.crt and .GOOD.key saved from the break
+	#if [[ -f /var/tmp/cee-cf-110/.GOOD.crt ]]; then
+	#	if [[ -f /var/tmp/cee-cf-110/.GOOD.key ]]; then
+	#		echo "Found original content."
+	#	else
+	#		echo "Unable to fix.  Missing original content.  You will need to redeploy the environment."
+	#		exit 7
+        #		fi
+	#else
+	#	echo "Unable to fix.  Missing original content.  You will need to redeploy the environment."
+	#	exit 7
+	#fi
+
+
+	get_creds
+        
+        KUBEPASS=`cat /home/lab-user/cluster-$GUID/auth/kubeadminpassword`
+        
+        # trying oc login else fail
+        echo -ne "Trying to login.\t"
+        oc login -u system:admin >/dev/null 2>failed-login
+        if [[ $? -eq 0 ]]; then
+                echo "${green}SUCCESS${normal}"
+        else
+                echo "${red}FAILED${normal}"
+                echo "Make sure your cluster was successfully installed and available."
+                echo "Tried to run oc login -u kubeadmin -p ${KUBEPASS} but got:"
+                cat failed-login 2>/dev/null
+                rm -f failed-login
+                exit 7
+        fi
+
+
+	# restore the .crt and .key which include proper wildcard certificate
+	echo -ne "Applying fix.."
+	oc delete secret router-certs-fix -n openshift-ingress &>/dev/null
+        #oc create secret tls router-certs-fix --cert=/var/tmp/cee-cf-110/.GOOD.crt --key=/var/tmp/cee-cf-110/.GOOD.key -n openshift-ingress &>/dev/null
+        #oc patch ingresscontroller.operator default --type=merge -p "{\"spec\":{\"defaultCertificate\":{\"name\": \"router-certs-fix\"}}}" -n openshift-ingress-operator &>/dev/null
+	oc patch ingresscontroller.operator default --type=merge -p '{"spec":null}' -n openshift-ingress-operator &>/dev/null
+
+
+        echo -n "." && sleep 1
+
+
+        # remove ingress-operator pod and redeploy it
+        ingressOP=`oc get pod -n openshift-ingress-operator -o jsonpath='{.items[0].metadata.name}'`
+        oc delete pod $ingressOP -n openshift-ingress-operator &>/dev/null
+
+        mySTATE=`oc get pod -n openshift-ingress-operator | grep ingress-operator`
+        while [[ ! "$mySTATE" =~ "Running" ]];do
+                echo -n "." && sleep 1
+                mySTATE=`oc get pod -n openshift-ingress-operator | grep ingress-operator`
+        done
+
+        # remove router pods so they are redeployed
+        for ROUTER in `oc get pod -n openshift-ingress | grep ^router | awk '{print $1}'`
+        do
+                 oc delete pod $ROUTER -n openshift-ingress &>/dev/null
+        done
+
+        echo -ne ".\t" && sleep 1
+
+	# now loop and wait and until the ingress routing allow a successful login using the proper wildcard cert
+	myCOUNT=0
+	while [[ $myCOUNT -lt 31 ]]
+	do
+		oc login -u kubeadmin -p $KUBEPASS &>/dev/null
+		if [[ $? -eq 0 ]]; then
+			myCOUNT=50
+		else
+			myCOUNT=$((myCOUNT+1))
+			sleep 1
+		fi
+	done
+
+        if [[ $myCOUNT -eq 50 ]]; then
+                echo "${green}SUCCESS${normal}"
+		# cleanup so that grade cant be gamed
+		rm -f /var/tmp/cee-cf-110/.break_ceecf110
+	else
+                echo "${red}FAILED${normal}"
+                echo "Still unable to login using oc login -u kubeadmin -p $KUBEPASS"
+        fi
+
+
+
+}
+
+case "$1" in
+	setup)
+                if [[ -f /etc/ravello/vm.json ]]; then
+                        echo "Ravello-based learning environment detected."
+                else
+                        setup
+                fi
+		;;
+        break)
+                break
+		;;
+	fix)
+                echo "This will revert the changes made by break."
+                read -p "Are you sure you want to continue (y/n)? " ANSWER
+                if [[ "$ANSWER" == "y" ]]; then
+                        fix
+                else
+                        echo "Exiting without making a change."
+                fi
+                ;;
+	grade)
+		grade
+		;;
+	*)
+		echo $"Usage: $0 {setup|break|fix|grade}"
+		exit 2
+esac
+
+
+# ending
+logger -p local0.notice "Completed $0 with option(s) $@ successfully"
+echo "Completed $0 with option(s) $@ successfully"
+exit 0

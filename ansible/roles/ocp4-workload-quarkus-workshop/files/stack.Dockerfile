@@ -7,7 +7,7 @@ FROM registry.redhat.io/devspaces/udi-rhel8:latest
 
 ENV MANDREL_VERSION=22.3.1.0-Final
 ENV QUARKUS_VERSION=2.13.7.Final-redhat-00003
-ENV OC_VERSION=4.12
+ENV OC_VERSION=4.13
 ENV MVN_VERSION=3.8.4
 ENV GRAALVM_HOME="/usr/local/mandrel-java17-${MANDREL_VERSION}"
 ENV PATH="/usr/local/maven/apache-maven-${MVN_VERSION}/bin:${PATH}"
