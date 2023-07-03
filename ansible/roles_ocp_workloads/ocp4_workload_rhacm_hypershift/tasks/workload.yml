@@ -45,27 +45,29 @@
     #   ignore_public_acls: true
     #   restrict_public_buckets: false
 
-- name: Workaround for s3 bucket access
-  when: ocp4_workload_rhacm_hypershift_s3_workaround | bool
-  block:
-  - name: Update s3 bucket
-    ansible.builtin.command:
-      cmd: >-
-        aws s3api delete-public-access-block
-          --bucket {{ ocp4_workload_rhacm_hypershift_s3_bucket_name }}
+- name: Update s3 bucket
+  ansible.builtin.command:
+    cmd: >-
+      aws s3api delete-public-access-block
+        --bucket {{ ocp4_workload_rhacm_hypershift_s3_bucket_name }}
 
-  - name: Copy policy file
-    ansible.builtin.template:
-      src: bucket-policy.json.j2
-      dest: /tmp/bucket-policy.json
+- name: Copy policy file
+  ansible.builtin.template:
+    src: bucket-policy.json.j2
+    dest: /tmp/bucket-policy.json
 
-  - name: Apply bucket policy
-    ansible.builtin.command:
-      chdir: /tmp
-      cmd: >-
-        aws s3api put-bucket-policy
-          --bucket {{ ocp4_workload_rhacm_hypershift_s3_bucket_name }}
-          --policy file://bucket-policy.json
+- name: Apply bucket policy
+  ansible.builtin.command:
+    chdir: /tmp
+    cmd: >-
+      aws s3api put-bucket-policy
+        --bucket {{ ocp4_workload_rhacm_hypershift_s3_bucket_name }}
+        --policy file://bucket-policy.json
+
+- name: Remove temporary policy file
+  ansible.builtin.file:
+    state: absent
+    path: /tmp/bucket-policy.json
 
 #############################################################################
 # Enable HyperShift Tech Preview
@@ -132,119 +134,132 @@
 # Install Hypershift CLI
 #############################################################################
 
-- name: Install HyperShift CLI from GPTE S3 Bucket
-  when: ocp4_workload_rhacm_hypershift_s3_workaround | bool
-  block:
-  - name: Download Hypershift CLI
-    become: true
-    get_url:
-      url: "{{ ocp4_workload_rhacm_hypershift_cli_download_url }}"
-      validate_certs: false
-      dest: /usr/bin/hypershift
-      mode: 0775
-      owner: root
-      group: root
-    register: r_cli
-    until: r_cli is success
-    retries: 10
-    delay: 10
+- name: Wait until Hypershift CLI download deployment is ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: multicluster-engine
+    name: hypershift-cli-download
+  register: r_hypershift_cli_deployment
+  retries: 60
+  delay: 30
+  until:
+  - r_hypershift_cli_deployment.resources | length | int > 0
+  - r_hypershift_cli_deployment.resources[0].status.readyReplicas is defined
+  - r_hypershift_cli_deployment.resources[0].status.readyReplicas | int == r_hypershift_cli_deployment.resources[0].spec.replicas | int
 
-- name: Install HyperShift CLI from ConsoleCLIDownload
-  when: not ocp4_workload_rhacm_hypershift_s3_workaround | bool
-  block:
-  - name: Wait until Hypershift CLI download deployment is ready
-    kubernetes.core.k8s_info:
-      api_version: v1
-      kind: Deployment
-      namespace: multicluster-engine
-      name: hypershift-cli-download
-    register: r_hypershift_cli_deployment
-    retries: 60
-    delay: 30
-    until:
-    - r_hypershift_cli_deployment.resources | length | int > 0
-    - r_hypershift_cli_deployment.resources[0].status.readyReplicas is defined
-    - r_hypershift_cli_deployment.resources[0].status.readyReplicas | int == r_hypershift_cli_deployment.resources[0].spec.replicas | int
+- name: Get Hypershift CLI download URl
+  kubernetes.core.k8s_info:
+    api_version: console.openshift.io/v1
+    kind: ConsoleCLIDownload
+    name: hypershift-cli-download
+  register: r_hypershift_cli_download
+  retries: 20
+  delay: 10
+  until: r_hypershift_cli_download.resources | length > 0
 
-  - name: Get Hypershift CLI download URl
-    kubernetes.core.k8s_info:
-      api_version: console.openshift.io/v1
-      kind: ConsoleCLIDownload
-      name: hypershift-cli-download
-    register: r_hypershift_cli_download
-    retries: 20
-    delay: 10
-    until: r_hypershift_cli_download.resources | length > 0
+- name: Set Hypershift CLI download URL
+  when: r_hypershift_cli_download.resources | length > 0
+  ansible.builtin.set_fact:
+    _ocp4_workload_rhacm_hypershift_cli_url: >-
+      {{ r_hypershift_cli_download.resources[0] | to_json | from_json
+      | json_query("spec.links[?contains(href,'/linux/amd64')].href") | first }}
 
-  - name: Set Hypershift CLI download URL
-    when: r_hypershift_cli_download.resources | length > 0
-    ansible.builtin.set_fact:
-      _ocp4_workload_rhacm_hypershift_cli_url: >-
-        {{ r_hypershift_cli_download.resources[0] | to_json | from_json
-        | json_query("spec.links[?contains(href,'/linux/amd64')].href") | first }}
+- name: Download Hypershift CLI tool
+  ansible.builtin.get_url:
+    url: "{{ _ocp4_workload_rhacm_hypershift_cli_url }}"
+    validate_certs: false
+    dest: /tmp/hypershift.tar.gz
+    mode: 0660
+  register: r_hypershift_cli
+  until: r_hypershift_cli is success
+  retries: 10
+  delay: 10
 
-  - name: Download Hypershift CLI tool
-    ansible.builtin.get_url:
-      url: "{{ _ocp4_workload_rhacm_hypershift_cli_url }}"
-      validate_certs: false
-      dest: /tmp/hypershift.tar.gz
-      mode: 0660
-    register: r_hypershift_cli
-    until: r_hypershift_cli is success
-    retries: 10
-    delay: 10
+- name: Get currently installed RHACM version
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: open-cluster-management
+    label_selectors:
+    - "operators.coreos.com/advanced-cluster-management.open-cluster-management ="
+  register: r_rhacm_csv
 
-  - name: Get currently installed RHACM version
-    kubernetes.core.k8s_info:
-      api_version: operators.coreos.com/v1alpha1
-      kind: ClusterServiceVersion
-      namespace: open-cluster-management
-      label_selectors:
-      - "operators.coreos.com/advanced-cluster-management.open-cluster-management ="
-    register: r_rhacm_csv
+# Strip first 5 directories if RHACM is 2.7 or earlier
+# Archive contains `remote-source/app/bin/linux/amd64/hypershift`
+- name: Install Hypershift CLI on bastion (RHACM 2.7 or earlier)
+  when: r_rhacm_csv.resources[0].spec.version is version_compare('2.8.0', '<')
+  become: true
+  ansible.builtin.unarchive:
+    src: /tmp/hypershift.tar.gz
+    remote_src: true
+    dest: /usr/bin
+    mode: 0775
+    owner: root
+    group: root
+    extra_opts:
+      --strip-components=5
+  args:
+    creates: /usr/bin/hypershift
 
-  # Strip first 5 directories if RHACM is 2.7 or earlier
-  # Archive contains `remote-source/app/bin/linux/amd64/hypershift`
-  - name: Install Hypershift CLI on bastion (RHACM 2.7 or earlier)
-    when: r_rhacm_csv.resources[0].spec.version is version_compare('2.8.0', '<')
-    become: true
-    ansible.builtin.unarchive:
-      src: /tmp/hypershift.tar.gz
-      remote_src: true
-      dest: /usr/bin
-      mode: 0775
-      owner: root
-      group: root
-      extra_opts:
-        --strip-components=5
-    args:
-      creates: /usr/bin/hypershift
+# Regular extract if RHACM is 2.8 or newser
+# Archive contains `./hypershift`
+- name: Install Hypershift CLI on bastion (RHACM 2.8 or newer)
+  when: r_rhacm_csv.resources[0].spec.version is version_compare('2.8.0', '>=')
+  become: true
+  ansible.builtin.unarchive:
+    src: /tmp/hypershift.tar.gz
+    remote_src: true
+    dest: /usr/bin
+    mode: 0775
+    owner: root
+    group: root
+  args:
+    creates: /usr/bin/hypershift
 
-  # Regular extract if RHACM is 2.8 or newser
-  # Archive contains `./hypershift`
-  - name: Install Hypershift CLI on bastion (RHACM 2.8 or newer)
-    when: r_rhacm_csv.resources[0].spec.version is version_compare('2.8.0', '>=')
-    become: true
-    ansible.builtin.unarchive:
-      src: /tmp/hypershift.tar.gz
-      remote_src: true
-      dest: /usr/bin
-      mode: 0775
-      owner: root
-      group: root
-    args:
-      creates: /usr/bin/hypershift
-
-  - name: Remove downloaded file
-    ansible.builtin.file:
-      state: absent
-      path: /tmp/hypershift.tar.gz
+- name: Remove downloaded file
+  ansible.builtin.file:
+    state: absent
+    path: /tmp/hypershift.tar.gz
 
 - name: Setup hypershift bash completion
   become: true
   ansible.builtin.shell: "/usr/bin/hypershift completion bash >/etc/bash_completion.d/hypershift"
   args:
     creates: /etc/bash_completion.d/hypershift
+
+#############################################################################
+# Set up RHDP Configuration
+#############################################################################
+- name: Set up RHDP Configuration
+  when: ocp4_workload_rhacm_hypershift_rhdp_policies_setup | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) }}"
+  loop:
+  - rhdp/clusterrolebinding.yaml.j2
+  - rhdp/namespace-channels.yaml.j2
+  - rhdp/namespace-applications.yaml.j2
+  - rhdp/namespace-policies.yaml.j2
+  - rhdp/secret.yaml.j2
+  - rhdp/channel.yaml.j2
+  - rhdp/placement.yaml.j2
+  - rhdp/subscription.yaml.j2
+  - rhdp/application.yaml.j2
+  - rhdp/managedclustersetbinding.yaml.j2
+
+#############################################################################
+# Set up ManagedClusterSet Policies
+#############################################################################
+- name: Set up ManagedClusterSet
+  when: ocp4_workload_rhacm_hypershift_managed_cluster_set_setup | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) }}"
+  loop:
+  - managedclusterset/namespace-submariner-broker.yaml.j2
+  - managedclusterset/managedclusterset.yaml.j2
+  - managedclusterset/managedclustersetbinding.yaml.j2
 
 #############################################################################
 # Deploy managed HyperShift clusters
