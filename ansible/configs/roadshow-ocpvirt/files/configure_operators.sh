@@ -26,7 +26,7 @@ spec:
 
 EOF
 
-until oc get hyperconvergeds.hco.kubevirt.io; do sleep 30; done
+until oc get hyperconvergeds.hco.kubevirt.io; do sleep 60; done
 
 cat << EOF | oc apply -f -
 apiVersion: hco.kubevirt.io/v1beta1
@@ -66,7 +66,7 @@ spec:
   source: redhat-operators
   sourceNamespace: openshift-marketplace
 EOF
-until oc get forkliftcontrollers.forklift.konveyor.io; do sleep 30; done
+until oc get forkliftcontrollers.forklift.konveyor.io; do sleep 60; done
 cat << EOF | oc apply -f -
 apiVersion: forklift.konveyor.io/v1beta1
 kind: ForkliftController
@@ -120,6 +120,7 @@ spec:
   sourceNamespace: openshift-marketplace
 EOF
 
+until oc get nmstates.nmstate.io; do sleep 60; done
 cat << EOF | oc apply -f -
 apiVersion: nmstate.io/v1
 kind: NMState
