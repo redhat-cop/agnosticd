@@ -1,4 +1,4 @@
-cat >openshift-cnv.yaml <<EOF
+cat << EOF | oc apply -f -
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -22,14 +22,13 @@ spec:
   source: redhat-operators
   sourceNamespace: openshift-marketplace
   name: kubevirt-hyperconverged
-  startingCSV: kubevirt-hyperconverged-operator.v4.11.2
   channel: "stable"
 
 EOF
 
-oc create -f openshift-cnv.yaml
-sleep 300
-cat >openshift-cnv-operator.yaml <<EOF
+until oc get hyperconvergeds.hco.kubevirt.io; do sleep 30; done
+
+cat << EOF | oc apply -f -
 apiVersion: hco.kubevirt.io/v1beta1
 kind: HyperConverged
 metadata:
@@ -37,7 +36,6 @@ metadata:
   namespace: openshift-cnv
 spec:
 EOF
-oc create -f openshift-cnv-operator.yaml 
 
 cat << EOF | oc apply -f -
 apiVersion: project.openshift.io/v1
@@ -62,14 +60,13 @@ metadata:
   name: mtv-operator
   namespace: openshift-mtv
 spec:
-  channel: release-v2.3.0
+  channel: release-v2.4.0
   installPlanApproval: Automatic
   name: mtv-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace
-  startingCSV: mtv-operator.v2.3.4
 EOF
-sleep 120
+until oc get forkliftcontrollers.forklift.konveyor.io; do sleep 30; done
 cat << EOF | oc apply -f -
 apiVersion: forklift.konveyor.io/v1beta1
 kind: ForkliftController
@@ -80,3 +77,52 @@ spec:
   olm_managed: true
 EOF
 
+cat << EOF | oc apply -f -
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    kubernetes.io/metadata.name: openshift-nmstate
+    name: openshift-nmstate
+  name: openshift-nmstate
+spec:
+  finalizers:
+  - kubernetes
+EOF
+
+cat << EOF | oc apply -f -
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  annotations:
+    olm.providedAPIs: NMState.v1.nmstate.io
+  generateName: openshift-nmstate-
+  name: openshift-nmstate-tn6k8
+  namespace: openshift-nmstate
+spec:
+  targetNamespaces:
+  - openshift-nmstate
+EOF
+
+cat << EOF| oc apply -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  labels:
+    operators.coreos.com/kubernetes-nmstate-operator.openshift-nmstate: ""
+  name: kubernetes-nmstate-operator
+  namespace: openshift-nmstate
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: kubernetes-nmstate-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+EOF
+
+cat << EOF | oc apply -f -
+apiVersion: nmstate.io/v1
+kind: NMState
+metadata:
+  name: nmstate
+EOF
