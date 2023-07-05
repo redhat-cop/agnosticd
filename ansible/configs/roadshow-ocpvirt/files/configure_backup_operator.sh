@@ -41,6 +41,8 @@ spec:
   generateBucketName: backups
 EOF
 
+until oc get secret obc-backups -n openshift-storage; do sleep 30; done
+
 AWS_ACCESS_KEY_ID=$(oc get secret obc-backups -n openshift-storage -o jsonpath='{.data.AWS_ACCESS_KEY_ID}{"\n"}' | base64 -d)
 AWS_SECRET_ACCESS_KEY=$(oc get secret obc-backups -n openshift-storage -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}{"\n"}' | base64 -d)
 BUCKET_HOST=$(oc get cm obc-backups -n openshift-storage -o jsonpath='{.data.BUCKET_HOST}{"\n"}')

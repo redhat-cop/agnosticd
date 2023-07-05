@@ -127,3 +127,41 @@ kind: NMState
 metadata:
   name: nmstate
 EOF
+
+
+cat << EOF | oc apply -f -
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: metallb-system
+EOF
+
+cat << EOF | oc apply -f -
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: metallb-operator
+  namespace: metallb-system
+EOF
+
+cat << EOF | oc apply -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: metallb-operator-sub
+  namespace: metallb-system
+spec:
+  channel: stable
+  name: metallb-operator
+  source: redhat-operators 
+  sourceNamespace: openshift-marketplace
+EOF
+
+until oc get metallbs.metallb.io; do sleep 60; done
+cat << EOF | oc apply -f -
+apiVersion: metallb.io/v1beta1
+kind: MetalLB
+metadata:
+  name: metallb
+  namespace: metallb-system
+EOF
