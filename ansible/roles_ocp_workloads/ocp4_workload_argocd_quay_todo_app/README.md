@@ -1,31 +1,117 @@
-Role Name
+TODO Application with Quarkus HELM Chart repo
 =========
 
-A brief description of the role goes here.
+This role will deploy the TODO Application with Quarkus HELM Chart repo. This is an example application based on a Todo list where the different tasks are created, read, updated, or deleted from the database. 
+
+See The [TODO Application with Quarkus HELM Chart repo](https://github.com/tosin2013/todo-demo-app-helmrepo/blob/main/openshift-pipelines/README.md) for use of this demo.
+
+[Deploy using Github Actions](https://github.com/tosin2013/todo-demo-app-helmrepo/blob/main/openshift-pipelines/github-actions.md)
 
 Requirements
 ------------
 
-Any pre-requisites that may not be covered by Ansible itself or the role should be mentioned here. For instance, if the role uses the EC2 module, it may be a good idea to mention in this section that the boto package is required.
+* OpenShift 4.12 cluster installed
+* Ansible 2.9 or higher
+```
+sudo pip3 install openshift pyyaml kubernetes jmespath 
+ansible-galaxy collection install kubernetes.core community.general
+```
+
 
 Role Variables
 --------------
 
-A description of the settable variables for this role should go here, including any variables that are in defaults/main.yml, vars/main.yml, and any variables that can/should be set via parameters to the role. Any variables that are read from other roles and/or the global scope (ie. hostvars, group vars, etc.) should be mentioned here as well.
+Role Variables are found in defaults/main.yml
+
+```
+become_override: false
+ocp_username: system:admin
+silent: false
+
+ocp4_workload_gitea_user: user1
+ocp4_workload_gitea_operator_create_admin: true
+ocp4_workload_gitea_operator_create_users: true
+ocp4_workload_gitea_operator_migrate_repositories: true
+ocp4_workload_gitea_operator_gitea_image_tag: 1.19.3
+ocp4_workload_gitea_operator_repositories_list:
+- repo: "https://github.com/tosin2013/todo-demo-app-helmrepo.git"
+  name: "todo-demo-app-helmrepo"
+  private: false
+
+## OpenShift Pipelines
+
+ocp4_workload_pipelines_defaults:
+  tkn_version: 0.31.1
+  channel: latest
+  automatic_install_plan_approval: true
+  starting_csv: ""
+
+```
 
 Dependencies
 ------------
-
-A list of other roles hosted on Galaxy should go here, plus any details in regards to parameters that may need to be set for other roles, or variables that are used from other roles.
+* ocp4_workload_gitea_operator
+* ocp4_workload_pipelines
 
 Example Playbook
 ----------------
 
-Including an example of how to use your role (for instance, with variables passed in as parameters) is always nice for users too:
+Deploy a Workload with the `ocp-workload` playbook
 
-    - hosts: servers
-      roles:
-         - { role: username.rolename, x: 42 }
+```
+TARGET_HOST="bastion.wk.red.osp.opentlc.com"
+OCP_USERNAME="lab-user"
+WORKLOAD="ocp4_workload_argocd_quay_todo_app"
+GUID=wk
+```
+**Generate extra vars**
+```
+cat >extra_vars.yaml<<EOF
+ocp4_workload_gitea_operator_create_admin: true
+ocp4_workload_gitea_operator_create_users: true
+ocp4_workload_gitea_operator_migrate_repositories: true
+ocp4_workload_gitea_operator_gitea_image_tag: 1.19.3
+ocp4_workload_gitea_operator_repositories_list:
+- repo: "https://github.com/tosin2013/todo-demo-app-helmrepo.git"
+  name: "todo-demo-app-helmrepo"
+  private: false
+EOF
+```
+
+
+**a TARGET_HOST is specified in the command line, without using an inventory file**
+```
+ansible-playbook -i ${TARGET_HOST}, ./configs/ocp-workloads/ocp-workload.yml \
+    -e"ansible_ssh_private_key_file=~/.ssh/keytoyourhost.pem" \
+    -e"ansible_user=cloud-user" \
+    -e"ocp_username=${OCP_USERNAME}" \
+    -e"ocp_workload=${WORKLOAD}" \
+    -e"silent=False" \
+    -e"guid=${GUID}" \
+    -e"@extra_vars.yaml" \
+    -e"ACTION=create"
+```
+
+To Delete an environment
+----
+```
+TARGET_HOST="bastion.wk.red.osp.opentlc.com"
+OCP_USERNAME="lab-user"
+WORKLOAD="ocp4_workload_argocd_quay_todo_app"
+GUID=wk
+```
+
+**TARGET_HOST is specified in the command line, without using an inventory file**
+```
+ansible-playbook -i ${TARGET_HOST}, ./configs/ocp-workloads/ocp-workload.yml \
+    -e"ansible_ssh_private_key_file=~/.ssh/keytoyourhost.pem" \
+    -e"ansible_user=ec2-user" \
+    -e"ocp_username=${OCP_USERNAME}" \
+    -e"ocp_workload=${WORKLOAD}" \
+    -e"guid=${GUID}" \
+    -e"@extra_vars.yaml" \
+    -e"ACTION=remove"
+```
 
 License
 -------
@@ -36,3 +122,4 @@ Author Information
 ------------------
 
 An optional section for the role authors to include contact information, or a website (HTML is not allowed).
+
