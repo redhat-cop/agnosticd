@@ -37,3 +37,5 @@ spec:
       imageChange: {}
     - type: ConfigChange
 EOF
+sleep 10
+oc -n openshift annotate is vddk test="$(date)"
