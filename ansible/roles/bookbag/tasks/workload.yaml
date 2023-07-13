@@ -17,6 +17,10 @@
       kind: ProjectRequest
       metadata:
         name: "{{ bookbag_namespace }}"
+  register: r_create_bookbag_namespace
+  until: r_create_bookbag_namespace is successful
+  retries: 10
+  delay: 5
 
 - name: Create temporary directory for bookbag source
   tempfile:
@@ -33,6 +37,7 @@
 - name: Process bookbag build template
   command: >-
     oc process --local -f {{ (r_bookbag_tmp.path ~ '/build-template.yaml') | quote }} -o json
+    --param GIT_REPO={{ bookbag_git_repo | quote }}
   register: r_process_build_template
 
 - name: Apply resources from build template
@@ -43,13 +48,25 @@
   loop: "{{ r_process_build_template.stdout | from_json | json_query('items') }}"
   loop_control:
     label: "{{ item.apiVersion }} {{ item.kind }} {{ item.metadata.name }}"
+  register: r_apply_build_template
+  until: r_apply_build_template is successful
+  retries: 10
+  delay: 5
 
 - name: Build bookbag image
   command: >-
-    oc start-build bookbag --follow
+    oc start-build bookbag --follow --wait
     {% if _bookbag_kubeconfig is defined %}--kubeconfig={{ _bookbag_kubeconfig | quote }}{% endif %}
     --namespace={{ bookbag_namespace | quote }}
     --from-dir={{ r_bookbag_tmp.path | quote }}
+  register: r_build_bookbag_image
+  failed_when: >-
+    r_build_bookbag_image is failed or
+    "Error: " in r_build_bookbag_image.stderr or
+    "build error: " in r_build_bookbag_image.stdout
+  until: r_build_bookbag_image is successful
+  retries: 60
+  delay: 10
 
 - name: Read user-data.yaml
   slurp:
@@ -76,7 +93,8 @@
   vars:
     _bookbag_instance_name: "{{ bookbag_name }}"
     _bookbag_user_info_messages: "{{ _bookbag_user_info }}"
-    _bookbag_vars: "{{ _bookbag_user_data }}"
+    _bookbag_vars: >-
+      {{ _bookbag_user_data | combine({'guid': guid}) }}
 
 - name: Deploy bookbag for users
   when:
@@ -91,7 +109,8 @@
     _bookbag_instance_name: "{{ bookbag_name }}-{{ _bookbag_user }}"
     _bookbag_user: "{{ _bookbag_users_item.key }}"
     _bookbag_user_info_messages: "{{ _bookbag_vars.msg | default('') }}"
-    _bookbag_vars: "{{ _bookbag_users_item.value | combine({'user': _bookbag_user}) }}"
+    _bookbag_vars: >-
+      {{ _bookbag_users_item.value | combine({'guid': guid, 'user': _bookbag_user}) }}
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete

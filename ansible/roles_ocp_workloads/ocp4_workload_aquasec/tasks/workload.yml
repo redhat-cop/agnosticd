@@ -1,0 +1,183 @@
+---
+- name: set base64 encode for {{ ocp4_workload_aquasec_base_url }} username and password
+  set_fact:
+    # yamllint disable-line rule:line-length
+    ocp4_workload_aquasec_base64: "{{ (ocp4_workload_aquasec.quay_username + ':' + ocp4_workload_aquasec.quay_password) | b64encode }}"
+
+#- debug:
+#    msg: "{{ ocp4_workload_aquasec.private_registry_url }}"
+#
+#- name: set json for dockerconfigjson
+#  set_fact:
+#    ocp4_workload_nginxplus_dockerconfigjson: "{{ lookup('template', 'aquasec-dockerconfigjson.j2') }}"
+
+- name: Create {{ ocp4_workload_aquasec_namespace }} namespace
+  kubernetes.core.k8s:
+    name: "{{ ocp4_workload_aquasec_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: temp task to create docker secret
+  # yamllint disable-line rule:line-length
+  shell: oc create secret docker-registry aqua-registry --docker-server="{{ ocp4_workload_aquasec_registry }}" --docker-username="{{ ocp4_workload_aquasec_docker_username }}" --docker-password="{{ ocp4_workload_aquasec_docker_password }}" --docker-email="{{ ocp4_workload_aquasec_docker_username }}" -n "{{ ocp4_workload_aquasec_namespace }}"
+  ignore_errors: true
+
+- name: Create secret for {{ ocp4_workload_aquasec_namespace }}
+  kubernetes.core.k8s:
+    state: present
+    template: aquasec-db-secret.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create operatorgroup
+  kubernetes.core.k8s:
+    state: present
+    template: aquasec-operatorgroup.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create subscription for {{ ocp4_workload_aquasec_namespace }}
+  kubernetes.core.k8s:
+    state: present
+    template: aquasec-subscription.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Sleep for {{ ocp4_workload_aquasec_wait }} seconds before continuing with play so operator has time to start
+  ansible.builtin.wait_for:
+    timeout: "{{ ocp4_workload_aquasec_wait }}"
+
+- name: Create AquaCsp for {{ ocp4_workload_aquasec_namespace }}
+  kubernetes.core.k8s:
+    state: present
+    template: aquasec-csp.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Sleep for {{ ocp4_workload_aquasec_wait }} seconds before continuing with play so pods have time to start
+  ansible.builtin.wait_for:
+    timeout: "{{ ocp4_workload_aquasec_wait * 9 }}"
+
+- name: Create Aqua Enforcer for {{ ocp4_workload_aquasec_namespace }}
+  kubernetes.core.k8s:
+    state: present
+    template: aquasec-enforcer.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Sleep for {{ ocp4_workload_aquasec_wait }} seconds before continuing with play so pods have time to start
+  ansible.builtin.wait_for:
+    timeout: "{{ ocp4_workload_aquasec_wait }}"
+
+- name: Create Aqua Kube Enforcer for {{ ocp4_workload_aquasec_namespace }}
+  kubernetes.core.k8s:
+    state: present
+    template: aquasec-kube-enforcer.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Sleep for {{ ocp4_workload_aquasec_wait }} seconds before continuing with play so pods have time to start
+  ansible.builtin.wait_for:
+    timeout: "{{ ocp4_workload_aquasec_wait }}"
+
+- name: extract Aqua console URL
+  kubernetes.core.k8s_info:
+    kind: Route
+    namespace: "{{ ocp4_workload_aquasec_namespace }}"
+    name: "{{ ocp4_workload_aquasec_csp_name }}"
+  register: r_aqua_route
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- debug:
+    msg: "{{ r_aqua_route.resources[0].spec.host }}"
+
+- set_fact:
+    ocp4_workload_aquasec_route: "{{ r_aqua_route.resources[0].spec.host }}"
+
+- name: set Aqua EnforcerGroup json
+  set_fact:
+    ocp4_workload_aquasec_enforcer_group_json: "{{ lookup('template', 'aquasec-EnforcerGroup-json.j2') }}"
+
+- name: set Kube Enforcer Group json
+  set_fact:
+    ocp4_workload_aquasec_kube_enforcer_json: "{{ lookup('template', 'aquasec-KubeEnforcerGroup-json.j2') }}"
+
+- name: POST EnforcerGroup
+  ansible.builtin.uri:
+    url: "https://{{ ocp4_workload_aquasec_route }}/api/v1/hostsbatch"
+    user: "administrator"
+    password: "{{ ocp4_workload_aquasec_admin_password }}"
+    method: POST
+    body_format: json
+    body: "{{ ocp4_workload_aquasec_enforcer_group_json }}"
+    force_basic_auth: yes
+    validate_certs: false
+    status_code: 200
+
+- name: POST KubeEnforcerGroup
+  ansible.builtin.uri:
+    url: "https://{{ ocp4_workload_aquasec_route }}/api/v1/hostsbatch"
+    user: "administrator"
+    password: "{{ ocp4_workload_aquasec_admin_password }}"
+    method: POST
+    body_format: json
+    body: "{{ ocp4_workload_aquasec_kube_enforcer_json }}"
+    force_basic_auth: yes
+    validate_certs: false
+    status_code: 200
+
+- name: Create Sock Shop project
+  kubernetes.core.k8s:
+    state: present
+    template: sockshop_project.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+# Deploy Sock Shop
+- name: Deploy Sock Shop
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ ocp4_workload_aquasec_namespace }}"
+    template: sockshop.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+# Expose Sock Shop to the world
+- name: Deploy Sock Shop Cloud route
+  kubernetes.core.k8s:
+    state: present
+    template: sockshop_route.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

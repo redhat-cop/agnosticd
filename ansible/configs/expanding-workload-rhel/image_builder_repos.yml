@@ -1,0 +1,144 @@
+---
+- name: Setup Image Builder for Satellite
+  hosts: bastions
+  become: True
+  gather_facts: False
+  vars:
+    imagebuilder_packages:
+      - osbuild-composer
+      - composer-cli
+      - cockpit-composer
+      - bash-completion
+  tasks:
+    - name: Install Packages for Image-builder
+      ansible.builtin.dnf:
+        state: present
+        name: "{{ imagebuilder_packages }}"
+   
+    - name: Create osbuild-composer/repositories directories
+      ansible.builtin.file:
+        path: /etc/osbuild-composer/repositories
+        state: directory
+        mode: '0755'
+
+    - name: Copy osbuild-composer repo file from /usr/share/
+      ansible.builtin.copy:
+        remote_src: True
+        src: /usr/share/osbuild-composer/repositories/rhel-90.json
+        dest: /etc/osbuild-composer/repositories/rhel-90.json
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Get /etc/yum.repos.d/redhat.repo
+      fetch:
+        src: /etc/yum.repos.d/redhat.repo
+        dest: /tmp/redhat.repo
+        flat: yes
+
+    - name: Dynamically grab repository baseurls
+      set_fact:
+        appstream_baseurl: "{{ lookup('ansible.builtin.ini', 'baseurl file=/tmp/redhat.repo section=rhel-9-for-x86_64-appstream-rpms') }}"
+        baseos_baseurl: "{{ lookup('ansible.builtin.ini', 'baseurl file=/tmp/redhat.repo section=rhel-9-for-x86_64-baseos-rpms') }}"
+
+    - name: Modify hard coded baseos content path
+      ansible.builtin.replace:
+        path: /etc/osbuild-composer/repositories/rhel-90.json
+        regexp: 'https://cdn.redhat.com/content/dist/rhel9/9/x86_64/baseos/os'
+        replace: "{{ baseos_baseurl }}"
+
+    - name: Modify hard coded appstream content path
+      ansible.builtin.replace:
+        path: /etc/osbuild-composer/repositories/rhel-90.json
+        regexp: 'https://cdn.redhat.com/content/dist/rhel9/9/x86_64/appstream/os'
+        replace: "{{ appstream_baseurl }}"
+
+    - name: Remove redhat-uep.pem file
+      ansible.builtin.file:
+        path: /etc/rhsm/ca/redhat-uep.pem
+        state: absent
+    
+    - name: Create link to katello-ca-cert
+      ansible.builtin.file:
+        src: /etc/rhsm/ca/katello-server-ca.pem
+        dest: /etc/rhsm/ca/redhat-uep.pem
+        owner: root
+        group: root
+        state: link
+    
+    - name: Fix cockpit.service
+      blockinfile:
+        dest: /usr/lib/systemd/system/cockpit.service
+        content: |
+          [Install]
+          WantedBy=multi-user.target
+  
+    - name: Enable cockpit and osbuild-composer
+      systemd:
+        daemon_reload: true
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - cockpit
+        - osbuild-composer
+
+    - name: Check services  
+      service_facts:
+      register: services_state
+
+    - name: Stop required services
+      service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - osbuild-local-worker.socket
+        - osbuild-composer.socket
+      when:
+        - ansible_facts.services['osbuild-composer.service']['state']|default('') != 'running'
+
+    - name: Start required services
+      retries: 6
+      delay: 5
+      register: start
+      until: not start.failed
+      service:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - osbuild-local-worker.socket
+        - osbuild-composer.socket
+      when:
+        - ansible_facts.services['osbuild-composer.service']['state']|default('') != 'running'
+
+# FIXME: osbuild is failing to start randomly on 9.0, check again after restart the services
+    - name: Sleep 30 seconds
+      ansible.builtin.pause:
+        seconds: 30
+    - name: Check services  
+      service_facts:
+      register: services_state
+
+    - name: Stop required services
+      service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - osbuild-local-worker.socket
+        - osbuild-composer.socket
+      when:
+        - ansible_facts.services['osbuild-composer.service']['state']|default('') != 'running'
+
+    - name: Start required services
+      retries: 6
+      delay: 5
+      register: start
+      until: not start.failed
+      service:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - osbuild-local-worker.socket
+        - osbuild-composer.socket
+      when:
+        - ansible_facts.services['osbuild-composer.service']['state']|default('') != 'running'
