@@ -88,6 +88,10 @@
   - name: Include Import tasks
     include_tasks: import_clusters_to_hub.yaml
 
+###############################################################################
+#### Change Label of Imported Clusters
+###############################################################################
+
 - name: Login to bastion hub
   hosts: devsecops_hub
   tasks:
@@ -113,79 +117,148 @@
       --type json
 
 ###############################################################################
-#### Setup RHACS secure cluster on Dev Cluster
+#### Set OpenShift GitOps and ACM with Managed Clusters
 ###############################################################################
 
-- name: Step 005 Post Software - Install RHACS Secured Cluster
-  hosts: localhost
-  connection: local
-  become: false
+- name: Login to bastion hub
+  hosts: devsecops_hub
+  tasks:
+    - name: Initialize virtual environment
+      block:
+      - name: Check if desired virtualenv is available on the host
+        stat:
+          path: "/opt/virtualenvs/k8s/bin/python"
+        register: r_virtualenv
+
+      - name: Set Ansible Python interpreter to virtualenv
+        when: r_virtualenv.stat.exists
+        set_fact:
+          ansible_python_interpreter: "/opt/virtualenvs/k8s/bin/python"
+
+    - name: Create Managed Cluster Set Bindings
+      k8s:
+        validate_certs: false
+        definition:
+          apiVersion: cluster.open-cluster-management.io/v1beta1
+          kind: ManagedClusterSetBinding
+          metadata:
+            namespace: openshift-gitops
+            name: global
+          spec:
+            clusterSet: global
+
+    - name: Create Placement
+      k8s:
+        validate_certs: false
+        definition:
+          apiVersion: cluster.open-cluster-management.io/v1beta1
+          kind: Placement
+          metadata:
+            name: global
+            namespace: openshift-gitops
+          spec:
+            predicates:
+            - requiredClusterSelector:
+                labelSelector:
+                  matchExpressions:
+                  - key: vendor
+                    operator: "In"
+                    values:
+                    - OpenShift
+
+    - name: Create a GitOpsCluster
+      k8s:
+        validate_certs: false
+        definition:
+          apiVersion: apps.open-cluster-management.io/v1beta1
+          kind: GitOpsCluster
+          metadata:
+            name: argo-acm-clusters
+            namespace: openshift-gitops
+          spec:
+            argoServer:
+              cluster: local-cluster
+              argoNamespace: openshift-gitops
+            placementRef:
+              kind: Placement
+              apiVersion: cluster.open-cluster-management.io/v1beta1
+              name: global
+              namespace: openshift-gitops
+
+###############################################################################
+#### Setup Gitops Workloads
+###############################################################################
+
+- name: Setup Gitops Workloads
+  hosts: devsecops_hub
+  become: true
   gather_facts: false
   tasks:
-    - name: hybrid_cloud_binder_install_secured_cluster
-      when: hybrid_cloud_binder_install_secured_cluster is true
+    - name: Gitops Workload Installation
       block:
+      - name: Check if desired virtualenv is available on the host
+        stat:
+          path: "/opt/virtualenvs/k8s/bin/python"
+        register: r_virtualenv
 
-      - name: Get cluster init bundle
-        ansible.builtin.uri:
-          url: "{{ aws_hub_provision_data.acs_route }}/v1/cluster-init/init-bundles"
-          body: "{ \"name\": \"prod-{{ lookup('password', '/dev/null chars=ascii_lowercase,digits length=8') }}\"}"
-          method: POST
-          user: "{{ aws_hub_provision_data.openshift_cluster_admin_username }}"
-          password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
-          body_format: json
-          force_basic_auth: true
-          validate_certs: false
-        register: __r_rhacs_cluster_init_response
-
-      - name: Store cluster init bundle as a fact
+      - name: Set Ansible Python interpreter to virtualenv
+        when: r_virtualenv.stat.exists
         set_fact:
-          __rhacs_init_bundle: "{{ __r_rhacs_cluster_init_response.json.kubectlBundle | b64decode }}"
+          ansible_python_interpreter: "/opt/virtualenvs/k8s/bin/python"
 
-      - name: Create stackrox namespace on Managed clusters
-        k8s:
-          host: "{{ item.k8s_auth.host }}"
-          username: "{{ item.k8s_auth.username }}"
-          api_key: "{{ item.k8s_auth.api_key }}"
-          validate_certs: false
-          state: present
-          kind: Namespace
-          name: "stackrox"
+      - name: Get Central route
+        k8s_info:
           api_version: v1
-        loop:
-          - "{{ __r_aws_prod_cluster }}"
-          - "{{ __r_aws_dev_cluster }}"
-
-      - name: Create init-bundle on Managed clusters
-        k8s:
-          host: "{{ item.k8s_auth.host }}"
-          username: "{{ item.k8s_auth.username }}"
-          api_key: "{{ item.k8s_auth.api_key }}"
-          validate_certs: false
+          kind: Route
+          name: central
           namespace: stackrox
-          state: present
-          definition: "{{ __rhacs_init_bundle }}"
+        register: r_route_central
+        until: r_route_central.resources | length > 0
+        retries: 60
+        delay: 5
+
+      - name: Create Secured Clusters
+        include_role:
+          name: ocp4_workload_gitops_rhacs_secured_cluster
+        vars:
+          ocp4_workload_gitops_rhacs_secured_cluster_central_host: "{{ r_route_central.resources[0].spec.host }}"
+
+      - name: Setup Openshift Data Foundation
+        include_role:
+          name: ocp4_workload_gitops_openshift_data_foundation
+
+      - name: Check ODF / Noobaa is ready
+        include_role:
+          name: ocp_application_validation
+        vars:
+          ocp_application_validation_list:
+            - cluster:
+                name: hub
+              validations:
+                - kind: StorageCluster
+                  name: ocs-storagecluster
+                  namespace: openshift-storage
+                  retries: 120
+                  delay: 10
+                - kind: NooBaa
+                  name: noobaa
+                  namespace: openshift-storage
+                  delay: 10
+
+      - name: Setup remainin pre-requisite gitops roles
+        include_role:
+          name: "{{ included_roles }}"
         loop:
-          - "{{ __r_aws_prod_cluster }}"
-          - "{{ __r_aws_dev_cluster }}"
-
-      - name: Install Secured Cluster on managed AWS Prod Cluster
-        k8s:
-          host: "{{ __r_aws_prod_cluster.k8s_auth.host }}"
-          username: "{{ __r_aws_prod_cluster.k8s_auth.username }}"
-          api_key: "{{ __r_aws_prod_cluster.k8s_auth.api_key }}"
-          validate_certs: false
-          state: present
-          definition: "{{ lookup('template', 'prod_secured_cluster.yaml.j2') }}"
-
-      - name: Install Secured Cluster on managed AWS Dev Cluster
-        k8s:
-          host: "{{ __r_aws_dev_cluster.k8s_auth.host }}"
-          username: "{{ __r_aws_dev_cluster.k8s_auth.username }}"
-          api_key: "{{ __r_aws_dev_cluster.k8s_auth.api_key }}"
-          validate_certs: false
-          state: present
-          definition: "{{ lookup('template', 'dev_secured_cluster.yaml.j2') }}"
+          - ocp4_workload_gitops_quay_registry
+          - ocp4_workload_gitops_sonarqube
+          #- ocp4_workload_gitops_hashicorp_vault
+          - ocp4_workload_gitops_amqstreams
+          - ocp4_workload_pipelines
+          - ocp4_workload_gitops_openshift_gitops
+          - ocp4_workload_codeserver
+          - ocp4_workload_acm_multicluster_observability
+        loop_control:
+            loop_var: included_roles
 
 ###############################################################################
 #### Setup Multi-Cluster Workload
@@ -214,66 +287,13 @@
         include_role:
           name: ocp4_workload_devsecops_validated_pattern
 
-- name: Recreate ArgoCD instance
+
+- name: Get argocd access details from hub
   hosts: localhost
   connection: local
   become: false
   gather_facts: false
   tasks:
-    - name: Get Dev/Prod ArgoCD Instance
-      k8s_info:
-        host: "{{ item.k8s_auth.host }}"
-        username: "{{ item.k8s_auth.username }}"
-        api_key: "{{ item.k8s_auth.api_key }}"
-        validate_certs: false
-        kind: ArgoCD
-        name: openshift-gitops
-        namespace: openshift-gitops
-        api_version: argoproj.io/v1alpha1
-      register: r_argocd_inst
-      retries: 60
-      delay: 5
-      until: r_argocd_inst.resources | length > 0
-      loop:
-        - "{{ __r_aws_dev_cluster }}"
-        - "{{ __r_aws_prod_cluster }}"
-
-    - name: Delete Dev/Prod ArgoCD instance
-      k8s:
-        host: "{{ item.k8s_auth.host }}"
-        username: "{{ item.k8s_auth.username }}"
-        api_key: "{{ item.k8s_auth.api_key }}"
-        validate_certs: false
-        state: absent
-        definition:
-          apiVersion: argoproj.io/v1alpha1
-          kind: ArgoCD
-          metadata:
-            namespace: openshift-gitops
-            name: openshift-gitops
-      loop:
-        - "{{ __r_aws_dev_cluster }}"
-        - "{{ __r_aws_prod_cluster }}"
-
-- name: Get argocd access details from prod
-  hosts: localhost
-  connection: local
-  become: false
-  gather_facts: false
-  tasks:
-  - name: Get Hub Argocd Route
-    k8s_info:
-      host: "{{ __r_aws_hub_cluster.k8s_auth.host }}"
-      username: "{{ __r_aws_hub_cluster.k8s_auth.username }}"
-      api_key: "{{ __r_aws_hub_cluster.k8s_auth.api_key }}"
-      validate_certs: false
-      kind: Route
-      name: openshift-gitops-server
-      namespace: openshift-gitops
-    register: r_hub_argocd
-    retries: 60
-    delay: 5
-    until: r_hub_argocd.resources | length > 0
 
   - name: Set common password for Hub ArgoCD
     k8s:
@@ -291,96 +311,259 @@
         data:
           admin.password: "{{ common_password | b64encode }}"
 
-  - name: Setfact for Hub Argocd
-    set_fact:
-      _hub_cluster_argocd_console_url: "https://{{ r_hub_argocd.resources[0].spec.host }}"
-      _hub_cluster_argocd_admin_username: admin
-      _hub_cluster_argocd_admin_password: "{{ common_password }}"
+  - name: include validation role
+    include_role:
+      name: ocp_application_validation
+    vars:
+      ocp_application_validation_list:
+        - cluster:
+            name: hub
+            host: "{{ aws_hub_provision_data.openshift_api_url }}"
+            username: "{{ aws_hub_provision_data.openshift_cluster_admin_username }}"
+            password: "{{ aws_hub_provision_data.openshift_cluster_admin_password }}"
+          validations:
+            - kind: Route
+              name: openshift-gitops-server
+              namespace: openshift-gitops
 
-  - name: Get Dev Argo Route
+            - kind: Route
+              name: gitea
+              namespace: gitea
+              port: https
+
+            - kind: Route
+              name: sonarqube
+              namespace: sonarqube
+              port: https
+
+            - kind: Route
+              name: quay-quay
+              namespace: quay-enterprise
+
+            # - kind: Route
+            #   name: vault
+            #   namespace: vault
+
+            - kind: Route
+              name: central
+              namespace: stackrox
+
+            - kind: InstallPlan
+              operator: openshift-pipelines-operator-rh
+              namespace: openshift-operators
+
+            - kind: Pipeline
+              name: app-globex-ui-pipeline
+              namespace: ci
+
+            - kind: Pipeline
+              name: app-globex-ui-unsigned-pipeline
+              namespace: ci
+
+            - kind: PipelineRun
+              pipeline: app-globex-ui-unsigned-pipeline
+              state: "Failed"
+              namespace: ci
+
+            - kind: PipelineRun
+              pipeline: app-globex-ui-pipeline
+              state: "Succeeded"
+              namespace: ci
+
+        - cluster:
+            name: dev
+            host: "{{ aws_dev_cluster_provision_data.openshift_api_url }}"
+            username: "{{ aws_dev_cluster_provision_data.openshift_cluster_admin_username }}"
+            password: "{{ aws_dev_cluster_provision_data.openshift_cluster_admin_password }}"
+          validations:
+            - kind: Route
+              name: openshift-gitops-server
+              namespace: openshift-gitops
+
+            - kind: InstallPlan
+              operator: amqstreams
+              namespace: openshift-operators
+
+            - kind: Kafka
+              name: kafka-cluster
+              namespace: kafka
+
+            - kind: KafkaTopic
+              name: globex.orders
+              namespace: kafka
+
+            - kind: KafkaTopic
+              name: globex.tracking
+              namespace: kafka
+
+            - kind: Deployment
+              name: globex-ui
+              namespace: globex
+              conditions:
+              - _r_validate_universal.resources is defined
+              - _r_validate_universal.resources | length | int > 0
+              - _r_validate_universal.resources[0].status.availableReplicas is defined
+              - _r_validate_universal.resources[0].status.availableReplicas | int > 0
+
+            - kind: Route
+              name: globex-ui
+              namespace: globex
+
+        - cluster:
+            name: prod
+            host: "{{ aws_prod_cluster_provision_data.openshift_api_url }}"
+            username: "{{ aws_prod_cluster_provision_data.openshift_cluster_admin_username }}"
+            password: "{{ aws_prod_cluster_provision_data.openshift_cluster_admin_password }}"
+          validations:
+            - kind: Route
+              name: openshift-gitops-server
+              namespace: openshift-gitops
+
+            - kind: InstallPlan
+              operator: amqstreams
+              namespace: openshift-operators
+
+            - kind: Kafka
+              name: kafka-cluster
+              namespace: kafka
+
+            - kind: KafkaTopic
+              name: globex.orders
+              namespace: kafka
+
+            - kind: KafkaTopic
+              name: globex.tracking
+              namespace: kafka
+
+            - kind: Deployment
+              name: globex-ui
+              namespace: globex
+              conditions:
+              - _r_validate_universal.resources is defined
+              - _r_validate_universal.resources | length | int > 0
+              - _r_validate_universal.resources[0].status.availableReplicas is defined
+              - _r_validate_universal.resources[0].status.availableReplicas | int > 0
+
+            - kind: Route
+              name: globex-ui
+              namespace: globex
+
+  # - name: Fetch hashicorp keys and token
+  #   set_fact:
+  #     _vault_token: >-
+  #       "{{ hostvars[groups['devsecops_hub'][0]].ocp4_workload_devsecops_validated_pattern_vault_token }}"
+  #     _vault_unsealing_key_1: >-
+  #       "{{ hostvars[groups['devsecops_hub'][0]].ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_1 }}"
+  #     _vault_unsealing_key_2: >-
+  #       "{{ hostvars[groups['devsecops_hub'][0]].ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_2 }}"
+  #     _vault_unsealing_key_3: >-
+  #       "{{ hostvars[groups['devsecops_hub'][0]].ocp4_workload_devsecops_validated_pattern_vault_unsealing_key_3 }}"
+
+  - name: Get App Route from Hub
     k8s_info:
-      host: "{{ __r_aws_dev_cluster.k8s_auth.host }}"
-      username: "{{ __r_aws_dev_cluster.k8s_auth.username }}"
-      api_key: "{{ __r_aws_dev_cluster.k8s_auth.api_key }}"
+      host: "{{ __r_aws_hub_cluster.k8s_auth.host }}"
+      username: "{{ __r_aws_hub_cluster.k8s_auth.username }}"
+      api_key: "{{ __r_aws_hub_cluster.k8s_auth.api_key }}"
       validate_certs: false
       kind: Route
-      name: openshift-gitops-server
-      namespace: openshift-gitops
-    register: r_dev_argocd
+      name: "{{ _app_route.name }}"
+      namespace: "{{ _app_route.namespace }}"
+    register: _r_app_route
     retries: 60
     delay: 5
-    until: r_dev_argocd.resources | length > 0
+    until: _r_app_route.resources | length > 0
+    loop:
+      # - name: vault
+      #   namespace: "{{ ocp4_workload_devsecops_validated_pattern_vault_namespace }}"
+      - name: quay-quay
+        namespace: "{{ ocp4_workload_devsecops_validated_pattern_quay_registry_namespace }}"
+      - name: sonarqube
+        namespace: "{{ ocp4_workload_devsecops_validated_pattern_sonarqube_namespace }}"
+      - name: codeserver
+        namespace: "{{ ocp4_workload_codeserver_multi_user_namespace_base }}"
+      - name: openshift-gitops-server
+        namespace: openshift-gitops
+    loop_control:
+      loop_var: _app_route
 
-  - name: Set common password for Dev ArgoCD
-    k8s:
-      host: "{{ __r_aws_dev_cluster.k8s_auth.host }}"
-      username: "{{ __r_aws_dev_cluster.k8s_auth.username }}"
-      api_key: "{{ __r_aws_dev_cluster.k8s_auth.api_key }}"
-      validate_certs: false
-      state: present
-      definition:
-        apiVersion: v1
-        kind: Secret
-        metadata:
-          namespace: openshift-gitops
-          name: openshift-gitops-cluster
-        data:
-          admin.password: "{{ common_password | b64encode }}"
-
-  - name: Setfact for Dev Argocd
-    set_fact:
-      _dev_cluster_argocd_console_url: "https://{{ r_dev_argocd.resources[0].spec.host }}"
-      _dev_cluster_argocd_admin_username: admin
-      _dev_cluster_argocd_admin_password: "{{ common_password }}"
-
-  - name: Get Prod Argo Route
-    k8s_info:
-      host: "{{ __r_aws_prod_cluster.k8s_auth.host }}"
-      username: "{{ __r_aws_prod_cluster.k8s_auth.username }}"
-      api_key: "{{ __r_aws_prod_cluster.k8s_auth.api_key }}"
-      validate_certs: false
-      kind: Route
-      name: openshift-gitops-server
-      namespace: openshift-gitops
-    register: r_prod_argocd
-    retries: 60
-    delay: 5
-    until: r_prod_argocd.resources | length > 0
-
-  - name: Set common password for Prod ArgoCD
-    k8s:
-      host: "{{ __r_aws_prod_cluster.k8s_auth.host }}"
-      username: "{{ __r_aws_prod_cluster.k8s_auth.username }}"
-      api_key: "{{ __r_aws_prod_cluster.k8s_auth.api_key }}"
-      validate_certs: false
-      state: present
-      definition:
-        apiVersion: v1
-        kind: Secret
-        metadata:
-          namespace: openshift-gitops
-          name: openshift-gitops-cluster
-        data:
-          admin.password: "{{ common_password | b64encode }}"
-
-  - name: Setfact for Prod Argocd
-    set_fact:
-      _prod_cluster_argocd_console_url: "https://{{ r_prod_argocd.resources[0].spec.host }}"
-      _prod_cluster_argocd_admin_username: admin
-      _prod_cluster_argocd_admin_password: "{{ common_password }}"
-
-  - name: Print Prod/Dev cluster user data
+  - name: Print User Access information
     agnosticd_user_info:
       data:
-        hub_argocd_console_url: "{{ _hub_cluster_argocd_console_url }}"
-        hub_argocd_admin_password: "{{ _hub_cluster_argocd_admin_username }}"
-        hub_argocd_admin_username: "{{ _hub_cluster_argocd_admin_password }}"
-        prod_argocd_console_url: "{{ _prod_cluster_argocd_console_url }}"
-        prod_argocd_admin_password: "{{ _prod_cluster_argocd_admin_username }}"
-        prod_argocd_admin_username: "{{ _prod_cluster_argocd_admin_password }}"
-        dev_argocd_console_url: "{{ _dev_cluster_argocd_console_url }}"
-        dev_argocd_admin_password: "{{ _dev_cluster_argocd_admin_username }}"
-        dev_argocd_admin_username: "{{ _dev_cluster_argocd_admin_password }}"
+        quay_console_url: >-
+          https://{{ _r_app_route.results | to_json | from_json |
+          json_query('[?resources[0].metadata.name == `quay-quay`].resources[0].spec.host') | join }}
+        quay_admin_username: "{{ ocp4_workload_gitops_quay_registry_admin_user }}"
+        quay_admin_password: "{{ ocp4_workload_gitops_quay_registry_admin_password }}"
+
+        sonarqube_url: >-
+          https://{{ _r_app_route.results | to_json | from_json |
+          json_query('[?resources[0].metadata.name == `sonarqube`].resources[0].spec.host') | join }}
+        sonarqube_username: admin
+        sonarqube_password: "{{ ocp4_workload_gitops_sonarqube_admin_password }}"
+
+        # hashicorp_vault_url: >-
+        #   https://{{ _r_app_route.results | to_json | from_json |
+        #   json_query('[?resources[0].metadata.name == `vault`].resources[0].spec.host') | join }}
+        # hashicorp_vault_token: "{{ _vault_token }}"
+        # hashicorp_vault_namespace: "{{ ocp4_workload_devsecops_validated_pattern_vault_namespace }}"
+        # hashicorp_vault_unsealing_key_1: "{{ _vault_unsealing_key_1 }}"
+        # hashicorp_vault_unsealing_key_2: "{{ _vault_unsealing_key_2 }}"
+        # hashicorp_vault_unsealing_key_3: "{{ _vault_unsealing_key_3 }}"
+
+        codeserver_url: >-
+          https://{{ _r_app_route.results | to_json | from_json |
+          json_query('[?resources[0].metadata.name == `codeserver`].resources[0].spec.host') | join}}
+        codeserver_password: "{{ ocp4_workload_codeserver_password }}"
+
+        hub_argocd_console_url: >-
+          https://{{ _r_app_route.results | to_json | from_json |
+          json_query('[?resources[0].metadata.name == `openshift-gitops-server`].resources[0].spec.host') | join}}
+        hub_argocd_admin_username: admin
+        hub_argocd_admin_password: "{{ common_password }}"
+
+  - name: Get App Route from Dev
+    k8s_info:
+      host: "{{ __r_aws_dev_cluster.k8s_auth.host }}"
+      username: "{{ __r_aws_dev_cluster.k8s_auth.username }}"
+      api_key: "{{ __r_aws_dev_cluster.k8s_auth.api_key }}"
+      validate_certs: false
+      kind: Route
+      name: openshift-gitops-server
+      namespace: openshift-gitops
+    register: _r_app_route
+    retries: 60
+    delay: 5
+    until: _r_app_route.resources | length > 0
+
+  - name: Print User Access information
+    agnosticd_user_info:
+      data:
+        dev_argocd_console_url: >-
+          https://{{ _r_app_route.resources[0].spec.host }}
+        dev_argocd_admin_username: admin
+        dev_argocd_admin_password: "{{ common_password }}"
+
+  - name: Get App Route from Prod
+    k8s_info:
+      host: "{{ __r_aws_prod_cluster.k8s_auth.host }}"
+      username: "{{ __r_aws_prod_cluster.k8s_auth.username }}"
+      api_key: "{{ __r_aws_prod_cluster.k8s_auth.api_key }}"
+      validate_certs: false
+      kind: Route
+      name: openshift-gitops-server
+      namespace: openshift-gitops
+    register: _r_app_route
+    retries: 60
+    delay: 5
+    until: _r_app_route.resources | length > 0
+
+  - name: Print User Access information
+    agnosticd_user_info:
+      data:
+        prod_argocd_console_url: >-
+          https://{{ _r_app_route.resources[0].spec.host }}
+        prod_argocd_admin_username: admin
+        prod_argocd_admin_password: "{{ common_password }}"
 
 - name: Step 005 Post Software - Report to Cloudforms
   hosts: localhost
@@ -396,8 +579,8 @@
     debug:
       msg: "Post-Software checks completed successfully"
 
-  - name: Exiting the open-hybrid-cloud-binder post_software.yml
+  - name: Exiting the devsecops-vld-framework-binder post_software.yml
     debug:
       msg:
-      - Exiting the open-hybrid-cloud-binder post_software.yml
+      - Exiting the devsecops-vld-framework-binder post_software.yml
 ...

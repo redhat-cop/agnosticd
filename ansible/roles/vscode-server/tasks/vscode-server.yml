@@ -1,19 +1,24 @@
 ---
 
-- name: Download vscode-server package
+- name: vscode | download vscode-server package
   get_url:
     url: "{{ vscode_server_rpm_url }}"
     dest: /tmp/code-server.rpm
 
-- name: Install vscode-server
+- name: vscode | install vscode-server
   yum:
     name: /tmp/code-server.rpm
     disable_gpg_check: true
     state: present
 
-- name: Create directory in user's home
+- name: Clean up
   file:
-    path: /home/{{ vscode_user_name }}/.local/share/code-server/{{ __directory }}/
+    path: "/tmp/code-server.rpm"
+    state: absent
+
+- name: vscode | create directory in user's home
+  file:
+    path: "{{ vscode_server_user_dir }}/{{ __directory }}/"
     recurse: true
     state: directory
     owner: "{{ vscode_user_name }}"
@@ -24,62 +29,66 @@
   loop_control:
     loop_var: __directory
 
-- name: Copy vscode default settings
+- name: vscode | copy default settings
   template:
     src: settings.json
-    dest: "/home/{{ vscode_user_name }}/.local/share/code-server/User/settings.json"
+    dest: "{{ vscode_server_user_dir }}/User/settings.json"
     owner: "{{ vscode_user_name }}"
     group: users
 
-- name: Download default vscode extensions from gpte-public 
+- name: vscode | create config directory in user's home
+  file:
+    path: "{{ vscode_server_config_dir }}/"
+    recurse: true
+    state: directory
+    owner: "{{ vscode_user_name }}"
+    group: users
+
+- name: vscode | copy configuration
+  template:
+    src: config.yaml.j2
+    dest: "{{ vscode_server_config_dir }}/config.yaml"
+    owner: "{{ vscode_user_name }}"
+    group: users
+
+- name: vscode | download necessary extensions
   get_url:
-    url: "https://gpte-public.s3.amazonaws.com/vscode-plugins/{{ __default_extension }}"
-    dest: /home/{{ vscode_user_name }}/.local/share/code-server/extensions/
+    url: "{{ __vscode_server_extension }}"
+    dest: "{{ vscode_server_user_dir }}/extensions/"
     validate_certs: no
     owner: "{{ vscode_user_name }}"
-  loop: "{{ vscode_server_default_extensions }}"
+  loop: "{{ [__vscode_server_extensions_base_url] | product(vscode_server_default_extensions) | map('join') | list | union(vscode_server_extension_urls) }}"
   loop_control:
-    loop_var: __default_extension
+    loop_var: __vscode_server_extension
 
-- name: Additional vscode extensions
-  when: vscode_server_extension_urls is defined
-  get_url:
-    url: "{{ __additional_extension }}"
-    dest: /home/{{ vscode_user_name }}/.local/share/code-server/extensions/
-    validate_certs: no
-    owner: "{{ vscode_user_name }}"
-  loop: "{{ vscode_server_extension_urls }}"
-  loop_control:
-    loop_var: __additional_extension
-
-- name: List vscode extensions
-  shell: >-
-    ls /home/{{ vscode_user_name }}/.local/share/code-server/extensions/ 
-    | grep ".vsix"
-  register: vscode_extensions
-
-- name: install vscode extensions
+- name: vscode | install extensions in given order
   become_user: "{{ vscode_user_name }}"
-  command: >-
-    /bin/code-server --install-extension 
-    /home/{{ vscode_user_name }}/.local/share/code-server/extensions/{{ __vscode_extension }}
-  loop: "{{ vscode_extensions.stdout_lines }}"
+  command:
+    argv:
+      - "/bin/code-server"
+      - "--install-extension"
+      - "{{ vscode_server_user_dir }}/extensions/{{ __vscode_extension }}"
+  loop: "{{ vscode_server_default_extensions | union(vscode_server_extension_urls | map('urlsplit', 'path') | map('basename') | list) }}"
   loop_control:
     loop_var: __vscode_extension
 
-- name: Create vscode-server daemon file
+- name: Copy coder.json template
+  when: vscode_user_workspace_path is defined
   template:
-    src: vscode-server.service.j2
-    dest: /etc/systemd/system/vscode-server.service
+    src: coder.json.j2
+    dest: "{{ vscode_server_user_dir }}/coder.json"
     owner: "{{ vscode_user_name }}"
-    group: users
-    mode: '0744'
-    
-- name: Enable and start vscode-server daemon
+    mode: '0644'
+
+- name: vscode | enable and start vscode-server daemon
   systemd:
     enabled: true
     state: started
     daemon_reload: true
-    name: vscode-server
+    name: "code-server@{{ vscode_user_name }}"
 
-...
+# because the vscode terminal isn't a login shell, it can be that podman
+# moans about no systemd user session being available
+- name: vscode | make sure user lingers to avoid issues with podman
+  command:
+    cmd: "loginctl enable-linger {{ vscode_user_name }}"

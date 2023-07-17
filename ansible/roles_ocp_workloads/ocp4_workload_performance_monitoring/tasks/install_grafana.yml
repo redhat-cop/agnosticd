@@ -1,0 +1,167 @@
+- name: Set Grafana Password
+  ansible.builtin.set_fact:
+    grafana_admin_password: "{{ common_admin_password }}"
+
+- name: Evaluate Namespace {{ grafana_project }}
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: Namespace
+    api_version: v1
+    definition:
+      metadata:
+        name: "{{ grafana_project }}"
+        annotations:
+          openshift.io/description: "Project for monitoring dashboard"
+          openshift.io/display-name: "{{ grafana_project }}"
+
+- name: Evaluate Operator Group
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    api_version: operators.coreos.com/v1
+    kind: OperatorGroup
+    definition:
+      metadata:
+        name: '{{ grafana_project }}-operatorgroup'
+        namespace: '{{ grafana_project }}'
+      spec:
+        targetNamespaces:
+          - '{{ grafana_project }}'
+
+- name: Evaluate Grafana Operator
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    kind: Subscription
+    api_version: operators.coreos.com/v1alpha1
+    definition:
+      metadata:
+        name: grafana-operator
+        namespace: '{{ grafana_project }}'
+      spec:
+        channel: v4
+        installPlanApproval: Automatic
+        name: grafana-operator
+        source: community-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait Grafana Operator
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Pod
+    namespace: '{{ grafana_project }}'
+    label_selectors:
+      - control-plane = controller-manager
+    field_selectors:
+      - status.phase=Running
+  register: r_grafana_pod
+  retries: 20
+  delay: 10
+  until: r_grafana_pod.resources | list | length == 1
+
+- name: Evaluate Grafana Templates
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ grafana_project }}'
+    resource_definition: "{{ lookup('template', item) }}"
+  loop:
+    - grafana_binding.yml.j2
+    - grafana_instance.yml.j2
+
+- name: Wait Grafana Instance
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Pod
+    namespace: '{{ grafana_project }}'
+    label_selectors:
+      - app = grafana
+    field_selectors:
+      - status.phase=Running
+  register: r_grafana_pod
+  retries: 20
+  delay: 10
+  until: r_grafana_pod.resources | list | length == 1
+
+# start configuration
+
+- name: Get a list of all Secret objects
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Secret
+    namespace: '{{ grafana_project }}'
+  register: secrets_list
+
+- name: Iterate over list of secrets until the correct string is found
+  ansible.builtin.set_fact:
+    secret_name: "{{ item['metadata']['name'] }}"
+  loop: "{{ secrets_list.resources }}"
+  when: item['metadata']['name'] | regex_search('grafana-serviceaccount-token.')
+  no_log: true
+
+- name: Get Grafana ServiceAccount Token
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    kind: Secret
+    name: '{{ secret_name }}'
+    namespace: '{{ grafana_project }}'
+    api_version: v1
+  register: r_grafana_secret
+  until:
+    - r_grafana_secret.resources is defined
+  retries: 10
+  delay: 15
+
+- name: Set grafana_token
+  ansible.builtin.set_fact:
+    grafana_token: '{{ r_grafana_secret.resources[0].data.token | b64decode }}'
+  when:
+    - r_grafana_secret.resources[0].data.token is defined
+
+- name: Evaluate Grafana ServiceAccount permissons
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    api_version: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    definition:
+      metadata:
+        name: thanos-metric-viewer
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-monitoring-view
+      subjects:
+        - kind: ServiceAccount
+          name: grafana-serviceaccount
+          namespace: '{{ grafana_project }}'
+
+- name: Evaluate Grafana Datasource
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ grafana_project }}'
+    resource_definition: "{{ lookup('template', 'grafana_datasource.yml.j2') }}"
+
+- name: Evaluate Dashboards
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ grafana_project }}'
+    resource_definition: "{{ lookup('file', item) }}"
+  loop:
+    - grafana_dashboard_jvm.yml.json
+    - grafana_dashboard_workload.yml.json
+    - grafana_dashboard_performance.yml.json
+
+- name: Evaluate Pod Monitors
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ item }}-staging'
+    resource_definition: "{{ lookup('template', 'prometheus_pod_monitor.yml.j2') }}"
+  loop: "{{ users }}"

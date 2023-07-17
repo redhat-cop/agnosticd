@@ -1,6 +1,6 @@
 ---
 - name: Setting up workload
-  debug:
+  ansible.builtin.debug:
     msg: "Setting up OpenShift Data Foundation"
 
 - name: Discovering worker nodes
@@ -13,22 +13,36 @@
 
 - name: Fail for less than 3 worker nodes
   when: r_worker_nodes.resources | length < 3
-  fail:
+  ansible.builtin.fail:
     msg: "Less than 3 worker nodes detected. Cannot install Ceph..."
 
 - name: Set variables
-  set_fact:
+  ansible.builtin.set_fact:
     _ocp4_workload_openshift_data_foundation_worker_nodes: "{{ r_worker_nodes | json_query('resources[*].metadata.name') }}"
 
 - name: Adding Ceph labels to worker nodes
-  shell: "oc label nodes --overwrite {{ item }} cluster.ocs.openshift.io/openshift-storage=''"
+  kubernetes.core.k8s:
+    state: patched
+    api_version: v1
+    kind: Node
+    name: "{{ worker_node }}"
+    definition:
+      apiVersion: v1
+      kind: Node
+      name: "{{ worker_node }}"
+      metadata:
+        labels:
+          cluster.ocs.openshift.io/openshift-storage: ''
   loop: "{{ _ocp4_workload_openshift_data_foundation_worker_nodes }}"
+  loop_control:
+    loop_var: worker_node
+    label: "{{ worker_node }}"
 
 - name: Create namespace openshift-storage
   kubernetes.core.k8s:
     state: present
-    kind: Namespace
     api_version: v1
+    kind: Namespace
     name: openshift-storage
 
 - name: Create CatalogSource
@@ -40,7 +54,6 @@
 - name: Create OperatorGroup
   kubernetes.core.k8s:
     state: present
-    apply: true
     definition: "{{ lookup('template', 'operatorgroup.yaml.j2' ) | from_yaml }}"
 
 - name: Create operator subscription
@@ -71,9 +84,6 @@
 - name: Enable ODF console plugin
   kubernetes.core.k8s:
     state: patched
-    merge_type:
-    - strategic-merge
-    - merge
     kind: Console
     api_version: operator.openshift.io/v1
     name: cluster
@@ -90,9 +100,6 @@
 - name: Create the ODF StorageSystem
   kubernetes.core.k8s:
     state: present
-    merge_type:
-    - strategic-merge
-    - merge
     definition: "{{ lookup('template', 'storagesystem.yaml.j2' ) | from_yaml }}"
   register: r_k8s_run
   until: r_k8s_run is not failed
@@ -150,7 +157,7 @@
     kubernetes.core.k8s:
       state: absent
       api_version: v1
-      kind: pod
+      kind: Pod
       namespace: openshift-storage
       label_selectors:
       - app = rook-ceph-operator
@@ -168,21 +175,35 @@
     delay: 10
     until: sc_crd.resources | list | length == 1
 
-  - name: Remove annotation from current default storage class
-    command:
-      cmd: >-
-        oc annotate sc {{ ocp4_workload_openshift_data_foundation_old_default_storage_class_name }}
-        storageclass.kubernetes.io/is-default-class-
-    ignore_errors: true
+  - name: Get all storage classes
+    kubernetes.core.k8s_info:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+    register: r_sc
+
+  - name: Remove default from previous default storage class
+    when: storage_class.metadata.annotations['storageclass.kubernetes.io/is-default-class'] is defined
+    kubernetes.core.k8s:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+      name: "{{ storage_class.metadata.name }}"
+      definition:
+        kind: StorageClass
+        apiVersion: v1
+        name: "{{ ocp4_workload_openshift_data_foundation_new_default_storage_class_name }}"
+        metadata:
+          annotations:
+            storageclass.kubernetes.io/is-default-class: "false"
+    loop: "{{ r_sc.resources }}"
+    loop_control:
+      loop_var: storage_class
+      label: "{{ storage_class.metadata.name }}"
 
   - name: Set new default storage class
     kubernetes.core.k8s:
       api_version: v1
       kind: StorageClass
       name: "{{ ocp4_workload_openshift_data_foundation_new_default_storage_class_name }}"
-      merge_type:
-      - strategic-merge
-      - merge
       definition:
         kind: StorageClass
         apiVersion: v1
@@ -200,6 +221,6 @@
 # Leave this as the last task in the playbook.
 # --------------------------------------------
 - name: workload tasks complete
-  debug:
+  ansible.builtin.debug:
     msg: "Workload Tasks completed successfully."
   when: not silent|bool

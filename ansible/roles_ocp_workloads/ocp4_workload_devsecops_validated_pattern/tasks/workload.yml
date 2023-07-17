@@ -3,77 +3,33 @@
   debug:
     msg: "Setting up workload for user = {{ ocp4_username }}"
 
-- name: Set up namespace
-  k8s:
-    state: present
-    definition: "{{ lookup('template',  'namespace-ci.yml.j2' ) | from_yaml }}"
-
-- name: Retrieve Gitea instance
-  kubernetes.core.k8s_info:
-    api_version: gpte.opentlc.com/v1
-    kind: Gitea
-    name: gitea
-    namespace: gitea
-  register: r_gitea
-
-- name: Set Gitea repo variables
-  set_fact:
-    _ocp4_workload_devsecops_validated_pattern_gitea_hostname: >-
-      {{ r_gitea.resources[0].status.giteaHostname }}
-    _ocp4_workload_devsecops_validated_pattern_gitea_route_url: >-
-      {{ r_gitea.resources[0].status.giteaRoute }}
-    _ocp4_workload_devsecops_validated_pattern_gitea_repo_globex_ui_url: >-
-      {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
-      ocp4_workload_devsecops_validated_pattern_gitea_username | urlencode }}:{{
-      ocp4_workload_devsecops_validated_pattern_gitea_password | urlencode }}@{{
-      r_gitea.resources[0].status.giteaHostname }}/{{
-      ocp4_workload_devsecops_validated_pattern_gitea_username }}/globex-ui
-    _ocp4_workload_devsecops_validated_pattern_gitea_repo_vault_url: >-
-      {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
-      ocp4_workload_devsecops_validated_pattern_gitea_username | urlencode }}:{{
-      ocp4_workload_devsecops_validated_pattern_gitea_password | urlencode }}@{{
-      r_gitea.resources[0].status.giteaHostname }}/{{
-      ocp4_workload_devsecops_validated_pattern_gitea_username }}/hashicorp-vault
-    _ocp4_workload_devsecops_validated_pattern_gitea_repo_devsecops_url: >-
-      {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
-      ocp4_workload_devsecops_validated_pattern_gitea_username | urlencode }}:{{
-      ocp4_workload_devsecops_validated_pattern_gitea_password | urlencode }}@{{
-      r_gitea.resources[0].status.giteaHostname }}/{{
-      ocp4_workload_devsecops_validated_pattern_gitea_username }}/devsecops-validated-pattern
-
-- name: Setup Hashicorp Vault
-  include_tasks: setup_hashicorp_vault.yaml
-
-- name: Retrieve Quay instance
-  kubernetes.core.k8s_info:
-    kind: Route
-    name: quay-quay
-    namespace: quay-enterprise
-  register: r_quay
-  retries: 60
-  delay: 5
-  until: r_quay.resources | length > 0
-
-- name: Set docker registry
-  set_fact:
-    ocp4_workload_devsecops_validated_pattern_docker_registry: "{{ r_quay.resources[0].spec.host }}"
-
-- name: Create Sonarqube and Stackrox resources
+- name: Run setup routine
   include_tasks: "{{ item }}"
   loop:
-  - sonarqube_create_resources.yml
-  - stackrox_create_secrets.yml
+  - setup_infrastructure_prerequisites.yml
+  - setup_secure_source_code.yml
+#  - setup_hashicorp_vault.yml
+  - setup_quay.yml
+  - setup_tekton_chains.yml
+  - setup_sonarqube.yml
+  - setup_stackrox.yml
+  - setup_gitea_requirements.yml
+  - setup_cyclonedx_repo_server.yml
+  - setup_demo_requirements.yml
 
-- name: Register webhook and token in Gitea and Update devsecops repository
-  include_tasks: "{{ item }}"
-  loop:
-  - update_gitea_requirements.yaml
-  - update_devsecops_repository.yaml
-
-- name: Set up globex-ui pipeline application
-  k8s:
+- name: Set up globex-ui pipeline application set
+  kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template',  'templates/application-globex-ui-pipeline.yml.j2' ) | from_yaml }}"
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - templates/acm/acm-placement.yml.j2
+  - templates/acm/acm-application-set.yml.j2
+  vars:
+    _app_name: globex-ui-pipeline
+    _namespace: "{{ ocp4_workload_devsecops_validated_pattern_ci_namespace }}"
+    cluster:
+      name: hub
+      purpose: management
 
 - name: Wait for pipeline to be deployed
   kubernetes.core.k8s_info:
@@ -103,12 +59,8 @@
   - r_el_deployment.resources[0].status.readyReplicas is defined
   - r_el_deployment.resources[0].status.readyReplicas > 0
 
-- name: Generate UID
-  set_fact:
-    _ocp4_workload_devsecops_validated_pattern_pipline_uid: "{{ 9999999999999999999999 | random | to_uuid }}"
-
 - name: Trigger pipeline run
-  include_tasks: trigger_globex_webhook.yaml
+  include_tasks: trigger_globex_webhook.yml
 
 - name: Wait for pipeline to finish run
   kubernetes.core.k8s_info:
@@ -118,14 +70,17 @@
     label_selectors:
     - tekton.dev/pipeline = app-globex-ui-pipeline
   register: r_pipeline
-  retries: 60
+  retries: 100
   delay: 10
   until:
   - r_pipeline.resources | length > 0
   - r_pipeline.resources | json_query('[*].status.conditions[?reason==`Succeeded`][].status') | select ('match','True') | list | length == 1
 
 - name: Apply acm manifests
-  include_tasks: update_acm_requirements.yaml
+  include_tasks: setup_acm_requirements.yml
+  loop: "{{ ocp4_workload_devsecops_validated_pattern_acm_clusters }}"
+  loop_control:
+    loop_var: cluster
 
 - name: Get {{ ocp4_workload_devsecops_validated_pattern_dev_cluster.acm }} cluster secret
   kubernetes.core.k8s_info:
