@@ -33,23 +33,6 @@
         msg: you need azure-cli installed
       when: az_result is failed
 
-    - set_fact:
-        t_dest: "{{output_dir}}/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
-        params_dest: "{{output_dir}}/{{project_tag}}-cloud_template_parameters.json"
-      tags:
-        - azure_infrastructure_deployment
-        - validate_azure_template
-        - gen_azure_template
-
-    - name: Azure Generate Resource manager template
-      template:
-        src: "../configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.j2"
-        dest: "{{t_dest}}"
-      tags:
-        - azure_infrastructure_deployment
-        - validate_azure_template
-        - gen_azure_template
-
     # use command line 'az' to validate template and deploy
     - name: Login to Azure
       command: >-
@@ -58,7 +41,6 @@
         -p {{ azure_password | quote }}
         --tenant {{ azure_tenant | quote }}
       tags:
-        - validate_azure_template
         - create_inventory
         - must
     - name: Create the resource group
@@ -73,53 +55,27 @@
 
     - name: Setting windows_password variable
       set_fact:
-        windows_password: "{{hostvars['localhost'].generated_windows_password}}"
+        windows_password: "{{hostvars.localhost.generated_windows_password}}"
       when:
         - windows_password is not defined
         - generated_windows_password is defined
 
-    - name: If windows password set pass it to parameters
-      set_fact:
-        adminPassword: '{% if windows_password is defined %}"adminPassword": { "value": "{{ windows_password }}" },{% endif %}'
+    - name: Check if deployment exists
+      azure.azcollection.azure_rm_deployment_info:
+        name: "{{ env_type }}.{{ guid }}"
+        resource_group: "{{ az_resource_group }}"
+      register: az_dg_check
+      ignore_errors: true
 
-    - name: Check if the parameter file exists
-      stat:
-        path: "{{params_dest}}"
-      register: params_dest_status
-
-    - name: Build parameter file
-      copy:
-        content: |
-          {
-            "adminUsername": { "value": "{{remote_user}}" }, {{ adminPassword }}
-            "sshKeyData": { "value": "{{ ssh_provision_pubkey_content | default(env_authorized_key_content_pub) }}"},
-            "DNSZone": { "value": "{{HostedZoneId}}"},
-            "guid": { "value": "{{guid}}"},
-          }
-        dest: "{{params_dest}}"
-      when: not params_dest_status.stat.exists
-      tags:
-        - azure_infrastructure_deployment
-        - validate_azure_template
-
-    - name: Validate arm template
-      command: >-
-        az deployment group validate
-        --template-file {{t_dest}}
-        --resource-group {{az_resource_group}}
-        --parameters @{{params_dest}}
-      changed_when: false
-      tags:
-        - azure_infrastructure_deployment
-        - validate_azure_template
-
-    - name: ARM deployment group create
-      command: >-
-        az deployment group create
-        --name {{env_type}}.{{guid}}
-        --template-file {{t_dest}}
-        --resource-group {{az_resource_group}}
-        --parameters @{{params_dest}}
+    - name: ARM deployment create
+      when: az_dg_check.deployments | length == 0
+      azure.azcollection.azure_rm_deployment:
+        name: "{{ env_type }}.{{ guid }}"
+        resource_group: "{{ az_resource_group }}"
+        location: "{{ azure_region }}"
+        parameters: "{{ lookup('ansible.builtin.template', '../configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_parameters_template.j2') }}"
+        template: "{{ lookup('ansible.builtin.template', '../configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.j2') }}"
+        state: present
       register: az_deploy
       tags:
         - azure_infrastructure_deployment
@@ -127,12 +83,6 @@
       until: az_deploy is succeeded
       retries: 5
       delay: 10
-
-    - debug:
-        var: az_deploy
-        verbosity: 2
-      tags:
-        - azure_infrastructure_deployment
 
     - name: Fetch DNS zone NS entries
       azure.azcollection.azure_rm_dnsrecordset_info:
@@ -146,12 +96,6 @@
       when:
         - dns_delegation is defined
         - dns_delegation == true
-
-    - debug:
-        var: subzone_ns
-        verbosity: 2
-      tags:
-        - azure_infrastructure_deployment
 
     - name: Add delegation for NS to the main DNSZone
       azure.azcollection.azure_rm_dnsrecordset:
@@ -224,7 +168,7 @@
       tags:
         - create_inventory
       set_fact:
-        ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|d() }} -F {{ hostvars.localhost.ansible_ssh_config }}"
+        ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|default('') }} -F {{ hostvars.localhost.ansible_ssh_config }}"
 
     - name: wait for linux host to be available
       wait_for_connection:
@@ -287,9 +231,9 @@
     - name: Populate /etc/hosts
       lineinfile:
         dest: /etc/hosts
-        regexp: ' {{hostvars[item].internaldns}}$'
-        line: '{{hostvars[item].private_ip_address}} {{hostvars[item].internaldns}}'
-      with_items: "{{ groups['all'] }}"
+        regexp: " {{ hostvars[item].internaldns }}$"
+        line: "{{ hostvars[item].private_ip_address }} {{ hostvars[item].internaldns }}"
+      with_items: "{{ groups.all }}"
 
 - name: Set facts for Windows hosts if any exist and wait_for_connection
   gather_facts: false
@@ -301,7 +245,7 @@
         ansible_become: false
         ansible_connection: winrm
         ansible_host: "{{ public_dns_name }}"
-        ansible_password: "{{ windows_password | default(hostvars['localhost'].generated_windows_password) }}"
+        ansible_password: "{{ windows_password | default(hostvars.localhost.generated_windows_password) }}"
         ansible_port: 5986
         ansible_user: "{{ remote_user | default('Administrator') }}"
         ansible_winrm_server_cert_validation: ignore
@@ -355,7 +299,7 @@
             disk_map_device:
               name: "{{ item.name }}"
               lun: "{{ index }}"
-          when: item.enable|d(true)
+          when: item.enable|default(true)
           loop_control:
             index_var: index
           loop: >-
