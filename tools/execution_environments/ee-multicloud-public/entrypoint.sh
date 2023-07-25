@@ -63,7 +63,7 @@ if [[ -n "${LAUNCHED_BY_RUNNER}" ]]; then
     export ANSIBLE_CALLBACK_PLUGINS="$(dirname $RUNNER_CALLBACKS)"
 
     # old versions split the callback name between awx_display and minimal, but new version just uses awx_display
-    export ANSIBLE_STDOUT_CALLBACK=awx_display
+    export ANSIBLE_STDOUT_CALLBACK=default_fix
 fi
 
 if [[ -d ${AWX_ISOLATED_DATA_DIR} ]]; then
