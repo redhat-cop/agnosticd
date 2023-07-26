@@ -41,121 +41,6 @@
       src: templates/kubeconfig.j2
       dest: ~/.kube/config
 
-  - name: Remove restricted operations on ROSA clusters from validatingwebhookconfiguration.
-    shell: |
-      oc login --insecure-skip-tls-verify=true -u cluster-admin -p {{ rosa_admin_result.stdout }} {{ rosa_api_server_url }}
-      oc delete validatingwebhookconfiguration sre-namespace-validation
-
-  # Deploy Workloads
-  - name: Deploy demo operator
-    k8s:
-      state: present
-      definition: "{{ lookup('template', item ) | from_yaml }}"
-      validate_certs: false
-    loop:
-    - templates/demo-operator-namespace.yaml
-    - templates/demo-operator-catalog-source.yaml
-    - templates/demo-operator-operator-group.yaml
-    - templates/demo-operator-subscription.yaml
-    register: r_operator_install
-    retries: 240
-    delay: 10
-    until:
-    - r_operator_install is defined
-    - r_operator_install is not failed
-
-  - name: Pause for 2 minutes for demo operator to install
-    ansible.builtin.pause:
-      minutes: 2
-
-  - name: Deploy demo
-    k8s:
-      state: present
-      definition: "{{ lookup('template', 'templates/demo-workshop-install.yaml.j2' ) | from_yaml }}"
-      validate_certs: false
-    register: r_demo
-    retries: 240
-    delay: 10
-    until:
-    - r_demo is defined
-    - r_demo is not failed
-    vars:
-      scm_ref: "{{ vars['__meta__']['deployer']['scm_ref'] }}"
-
-  - name: Check if demo has completed install
-    k8s_info:
-      api_version: demos.redhat.com/v1
-      kind: Demo
-      name: "{{ demo_instance_name }}"
-      namespace: demo-provisioner-operator-system
-      validate_certs: false
-    register: result_demo_install
-    retries: 480
-    delay: 15
-    until:
-    - result_demo_install is defined
-    - result_demo_install.resources is defined
-    - result_demo_install.resources | length > 0
-    - result_demo_install.resources[0].status is defined
-    - result_demo_install.resources[0].status.phase is defined
-    - result_demo_install.resources[0].status.phase != 'Running'
-
-  - name: Check if demo failed installation
-    ansible.builtin.fail:
-      msg: The demo did not provision successfully.  Please view the logs on the demo pod.
-    when: result_demo_install.resources[0].status.phase == 'Failed'
-
-  - name: Get user data and info
-    shell: |
-      oc login --insecure-skip-tls-verify=true -u cluster-admin -p {{ rosa_admin_result.stdout }} {{ rosa_api_server_url }}
-      POD=$(oc get pod -l app=demo-provisioner -n demo-provisioner-operator-system | grep demo- | awk '{print $1}')
-      oc rsync $POD:/tmp/user-info.yaml /tmp -c demo-playbook -n demo-provisioner-operator-system > /dev/null 2>&1
-      oc rsync $POD:/tmp/user-data.yaml /tmp -c demo-playbook -n demo-provisioner-operator-system > /dev/null 2>&1
-
-  - name: Upload AgnosticD user info
-    block:
-    - name: Fetch user data
-      ansible.builtin.fetch:
-        src: /tmp/user-data.yaml
-        dest: /tmp/
-        flat: yes
-      ignore_errors: true
-
-    - name: Get user-data
-      include_vars:
-        file: "/tmp/user-data.yaml"
-        name: _userdata
-      ignore_errors: true
-
-    - name: Fetch user info
-      ansible.builtin.fetch:
-        src: /tmp/user-info.yaml
-        dest: /tmp/
-        flat: yes
-      ignore_errors: true
-
-    - name: Get user-info
-      set_fact:
-        _userinfo: "{{ lookup('file', '/tmp/user-info.yaml') }}"
-      ignore_errors: true
-
-    - name: Create upload task from template
-      ansible.builtin.template:
-        src: templates/agnosticd_user_info_upload.yaml.j2
-        dest: /tmp/agnosticd_user_info_upload.yaml
-      ignore_errors: true
-
-    - name: Fetch upload task
-      ansible.builtin.fetch:
-        src: /tmp/agnosticd_user_info_upload.yaml
-        dest: /tmp/
-        flat: yes
-      ignore_errors: true
-
-    - name: Run upload task
-      include_tasks: /tmp/agnosticd_user_info_upload.yaml
-      ignore_errors: true
-
   - name: Install ocp-student-workloads
     when:
     - user_count | default(0) | int > 0
@@ -183,6 +68,35 @@
       loop_control:
         loop_var: workload_loop_var
 
+  - name: install ocp-infra-workloads
+    vars:
+      ACTION: "provision"
+      ocp_username: "system:admin"
+      # Variables defined for running infra workloads
+      output_dir: "/tmp"
+      num_users: "{{ num_users }}"
+      ocp4_workload_authentication_rosa_admin_user: admin
+      ocp4_workload_authentication_rosa_admin_password: Openshift@1
+      ocp4_workload_generate_kubeconfig_openshift_username: cluster-admin
+      ocp4_workload_generate_kubeconfig_openshift_password: "{{ rosa_admin_result.stdout }}"
+      ocp4_workload_generate_kubeconfig_openshift_api_url: "{{ rosa_api_server_url }}"
+      guid: "{{ guid | default(omit) }}"
+      ocp4_workload_authentication_rosa_aws_access_key_id: "{{ aws_access_key_id }}"
+      ocp4_workload_authentication_rosa_aws_region: "{{ aws_region }}"
+      ocp4_workload_authentication_rosa_aws_secret_access_key: "{{ aws_secret_access_key }}"
+      ocp4_workload_authentication_rosa_token: "{{ gpte_rosa_token | default(omit) }}"
+    ansible.builtin.include_role:
+      name: "{{ workload_loop_var }}"
+    loop: "{{ infra_workloads }}"
+    loop_control:
+      loop_var: workload_loop_var
+
+  - name: Remove restricted operations on ROSA clusters from validatingwebhookconfiguration.
+    shell: |
+      oc login --insecure-skip-tls-verify=true -u cluster-admin -p {{ rosa_admin_result.stdout }} {{ rosa_api_server_url }}
+      sleep 60
+      oc delete validatingwebhookconfiguration sre-namespace-validation
+
   - name: Update project template
     k8s:
       state: present
@@ -191,12 +105,3 @@
     register: r_project_template
     retries: 2
     delay: 5
-
-  - name: Remmove htpasswd identity provider
-    shell: |
-      oc delete secret htpasswd-secret -n openshift-config
-      oc patch OAuth cluster --type json --patch '[{ "op": "remove", "path": "/spec/identityProviders/1" }]'
-      oc delete deployment oauth-openshift -n openshift-authentication
-      oc delete user cluster-admin
-      rosa delete admin -c rosa-{{ guid }} -y
-    ignore_errors: true
