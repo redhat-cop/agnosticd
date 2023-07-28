@@ -78,5 +78,5 @@ SCRIPT=/usr/local/bin/dumb-init
 if [ -f "/usr/bin/dumb-init" ]; then
     SCRIPT=/usr/bin/dumb-init
 fi
-
+mkdir -p /runner/requirements_collections/ansible_collections/
 exec $SCRIPT -- "${@}"
