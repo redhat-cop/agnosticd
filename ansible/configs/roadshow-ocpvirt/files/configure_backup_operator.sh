@@ -92,3 +92,50 @@ spec:
 EOF
 
 oc label volumesnapshotclass ocs-storagecluster-rbdplugin-snapclass velero.io/csi-volumesnapshot-class=true
+
+
+cat << EOF | oc apply -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  generation: 1
+  labels:
+    operators.coreos.com/web-terminal.openshift-operators: ""
+  name: web-terminal
+  namespace: openshift-operators
+spec:
+  channel: fast
+  installPlanApproval: Automatic
+  name: web-terminal
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  startingCSV: web-terminal.v1.8.0
+EOF
+
+until oc get DevWorkspace; do sleep 30; done
+cat << EOF | oc apply -f -
+kind: DevWorkspace
+apiVersion: workspace.devfile.io/v1alpha2
+metadata:
+  name: web-terminal
+  annotations:
+    controller.devfile.io/restricted-access: "true"
+  labels:
+    # it's a label OpenShift console uses a flag to mark terminal's workspaces
+    console.openshift.io/terminal: "true"
+spec:
+  started: true
+  routingClass: 'web-terminal'
+  template:
+    components:
+      - name: web-terminal-exec
+        plugin:
+          kubernetes:
+            name: web-terminal-exec
+            namespace: openshift-operators
+      - name: web-terminal-tooling
+        plugin:
+          kubernetes:
+            name: web-terminal-tooling
+            namespace: openshift-operators
+EOF
