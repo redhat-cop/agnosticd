@@ -26,4 +26,5 @@ echo -e "\n# Alternatives\n"
 alternatives --list
 
 echo -e "\n# /runner directory \n"
-find /runner -ls
+# do not print first column inode as it changes
+find /runner -ls | perl -pe 's/^[\s\t]+\d+//'
