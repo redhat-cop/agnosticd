@@ -24,3 +24,6 @@ dnf list installed
 
 echo -e "\n# Alternatives\n"
 alternatives --list
+
+echo -e "\n# /runner directory \n"
+find /runner -ls
