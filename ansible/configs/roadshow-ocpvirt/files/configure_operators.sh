@@ -1,3 +1,4 @@
+#!/bin/sh -xe
 cat << EOF | oc apply -f -
 apiVersion: v1
 kind: Namespace
@@ -27,7 +28,7 @@ spec:
 EOF
 
 until oc get hyperconvergeds.hco.kubevirt.io; do sleep 60; done
-
+sleep 30
 cat << EOF | oc apply -f -
 apiVersion: hco.kubevirt.io/v1beta1
 kind: HyperConverged
@@ -185,6 +186,7 @@ spec:
 EOF
 
 until oc get DevWorkspace; do sleep 30; done
+sleep 30
 cat << EOF | oc apply -f -
 kind: DevWorkspace
 apiVersion: workspace.devfile.io/v1alpha2
