@@ -188,28 +188,33 @@ EOF
 until oc get DevWorkspace; do sleep 30; done
 sleep 30
 cat << EOF | oc apply -f -
-kind: DevWorkspace
 apiVersion: workspace.devfile.io/v1alpha2
+kind: DevWorkspace
 metadata:
-  name: web-terminal
   annotations:
-    controller.devfile.io/restricted-access: "true"
+    controller.devfile.io/devworkspace-source: web-terminal
+    controller.devfile.io/restricted-access: 'true'
+    controller.devfile.io/started-at: '1690872410620'
+  name: terminal-53yist
+  namespace: openshift-terminal
+  finalizers:
+    - rbac.controller.devfile.io
   labels:
-    # it's a label OpenShift console uses a flag to mark terminal's workspaces
-    console.openshift.io/terminal: "true"
+    console.openshift.io/terminal: 'true'
+    controller.devfile.io/creator: 9a06e0af-f4d8-4946-8429-a9855fdc056d
 spec:
+  routingClass: web-terminal
   started: true
-  routingClass: 'web-terminal'
   template:
     components:
-      - name: web-terminal-exec
-        plugin:
-          kubernetes:
-            name: web-terminal-exec
-            namespace: openshift-operators
       - name: web-terminal-tooling
         plugin:
           kubernetes:
             name: web-terminal-tooling
+            namespace: openshift-operators
+      - name: web-terminal-exec
+        plugin:
+          kubernetes:
+            name: web-terminal-exec
             namespace: openshift-operators
 EOF
