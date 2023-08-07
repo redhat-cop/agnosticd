@@ -1,0 +1,179 @@
+---
+- name: Login with azure root user
+  ansible.builtin.command: >-
+    az login -u "{{ azure_user }}"
+    -p="{{ azure_user_password }}" --tenant="{{ azure_tenant }}"
+  no_log: false
+
+- name: Set openenv user UPN
+  ansible.builtin.set_fact: openenv_user_upn="openenv-{{ guid }}@{{ azure_user_domain }}"
+
+- name: Create openenv user
+  azure.azcollection.azure_rm_aduser:
+    auth_source: cli
+    user_principal_name: "{{ openenv_user_upn }}"
+    tenant: "{{ azure_tenant }}"
+    state: "present"
+    account_enabled: "True"
+    display_name: "OPENENV User {{ guid }}"
+    password_profile: "{{ generated_password }}"
+    mail_nickname: "openenv-{{ guid }}"
+    given_name: "OPENENV"
+    surname: "User {{ guid }}"
+    user_type: "Member"
+    usage_location: "US"
+    mail: "{{ openenv_user_upn }}"
+
+- name: Create ARO virtual network
+  azure.azcollection.azure_rm_virtualnetwork:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    name: "aro-vnet-{{ guid }}"
+    address_prefixes_cidr:
+      - "10.0.0.0/22"
+
+- name: Check if ARO master subnet exists
+  azure.azcollection.azure_rm_subnet_info:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: master-subnet
+  ignore_errors: true
+  register: master_subnet_check
+
+- name: Create ARO master subnet
+  when: "'subnets' not in master_subnet_check"
+  azure.azcollection.azure_rm_subnet:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: master-subnet
+    address_prefix_cidr: "10.0.0.0/23"
+    service_endpoints:
+      - service: "Microsoft.ContainerRegistry"
+        locations:
+          - "{{ azure_region }}"
+    private_link_service_network_policies: "Disabled"
+
+- name: Check if ARO worker subnet exists
+  azure.azcollection.azure_rm_subnet_info:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: worker-subnet
+  ignore_errors: true
+  register: worker_subnet_check
+
+- name: Create ARO worker subnet
+  when: "'subnets' not in worker_subnet_check"
+  azure.azcollection.azure_rm_subnet:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: worker-subnet
+    address_prefix_cidr: "10.0.2.0/23"
+    service_endpoints:
+      - service: "Microsoft.ContainerRegistry"
+        locations:
+          - "{{ azure_region }}"
+
+- name: Wait for ARO master subnet to provision
+  azure.azcollection.azure_rm_subnet_info:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: master-subnet
+  register: master_subnet
+  until: "master_subnet.subnets[0].provisioning_state == 'Succeeded'"
+  retries: 10
+  delay: 10
+
+- name: Wait for ARO worker subnet to provision
+  azure.azcollection.azure_rm_subnet_info:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: worker-subnet
+  register: worker_subnet
+  until: "worker_subnet.subnets[0].provisioning_state == 'Succeeded'"
+  retries: 10
+  delay: 10
+
+- name: Install ARO using azcollection
+  when: install_aro_with_azcollection | default(false) | bool
+  include_tasks:
+    file: ./install-aro-azcollection.yml
+
+- name: Install ARO using az commands
+  when: not install_aro_with_azcollection | default(false) | bool
+  include_tasks:
+    file: ./install-aro-az-command.yml
+
+- name: Grabbing the kubeadmin password for ARO
+  ansible.builtin.command: >-
+    az aro list-credentials --resource-group "openenv-{{ guid }}" --name "aro-cluster-{{ guid }}"
+    --query kubeadminPassword -o tsv
+  register: az_aro4_kubeadmin_password
+
+- name: Configure AAD Oauth in ARO cluster
+  when:
+    - preconfigure_aad | default(true) | bool
+  block:
+    - name: Add redirect URI to service principal
+      ansible.builtin.command: >-
+        az ad app update --id "api://openenv-{{ guid }}" --reply-urls "{{ az_aro4_reply_url }}"
+
+    - ansible.builtin.set_fact: kubeconfigdir="{{ output_dir }}/.kube"
+
+    - ansible.builtin.set_fact: kubeconfig="{{ kubeconfigdir }}/config"
+
+    - name: Make sure .kube directory exists
+      ansible.builtin.file:
+        state: directory
+        path: "{{ kubeconfigdir }}"
+        mode: 0700
+
+    - name: Login to the resulting ARO cluster as kubeadmin
+      ansible.builtin.command: >-
+          oc login {{ az_aro4_public_api_url }} -u kubeadmin -p {{ az_aro4_kubeadmin_password.stdout }} --kubeconfig {{ kubeconfig }} --insecure-skip-tls-verify
+      register: r_cluster_login
+      retries: 6
+      delay: 60
+      until: r_cluster_login is success
+  
+    - name: Create a secret to store the azureAD App ID password in the cluster
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ lookup('template', 'secret-azuread.yaml.j2' ) | from_yaml }}"
+      register: r_create_secret
+      retries: 6
+      delay: 60
+      until: r_create_secret is success
+
+    - name: Make openenv admin user cluster admin
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ lookup('template', 'admin.yaml.j2' ) | from_yaml }}"
+      register: r_make_admin
+      retries: 6
+      delay: 60
+      until: r_make_admin is success
+
+    - name: Update OAuth configuration on the cluster to add AAD
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ lookup('template', 'aad_oidc.yaml.j2' ) | from_yaml }}"
+      register: r_update_oauth
+      retries: 6
+      delay: 60
+      until: r_update_oauth is success
