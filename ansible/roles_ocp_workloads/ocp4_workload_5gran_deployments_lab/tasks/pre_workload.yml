@@ -56,13 +56,6 @@
   ansible.builtin.shell:
     cmd: restorecon /var/lib/libvirt
 
-#- name: Ensure kcli copr repo is enabled
-#  community.general.copr:
-#    state: enabled
-#    host: copr.fedorainfracloud.org
-#    chroot: epel-8-x86_64
-#    name: karmab/kcli
-
 # group all dnf installs in the same task to save time
 - name: Ensure lab dependencies are installed
   ansible.builtin.dnf:
@@ -76,7 +69,12 @@
       - podman
       - httpd-tools
       - haproxy
+      - python3-pyOpenSSL
     state: present
+
+- name: Ensure ksushy requirements are installed
+  ansible.builtin.pip:
+    name: cherrypy
 
 - name: Ensure kcli rpm is installed
   ansible.builtin.dnf:
@@ -100,7 +98,7 @@
 
 - name: Ensure lab network is present
   ansible.builtin.shell:
-    cmd: "kcli create network -c {{ lab_network_cidr }} --nodhcp --domain {{ lab_network_domain }} 5gdeploymentlab"
+    cmd: "kcli create network -c {{ lab_network_cidr }} -P dhcp=false -P dns=false --domain {{ lab_network_domain }} 5gdeploymentlab"
 
 - name: Ensure oc/kubectl tooling is present
   ansible.builtin.shell:
@@ -220,17 +218,9 @@
   async: 900
   register: download_rhcos
 
-- name: Ensure sushy-tools script exists
-  ansible.builtin.get_url:
-    # yamllint disable rule:line-length
-    url: "https://gist.githubusercontent.com/mvazquezc/0acb9e716c329abb9a184f1bcceed591/raw/21de9c32bcaf53ef40f379231ab1a4c1fdfefcf7/deploy-sushy-tools.sh"
-    # yamllint enable rule:line-length
-    dest: "/tmp/deploy-sushy-tools.sh"
-    mode: "0755"
-
-- name: Ensure sushy-tools are installed
+- name: Ensure ksushy is installed
   ansible.builtin.shell:
-    cmd: /tmp/deploy-sushy-tools.sh
+    cmd: kcli create sushy-service --ssl --port 9000
   async: 120
   poll: 0
   register: sushy_async
@@ -323,7 +313,6 @@
     dest: "/etc/systemd/system/podman-gitea.service"
     mode: "0644"
 
-
 - name: Ensure git server service is enabled and running
   ansible.builtin.systemd:
     state: restarted
@@ -369,30 +358,21 @@
   failed_when: result.rc != 0 and "not created because VM" not in result.stderr
   # yamllint disable rule:line-length
   with_items:
-    - {name: "hub-master0", cpus: "{{ lab_hub_vm_cpus }}", disk: "{{ lab_hub_vm_disk }}", memory: "{{ lab_hub_vm_memory }}", mac: "aa:aa:aa:aa:01:01", uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0101"}
-    - {name: "hub-master1", cpus: "{{ lab_hub_vm_cpus }}", disk: "{{ lab_hub_vm_disk }}", memory: "{{ lab_hub_vm_memory }}", mac: "aa:aa:aa:aa:01:02", uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0102"}
-    - {name: "hub-master2", cpus: "{{ lab_hub_vm_cpus }}", disk: "{{ lab_hub_vm_disk }}", memory: "{{ lab_hub_vm_memory }}", mac: "aa:aa:aa:aa:01:03", uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0103"}
     - {name: "sno1", cpus: "{{ lab_sno_vm_cpus }}", disk: "{{ lab_sno_vm_disk }}", memory: "{{ lab_sno_vm_memory }}", mac: "aa:aa:aa:aa:02:01", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0201"}
     - {name: "sno2", cpus: "{{ lab_sno_vm_cpus }}", disk: "{{ lab_sno_vm_disk }}", memory: "{{ lab_sno_vm_memory }}", mac: "aa:aa:aa:aa:03:01", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0301"}
   # yamllint enable rule:line-length
 
-- name: Ensure kcli-baremetal-plan-repo is cloned
-  ansible.builtin.git:
-    repo: 'https://github.com/karmab/kcli-openshift4-baremetal.git'
-    dest: /root/kcli-openshift4-baremetal/
-    version: "{{ kcli_baremetal_plan_revision }}"
-
 - name: Ensure pull secret is copied to the bastion host
   ansible.builtin.copy:
     content: "{{ ocp4_pull_secret }}"
-    dest: "/root/kcli-openshift4-baremetal/openshift_pull.json"
+    dest: "/root/openshift_pull.json"
     mode: '0644'
 
 - name: Ensure plan file exists
   ansible.builtin.get_url:
     # yamllint disable rule:line-length
     url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hub-cluster/hub.yml"
-    dest: "/root/kcli-openshift4-baremetal/hub.yml"
+    dest: "/root/hub.yml"
     mode: "0644"
     # yamllint enable rule:line-length
 
@@ -403,7 +383,7 @@
 
 - name: Set password to hub admin user
   ansible.builtin.replace:
-    path: "/root/kcli-openshift4-baremetal/hub.yml"
+    path: "/root/hub.yml"
     regexp: '{{ item.regexp }}'
     replace: "'{{ item.password }}'"
   with_items:
@@ -428,7 +408,7 @@
   community.crypto.openssh_keypair:
     path: /root/.ssh/id_rsa
 
-- name: Async check sushy-tools are installed
+- name: Async check sushy tools are installed
   ansible.builtin.async_status:
     jid: "{{ sushy_async.ansible_job_id }}"
   register: job_result
@@ -440,11 +420,11 @@
   ansible.builtin.systemd:
     state: restarted
     enabled: true
-    name: sushy-tools
+    name: ksushy
 
 - name: Ensure sushy is listening for redfish connections
   ansible.builtin.uri:
-    url: https://infra.5g-deployment.lab:9000/redfish/v1/Systems/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0101
+    url: https://infra.5g-deployment.lab:9000/redfish/v1/Systems/local/sno1
     method: GET
     status_code: 200
     validate_certs: false
