@@ -1,0 +1,77 @@
+---
+- name: Retrieve root private token
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: root-user-personal-token
+    namespace: "{{ ocp4_workload_redhat_developer_hub_gitlab_namespace }}"
+  register: r_root_token
+  retries: 120
+  delay: 10
+  until:
+  - r_root_token is defined
+  - r_root_token.resources is defined
+  - r_root_token.resources | length > 0
+  - r_root_token.resources[0] is defined
+  - r_root_token.resources[0].data is defined
+  - r_root_token.resources[0].data.token is defined
+  - r_root_token.resources[0].data.token | length > 0
+
+- name: Decode root token
+  set_fact:
+    ocp4_workload_redhat_developer_hub_gitlab_root_token: "{{ r_root_token.resources[0].data.token | b64decode }}"
+
+- name: Create vault secret for gitlab token
+  shell: |
+    oc exec vault-0 -n {{ ocp4_workload_redhat_developer_hub_vault_namespace
+    }} -- vault kv put kv/secrets/janusidp/gitlab token={{ ocp4_workload_redhat_developer_hub_gitlab_root_token }}
+    oc exec vault-0 -n {{ ocp4_workload_redhat_developer_hub_vault_namespace
+    }} -- vault kv put kv/secrets/janusidp/gitlab_webhook secret={{ lookup('password', '/dev/null chars=ascii_lowercase length=12') }}
+
+- name: Create Keycloak GitLab application
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_redhat_developer_hub_gitlab_host }}/api/v4/applications
+    method: POST
+    body_format: form-urlencoded
+    body:
+      name: keycloak
+      redirect_uri: https://{{ ocp4_workload_redhat_developer_hub_keycloak_host }}/auth/realms/backstage/broker/GitLab/endpoint
+      scopes: api read_user read_repository write_repository sudo openid profile email
+      confidential: false
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_redhat_developer_hub_gitlab_root_token }}"
+    validate_certs: false
+    status_code: [201]
+  register: r_keycloak_app
+  retries: 60
+  delay: 10
+  until: r_keycloak_app.status == 201
+
+- name: Get Keycloak client credentials
+  set_fact:
+    ocp4_workload_redhat_developer_hub_keycloak_client_id: "{{ r_keycloak_app.json.application_id }}"
+    ocp4_workload_redhat_developer_hub_keycloak_client_secret: "{{ r_keycloak_app.json.secret }}"
+
+- name: Create Devspaces GitLab application
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_redhat_developer_hub_gitlab_host }}/api/v4/applications
+    method: POST
+    body_format: form-urlencoded
+    body:
+      name: devspaces
+      redirect_uri: https://{{ ocp4_workload_redhat_developer_hub_devspaces_host }}/api/oauth/callback
+      scopes: api read_user read_repository write_repository sudo openid profile email
+      confidential: false
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_redhat_developer_hub_gitlab_root_token }}"
+    validate_certs: false
+    status_code: [201]
+  register: r_devspaces_app
+  retries: 60
+  delay: 10
+  until: r_devspaces_app.status == 201
+
+- name: Get Keycloak client credentials
+  set_fact:
+    ocp4_workload_redhat_developer_hub_devspaces_client_id: "{{ r_devspaces_app.json.application_id }}"
+    ocp4_workload_redhat_developer_hub_devspaces_client_secret: "{{ r_devspaces_app.json.secret }}"
