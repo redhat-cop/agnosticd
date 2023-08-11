@@ -1,0 +1,180 @@
+---
+
+# may need to wait for some specific cockroachy thing
+
+- name: Create Cockroach SaaS database provider secret
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cockroach-saas-provider-credentials
+        namespace: openshift-dbaas-operator
+        labels:
+          db-operator/type: credentials
+          related-to: dbaas-operator
+#        ownerReferences:
+#          - apiVersion: dbaas.redhat.com/v1beta1
+#            kind: DBaaSInventory
+#            name: cockroach-saas-provider
+#            uid: "{{ r_cockroach_dbaas_inventory.resources[0].metadata.uid }}"
+      data:
+        apiSecretKey: "{{ ocp4_workload_cockroach_dbaas_amq_lab_apikey | b64encode }}"
+
+- name: Create Cockroach SaaS database provider account
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: dbaas.redhat.com/v1beta1
+      kind: DBaaSInventory
+      metadata:
+        name: cockroach-saas-provider
+        namespace: openshift-dbaas-operator
+        labels:
+          related-to: dbaas-operator
+          type: dbaas-vendor-service
+      spec:
+        credentialsRef:
+          name: cockroach-saas-provider-credentials
+        providerRef:
+          name: cockroachdb-cloud-registration
+
+- name: Get the uid in order to set the owner reference for the provider secret
+  kubernetes.core.k8s_info:
+    api_version: dbaas.redhat.com/v1beta1
+    kind: DBaaSInventory
+    name: cockroach-saas-provider
+    namespace: openshift-dbaas-operator
+  register: r_cockroach_dbaas_inventory
+
+- name: Create the crdb-kafka namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: crdb-kafka
+
+- name: Create the Kafka cluster
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: kafka.strimzi.io/v1beta2
+      kind: Kafka
+      metadata:
+        name: crdb-cluster
+        namespace: crdb-kafka
+      spec:
+        entityOperator:
+          topicOperator: {}
+          userOperator: {}
+        kafka:
+          config:
+            default.replication.factor: 3
+            min.insync.replicas: 2
+            offsets.topic.replication.factor: 3
+            transaction.state.log.min.isr: 2
+            transaction.state.log.replication.factor: 3
+          listeners:
+            - name: plain
+              port: 9092
+              tls: false
+              type: internal
+            - name: external
+              port: 9093
+              tls: true
+              type: route
+          replicas: 3
+          storage:
+            type: ephemeral
+        zookeeper:
+          replicas: 3
+          storage:
+            type: ephemeral
+
+- name: Allow all users to view the crdb-kafka namespace via a rolebinding
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: view-crdb-kafka
+        namespace: crdb-kafka
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: view
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: Group
+          name: system:authenticated:oauth
+
+- name: Give all users the Tekton aggregate view role
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: all-user-tekton-aggregate-view
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: tekton-aggregate-view
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: Group
+          name: system:authenticated:oauth
+
+- name: Create user namespaces
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: user{{ n }}-eda
+  loop: "{{ range(1, user_count | default(num_users) | default(10) | int + 1, 1) | list }}"
+  loop_control:
+    loop_var: n
+
+- name: Make users admins of their namespaces
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        creationTimestamp: null
+        name: admin
+        namespace: user{{ n }}-eda
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: admin
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: User
+          name: user{{ n }}
+  loop: "{{ range(1, user_count | default(num_users) | default(10) | int + 1, 1) | list }}"
+  loop_control:
+    loop_var: n
+
+- name: User Namespace Access data
+  agnosticd_user_info:
+    user: "user{{ n }}"
+    data:
+      user_namespace: "user{{ n }}-eda"
+  loop: "{{ range(1, user_count | default(num_users) | default(10) | int + 1, 1) | list }}"
+  loop_control:
+    loop_var: n
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
