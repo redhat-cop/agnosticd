@@ -17,7 +17,7 @@ podman run -d -p 5000:5000 --restart=always \
   -e REGISTRY_HTTP_TLS_KEY=/certs/registry.key \
   -p 443:443 \
   --name registry registry:2
-for i in `podman search --limit 1000 "registry.redhat.io/rhosp" | grep rhosp-rhel8 | awk '{ print $2 }' | grep -v beta | sed "s/registry.redhat.io\///g" | tail -n+2`; do skopeo copy --dest-tls-verify=false docker://registry.redhat.io/$i:16.2 docker://localhost:443/$i:16.2; done
+for i in `podman search --limit 1000 "registry.redhat.io/rhosp" | awk '{ print $2 }' | grep -v beta | sed "s/registry.redhat.io\///g" | tail -n+2`; do skopeo copy --dest-tls-verify=false docker://registry.redhat.io/$i:16.2 docker://localhost:443/$i:16.2; done
 
 
 for image in $(curl -s -H "Accept: application/json" https://registry.access.redhat.com/crane/repositories/v2 | jq -r 'to_entries[] | .key | select(startswith("rhceph/rhceph-4"))'); do
