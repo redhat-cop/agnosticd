@@ -1,0 +1,112 @@
+---
+- name: "{{ install_operator_name }} - Get Installed CSV"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: "{{ install_operator_name }}"
+    namespace: "{{ install_operator_namespace }}"
+  register: r_subscription
+
+- name: "{{ install_operator_name }} - Remove CSV"
+  when:
+    - r_subscription.resources | length > 0
+    - r_subscription.resources[0].status.currentCSV is defined
+    - r_subscription.resources[0].status.currentCSV | length > 0
+  kubernetes.core.k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: "{{ install_operator_namespace }}"
+
+- name: "{{ install_operator_name }} - Remove subscription"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: "{{ install_operator_name }}"
+    namespace: "{{ install_operator_namespace }}"
+
+- name: "{{ install_operator_name }} - Find InstallPlan"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ install_operator_namespace }}"
+  register: r_install_plans
+
+- name: "{{ install_operator_name }} - Set InstallPlan name"
+  when: r_install_plans.resources | length > 0
+  ansible.builtin.set_fact:
+    install_operator_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], '{{ install_operator_csv_nameprefix }}' )].metadata.name|[0]
+
+- name: "{{ install_operator_name }} - Remove InstallPlan"
+  when: install_operator_install_plan_name | default("") | length > 0
+  kubernetes.core.k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ install_operator_install_plan_name }}"
+    namespace: "{{ install_operator_namespace }}"
+
+- name: "{{ install_operator_name }} - Remove CatalogSource for catalog snapshot"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: operators.coreos.com/v1alpha1
+    kind: CatalogSource
+    name: "{{ install_operator_catalogsource_name }}"
+    namespace: "{{ install_operator_catalogsource_namespace }}"
+
+- name: "{{ install_operator_name }} - Cleanup if not 'openshift-operators' namespace"
+  when: install_operator_namespace is not match("openshift-operators")
+  block:
+    - name: "{{ install_operator_name }} - Remove OperatorGroup"
+      kubernetes.core.k8s:
+        state: absent
+        definition: "{{ lookup('template', 'operatorgroup.yaml.j2') | from_yaml }}"
+
+    - name: "{{ install_operator_name }} - Remove Namespace"
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ install_operator_namespace }}"
+
+# Cleanup operator object, remove labels from CRDs
+- name: "{{ install_operator_name }} - Find all CRDs with the operator label"
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    label_selectors:
+      - "operators.coreos.com/{{ install_operator_name }}.{{ install_operator_namespace }}="
+  register: r_crds
+
+# This doesn't work to remove the label. Using `oc label` command instead. :-(
+# - name: Remove operator label from any CRDs
+#   when: r_crds.resources | length > 0
+#   k8s:
+#     state: present
+#     merge_type: merge
+#     definition:
+#       apiVersion: apiextensions.k8s.io/v1
+#       kind: CustomResourceDefinition
+#       metadata:
+#         name: "{{ item.metadata.name }}"
+#         labels:
+#           "operators.coreos.com/{{ install_operator_name }}.{{ install_operator_namespace }}": null
+#   loop: "{{ r_crds.resources }}"
+
+- name: "{{ install_operator_name }} - Remove operator label from any CRDs"
+  when: r_crds.resources | length > 0
+  ansible.builtin.command: >-
+    oc label crd {{ item.metadata.name }} operators.coreos.com/{{ install_operator_name }}.{{ install_operator_namespace }}-
+  loop: "{{ r_crds.resources }}"
+
+- name: "{{ install_operator_name }} - Remove Operator"
+  kubernetes.core.k8s:
+    state: absent
+    api_version: operators.coreos.com/v1
+    kind: Operator
+    name: "{{ install_operator_name }}.{{ install_operator_namespace }}"

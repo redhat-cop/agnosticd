@@ -1,0 +1,142 @@
+---
+- name: Check that operator name has been provided
+  ansible.builtin.assert:
+    that:
+      - install_operator_name | default("") | length > 0
+    fail_msg: install_operator_name must be set.
+
+- name: "{{ install_operator_name }} - Set up for Namespace other than 'openshift-operators'"
+  when: install_operator_namespace is not match("openshift-operators")
+  block:
+    - name: "{{ install_operator_name }} - Ensure Namespace exists"
+      kubernetes.core.k8s:
+        state: present
+        api_version: v1
+        kind: Namespace
+        name: "{{ install_operator_namespace }}"
+
+    - name: "{{ install_operator_name }} - Ensure OperatorGroup exists"
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'operatorgroup.yaml.j2') | from_yaml }}"
+
+- name: "{{ install_operator_name }} - Create CatalogSource for use with catalog snapshot"
+  when: install_operator_catalogsource_setup | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'catalogsource.yaml.j2') | from_yaml }}"
+
+- name: "{{ install_operator_name }} - Set subscription channel to provided channel"
+  when: install_operator_channel | default("") | length > 0
+  ansible.builtin.set_fact:
+    __install_operator_channel: "{{ install_operator_channel }}"
+
+- name: "{{ install_operator_name }} - Determine channel for the operator if no channel specified"
+  when: install_operator_channel | default("") | length == 0
+  block:
+    - name: Get cluster version
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: ClusterVersion
+        name: version
+      register: r_cluster_version
+
+    - name: "{{ install_operator_name }} - Get PackageManifest for the operator"
+      kubernetes.core.k8s_info:
+        api_version: packages.operators.coreos.com/v1
+        kind: PackageManifest
+        name: "{{ install_operator_packagemanifest_name }}"
+        namespace: "{{ install_operator_catalogsource_namespace }}"
+      register: r_packagemanifest
+
+    # Set channel to the one matching the deployed cluster version.
+    # If no matching channel available set to defaultChannel from the package manifest.
+    - name: "{{ install_operator_name }} - Set operator channel"
+      ansible.builtin.set_fact:
+        __install_operator_channel: "{{ t_channel | regex_replace(' ') }}"
+      vars:
+        t_cluster_version: >-
+          {{ r_cluster_version.resources[0].spec.channel | regex_replace('.*-(\d+\.\d+)', '\1') }}
+        t_version_match_query: "[?name=='{{ t_cluster_version }}']|[0].name"
+        t_version_match_channel: >-
+          {{ r_packagemanifest.resources[0].status.channels | json_query(t_version_match_query) }}
+        t_channel: >-
+          {{ t_version_match_channel | default(r_packagemanifest.resources[0].status.defaultChannel, true) }}
+
+- name: "{{ install_operator_name }} - Print operator channel to be installed"
+  ansible.builtin.debug:
+    msg: "Operator channel to be installed: {{ __install_operator_channel }}"
+
+- name: "{{ install_operator_name }} - Create operator subscription"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'subscription.yaml.j2') | from_yaml }}"
+
+- name: "{{ install_operator_name }} - Wait until InstallPlan is created"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ install_operator_namespace }}"
+  register: r_install_plans
+  vars:
+    _query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], '{{ install_operator_csv_nameprefix }}') && status.phase ]
+  retries: 30
+  delay: 10
+  until:
+    - r_install_plans.resources | length > 0
+    - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+- name: "{{ install_operator_name }} - Set InstallPlan name"
+  ansible.builtin.set_fact:
+    install_operator_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?starts_with(spec.clusterServiceVersionNames[0], '{{ install_operator_csv_nameprefix }}' )].metadata.name|[0]
+
+- name: "{{ install_operator_name }} - Get InstallPlan"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ install_operator_install_plan_name }}"
+    namespace: "{{ install_operator_namespace }}"
+  register: r_install_plan
+
+- name: "{{ install_operator_name }} - Approve InstallPlan if necessary"
+  when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'installplan.yaml.j2') }}"
+
+- name: "{{ install_operator_name }} - Get Installed CSV"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: "{{ install_operator_name }}"
+    namespace: "{{ install_operator_namespace }}"
+  register: r_subscription
+  retries: 30
+  delay: 10
+  until:
+    - r_subscription.resources[0].status.currentCSV is defined
+    - r_subscription.resources[0].status.currentCSV | length > 0
+
+- name: "{{ install_operator_name }} - Print CSV version to be installed"
+  when: install_operator_starting_csv is defined
+  ansible.builtin.debug:
+    msg: "Starting CSV: {{ install_operator_starting_csv }}"
+
+- name: "{{ install_operator_name }} - Wait until CSV is installed"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: "{{ install_operator_namespace }}"
+  register: r_csv
+  retries: 40
+  delay: 30
+  until:
+    - r_csv.resources[0].status.phase is defined
+    - r_csv.resources[0].status.phase | length > 0
+    - r_csv.resources[0].status.phase == "Succeeded"
+  ignore_errors: "{{ install_operator_install_csv_ignore_error }}"
