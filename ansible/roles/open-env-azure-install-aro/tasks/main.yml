@@ -5,24 +5,13 @@
     -p="{{ azure_user_password }}" --tenant="{{ azure_tenant }}"
   no_log: true
 
-- name: Set openenv user UPN
-  ansible.builtin.set_fact: openenv_user_upn="openenv-{{ guid }}@{{ azure_user_domain }}"
-
-- name: Create openenv user
-  azure.azcollection.azure_rm_aduser:
+# This app_id is constant for all azure tenants
+- name: Get Azure Red Hat OpenShift RP SP info
+  azure.azcollection.azure_rm_adserviceprincipal_info:
     auth_source: cli
-    user_principal_name: "{{ openenv_user_upn }}"
+    app_id: "f1dd0a37-89c6-4e07-bcd1-ffd3d43d8875"
     tenant: "{{ azure_tenant }}"
-    state: "present"
-    account_enabled: "True"
-    display_name: "OPENENV User {{ guid }}"
-    password_profile: "{{ generated_password }}"
-    mail_nickname: "openenv-{{ guid }}"
-    given_name: "OPENENV"
-    surname: "User {{ guid }}"
-    user_type: "Member"
-    usage_location: "US"
-    mail: "{{ openenv_user_upn }}"
+  register: azrpsp
 
 - name: Create ARO virtual network
   azure.azcollection.azure_rm_virtualnetwork:
@@ -32,6 +21,36 @@
     name: "aro-vnet-{{ guid }}"
     address_prefixes_cidr:
       - "10.0.0.0/22"
+  register: az_aro_vnet
+
+- name: Get Network Contributor Role Definition
+  azure.azcollection.azure_rm_roledefinition_info:
+    auth_source: cli
+    scope: "{{ az_aro_vnet.state.id }}"
+    role_name: "Network Contributor"
+  register: az_nc_role_definition
+
+- name: Set ARO SP as Network Contributor for the vnet
+  azure.azcollection.azure_rm_roleassignment:
+    auth_source: cli
+    scope: "{{ az_aro_vnet.state.id }}"
+    assignee_object_id: "{{ azaroappsp.service_principals[0].object_id }}"
+    role_definition_id:
+      "{{ az_nc_role_definition.roledefinitions[0].id }}"
+    state: present
+  register: az_nc_app_result
+  failed_when: "az_nc_app_result.msg is defined and 'The role assignment already exists' not in az_nc_app_result.msg"
+
+- name: Set ARO RP SP as Network Contributor for the vnet
+  azure.azcollection.azure_rm_roleassignment:
+    auth_source: cli
+    scope: "{{ az_aro_vnet.state.id }}"
+    assignee_object_id: "{{ azrpsp.service_principals[0].object_id }}"
+    role_definition_id:
+      "{{ az_nc_role_definition.roledefinitions[0].id }}"
+    state: present
+  register: az_nc_rp_app_result
+  failed_when: "az_nc_rp_app_result.msg is defined and 'The role assignment already exists' not in az_nc_rp_app_result.msg"
 
 - name: Check if ARO master subnet exists
   azure.azcollection.azure_rm_subnet_info:
@@ -106,6 +125,10 @@
   retries: 10
   delay: 10
 
+- name: Sleep before running ARO install
+  ansible.builtin.pause:
+    minutes: 5
+
 - name: Install ARO using azcollection
   when: install_aro_with_azcollection | default(false) | bool
   include_tasks:
@@ -116,11 +139,11 @@
   include_tasks:
     file: ./install-aro-az-command.yml
 
-- name: Grabbing the kubeadmin password for ARO
-  ansible.builtin.command: >-
-    az aro list-credentials --resource-group "openenv-{{ guid }}" --name "aro-cluster-{{ guid }}"
-    --query kubeadminPassword -o tsv
-  register: az_aro4_kubeadmin_password
+- name: Run kubeconfig role
+  include_tasks:
+    file: ./create-kubeconfig.yml
+  vars:
+    kube_config_root: "{{ output_dir }}"
 
 - name: Configure AAD Oauth in ARO cluster
   when:
@@ -128,26 +151,8 @@
   block:
     - name: Add redirect URI to service principal
       ansible.builtin.command: >-
-        az ad app update --id "api://openenv-{{ guid }}" --reply-urls "{{ az_aro4_reply_url }}"
+        az ad app update --id "{{ azappcreate.stdout | from_json | json_query('appId') }}" --public-client-redirect-uris "{{ az_aro4_reply_url }}"
 
-    - ansible.builtin.set_fact: kubeconfigdir="{{ output_dir }}/.kube"
-
-    - ansible.builtin.set_fact: kubeconfig="{{ kubeconfigdir }}/config"
-
-    - name: Make sure .kube directory exists
-      ansible.builtin.file:
-        state: directory
-        path: "{{ kubeconfigdir }}"
-        mode: 0700
-
-    - name: Login to the resulting ARO cluster as kubeadmin
-      ansible.builtin.command: >-
-          oc login {{ az_aro4_public_api_url }} -u kubeadmin -p {{ az_aro4_kubeadmin_password.stdout }} --kubeconfig {{ kubeconfig }} --insecure-skip-tls-verify
-      register: r_cluster_login
-      retries: 6
-      delay: 60
-      until: r_cluster_login is success
-  
     - name: Create a secret to store the azureAD App ID password in the cluster
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -177,3 +182,8 @@
       retries: 6
       delay: 60
       until: r_update_oauth is success
+
+    - name: Put preconfigure_aad status in user_data
+      agnosticd_user_info:
+        data:
+          preconfigure_aad: "{{ preconfigure_aad }}"
