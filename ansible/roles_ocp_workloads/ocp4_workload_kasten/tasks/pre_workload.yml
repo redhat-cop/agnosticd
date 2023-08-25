@@ -1,93 +1,80 @@
 ---
-# Implement your Pre Workload deployment tasks here
-# -------------------------------------------------
 
-- name: Install the minio from remote repo
+- name: Gather aws security group info
+  amazon.aws.ec2_group_info:
+    filters:
+      "tag:Name": "BastionSG"
+    region: "{{ aws_region }}"
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+  register: sg_info
+
+- name: Add ingress rules for ports 9000 and 9090 for minio
+  amazon.aws.ec2_group:
+    name: "{{ sg_info.security_groups[0].group_name }}"
+    state: present
+    description: "Edited by Ansible installer"
+    purge_rules: false
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    region: "{{ aws_region }}"
+    rules:
+      - proto: tcp
+        ports:
+          - 9000
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        ports:
+          - 9090
+        cidr_ip: 0.0.0.0/0
+    
+- name: Install minio server from remote repo
   ansible.builtin.dnf:
-    name: https://dl.min.io/server/minio/release/linux-amd64/minio-20230816201730.0.0.x86_64.rpm
+    name: "{{ ocp4_workload_kasten_minio_rpm_url }}"
     state: present
+    disable_gpg_check: true
   become: true
 
-- name: Create a system group for minio-user
-  group:
-    name: minio-user
-    state: present
-    system: yes
-  become: true
-
-- name: Create MinIO user
-  user:
-    name: minio-user
-    comment: MinIO User
-    shell: /sbin/nologin
-    system: yes
-    group: minio-user
-    append: yes
-    state: present
-  become: true
-
-- name: Create loopback device file
-  shell: "dd if=/dev/zero of=/home/{{ ansible_user}}/minio.img bs=1M count=2048"
-  args:
-    creates: "/home/{{ ansible_user}}/minio.img"
-  become: true
-
-- name: Update loopback file ownership
+- name: Create minio directory
   file:
-    path: "/home/{{ ansible_user}}/minio.img"
-    owner: minio-user
-    group: minio-user
-  become: true
-
-- name: Create loopback device
-  shell: losetup /dev/loop0 /home/{{ ansible_user }}/minio.img
-  ignore_errors: true
-  become: true
-
-- name: Format the loopback device
-  shell: "mkfs.ext4 /dev/loop0"
-  ignore_errors: true
-  become: true
-
-- name: Create mount directory
-  file:
-    path: /mnt/minio_loopback
+    path: "/home/{{ ansible_user }}/minio"
     state: directory
+
+# For testing
+# Begin:
+- name: Check if MinIO is running
+  shell: "pgrep -x minio"
+  register: minio_process
+  ignore_errors: true
+
+- name: Stop MinIO if it's running
+  shell: "pkill -f 'minio server'"
+  when: minio_process.rc == 0
+# END
+
+- name: Start minio
+  shell: "nohup minio server /home/{{ ansible_user }}/minio --console-address :9090 >/dev/null 2>&1 &"
+
+- name: Download minio-client
+  get_url:
+    url: "{{ ocp4_workload_kasten_minio_client_url }}"
+    dest: /usr/local/bin/mc
   become: true
 
-- name: Update loopback file ownership
+- name: Make mc executable
   file:
-    path: /mnt/minio_loopback
-    owner: minio-user
-    group: minio-user
+    path: /usr/local/bin/mc
+    mode: '0755'
   become: true
 
-- name: Mount loopback device
-  mount:
-    path: /mnt/minio_loopback
-    src: /dev/loop0
-    fstype: ext4
-    state: mounted
+- name: set mc alias
+  shell: /usr/local/bin/mc alias set myminio http://127.0.0.1:9000 minioadmin minioadmin
   become: true
 
-- name: Create /etc/default/minio from template
-  template:
-    src: minio.j2
-    dest: /etc/default/minio
+- name: setup minio bucket
+  shell: "/usr/local/bin/mc mb --region={{ aws_region }} myminio/kasten-bucket"
   become: true
-
-- name: Remove ProtectProc line from minio.service
-  lineinfile:
-    path: /usr/lib/systemd/system/minio.service
-    state: absent
-    regexp: '^ProtectProc=invisibl$'
-
-- name: Restart MinIO service
-  service:
-    name: minio
-    state: restarted
-    daemon_reload: true
-  become: true
+  ignore_errors: true
 
 
 # Leave these as the last tasks in the playbook
