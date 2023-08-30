@@ -54,16 +54,16 @@ Including an example of how to use your role (for instance, with variables passe
     include_role:
       name: ../../roles/host-lets-encrypt-certs
     vars:
-    - _certbot_domain: "master.example.opentlc.com"
-    - _certbot_production: False
-    - _certbot_remote_dir: "/root"
-    - _certbot_cache_cert_file: "/tmp/server.cert"
-    - _certbot_cache_key_file: "/tmp/server.key"
-    - _certbot_cache_ca_file: "/tmp/server_ca.cer"
-    - _certbot_cache_fullchain_file: "/tmp/fullchain.cer"
-    - _certbot_cache_archive_file: "/tmp/acme.tar.gz"
-    - _certbot_renew_automatically: False
-    - _certbot_force_issue: False
+      _certbot_domain: "master.example.opentlc.com"
+      _certbot_production: False
+      _certbot_remote_dir: "/root"
+      _certbot_cache_cert_file: "/tmp/server.cert"
+      _certbot_cache_key_file: "/tmp/server.key"
+      _certbot_cache_ca_file: "/tmp/server_ca.cer"
+      _certbot_cache_fullchain_file: "/tmp/fullchain.cer"
+      _certbot_cache_archive_file: "/tmp/acme.tar.gz"
+      _certbot_renew_automatically: False
+      _certbot_force_issue: False
 
 - name: Request Let's Encrypt Wildcard Certificates
   hosts: quay
@@ -73,16 +73,16 @@ Including an example of how to use your role (for instance, with variables passe
     include_role:
       name: ../ansible/roles/host-lets-encrypt-certs
     vars:
-    - _certbot_wildcard_domain: "*.apps.example.opentlc.com"
-    - _certbot_production: False
-    - _certbot_remote_dir: "/root"
-    - _certbot_cache_cert_file: "/tmp/server.cert"
-    - _certbot_cache_key_file: "/tmp/server.key"
-    - _certbot_cache_ca_file: "/tmp/server_ca.cer"
-    - _certbot_cache_fullchain_file: "/tmp/fullchain.cer"
-    - _certbot_cache_archive_file: "/tmp/certbot.tar.gz"
-    - _certbot_renew_automatically: False
-    - _certbot_force_issue: False
+      _certbot_wildcard_domain: "*.apps.example.opentlc.com"
+      _certbot_production: False
+      _certbot_remote_dir: "/root"
+      _certbot_cache_cert_file: "/tmp/server.cert"
+      _certbot_cache_key_file: "/tmp/server.key"
+      _certbot_cache_ca_file: "/tmp/server_ca.cer"
+      _certbot_cache_fullchain_file: "/tmp/fullchain.cer"
+      _certbot_cache_archive_file: "/tmp/certbot.tar.gz"
+      _certbot_renew_automatically: False
+      _certbot_force_issue: False
 
 - name: Request Both Let's Encrypt Static and Wildcard Certificates
   hosts: quay
@@ -92,15 +92,15 @@ Including an example of how to use your role (for instance, with variables passe
     include_role:
       name: ../ansible/roles/host-lets-encrypt-certs
     vars:
-    - _certbot_domain: "master.example.opentlc.com"
-    - _certbot_wildcard_domain: "*.apps.example.opentlc.com"
-    - _certbot_production: False
-    - _certbot_remote_dir: "/root"
-    - _certbot_cache_cert_file: "/tmp/server.cert"
-    - _certbot_cache_key_file: "/tmp/server.key"
-    - _certbot_cache_ca_file: "/tmp/server_ca.cer"
-    - _certbot_cache_fullchain_file: "/tmp/fullchain.cer"
-    - _certbot_cache_archive_file: "/tmp/certbot.tar.gz"
-    - _certbot_renew_automatically: False
-    - _certbot_force_issue: False
+      _certbot_domain: "master.example.opentlc.com"
+      _certbot_wildcard_domain: "*.apps.example.opentlc.com"
+      _certbot_production: False
+      _certbot_remote_dir: "/root"
+      _certbot_cache_cert_file: "/tmp/server.cert"
+      _certbot_cache_key_file: "/tmp/server.key"
+      _certbot_cache_ca_file: "/tmp/server_ca.cer"
+      _certbot_cache_fullchain_file: "/tmp/fullchain.cer"
+      _certbot_cache_archive_file: "/tmp/certbot.tar.gz"
+      _certbot_renew_automatically: False
+      _certbot_force_issue: False
 ```
