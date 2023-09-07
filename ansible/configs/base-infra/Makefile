@@ -71,7 +71,7 @@ user-data: ## Assumes an existing output_dir, outputs contenst of user-data.yaml
 	ansible-playbook rhdp.agnostic_utilities.agd_user_info.yml -e @$(OUTPUT_DIR)/user-data.yaml -e SANDBOX=$(SANDBOX)
 
 ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
-	ssh -F $(OUTPUT_DIR)/$(ENV_YPE)_$(GUID)_ssh_conf $(TARGET)
+	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf $(TARGET)
 
 last-status: ## Output last status file
 	ls -l $(OUTPUT_DIR)/status.txt
