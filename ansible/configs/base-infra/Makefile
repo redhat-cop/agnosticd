@@ -22,6 +22,7 @@ VARS_FILE=$(VARS_DIR)/vars-showroom-sandbox0$(SANDBOX).yaml
 
 TARGET=bastion
 EXTRA_ARGS=
+USER_EXTRA_ARGS=
 # Adjust to taste
 
 : ## TIP! make supports tab completion with *modern* shells e.g. zsh etc
@@ -31,128 +32,63 @@ EXTRA_ARGS=
 .SILENT: setup my-env ssh-target
 
 help: ## Show this help - technically unnecessary as `make` alone will do
-help: ## 
-	@egrep -h '\s##\s' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", ($$2=="" ? "" : $$1 ),  $$2}' | less
+	@egrep -h '\s##\s' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", ($$2=="" ? "" : $$1 ),  $$2}' 
 
 # Thanks to victoria.dev for the above syntax
 # https://victoria.dev/blog/how-to-create-a-self-documenting-makefile/
 
-setup: ## Virtualenvs, ANSIBLE logs, env vars etc
-setup: ## 
-	echo "\n\nActivate a virtualenv if required\n"
-	echo "Consider export ANSIBLE_LOG_PATH=/tmp/ansible_base_aap2_infra_$(GUID).log\n\n"
+env: ## Confirm env setup
+	@echo "\n\nActivate a virtualenv if required\n"
+	@type python3
+	@printf "Python3 version is: "
+	@python3 --version
+	@type ansible
+	@ansible --version
+	@printf "ENV VARS containing ANSIBLE: "
+	@-env | grep ANSIBLE || echo "None"
 
-my-env: ## Confirm env setup
-my-env: ## Could add extra env vars like `env | grep ANSIBLE`
-my-env: ## 
-	type python3
-	printf "Python3 version is: "
-	python3 --version
-	type ansible
-	ansible --version
-	env | grep ANSIBLE 
-
-deploy: ## Deploy ent-demo-automate-the-enterprise
-deploy: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
-deploy: ## 
-	cd ../../.. ; \
-	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log; \
-	ansible-playbook $(PLAYBOOK_DIR)/main.yml \
-		-e @$(VARS_FILE) \
-		-e @$(SECRETS_FILE) \
-		-e output_dir=$(OUTPUT_DIR) \
-		-e env_type=$(ENV_TYPE) \
-		$(EXTRA_ARGS)
-
-deploy-fast: ## Deploy without package updates etc
-deploy-fast: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
-deploy-fast: ## 
+ansible-execute: ## Execute ansible-playbook with PLAYBOOK of choice
 	cd ../../.. ; \
 	mkdir -p $(OUTPUT_DIR); \
 	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log; \
-	ansible-playbook $(PLAYBOOK_DIR)/main.yml \
+		ansible-playbook $(PLAYBOOK_DIR)/$(PLAYBOOK) \
 		-e @$(VARS_FILE) \
 		-e @$(SECRETS_FILE) \
 		-e output_dir=$(OUTPUT_DIR) \
 		-e env_type=$(ENV_TYPE) \
-		-e update_packages=false \
-		$(EXTRA_ARGS)
+		$(USER_EXTRA_ARGS) $(EXTRA_ARGS)
 
-destroy: ## Destroy ent-demo-automate-the-enterprise
-destroy: ## See README.adoc for recommended contents of ~/secrets/secret-aws-ate-no-sandbox.yml 
-destroy: ## 
-	cd ../../.. ; \
-	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log; \
-	ansible-playbook $(PLAYBOOK_DIR)/destroy.yml \
-		-e @$(VARS_FILE) \
-		-e @$(SECRETS_FILE) \
-		-e env_type=$(ENV_TYPE) \
-		$(EXTRA_ARGS)
+deploy: ## Deploy normally with package updates etc (can be slow)
+	$(MAKE) ansible-execute PLAYBOOK=main.yml 
 
-user-data: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
-user-data: ## Assumes an existing output_dir
-user-data: ## 
-	cat $(OUTPUT_DIR)/user-data.yaml
+deploy-fast: ## Deploy fast without package updates etc
+	$(MAKE) ansible-execute PLAYBOOK=main.yml EXTRA_ARGS="-e update_packages=false"	
+
+destroy: ## Destroy the config
+	$(MAKE) ansible-execute PLAYBOOK=destroy.yml
+
+user-data: ## Assumes an existing output_dir, outputs contenst of user-data.yaml
+	ansible-playbook rhdp.agnostic_utilities.agd_user_info.yml -e @$(OUTPUT_DIR)/user-data.yaml -e SANDBOX=$(SANDBOX)
 
 ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
-ssh-target: ## Assumes an existing output_dir
-ssh-target: ## 
-	echo "\n\nYou may want to 'sudo su - devops' - the primary user if you are on bastion\n\n"
-	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf $(TARGET)
-
-#	ssh -F $(OUTPUT_DIR)/aap2sbox0$(SANDBOX)/$(ENV_TYPE)_app2sbox0$(SANDBOX)_ssh_conf $(TARGET)
+	ssh -F $(OUTPUT_DIR)/$(ENV_YPE)_$(GUID)_ssh_conf $(TARGET)
 
 last-status: ## Output last status file
-last-status: ## Update status file via make status
-last-status: ## 
-	ls -l $(OUTPUT_DIR)/aap2sbox0$(SANDBOX)/status.txt
-	cat $(OUTPUT_DIR)/aap2sbox0$(SANDBOX)/status.txt
+	ls -l $(OUTPUT_DIR)/status.txt
+	cat $(OUTPUT_DIR)/status.txt
 
-# | awk '{ print \$6 " " $7 " " $8 " " $9 " " $10 }'
-update-status: ## Generate status
 update-status: ## Update status file
-update-status: ## 
-	cd ../../.. ; \
-	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log; \
-	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
-		-e ACTION=status \
-		-e @$(SECRETS_FILE) \
-		-e env_type=$(ENV_TYPE) \
-		$(EXTRA_ARGS)
+	$(MAKE) ansible-execute PLAYBOOK=lifecycle_entry_point.yml EXTRA_ARGS="-e ACTION=status"
 
-	# export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/aap2sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log; \
-#	ansible-playbook ../../../ansible/lifecycle_entry_point.yml \
 stop: ## Suspend, stop, instances
-stop: ## Restart with make start
-stop: ## 
-stop:
-	cd ../../.. ; \
-	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log; \
-	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
-		-e ACTION=stop \
-		-e @$(SECRETS_FILE) \
-		-e @$(SECRETS_BOOKBAG) \
-		-e env_type=$(ENV_TYPE) \
-		$(EXTRA_ARGS)
+	$(MAKE) ansible-execute PLAYBOOK=lifecycle_entry_point.yml EXTRA_ARGS="-e ACTION=stop"
 
-start: ## Suspend, start, instances
-start: ## Restart with make start
-start: ## 
-	cd ../../.. ; \
-	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/aap2sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log; \
-	ansible-playbook $(PLAYBOOK_DIR)/lifecycle_entry_point.yml \
-		-e ACTION=start \
-		-e @$(SECRETS_FILE) \
-		-e env_type=$(ENV_TYPE) \
-		$(EXTRA_ARGS)
+start: ## Start stopped instances
+	$(MAKE) ansible-execute PLAYBOOK=lifecycle_entry_point.yml EXTRA_ARGS="-e ACTION=start"
 
-bounce: ## Bounce the deploy 
-bounce: ## IE stop then start
-bounce: ## 
+bounce: ## Bounce the deploy IE stop then start
 bounce: stop start
 
 relog: ## Zero out the ANSIBLE_LOG_PATH log file
-relog: ## 
 	rm $(OUTPUT_DIR)/aap2sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log
 
-exit-make-help: ## You're in less - type q to exit
