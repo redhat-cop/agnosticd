@@ -1,7 +1,7 @@
 TODO Application with Quarkus HELM Chart repo
 =========
 
-This role will deploy the TODO Application with Quarkus HELM Chart repo. This is an example application based on a Todo list where the different tasks are created, read, updated, or deleted from the database. 
+This is a simple TODO application that allows users to create, read, update, and delete tasks from a database. The application is built using the Quarkus framework, which is a Kubernetes-native Java framework. The application is also packaged as a Helm chart, which makes it easy to deploy and manage on Kubernetes.
 
 See The [TODO Application with Quarkus HELM Chart repo](https://github.com/tosin2013/todo-demo-app-helmrepo/blob/main/openshift-pipelines/README.md) for use of this demo.
 
