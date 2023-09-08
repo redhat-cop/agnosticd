@@ -100,6 +100,7 @@
             - nmcli con down provisioning
             - nmcli con up provisioning
             - sleep 180
+            - rm /etc/sysconfig/network-scripts/ifcfg-eth[012] || echo "ok"
 
 
         - name: Create pull secret file
@@ -284,10 +285,30 @@
             chdir: /home/lab-user/install/
           loop:
             - htpasswd -c -B -b users.htpasswd developer r3dh4t1!
-            - /usr/local/bin/oc apply secret generic htpass-secret --from-file=htpasswd=users.htpasswd -n openshift-config
+            - /usr/local/bin/oc create secret generic htpass-secret --from-file=htpasswd=users.htpasswd -n openshift-config
             - /usr/local/bin/oc apply -f htpasswd.yaml
             - /usr/local/bin/oc adm policy add-cluster-role-to-user cluster-admin developer
 
+- name: Workaround for issue INC2244178
+  hosts: bastions
+  become: true
+  tasks:
+    - name: Configure OCS
+      when: purpose != "build"
+      block:
+        - name: Copy dhcpd.conf file
+          copy:
+            src: dhcpd.conf
+            dest: /etc/dhcp/dhcpd.conf
+
+        - name: Restart dhcpd service
+          service:
+            name: dhcpd
+            state: restarted
+            enabled: yes
+
+        - name: Configure the provisioning network
+          shell: rm /etc/sysconfig/network-scripts/ifcfg-eth[012] || echo "ok"
 
 - name: Approve CSR and Configure OCS
   hosts: bastions
@@ -316,19 +337,15 @@
             jid: "{{ approve_csr.ansible_job_id }}"
           register: job_result
           until: job_result.finished
-          retries: 150
+          retries: 600
 
 
         - name: Tag nodes for OCS
           shell: "{{ item }}"
-          retries: 60
-          delay: 30
-          register: result
-          until: result.rc == 0
           loop:
-            - /usr/local/bin/oc label nodes worker-0 cluster.ocs.openshift.io/openshift-storage='' --overwrite
-            - /usr/local/bin/oc label nodes worker-1 cluster.ocs.openshift.io/openshift-storage='' --overwrite 
-            - /usr/local/bin/oc label nodes worker-2 cluster.ocs.openshift.io/openshift-storage='' --overwrite
+            - /usr/local/bin/oc label nodes worker-0 cluster.ocs.openshift.io/openshift-storage=''
+            - /usr/local/bin/oc label nodes worker-1 cluster.ocs.openshift.io/openshift-storage=''
+            - /usr/local/bin/oc label nodes worker-2 cluster.ocs.openshift.io/openshift-storage=''
 
         - name: Copy files to configure OCS with Local Volumes
           copy:
@@ -340,62 +357,28 @@
             - 3_ocs_operator.yaml
             - 4_ocs_cluster.yaml
 
-
-        - name: Remove taints related to MTU
-          script: files/remove_taints.sh
-
         - name: Configure Local Storage Operator
-          shell: "/usr/local/bin/oc apply -f 1_local_storage_operator.yaml"
-          retries: 60
-          delay: 30
-          register: result
-          until: result.rc == 0
+          shell: "/usr/local/bin/oc create -f 1_local_storage_operator.yaml"
           args:
             chdir: /home/lab-user/install/
 
         - name: Configure Logical Volumes
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
           shell: "/usr/local/bin/oc create -f 2_logical_volume.yaml"
-          retries: 10
-=======
-          shell: "/usr/local/bin/oc replace -f 2_logical_volume.yaml"
-=======
-          shell: "/usr/local/bin/oc create -f 2_logical_volume.yaml"
-<<<<<<< HEAD
->>>>>>> fd39e9fb8 (New version)
           retries: 30
->>>>>>> da9697e3a (Updated)
-=======
-=======
-          shell: "/usr/local/bin/oc apply -f 2_logical_volume.yaml"
->>>>>>> 0e45cab5d (Update retries)
-          retries: 60
->>>>>>> 435f64b0e (Update locking)
-=======
-          shell: "/usr/local/bin/oc apply -f 2_logical_volume.yaml"
-          retries: 60
->>>>>>> 6ac4bc0c57ee65c726a3aee907e778de42d5213c
-          delay: 30
+          delay: 60
           register: result
           until: result.rc == 0
           args:
             chdir: /home/lab-user/install/
 
         - name: Configure OCS Operator
-          shell: "/usr/local/bin/oc apply -f 3_ocs_operator.yaml"
-          retries: 60
-          delay: 30
-          register: result
-          until: result.rc == 0
+          shell: "/usr/local/bin/oc create -f 3_ocs_operator.yaml"
           args:
             chdir: /home/lab-user/install/
 
 
         - name: Configure OCS Cluster
-          shell: "/usr/local/bin/oc apply -f 4_ocs_cluster.yaml"
+          shell: "/usr/local/bin/oc create -f 4_ocs_cluster.yaml"
           retries: 10
           delay: 30
           register: result
@@ -414,7 +397,7 @@
             /usr/local/bin/oc patch storageclass ocs-storagecluster-ceph-rbd -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "true"}}}'
           args:
             chdir: /home/lab-user/install/
-          retries: 30
+          retries: 10
           delay: 30
           register: result
           until: result.rc == 0
@@ -427,73 +410,37 @@
       yum:
         name: httpd
 
+    - name: Copy horizon.conf
+      template:
+        src: httpd/ssl.conf
+        dest: /etc/httpd/conf.d/ssl.conf
+
+    - name: Enable EPEL
+      dnf:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
+        state: present
+        disable_gpg_check: true
+
     - name: Allow SELinux rule to allow httpd to connect network
       shell: setsebool -P httpd_can_network_connect 1
 
-    - name: Self generate certificate
-      when: cloud_provider == "openshift_cnv"
-      block:
-      - name: Copy ssl.conf
-        template:
-          src: httpd/ssl_openshift_cnv.conf
-          dest: /etc/httpd/conf.d/ssl.conf
+    - name: install certbot
+      yum:
+        name: "certbot"
 
+    - name: Ensure httpd is stopped
+      service:
+        name: httpd
+        state: stopped
 
-#      - name: Create certificate
-#        command: >
-#          openssl req -newkey rsa:4096 -nodes -sha256 -keyout cert.key -x509 -days 365 -out cert.crt -subj "/C=US/ST=NorthCarolina/L=Raleigh/O=Red Hat/OU=Marketing/CN=provision.ocp.example.com" -addext "subjectAltName = DNS:provision.ocp.example.com" -addext "certificatePolicies = 1.2.3.4"
-#        args:
-#          chdir: "/etc/ssl/certs/"
+    - name: Generate certificate using certbot
+      command: certbot certonly  --standalone -d console-openshift-console.apps.{{ guid }}.dynamic.opentlc.com,oauth-openshift.apps.{{ guid }}.dynamic.opentlc.com -m josegonz@redhat.com --agree-tos -n
 
-      - name: Ensure httpd is stopped
-        service:
-          name: httpd
-          state: stopped
-
-      - name: Generate certificate using certbot
-        command: certbot certonly  --standalone -d console-openshift-console.{{ guid }}.apps.{{ openshift_cnv_apps_domain }},oauth-openshift.{{ guid }}.apps.{{ openshift_cnv_apps_domain }} -m josegonz@redhat.com --agree-tos -n
-
-      - name: Start and enable httpd
-        service:
-          name: httpd
-          state: restarted
-          enabled: yes
-
-
-
-
-    - name: Install and use certbot
-      when: cloud_provider == "osp"
-      block:
-      - name: Copy ssl.conf
-        template:
-          src: httpd/ssl.conf
-          dest: /etc/httpd/conf.d/ssl.conf
-
-      - name: Enable EPEL
-        dnf:
-          name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
-          state: present
-          disable_gpg_check: true
-
-
-      - name: install certbot
-        yum:
-          name: "certbot"
-
-      - name: Ensure httpd is stopped
-        service:
-          name: httpd
-          state: stopped
-
-      - name: Generate certificate using certbot
-        command: certbot certonly  --standalone -d console-openshift-console.apps.{{ guid }}.dynamic.opentlc.com,oauth-openshift.apps.{{ guid }}.dynamic.opentlc.com -m josegonz@redhat.com --agree-tos -n
-
-      - name: Start and enable httpd
-        service:
-          name: httpd
-          state: restarted
-          enabled: yes
+    - name: Start and enable httpd
+      service:
+        name: httpd
+        state: restarted
+        enabled: yes
 
 
 - name: Import playbook tests
