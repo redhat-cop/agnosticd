@@ -184,7 +184,12 @@ spec:
   sourceNamespace: openshift-marketplace
   startingCSV: web-terminal.v1.8.0
 EOF
-oc create namespace openshift-terminal
+cat <<EOF | oc apply -f -
+kind: Namespace
+metadata:
+  creationTimestamp: null
+  name: openshift-terminal
+EOF
 until oc get DevWorkspace; do sleep 30; done
 sleep 30
 cat << EOF | oc apply -f -
