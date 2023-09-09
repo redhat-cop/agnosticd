@@ -185,9 +185,9 @@ spec:
   startingCSV: web-terminal.v1.8.0
 EOF
 cat <<EOF | oc apply -f -
+apiVersion: v1
 kind: Namespace
 metadata:
-  creationTimestamp: null
   name: openshift-terminal
 EOF
 until oc get DevWorkspace; do sleep 30; done
