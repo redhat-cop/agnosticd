@@ -1,4 +1,6 @@
 #!/bin/sh -x
+oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
+sleep 120
 READY=$((oc get nodes || echo NotReady) |grep -c " Ready ")
 echo "Ready servers: $READY"
 while [ $READY -ne 6 ]; do
