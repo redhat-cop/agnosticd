@@ -1,6 +1,6 @@
-NOTREADY=$((oc get nodes || echo NotReady) |grep -c NotReady)
-while [ $NOTREADY -gt 0 ]; do
+READY=$((oc get nodes || echo NotReady) |grep -c Ready)
+while [ $READY -ne 6 ]; do
         oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
-        NOTREADY=$((oc get nodes || echo NotReady) |grep -c NotReady)
+        READY=$((oc get nodes || echo NotReady) |grep -c Ready)
         sleep 10
 done
