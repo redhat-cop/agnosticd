@@ -35,40 +35,9 @@
       set_fact:
         pool_subscription_id: "{{ assignedsubscription.subscriptions[0].subscription_id }}"
 
-    - name: Get application info
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_adapplication_info:
-        auth_source: env
-        identifier_uri: "api://openenv-{{ guid }}"
-        tenant: "{{ azure_tenant }}"
-      register: azapp
-
-    - name: Delete application
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      when: azapp.applications|length>0
-      azure.azcollection.azure_rm_adapplication:
-        auth_source: env
-        tenant: "{{ azure_tenant }}"
-        app_id: "{{ azapp.applications[0].app_id }}"
-        state: absent
-      ignore_errors: true
-
-    #- name: Get ARO application info
-    #  azure.azcollection.azure_rm_adapplication_info:
-    #    auth_source: env
-    #    identifier_uri: "api://openenv-aro-{{ guid }}"
-    #    tenant: "{{ azure_tenant }}"
-    #  register: azaroapp
-
-    #- name: Delete ARO application
-    #  when: azaroapp.applications|length>0
-    #  azure.azcollection.azure_rm_adapplication:
-    #    auth_source: env
-    #    tenant: "{{ azure_tenant }}"
-    #    app_id: "{{ azaroapp.applications[0].app_id }}"
-    #    state: absent
+    - name: Switch Subscriptions
+      ansible.builtin.command: >
+        az account set -s "{{ pool_subscription_id }}"
 
     - name: Clean up DNS zone
       command: >
@@ -88,6 +57,25 @@
         zone_name: "{{ azure_root_dns_zone }}"
         state: absent
 
+    - name: Get all resource groups in the subscription
+      environment:
+        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+      azure.azcollection.azure_rm_resourcegroup_info:
+        auth_source: env
+        tenant: "{{ azure_tenant }}"
+      register: allresourcegroups
+
+    - name: Write out all resource groups
+      debug:
+        msg: "{{ allresourcegroups }}"
+
+    - name: Empty Resource Group
+      when: allresourcegroups.resourcegroups|length>0
+      include_tasks: empty_resource_group.yml
+      vars:
+        az_resource_group: "{{ item.name }}"
+      loop: "{{ allresourcegroups.resourcegroups }}"
+
     - name: Get list of locks in the subscription
       environment:
         AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
@@ -100,24 +88,21 @@
       when: r_subscription_locks.locks|length>0
       environment:
         AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_lock:
-        auth_source: env
-        name: "{{ item.name }}"
-        managed_resource_id: "/subscriptions/{{ pool_subscription_id }}"
-        state: absent
+      ansible.builtin.command: >
+        az lock delete --name {{ item.name }} --ids {{ item.id }}
       loop: "{{ r_subscription_locks.locks }}"
 
-    - name: Get all resource groups in the subscription
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_resourcegroup_info:
-        auth_source: env
-        tenant: "{{ azure_tenant }}"
-      register: allresourcegroups
-
-    - name: Write out all resource groups
-      debug:
-        msg: "{{ allresourcegroups }}"
+    # Leave here until azure fixes the collection
+    #- name: Delete all locks in the subscription
+    #  when: r_subscription_locks.locks|length>0
+    #  environment:
+    #    AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+    #  azure.azcollection.azure_rm_lock:
+    #    auth_source: env
+    #    name: "{{ item.name }}"
+    #    managed_resource_id: "{{ item.id }}"
+    #    state: absent
+    #  loop: "{{ r_subscription_locks.locks }}"
 
     - name: Delete all resource groups owned by the subscription (RG's created by the lab user)
       when: allresourcegroups.resourcegroups|length>0
@@ -145,10 +130,6 @@
         id: "{{ azure_subscription_id }}"
       register: management_subscription
 
-    - name: Log out of Azure CLI
-      command: >
-        az logout
-
     - name: Get the user's object from Active Directory
       azure.azcollection.azure_rm_aduser_info:
         auth_source: env
@@ -175,7 +156,25 @@
         state: absent
       loop: "{{ role_assignments.roleassignments }}"
 
+    - name: Get all azure applications
+      azure.azcollection.azure_rm_adapplication_info:
+        auth_source: cli
+        tenant: "{{ azure_tenant }}"
+      register: all_apps
+
+    - ansible.builtin.set_fact: oe_app_reg="api://openenv-{{ guid }}"
+    - ansible.builtin.set_fact: oe_aro_app_reg="api://openenv-aro-{{ guid }}"
+    - name: Delete open environment app registrations
+      ansible.builtin.command: >-
+        az rest --method DELETE --url https://graph.microsoft.com/v1.0/applications/{{ item.object_id }}
+      with_items: "{{ all_apps.applications }}"
+      when: item.app_display_name == oe_app_reg or item.app_display_name == oe_aro_app_reg
+
     - name: Remove pool allocation from the database
       ansible.builtin.uri:
         url: "{{ az_function_release }}{{ project_tag }}/{{ az_pool_id }}?code={{ azure_pool_api_secret }}"
       ignore_errors: yes
+
+    - name: Log out of Azure CLI
+      command: >
+        az logout

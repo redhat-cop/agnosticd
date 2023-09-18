@@ -54,16 +54,16 @@ Including an example of how to use your role (for instance, with variables passe
     include_role:
       name: ../../roles/host-lets-encrypt-certs
     vars:
-    - acme_domain: "master.example.opentlc.com"
-    - acme_production: False
-    - acme_remote_dir: "/root"
-    - acme_cache_cert_file: "/tmp/server.cert"
-    - acme_cache_key_file: "/tmp/server.key"
-    - acme_cache_ca_file: "/tmp/server_ca.cer"
-    - acme_cache_fullchain_file: "/tmp/fullchain.cer"
-    - acme_cache_archive_file: "/tmp/acme.tar.gz"
-    - acme_renew_automatically: False
-    - acme_force_issue: False
+      acme_domain: "master.example.opentlc.com"
+      acme_production: False
+      acme_remote_dir: "/root"
+      acme_cache_cert_file: "/tmp/server.cert"
+      acme_cache_key_file: "/tmp/server.key"
+      acme_cache_ca_file: "/tmp/server_ca.cer"
+      acme_cache_fullchain_file: "/tmp/fullchain.cer"
+      acme_cache_archive_file: "/tmp/acme.tar.gz"
+      acme_renew_automatically: False
+      acme_force_issue: False
 
 - name: Request Let's Encrypt Wildcard Certificates
   hosts: quay
@@ -73,18 +73,18 @@ Including an example of how to use your role (for instance, with variables passe
     include_role:
       name: ../ansible/roles/host-lets-encrypt-certs
     vars:
-    - acme_wildcard_domain: "*.apps.example.opentlc.com"
-    - acme_aws_access_key: "<AWS ACCESS KEY>"
-    - acme_aws_secret_access_key: "<AWS_SECRET_ACCESS_KEY>"
-    - acme_production: False
-    - acme_remote_dir: "/root"
-    - acme_cache_cert_file: "/tmp/server.cert"
-    - acme_cache_key_file: "/tmp/server.key"
-    - acme_cache_ca_file: "/tmp/server_ca.cer"
-    - acme_cache_fullchain_file: "/tmp/fullchain.cer"
-    - acme_cache_archive_file: "/tmp/acme.tar.gz"
-    - acme_renew_automatically: False
-    - acme_force_issue: False
+      acme_wildcard_domain: "*.apps.example.opentlc.com"
+      acme_aws_access_key: "<AWS ACCESS KEY>"
+      acme_aws_secret_access_key: "<AWS_SECRET_ACCESS_KEY>"
+      acme_production: False
+      acme_remote_dir: "/root"
+      acme_cache_cert_file: "/tmp/server.cert"
+      acme_cache_key_file: "/tmp/server.key"
+      acme_cache_ca_file: "/tmp/server_ca.cer"
+      acme_cache_fullchain_file: "/tmp/fullchain.cer"
+      acme_cache_archive_file: "/tmp/acme.tar.gz"
+      acme_renew_automatically: False
+      acme_force_issue: False
 
 - name: Request Both Let's Encrypt Static and Wildcard Certificates
   hosts: quay
@@ -94,17 +94,17 @@ Including an example of how to use your role (for instance, with variables passe
     include_role:
       name: ../ansible/roles/host-lets-encrypt-certs
     vars:
-    - acme_domain: "master.example.opentlc.com"
-    - acme_wildcard_domain: "*.apps.example.opentlc.com"
-    - acme_aws_access_key: "<AWS ACCESS KEY>"
-    - acme_aws_secret_access_key: "<AWS_SECRET_ACCESS_KEY>"
-    - acme_production: False
-    - acme_remote_dir: "/root"
-    - acme_cache_cert_file: "/tmp/server.cert"
-    - acme_cache_key_file: "/tmp/server.key"
-    - acme_cache_ca_file: "/tmp/server_ca.cer"
-    - acme_cache_fullchain_file: "/tmp/fullchain.cer"
-    - acme_cache_archive_file: "/tmp/acme.tar.gz"
-    - acme_renew_automatically: False
-    - acme_force_issue: False
+      acme_domain: "master.example.opentlc.com"
+      acme_wildcard_domain: "*.apps.example.opentlc.com"
+      acme_aws_access_key: "<AWS ACCESS KEY>"
+      acme_aws_secret_access_key: "<AWS_SECRET_ACCESS_KEY>"
+      acme_production: False
+      acme_remote_dir: "/root"
+      acme_cache_cert_file: "/tmp/server.cert"
+      acme_cache_key_file: "/tmp/server.key"
+      acme_cache_ca_file: "/tmp/server_ca.cer"
+      acme_cache_fullchain_file: "/tmp/fullchain.cer"
+      acme_cache_archive_file: "/tmp/acme.tar.gz"
+      acme_renew_automatically: False
+      acme_force_issue: False
 ```
