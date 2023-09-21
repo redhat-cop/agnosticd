@@ -1,0 +1,102 @@
+---
+- name: Init AWS account for ROSA
+  ansible.builtin.command: >-
+    /usr/local/bin/rosa init
+
+- name: Get list of available ROSA versions
+  ansible.builtin.command: >-
+    /usr/local/bin/rosa list versions -o json
+  register: r_rosa_versions
+
+- name: Set default facts for ROSA version
+  ansible.builtin.set_fact:
+    rosa_version_to_install: ""
+    rosa_ocp_cli_version: "{{ r_rosa_versions.stdout | from_json | json_query(query) }}"
+  vars:
+    query: "[?default==`true`]"
+
+- name: Set ROSA version to install to specific version
+  when:
+  - rosa_version | default("") | length > 0
+  - rosa_version | default("") != "latest"
+  ansible.builtin.set_fact:
+    rosa_version_to_install: "{{ rosa_version }}"
+    rosa_ocp_cli_version: "{{ rosa_version }}"
+
+- name: Set ROSA version to latest available
+  when: rosa_version | default("") == "latest"
+  ansible.builtin.set_fact:
+    rosa_version_to_install: "{{ (r_rosa_versions.stdout | from_json) [0].raw_id }}"
+    rosa_ocp_cli_version: "{{ (r_rosa_versions.stdout | from_json) [0].raw_id }}"
+
+- name: Print ROSA version to install
+  ansible.builtin.debug:
+    msg: "{{ item }}"
+  loop:
+  - "ROSA Version to be installed: '{{ rosa_version_to_install }}'."
+  - "OCP CLI to be installed:      '{{ rosa_ocp_cli_version}}'."
+
+- name: Create ROSA account roles
+  ansible.builtin.command: >-
+    /usr/local/bin/rosa create account-roles
+    --force-policy-creation
+    --mode auto
+    --yes
+
+- name: Create ROSA Cluster with default OpenShift version
+  when: rosa_version_to_install | default("") | length == 0
+  ansible.builtin.command: >-
+    /usr/local/bin/rosa create cluster
+    --cluster-name {{ rosa_cluster_name }}
+    --region {{ aws_region }}
+    --sts
+    --mode auto
+    --yes
+  register: r_rosa_create_status
+  until: r_rosa_create_status.rc == 0
+  retries: 10
+  delay: 60
+
+- name: Create ROSA Cluster with latest or specific OpenShift version
+  when: rosa_version_to_install | default("") | length > 0
+  ansible.builtin.command: >-
+    /usr/local/bin/rosa create cluster
+    --cluster-name {{ rosa_cluster_name }}
+    --region {{ aws_region }}
+    --version {{ rosa_version_to_install }}
+    --sts
+    --mode auto
+    --yes
+  register: r_rosa_create_status
+  until: r_rosa_create_status.rc == 0
+  retries: 10
+  delay: 60
+
+- name: Wait for ROSA installer completion
+  ansible.builtin.command: >-
+    /usr/local/bin/rosa describe cluster
+    --cluster {{ rosa_cluster_name }}
+    -o json
+  register: r_rosa_installer_status
+  until:
+  - (r_rosa_installer_status.stdout | from_json).status is defined
+  - (r_rosa_installer_status.stdout | from_json).status.state is defined
+  - (r_rosa_installer_status.stdout | from_json).status.state == "ready"
+  retries: 120
+  delay: 60
+
+- name: Create ROSA admin user
+  ansible.builtin.shell: "/usr/local/bin/rosa create admin --cluster {{ rosa_cluster_name }} | grep 'oc login' | awk '{print $7}'"
+  register: r_rosa_admin_result
+
+- name: Save ROSA admin password
+  ansible.builtin.set_fact:
+    rosa_admin_password: "{{ r_rosa_admin_result.stdout }}"
+
+- name: Get ROSA API URL
+  ansible.builtin.set_fact:
+    rosa_api_url: "{{ (r_rosa_installer_status.stdout | from_json).api.url }}"
+
+- name: Get ROSA console URL
+  ansible.builtin.set_fact:
+    rosa_console_url: "{{ (r_rosa_installer_status.stdout | from_json).console.url }}"
