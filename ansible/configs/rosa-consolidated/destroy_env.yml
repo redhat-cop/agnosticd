@@ -1,0 +1,78 @@
+---
+- name: Destroy environment on AWS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_DEFAULT_REGION: "{{ aws_region_final | default(aws_region) }}"
+  tasks:
+  - name: Run infra-ec2-create-inventory role
+    ansible.builtin.include_role:
+      name: infra-ec2-create-inventory
+
+  - name: Create local ssh provision facts (key already exists)
+    when: ssh_provision_key_name is undefined
+    ansible.builtin.include_role:
+      name: create_ssh_provision_key
+
+  - name: SSH config setup
+    when:
+    - groups["bastions"] is defined
+    - groups["bastions"] | length > 0
+    ansible.builtin.include_role:
+      name: infra-common-ssh-config-generate
+
+- name: Set ssh extra args for all hosts, use ssh_config just created
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  tasks:
+  - name: Add -F option ansible_ssh_extra_args
+    ansible.builtin.set_fact:
+      ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|d() }} -F {{ hostvars['localhost'].ansible_ssh_config }}"
+
+- name: Start all EC2 instances if they are stopped
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_DEFAULT_REGION: "{{ aws_region_final | default(aws_region) }}"
+  tasks:
+  - ansible.builtin.include_tasks: ec2_instances_start.yaml
+
+- name: Destroy ROSA
+  hosts: bastions
+  gather_facts: false
+  become: false
+  environment:
+    AWS_DEFAULT_REGION: "{{ aws_region }}"
+  tasks:
+  - name: Check for ROSA binary
+    ansible.builtin.stat:
+      path: /usr/local/bin/rosa
+    register: r_rosa_check
+    ignore_errors: true
+
+  - name: Get a list of ROSA clusters in the account
+    when: r_rosa_check.stat.exists
+    ansible.builtin.command: "/usr/local/bin/rosa list clusters -o json"
+    register: r_rosa_list
+
+  - name: Print number of clusters to uninstall
+    ansible.builtin.debug:
+      msg: "Found {{ r_rosa_list.stdout | from_json | length }} clusters to uninstall"
+
+  - name: Try to gracefully uninstall ROSA cluster
+    when: r_rosa_check.stat.exists
+    ansible.builtin.include_tasks: uninstall_rosa.yml
+    loop: "{{ r_rosa_list.stdout | from_json }}"
+
+- name: Import cloud provider specific destroy playbook
+  ansible.builtin.import_playbook: "../../cloud_providers/{{ cloud_provider }}_destroy_env.yml"
