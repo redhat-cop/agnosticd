@@ -1,59 +1,12 @@
 ---
-- name: Init AWS account for ROSA HCP
-  ansible.builtin.command: >-
-    /usr/local/bin/rosa init
-
-- name: Get available regions for ROSA
-  ansible.builtin.command: /usr/local/bin/rosa list regions --output json
-  register: r_rosa_regions
-
-- name: Find regions that support ROSA with Hosted Control Planes
-  set_fact:
-    rosa_hcp_regions: "{{ r_rosa_regions.stdout | from_json | json_query(query) }}"
-  vars:
-    query: "[?supports_hypershift == `true`].id"
-
 - name: Print regions supporting HCP Rosa
   ansible.builtin.debug:
-    msg: "{{ rosa_hcp_regions }}"
+    msg: "{{ _rosa_hcp_regions }}"
 
 - name: Check if requested region is supported
-  when: not aws_region in rosa_hcp_regions
+  when: not aws_region in _rosa_hcp_regions
   ansible.builtin.fail:
     msg: "Requested region '{{ aws_region }}' is not supported by ROSA for Hosted Control Planes."
-
-- name: Get list of available ROSA HCP versions
-  ansible.builtin.command: >-
-    /usr/local/bin/rosa list versions -o json
-  register: r_rosa_versions
-
-- name: Set default facts for ROSA HCP version
-  ansible.builtin.set_fact:
-    rosa_version_to_install: ""
-    rosa_ocp_cli_version: "{{ r_rosa_versions.stdout | from_json | json_query(query) }}"
-  vars:
-    query: "[?default==`true`]"
-
-- name: Set ROSA HCP version to install to specific version
-  when:
-  - rosa_version | default("") | length > 0
-  - rosa_version | default("") != "latest"
-  ansible.builtin.set_fact:
-    rosa_version_to_install: "{{ rosa_version }}"
-    rosa_ocp_cli_version: "{{ rosa_version }}"
-
-- name: Set ROSA HCP version to latest available
-  when: rosa_version | default("") == "latest"
-  ansible.builtin.set_fact:
-    rosa_version_to_install: "{{ (r_rosa_versions.stdout | from_json) [0].raw_id }}"
-    rosa_ocp_cli_version: "{{ (r_rosa_versions.stdout | from_json) [0].raw_id }}"
-
-- name: Print ROSA HCP version to install
-  ansible.builtin.debug:
-    msg: "{{ item }}"
-  loop:
-  - "ROSA HCP Version to be installed: '{{ rosa_version_to_install }}'."
-  - "OCP CLI to be installed:      '{{ rosa_ocp_cli_version}}'."
 
 - name: Clone ROSA HCP terraform files
   ansible.builtin.git:
@@ -133,16 +86,17 @@
 - name: Create ROSA HCP Cluster with default OpenShift version
   when: rosa_version_to_install | default("") | length == 0
   ansible.builtin.command: >-
-    /usr/local/bin/rosa create cluster \
-      --cluster-name=rosa-{{ guid }} \
-      --sts \
-      --mode=auto \
-      --yes \
-      --hosted-cp \
-      --region {{ aws_region }} \
-      --operator-roles-prefix rosa-{{ guid }} \
-      --oidc-config-id {{ rosa_oidc_id }} \
+    /usr/local/bin/rosa create cluster
+      --cluster-name=rosa-{{ guid }}
+      --sts
+      --mode=auto
+      --yes
+      --hosted-cp
+      --region {{ aws_region }}
+      --operator-roles-prefix rosa-{{ guid }}
+      --oidc-config-id {{ rosa_oidc_id }}
       --subnet-ids={{ rosa_subnets }}
+      {{ _rosa_create_cluster_extra_args }}
   register: r_rosa_create_status
   until: r_rosa_create_status.rc == 0
   retries: 10
@@ -151,17 +105,18 @@
 - name: Create ROSA HCP Cluster with latest or specific OpenShift version
   when: rosa_version_to_install | default("") | length > 0
   ansible.builtin.command: >-
-    /usr/local/bin/rosa create cluster \
-      --cluster-name=rosa-{{ guid }} \
-      --sts \
-      --mode=auto \
-      --yes \
-      --hosted-cp \
-      --version {{ rosa_version_to_install }} \
-      --region {{ aws_region }} \
-      --operator-roles-prefix rosa-{{ guid }} \
-      --oidc-config-id {{ rosa_oidc_id }} \
+    /usr/local/bin/rosa create cluster
+      --cluster-name=rosa-{{ guid }}
+      --sts
+      --mode=auto
+      --yes
+      --hosted-cp
+      --version {{ _rosa_version_to_install }}
+      --region {{ aws_region }}
+      --operator-roles-prefix rosa-{{ guid }}
+      --oidc-config-id {{ rosa_oidc_id }}
       --subnet-ids={{ rosa_subnets }}
+      {{ _rosa_create_cluster_extra_args }}
   register: r_rosa_create_status
   until: r_rosa_create_status.rc == 0
   retries: 10
@@ -171,7 +126,7 @@
   ansible.builtin.command: >-
     /usr/local/bin/rosa describe cluster
     --cluster {{ rosa_cluster_name }}
-    -o json
+    --output json
   register: r_rosa_installer_status
   until:
   - (r_rosa_installer_status.stdout | from_json).status is defined
@@ -180,34 +135,17 @@
   retries: 120
   delay: 60
 
-- name: Create ROSA HCP admin user
-  ansible.builtin.shell: "/usr/local/bin/rosa create admin --cluster {{ rosa_cluster_name }} | grep 'oc login' | awk '{print $7}'"
-  register: r_rosa_admin_result
-
-- name: Save ROSA HCP admin password
-  ansible.builtin.set_fact:
-    rosa_admin_password: "{{ r_rosa_admin_result.stdout }}"
-
-- name: Print cluster-admin password
-  ansible.builtin.debug:
-    msg: "Password for cluster-admin is '{{ rosa_admin_password }}'"
-
+# HCP install finishes well before all the cluster operators have
+# rolled out. Need to wait for the console to be available before
+# continuing
 - name: Wait for ROSA HCP console URL to be available
   ansible.builtin.command: >-
     /usr/local/bin/rosa describe cluster
     --cluster {{ rosa_cluster_name }}
-    -o json
+    --output json
   register: r_rosa_installer_status
   until:
   - (r_rosa_installer_status.stdout | from_json).console is defined
   - (r_rosa_installer_status.stdout | from_json).console.url is defined
   retries: 60
   delay: 60
-
-- name: Get ROSA HCP API URL
-  ansible.builtin.set_fact:
-    rosa_api_url: "{{ (r_rosa_installer_status.stdout | from_json).api.url }}"
-
-- name: Get ROSA HCP console URL
-  ansible.builtin.set_fact:
-    rosa_console_url: "{{ (r_rosa_installer_status.stdout | from_json).console.url }}"
