@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+from copy import deepcopy
 from ansible.errors import AnsibleFilterError
 from ansible.utils.display import Display
 from ansible.module_utils.six import string_types, integer_types
@@ -261,6 +262,72 @@ def agnosticd_get_all_images(image, predefined, done=None):
 
         return result
 
+def agnosticd_filter_out_installed_collections(requirements, installed_collections):
+    '''Remove collections from a requirement content that are already installed.
+
+    argument collections is a dict, usually output of the command:
+    ansible-galaxy collection list --format json
+    , ex:
+    {
+        "/usr/share/ansible/collections/ansible_collections": {
+            {
+                "community.general": {
+                "version": "6.3.0"
+                },
+                "openstack.cloud": {
+                "version": "2.0.0"
+                }
+            }
+        }
+    }
+    '''
+
+    requirements = deepcopy(requirements)
+    function_name = "agnosticd_remove_collection_already_installed"
+
+    if not isinstance(requirements, dict):
+        raise AnsibleFilterError(
+            '%s: requirement content arg should be a dict' %(function_name)
+        )
+    if not isinstance(installed_collections, dict):
+        raise AnsibleFilterError(
+            '%s: collections arg should be a dict' %(function_name)
+        )
+
+    if 'collections' not in requirements:
+        return requirements
+
+    installed = {}
+    for _, collections_ in installed_collections.items():
+        for collection, value in collections_.items():
+            if collection in installed:
+                continue
+            installed[collection] = value["version"]
+
+    keep_collections = []
+
+    for collection in requirements['collections']:
+        if 'name' not in collection:
+            continue
+
+        if collection['name'] not in installed:
+            # collection is not installed, keep it
+            keep_collections.append(collection)
+        else:
+            display.warning(
+                "skipping installation of %s==%s ; %s==%s already installed in EE"
+                %(collection['name'],
+                  collection['version'],
+                  collection['name'],
+                  installed[collection['name']])
+            )
+
+
+    requirements['collections'] = keep_collections
+
+    return requirements
+
+
 class FilterModule(object):
     ''' AgnosticD core jinja2 filters '''
 
@@ -272,4 +339,5 @@ class FilterModule(object):
             'equinix_metal_tags_to_dict': equinix_metal_tags_to_dict,
             'image_to_ec2_filters': image_to_ec2_filters,
             'agnosticd_get_all_images': agnosticd_get_all_images,
+            'agnosticd_filter_out_installed_collections': agnosticd_filter_out_installed_collections,
         }

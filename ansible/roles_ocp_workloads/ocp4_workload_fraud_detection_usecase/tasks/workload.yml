@@ -1,0 +1,202 @@
+---
+- name: Create required namespaces
+  kubernetes.core.k8s:
+    name: "{{ item }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+  loop:
+    - "{{ ocp4_workload.starburst.namespace }}"
+    - "{{ ocp4_workload.rhods.namespace }}"
+    - "{{ ocp4_workload.sub_spec_source_namespace }}"
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create rhods and starburst operatorgroups
+  kubernetes.core.k8s:
+    state: present
+    template: "{{ item }}"
+  loop:
+    - rhods/operatorgroup.yml.j2
+    - starburst/operator/operatorgroup.yml.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Extract console URL
+  k8s_info:
+    kind: DNSRecord
+  register: ocp4_workload_starburst_route_subdomain_r
+
+- set_fact:
+    # yamllint disable-line rule:line-length
+    ocp4_workload_starburst_route_url: "{{ ocp4_workload.starburst.namespace }}{{ ocp4_workload_starburst_route_subdomain_r.resources[0].spec.dnsName | trim | regex_search('\\.apps.*[^.]') }}"
+
+- name: Print and email starburst link and aws bucket name.
+  agnosticd_user_info:
+    msg: |
+        Take a note of the below link and S3 bucket which you would need later.
+        Starburst Query Editor Link:
+        http://{{ ocp4_workload.starburst.namespace }}-{{ ocp4_workload_starburst_route_url }}
+        AWS S3 bucket:
+        {{ aws_s3_bucket_name }}
+    data:
+      starburst_query_editor_link: "http://{{ ocp4_workload.starburst.namespace }}-{{ ocp4_workload_starburst_route_url }}"
+      starburst_s3_bucket_name: "{{ aws_s3_bucket_name }}"
+
+- name: Create objects for postgresql catalog
+  kubernetes.core.k8s:
+    state: present
+    template: postgres/postgres.yml.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create Starburst cache service secret
+  kubernetes.core.k8s:
+    state: present
+    template: starburst/cache/cache-secret.yml.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create objects for Starburst cache service from deployment config
+  kubernetes.core.k8s:
+    state: present
+    template: starburst/cache/cache-deploymentconfig.yml.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create Starburst cache service service
+  kubernetes.core.k8s:
+    state: present
+    template: starburst/cache/cache-service.yml.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Get Starburst cache service service info
+  kubernetes.core.k8s_info:
+    kind: Service
+    namespace: "{{ ocp4_workload.starburst.namespace }}"
+    name: "postgresql"
+  register: ocp4_workload_starburst_postgresql_service
+
+- name: Set the Starburst cache service IP and Port
+  set_fact:
+    postgresql_service_ip: "{{ ocp4_workload_starburst_postgresql_service.resources[0].spec.clusterIP }}"
+    postgresql_service_port: "{{ ocp4_workload_starburst_postgresql_service.resources[0].spec.ports[0].port }}"
+
+- name: Get postgres cache db data
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ ocp4_workload.starburst.namespace }}"
+    label_selectors:
+      - name=postgresql
+  register: r_service_db_pod
+  until: r_service_db_pod["resources"] is defined and (r_service_db_pod["resources"] | length > 0)
+  retries: 10
+  delay: 6
+
+- name: Wait until postgres cache db is up
+  kubernetes.core.k8s_exec:
+    namespace: "{{ ocp4_workload.starburst.namespace }}"
+    pod: "{{ r_service_db_pod.resources[0].metadata.name }}"
+    command: 'pg_isready'
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create starburst db in cache service
+  kubernetes.core.k8s_exec:
+    namespace: "{{ ocp4_workload.starburst.namespace }}"
+    pod: "{{ r_service_db_pod.resources[0].metadata.name }}"
+    command: psql -c "CREATE DATABASE starburst;"
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create rhods and starburst subscriptions
+  kubernetes.core.k8s:
+    state: present
+    template: "{{ item }}"
+  loop:
+    - starburst/operator/subscription.yml.j2
+    - rhods/subscription.yml.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create starburst CRs and associated resources
+  kubernetes.core.k8s:
+    state: present
+    template: "{{ item }}"
+  with_fileglob:
+    - "templates/starburst/operands/*.j2"
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Get postgresql catalog db data
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "postgres"
+    label_selectors:
+      - app=postgres
+  register: r_catalog_db_pod
+  until: r_catalog_db_pod["resources"] is defined and (r_catalog_db_pod["resources"] | length > 0)
+  retries: 10
+  delay: 6
+
+- name: Wait until postgresql catalog db is running
+  kubernetes.core.k8s_exec:
+    namespace: "postgres"
+    pod: "{{ r_catalog_db_pod.resources[0].metadata.name }}"
+    command: 'pg_isready'
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Copy transactions.csv to postgres pod
+  kubernetes.core.k8s_cp:
+    namespace: "postgres"
+    pod: "{{ r_catalog_db_pod.resources[0].metadata.name }}"
+    remote_path: /tmp
+    local_path: "{{ local_dataset_path.dest }}data/transactions.csv"
+
+- name: Create transactions table
+  kubernetes.core.k8s_exec:
+    namespace: "postgres"
+    pod: "{{ r_catalog_db_pod.resources[0].metadata.name }}"
+    command: 'psql postgres postgres -c "CREATE TABLE transactions (id SERIAL, Time INTEGER, Amount NUMERIC(10,2), Class INTEGER, PRIMARY KEY (id));"'
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Load csv into transactions table
+  kubernetes.core.k8s_exec:
+    namespace: "postgres"
+    pod: "{{ r_catalog_db_pod.resources[0].metadata.name }}"
+    command: "psql postgres postgres -c \"COPY transactions(id, Time, Amount, Class) FROM '/tmp/transactions.csv' DELIMITER ',' CSV HEADER;\""
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete

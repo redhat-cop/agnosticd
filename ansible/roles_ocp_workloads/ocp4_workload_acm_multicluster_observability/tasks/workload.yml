@@ -1,0 +1,118 @@
+---
+# Implement your Workload deployment tasks here
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- environment:
+    KUBECONFIG: "{{ tmp_kubeconfig }}"
+  block:
+    - name: Create MultCluster Observability Namespace
+      k8s:
+        state: present
+        definition: "{{ lookup('template','./templates/namespace_create.yml.j2') | from_yaml }}"
+
+    - name: Get pull-secret from openshift-config
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: pull-secret
+        namespace: openshift-config
+      register: pullsecret
+      retries: 10
+      delay: 5
+      until: pullsecret | length > 0
+
+    - name: Get the original cred secrets
+      set_fact:
+        original_secret: "{{ item.data }}"
+      with_items: "{{ pullsecret.resources }}"
+      no_log: true
+
+    - name: Get the dockerconfigjson info
+      set_fact:
+        secret_string: '{{ original_secret[".dockerconfigjson"] | b64decode | from_json }}'
+
+    - name: Create new secret
+      k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          data:
+            .dockerconfigjson: "{{ secret_string | to_json | b64encode }}"
+          kind: Secret
+          metadata:
+            name: multiclusterhub-operator-pull-secret
+            namespace: "{{ ocp4_workload_acm_multicluster_observability_namespace }}"
+          type: kubernetes.io/dockerconfigjson
+
+    - name: Check ODF is ready
+      k8s_info:
+      #  api_key: "{{ ocp_key_hub }}"
+      #  host: "{{ ocp_hub_api_url }}"
+        validate_certs: false
+        api_version: ocs.openshift.io/v1
+        kind: StorageCluster
+        name: ocs-storagecluster
+        namespace: openshift-storage
+      register: r_storagecluster
+    #- debug: var=r_storagecluster.resources.0.status.phase
+      until:
+        - r_storagecluster.resources.0.status.phase == "Ready"
+      retries: 30
+      delay: 30
+
+    - name: Check NooBaa is ready
+      k8s_info:
+       # api_key: "{{ ocp_key_hub }}"
+       # host: "{{ ocp_hub_api_url }}"
+        validate_certs: false
+        api_version: noobaa.io/v1alpha1
+        kind: NooBaa
+        name: noobaa
+        namespace: openshift-storage
+      register: r_noobaa
+
+      until:
+        - r_noobaa.resources.0.status.phase == "Ready"
+      retries: 30
+      delay: 30
+
+    - name: Create Object Bucket Claim
+      k8s:
+        state: present
+        definition: "{{ lookup('template','./templates/obc-observability.yml.j2') | from_yaml }}"
+
+    - name: Get Bucket information part 1
+      k8s_info:
+        api_version: v1
+        kind: ConfigMap
+        name: observer-bucket
+        namespace: "{{ ocp4_workload_acm_multicluster_observability_namespace }}"
+      register: r_bucket_cm
+#    - debug: var=r_bucket_cm
+
+    - name: Get Bucket information part 2
+      k8s_info:
+        api_version: v1
+        kind: Secret
+        name: observer-bucket
+        namespace: "{{ ocp4_workload_acm_multicluster_observability_namespace }}"
+      register: r_bucket_secret
+#    - debug: var=r_bucket_secret
+
+    - name: Create Thanos Object Storage Secret
+      k8s:
+        state: present
+        definition: "{{ lookup('template','./templates/thanos-object-storage-secret.yml.j2') | from_yaml }}"
+
+    - name: Create MultiCluster Observability for ACM
+      k8s:
+        state: present
+        definition: "{{ lookup('template','./templates/multiclusterobservability-cr.yml.j2') | from_yaml }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

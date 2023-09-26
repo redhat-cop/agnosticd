@@ -1,0 +1,109 @@
+---
+
+- name: Set internal facts
+  set_fact:
+    _internal_image_repo: >-
+     {{ ocp4_workload_devsecops_validated_pattern_docker_registry }}/{{
+        ocp4_workload_devsecops_validated_pattern_docker_username }}/globex-ui
+    _internal_manifest_repo: "{{ _ocp4_workload_devsecops_validated_pattern_gitea_repo_devsecops_url }}"
+    _internal_manifest_repo_name: "{{ ocp4_workload_devsecops_validated_pattern_gitea_username }}/securing-software-supply-chain"
+    _internal_manifest_file_dev: gitops/application/globex/overlays/dev/kustomization.yaml
+    _internal_manifest_file_prod: gitops/application/globex/overlays/prod/kustomization.yaml
+    _internal_manifest_file_fail: gitops/application/globex/overlays/fail/kustomization.yaml
+    _internal_git_repo_host: "{{ _ocp4_workload_devsecops_validated_pattern_gitea_hostname }}"
+    _internal_sonarqube_host_url: "{{ _ocp4_workload_devsecops_validated_pattern_sonarqube_host_url }}"
+    _internal_webhook_secret_key: "{{ common_password }}"
+    _internal_gitea_token: "{{ _ocp4_workload_devsecops_validated_pattern_gitea_token }}"
+    _internal_globex_ui_prod_image: "{{ ocp4_workload_devsecops_validated_pattern_docker_registry }}/{{ ocp4_workload_devsecops_validated_pattern_docker_username }}/globex-ui:app-mod-workshop" # yamllint disable-line rule:line-length
+    _internal_cyclone_host_url: "{{ ocp4_workload_devsecops_validated_pattern_cyclonedx_hostname }}"
+
+- name: Base64 encode basic auth
+  set_fact:
+    _internal_docker_registry: "{{ ocp4_workload_devsecops_validated_pattern_docker_registry }}"
+    _internal_docker_registry_username: "{{ ocp4_workload_devsecops_validated_pattern_docker_username }}"
+    _internal_docker_registry_password: "{{ ocp4_workload_devsecops_validated_pattern_docker_password }}"
+    _internal_docker_registry_auth: "{{ ocp4_workload_devsecops_validated_pattern_docker_username }}:{{ ocp4_workload_devsecops_validated_pattern_docker_password }}" # yamllint disable-line rule:line-length
+
+- name: Set docker config json
+  set_fact:
+    _internal_docker_config: "{{ lookup('template', 'templates/docker-config.json.j2') | to_nice_json | b64encode }}"
+
+- name: Base64 encode cosign public key
+  set_fact:
+    _internal_cosign_pub: "{{ lookup('file', '/tmp/cosign.pub') | b64encode  }}"
+
+- name: Clone application source code
+  block:
+  - name: Clone config repository
+    ansible.builtin.git:
+      accept_hostkey: true
+      force: true
+      repo: "{{ _ocp4_workload_devsecops_validated_pattern_gitea_repo_devsecops_url }}"
+      dest: "~/securing-software-supply-chain"
+      version: main
+    environment:
+      GIT_SSL_NO_VERIFY: "true"
+
+- name: Fetch template from remote host
+  include_tasks: fetch_and_apply_template.yml
+  loop:
+  - secret-image-registry.yaml
+  vars:
+    _folder: /home/ec2-user/securing-software-supply-chain/gitops/application/globex/base
+
+- name: Fetch template from remote host
+  include_tasks: fetch_and_apply_template.yml
+  loop:
+  - kustomization.yaml
+  vars:
+    _folder: /home/ec2-user/securing-software-supply-chain/gitops/application/globex/overlays/prod
+
+- name: Add new files to the repository
+  command:
+    chdir: >-
+      /home/ec2-user/securing-software-supply-chain
+    cmd: "git add ."
+  ignore_errors: true
+
+- name: Commit changes to the repository
+  command:
+    chdir: >-
+      /home/ec2-user/securing-software-supply-chain
+    cmd: >-
+      git commit -a -m 'Updates for starting scenario.'
+  ignore_errors: true
+
+- name: Push all changes back to the project repository
+  command:
+    chdir: >-
+      /home/ec2-user/securing-software-supply-chain
+    cmd: >-
+      git push {{ _ocp4_workload_devsecops_validated_pattern_gitea_repo_devsecops_url }}
+
+- name: Create initial prod globex-ui image
+  shell: |
+    podman pull quay.io/globex-recommendation/globex-recommendation-ui:app-mod-workshop
+    podman tag quay.io/globex-recommendation/globex-recommendation-ui:app-mod-workshop {{
+    ocp4_workload_devsecops_validated_pattern_docker_registry }}/{{
+    ocp4_workload_devsecops_validated_pattern_docker_username }}/globex-ui:app-mod-workshop
+    podman login -u {{ ocp4_workload_devsecops_validated_pattern_docker_username }} -p {{
+    ocp4_workload_devsecops_validated_pattern_docker_password }} {{
+    ocp4_workload_devsecops_validated_pattern_docker_registry }}
+    podman push {{ ocp4_workload_devsecops_validated_pattern_docker_registry }}/{{
+    ocp4_workload_devsecops_validated_pattern_docker_username }}/globex-ui:app-mod-workshop
+  register: r_image_copy
+  retries: 5
+  delay: 10
+  until: r_image_copy is not failed
+
+- name: Sign prod globex-ui image
+  shell: |
+    oc get secret signing-secrets -n openshift-pipelines -o 'go-template={% raw %}{{
+    index .data "cosign.key"}}{% endraw %}' | base64 --decode > /tmp/cosign.key
+    COSIGN_PASSWORD={{ ocp4_workload_devsecops_validated_pattern_cosign_password }} \
+    cosign sign --yes --key /tmp/cosign.key {{ ocp4_workload_devsecops_validated_pattern_docker_registry }}/{{
+    ocp4_workload_devsecops_validated_pattern_docker_username }}/globex-ui:app-mod-workshop
+  register: r_cosign
+  retries: 5
+  delay: 10
+  until: r_cosign is not failed

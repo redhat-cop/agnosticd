@@ -266,9 +266,9 @@ def test_dict_to_equinix_metal_tags():
     testcases = [
         [
             {
-                    "AnsibleGroup":"bastions",
-                    "ostype":"linux",
-                    "number": 2,
+                "AnsibleGroup":"bastions",
+                "ostype":"linux",
+                "number": 2,
             },
             [
                 "AnsibleGroup=bastions",
@@ -343,7 +343,6 @@ def test_agnosticd_get_all_images():
     ]
 
     for tc in testcases:
-        print("test suivant")
         assert(core.agnosticd_get_all_images(tc[0], predefined) == tc[1])
 
     error_testcases = [
@@ -353,3 +352,114 @@ def test_agnosticd_get_all_images():
     for tc in error_testcases:
         with pytest.raises(AnsibleFilterError):
             core.agnosticd_get_all_images(tc, predefined)
+
+def test_agnosticd_filter_out_installed_collections():
+    testcases = [
+        {
+            "requirements": {},
+            "installed_collections": {},
+            "result": {},
+        },
+        {
+            "requirements":
+            {
+                "collections": [
+                    {
+                        "name": "amazon.aws",
+                        "version": "2.2.0"
+                    },
+                    {
+                        "name": "ansible.posix",
+                        "version": "1.3.0"
+                    },
+                    {
+                        "name": "community.general",
+                        "version": "4.6.1"
+                    },
+                    {
+                        "name": "community.vmware",
+                        "version": "2.7.0"
+                    },
+                    {
+                        "name": "google.cloud",
+                        "version": "1.0.2"
+                    },
+                    {
+                        "name": "kubernetes.core",
+                        "version": "2.3.0"
+                    },
+                    {
+                        "name": "openstack.cloud",
+                        "version": "1.7.2"
+                    }
+                ],
+                "roles": [
+                    {
+                        "name": "ftl-injector",
+                        "src": "https://github.com/redhat-gpte-devopsautomation/ftl-injector",
+                        "version": "v0.17"
+                    }
+                ]
+            },
+            "installed_collections":
+            {
+                "/usr/share/ansible/collections/ansible_collections": {
+
+                "community.general": {
+                    "version": "6.3.0"
+                },
+                    "community.aws": {
+                        "version": "5.2.0"
+                    },
+                    "ansible.utils": {
+                        "version": "2.9.0"
+                    },
+                    "ansible.netcommon": {
+                        "version": "4.1.0"
+                    },
+                    "ansible.posix": {
+                        "version": "1.5.1"
+                    },
+                    "amazon.aws": {
+                        "version": "5.2.0"
+                    },
+                    "kubernetes.core": {
+                        "version": "2.4.0"
+                    },
+                    "azure.azcollection": {
+                        "version": "1.14.0"
+                    },
+                    "openstack.cloud": {
+                        "version": "2.0.0"
+                    }
+                }
+            }
+            ,
+            "result":
+            {
+                "collections": [
+                    {
+                        "name": "community.vmware",
+                        "version": "2.7.0"
+                    },
+                    {
+                        "name": "google.cloud",
+                        "version": "1.0.2"
+                    },
+                ],
+                "roles": [
+                    {
+                        "name": "ftl-injector",
+                        "src": "https://github.com/redhat-gpte-devopsautomation/ftl-injector",
+                        "version": "v0.17"
+                    }
+                ]
+            },
+        },
+    ]
+
+    for tc in testcases:
+        assert(
+            core.agnosticd_filter_out_installed_collections(
+                tc["requirements"], tc["installed_collections"]) == tc["result"]
+        )

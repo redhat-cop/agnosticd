@@ -1,19 +1,4 @@
 ---
-- name: Get machineset name
-  kubernetes.core.k8s_info:
-    kind: MachineSet
-    api_version: v1beta1
-  register: ocp_machineset
-
-- name: increase machinesets in ocp4 to meet portworx min requirements
-  kubernetes.core.k8s:
-    name: "{{ ocp_machineset.resources[0].metadata.name }}"
-    namespace: openshift-machine-api
-    kind: MachineSet
-    api_version: v1beta1
-    definition:
-      spec:
-        replicas: 3
 
 - name: Gather aws security group info
   amazon.aws.ec2_group_info:
@@ -35,6 +20,18 @@
     region: "{{ aws_region }}"
     rules:
       - proto: tcp
+        ports: 111
+        rule_desc: "{{ ocp4_workload_portworx_namespace }}"
+        group_id: "{{ sg_info.security_groups[0].group_id }}"
+      - proto: tcp
+        ports: 2049
+        rule_desc: "{{ ocp4_workload_portworx_namespace }}"
+        group_id: "{{ sg_info.security_groups[0].group_id }}"
+      - proto: tcp
+        ports: 20048
+        rule_desc: "{{ ocp4_workload_portworx_namespace }}"
+        group_id: "{{ sg_info.security_groups[0].group_id }}"
+      - proto: tcp
         ports: 17001 - 17020
         rule_desc: "{{ ocp4_workload_portworx_namespace }}"
         group_id: "{{ sg_info.security_groups[0].group_id }}"
@@ -44,25 +41,33 @@
         group_id: "{{ sg_info.security_groups[0].group_id }}"
 
 - name: find all existing IAM roles
-  community.aws.iam_role_info:
-    aws_access_key: "{{ aws_access_key_id }}"
-    aws_secret_key: "{{ aws_secret_access_key }}"
-    region: "{{ aws_region }}"
-  register: r_aws_iam_role_info
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+  shell: "aws iam list-roles --query 'Roles[].RoleName' --output text"
+  register: r_aws_iam_role_names
 
 - set_fact:
     # yamllint disable-line rule:line-length
-    ocp4_workload_portworx_iam_worker_role: "{{ r_aws_iam_role_info.iam_roles | map(attribute='role_name') | regex_search('cluster-[a-z0-9]*-[a-z0-9]*-worker-role') }}"
+    ocp4_workload_portworx_iam_worker_role: "{{ r_aws_iam_role_names.stdout | regex_search('cluster-[a-z0-9]*-[a-z0-9]*-worker-role') }}"
+
+- debug:
+    msg: "{{ ocp4_workload_portworx_iam_worker_role }}"
+
+- name: Create aws_policy.json from aws_policy.j2 template
+  template:
+    src: aws_policy.j2
+    dest: /tmp/aws_policy.json
 
 - name: Assign {{ ocp4_workload_portworx_policy_name }} policy to {{ ocp4_workload_portworx_iam_worker_role }}
-  community.aws.iam_policy:
-    iam_type: role
-    iam_name: "{{ ocp4_workload_portworx_iam_worker_role }}"
-    policy_name: "{{ ocp4_workload_portworx_policy_name }}"
-    state: present
-    policy_json: "{{ lookup('template', 'aws_policy.j2') }}"
-    aws_access_key: "{{ aws_access_key_id }}"
-    aws_secret_key: "{{ aws_secret_access_key }}"
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+  shell: |
+    aws iam put-role-policy \
+      --role-name "{{ ocp4_workload_portworx_iam_worker_role }}" \
+      --policy-name "{{ ocp4_workload_portworx_policy_name }}" \
+      --policy-document file:///tmp/aws_policy.json
 
 - name: pre_workload Tasks Complete
   debug:
