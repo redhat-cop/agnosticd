@@ -1,0 +1,71 @@
+---
+- name: Debug OpenShift CNV Instances fact
+  debug:
+    var: r_openshift_cnv_instances
+    verbosity: 2
+
+# Find the bastion
+- name: Find the bastion in this batch of hosts
+  loop: "{{ r_openshift_cnv_instances | list }}"
+  set_fact:
+    local_bastion: "{{ item.result.metadata.name }}"
+  when:
+    - '"result" in item and "bastions" in item.result.metadata.annotations.AnsibleGroup|default("")'
+  ignore_errors: true
+
+- name: Expose bastion externally
+  register: r_expose_bastion
+  when: local_bastion|default(False)
+  k8s:
+    host: "{{ openshift_cnv_api_uri }}"
+    api_key: "{{ k8s_auth_results.k8s_auth.api_key }}"
+    validate_certs: false
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: "{{ local_bastion }}-ssh"
+        namespace: "{{ openshift_cnv_project_name }}"
+      spec:
+        ports:
+          - port: 22
+            protocol: TCP
+            targetPort: 22
+        selector:
+          vm.cnv.io/name: "{{ local_bastion }}"
+        sessionAffinity: None
+        type: NodePort
+
+- name: Debug OpenShift CNV Instances fact
+  debug:
+    var: r_openshift_cnv_instances
+    verbosity: 2
+
+- name: Create inventory (add_host)
+  loop: "{{ r_openshift_cnv_instances | list }}"
+  add_host:
+    name: "{{ item.result.metadata.name }}"
+    shortname: "{{ item.result.metadata.name }}"
+    ansible_ssh_host: "{{ item.result.metadata.name }}"
+    ssh_port: "{{ r_expose_bastion.result.spec.ports.0.nodePort|default(omit) }}"
+    private_ip_address: "{{ item.result.metadata.name }}"
+    public_ip_address: "ssh.{{ openshift_cnv_apps_domain }}"
+    groups: "{{ item.result.metadata.annotations.AnsibleGroup }}"
+    bastion: "{{ local_bastion | default('') }}"
+    bastion_ssh_port: "{{ r_expose_bastion.result.spec.ports.0.nodePort|default(omit) }}"
+    # Specify if the node is isolated, so won't connect to it
+    isolated: "{{ item.result.metadata.annotations.isolated | default(false) }}"
+  when: "item.result.metadata.annotations.managed|default(True)|bool != False"
+
+- name: Get a list of VMIs
+  k8s_info:
+    host: "{{ openshift_cnv_api_uri }}"
+    api_key: "{{ k8s_auth_results.k8s_auth.api_key }}"
+    validate_certs: false
+    kind: VirtualMachineInstance
+    namespace: "{{ openshift_cnv_project_name }}"
+  register: r_vmi_list
+
+- name: Set the variable r_vmi_list as a fact in localhost
+  set_fact:
+    r_vmi_list: "{{ r_vmi_list }}"
