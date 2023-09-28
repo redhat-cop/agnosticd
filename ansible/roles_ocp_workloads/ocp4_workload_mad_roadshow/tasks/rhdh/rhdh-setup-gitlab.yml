@@ -1,0 +1,152 @@
+- name: Retrieve root private token
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: root-user-personal-token
+    namespace: "{{ ocp4_workload_redhat_developer_hub_gitlab_namespace }}"
+  register: r_root_token
+  retries: 120
+  delay: 10
+  until:
+  - r_root_token is defined
+  - r_root_token.resources is defined
+  - r_root_token.resources | length > 0
+  - r_root_token.resources[0] is defined
+  - r_root_token.resources[0].data is defined
+  - r_root_token.resources[0].data.token is defined
+  - r_root_token.resources[0].data.token | length > 0
+
+- name: Decode root token
+  set_fact:
+    ocp4_workload_redhat_developer_hub_gitlab_root_token: "{{ r_root_token.resources[0].data.token | b64decode }}"
+
+- name: Update application settings
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_redhat_developer_hub_gitlab_host }}/api/v4/application/settings
+    method: PUT
+    body_format: form-urlencoded
+    body:
+      import_sources: "git,github,gitea"
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_redhat_developer_hub_gitlab_root_token }}"
+    validate_certs: false
+    status_code: 200
+
+- name: Create group
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_redhat_developer_hub_gitlab_host }}/api/v4/groups
+    method: POST
+    body_format: form-urlencoded
+    body:
+      name: "{{ ocp4_workload_mad_roadshow_rhdh_namespace }}"
+      path: "{{ ocp4_workload_mad_roadshow_rhdh_namespace }}"
+      visibility: public
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_redhat_developer_hub_gitlab_root_token }}"
+    validate_certs: false
+    status_code: [201]
+  register: r_group
+  #retries: 100
+  #delay: 5
+  #until: r_group.status == 201
+
+- name: Debugging project import
+  debug:
+    msg: group '{{  r_group.json.id  }}'
+#
+- name: Import repository to group
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_redhat_developer_hub_gitlab_host }}/api/v4/projects
+    method: POST
+    body_format: form-urlencoded
+    body:
+      name: 'Software Templates'
+      namespace_id: '{{  r_group.json.id  }}'
+      import_url: "{{ ocp4_workload_gitops_gitlab_import_repos_init }}" 
+      visibility: public
+    validate_certs: false
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_redhat_developer_hub_gitlab_root_token }}"
+    status_code: [201]
+  register: r_import
+  retries: 60
+  delay: 10
+  until: r_import.status == 201
+
+- name: Create users
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_redhat_developer_hub_gitlab_host }}/api/v4/users
+    method: POST
+    body_format: form-urlencoded
+    body:
+      admin: false
+      email: user{{ user }}@opentlc.com
+      skip_confirmation: true
+      username: user{{ user }}
+      password: "{{ ocp4_workload_redhat_developer_hub_gitlab_user_password }}"
+      name: User{{ user }} GitLab
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_redhat_developer_hub_gitlab_root_token }}"
+    validate_certs: false
+    status_code: 201
+  register: r_user
+  retries: 100
+  delay: 5
+  until: r_user.status == 201
+  loop: "{{ range(1, ocp4_workload_redhat_developer_hub_gitlab_users_count | int + 1) | list }}"
+  loop_control:
+    loop_var: user 
+    #label: "{{ ocp4_workload_redhat_developer_hub_gitlab_users_count }}{{ n }}"
+
+- name: List users
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_redhat_developer_hub_gitlab_host }}/api/v4/users
+    method: GET
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_redhat_developer_hub_gitlab_root_token }}"
+    validate_certs: false
+    status_code: 200
+  register: r_users
+
+- name: Add user to group
+  when: item.username.startswith('user')
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_redhat_developer_hub_gitlab_host }}/api/v4/groups/{{ r_group.json.id  }}/members
+    method: POST
+    body_format: form-urlencoded
+    body:
+      user_id: "{{  item.id }}" 
+      access_level: 50
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_redhat_developer_hub_gitlab_root_token }}"
+    validate_certs: false
+    status_code: 201
+  register: r_group_user
+  retries: 100
+  delay: 5
+  until: r_group_user.status == 201
+  loop: "{{ r_users.json }}"
+
+- name: Create Devspaces GitLab application
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_redhat_developer_hub_gitlab_host }}/api/v4/applications
+    method: POST
+    body_format: form-urlencoded
+    body:
+      name: devspaces
+      redirect_uri: https://{{ ocp4_workload_redhat_developer_hub_devspaces_host }}/api/oauth/callback
+      scopes: api read_user read_repository write_repository sudo openid profile email
+      confidential: false
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_redhat_developer_hub_gitlab_root_token }}"
+    validate_certs: false
+    status_code: [201]
+  register: r_devspaces_app
+  retries: 60
+  delay: 10
+  until: r_devspaces_app.status == 201
+
+- name: Get Keycloak client credentials
+  set_fact:
+    ocp4_workload_redhat_developer_hub_devspaces_client_id: "{{ r_devspaces_app.json.application_id }}"
+    ocp4_workload_redhat_developer_hub_devspaces_client_secret: "{{ r_devspaces_app.json.secret }}"
