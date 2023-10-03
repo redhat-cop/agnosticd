@@ -94,5 +94,5 @@ bounce: ## Bounce the deploy IE stop then start
 bounce: stop start
 
 relog: ## Zero out the ANSIBLE_LOG_PATH log file
-	rm $(OUTPUT_DIR)/aap2sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log
+	rm $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log
 
