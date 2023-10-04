@@ -25,70 +25,16 @@
         - secret.yaml.j2
         - storageclass.yaml.j2
         - storagecluster.yaml.j2
-
-- name: Configure rbd as default storage
-  shell: >
-    oc patch storageclass ocs-external-storagecluster-ceph-rbd -p '{"metadata": {"annotations": {"storageclass.kubernetes.io/is-default-class": "true"}}}'
-  register: r_defaultstorage
-  until: r_defaultstorage is success
-  retries: 30
-  delay: 30
-
-- name: Configure Image Registry with Ceph RGW
-  environment:
-    KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
-  block:
-    - name: Create ObjectBucketClaim
-      k8s:
+    - name: Create PVC for image registry
+      kubernetes.core.k8s:
         state: present
-        definition:
-          apiVersion: objectbucket.io/v1alpha1
-          kind: ObjectBucketClaim
-          metadata:
-            name: imageregistry
-            namespace: openshift-storage
-          spec:
-            storageClassName: openshift-storage.noobaa.io
-            generateBucketName: imageregistry
-      register: obc_result
-      until: obc_result.changed|default(False)
-      retries: 10
+        definition: "{{ lookup('template',  'pvc-imageregistry.yaml') | from_yaml }}"
+      register: r_pvc
+      until: r_pvc is success
+      retries: 30
       delay: 30
 
-    - name: Get Bucket Name
-      shell: oc get obc -n openshift-storage imageregistry -o jsonpath='{.spec.bucketName}'
-      register: bucket_name
-      until: bucket_name.stdout != ""
-      retries: 10
-      delay: 30
-
-    - name: Get AWS_ACCESS_KEY_ID
-      shell: oc get secret -n openshift-storage imageregistry -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 --decode
-      register: aws_access_key_id
-      until: aws_access_key_id.stdout != ""
-      retries: 10
-      delay: 30
-
-    - name: Get AWS_SECRET_ACCESS_KEY
-      shell: oc get secret -n openshift-storage imageregistry -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' | base64 --decode
-      register: aws_secret_access_key
-
-    - name: Create Image Registry Secret
+    - name: Configure registry
       shell: >
-        oc create secret generic image-registry-private-configuration-user
-        --from-literal=REGISTRY_STORAGE_S3_ACCESSKEY={{ aws_access_key_id.stdout }}
-        --from-literal=REGISTRY_STORAGE_S3_SECRETKEY={{ aws_secret_access_key.stdout }}
-        --namespace openshift-image-registry
-
-    #- name: Create Route Reencrypt
-    #  shell: oc create route reencrypt s3 --service=rook-ceph-rgw-ocs-storagecluster-cephobjectstore --port=https -n openshift-storage
-
-    - name: Get Route Host
-      shell: oc get route s3 -n openshift-storage -o jsonpath='{.spec.host}'
-      register: route_host
-
-    - name: Create Image Registry S3 Bundle ConfigMap
-      shell: oc create configmap image-registry-s3-bundle --from-file=ca-bundle.crt=/home/cloud-user/certificates/fullchain.pem  -n openshift-config
-
-    - name: Patch Image Registry Config
-      shell: oc patch config.image/cluster -p '{"spec":{"managementState":"Managed","replicas":2,"storage":{"managementState":"Unmanaged","s3":{"bucket":"{{ bucket_name.stdout }}","region":"us-east-1","regionEndpoint":"https://{{ route_host.stdout }}","virtualHostedStyle":false,"encrypt":false,"trustedCA":{"name":"image-registry-s3-bundle"}}}}}' --type=merge
+        oc patch configs.imageregistry.operator.openshift.io cluster --type merge --patch
+        '{"spec":{"storage":{"pvc":{"claim":"pvc-image-registry"}}, "managementState": "Managed"}}'
