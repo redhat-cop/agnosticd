@@ -1,0 +1,127 @@
+---
+- name: Create Master virtual machine
+  kubevirt.core.kubevirt_vm:
+    host: "{{ openshift_cnv_api_uri }}"
+    api_key: "{{ k8s_auth_results.k8s_auth.api_key }}"
+    validate_certs: false
+    name: "{{ vmname }}"
+    namespace: "{{ namespace }}"
+    data_volume_templates:
+      - metadata:
+          name: "{{ vmname }}-installation-cdrom"
+        spec:
+          source:
+            pvc:
+              name: "{{ pvcinstall }}"
+              namespace: "{{ namespace }}"
+          storage:
+            resources:
+              requests:
+                storage: 2Gi
+      - metadata:
+          name: "{{ vmname }}"
+        spec:
+          preallocation: false
+          source:
+            blank: {}
+          storage:
+            resources:
+              requests:
+                storage: 100Gi
+            storageClassName: "{{ storageclass }}"
+
+      - metadata:
+          name: "{{ vmname }}-etcd"
+        spec:
+          preallocation: false
+          source:
+            blank: {}
+          storage:
+            resources:
+              requests:
+                storage: 30Gi
+            storageClassName: "{{ ai_local_storageclass }}"
+            volumeMode: Filesystem
+
+    running: true
+    wait: false
+    annotations:
+      vm.kubevirt.io/os: rhel8
+    labels:
+      kubevirt.io/domain: "{{ vmname }}"
+      role: control-plane
+    spec: "{{ _spec | from_yaml }}"
+  vars:
+    _spec: |
+      domain:
+        cpu:
+          cores: {{ ai_control_plane_cores | int }}
+          sockets: 1
+          threads: 1
+          model: host-passthrough
+        devices:
+          disks:
+            - bootOrder: 1
+              disk:
+                bus: virtio
+              name: rootdisk
+            - bootOrder: 3
+              disk:
+                bus: virtio
+              name: etcd
+            - bootOrder: 2
+              cdrom:
+                bus: sata
+              name: installation-cdrom
+          interfaces:
+            - masquerade: {}
+              model: virtio
+              name: default
+            - name: "{{ network }}"
+              macAddress: "{{ ai_masters_macs[_index|int-1] }}"
+              bridge: {}
+          networkInterfaceMultiqueue: true
+        machine:
+          type: pc-q35-rhel8.6.0
+        resources:
+          requests:
+            memory: "{{ ai_control_plane_memory }}"
+      readinessProbe:
+        httpGet:
+          path: /healthz
+          port: 6443
+          scheme: HTTPS
+        initialDelaySeconds: 120
+        periodSeconds: 1
+      evictionStrategy: LiveMigrate
+      networks:
+        - name: default
+          pod:
+            vmNetworkCIDR: "{{ pod_network }}"
+        - name: "{{ network }}"
+          multus:
+            networkName: "{{ network_name }}"
+      terminationGracePeriodSeconds: 180
+      volumes:
+        - dataVolume:
+            name: "{{ vmname }}"
+          name: rootdisk
+        - dataVolume:
+            name: "{{ vmname }}-installation-cdrom"
+          name: installation-cdrom
+        - dataVolume:
+            name: "{{ vmname }}-etcd"
+          name: etcd
+
+- name: Wait till VM is running
+  kubernetes.core.k8s_info:
+    host: "{{ openshift_cnv_api_uri }}"
+    api_key: "{{ k8s_auth_results.k8s_auth.api_key }}"
+    validate_certs: false
+    kind: VirtualMachine
+    name: "{{ vmname }}"
+    namespace: "{{ namespace }}"
+  register: r_vm_status
+  until: r_vm_status.resources[0].status.printableStatus|default('') == "Running"
+  retries: 30
+  delay: 10
