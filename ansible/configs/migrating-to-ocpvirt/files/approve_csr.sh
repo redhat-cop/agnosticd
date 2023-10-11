@@ -2,6 +2,7 @@
 oc get csr 2>error.log
 ERRORS=$(wc -l < error.log)
 while [ $ERRORS -gt 0 ]; do
+  oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
   oc get csr 2>error.log
   ERRORS=$(wc -l < error.log)
 done
