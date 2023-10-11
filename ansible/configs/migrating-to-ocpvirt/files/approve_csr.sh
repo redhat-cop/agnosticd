@@ -1,10 +1,11 @@
 #!/bin/sh -x
 oc get csr 2>error.log
-ERRORS=$(wc -l < error.log)
+ERRORS=$(grep -v "No resources found" error.log|wc -l)
 while [ $ERRORS -gt 0 ]; do
+  sleep 10
   oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
   oc get csr 2>error.log
-  ERRORS=$(wc -l < error.log)
+  ERRORS=$(grep -v "No resources found" error.log|wc -l)  
 done
 
 oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
