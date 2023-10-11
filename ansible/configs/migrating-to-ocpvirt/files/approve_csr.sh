@@ -9,16 +9,16 @@ while [ $ERRORS -gt 0 ]; do
 done
 
 oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
-sleep 120
+sleep 30
 READY=$((oc get nodes || echo NotReady) |grep -c " Ready ")
 echo "Ready servers: $READY"
 while [ $READY -ne 6 ]; do
         oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
         READY=$((oc get nodes || echo NotReady) |grep -c " Ready ")
         echo "Ready servers: $READY"
-        sleep 10
+        sleep 5
 done
-sleep 120
+sleep sleep 30
 oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
 READY=$((oc get nodes || echo NotReady) |grep -c " Ready ")
 echo "Ready servers: $READY"
@@ -26,5 +26,5 @@ while [ $READY -ne 6 ]; do
         oc get csr|grep Pending|awk '{print $1}'|xargs -i oc adm certificate approve {}
         READY=$((oc get nodes || echo NotReady) |grep -c " Ready ")
         echo "Ready servers: $READY"
-        sleep 10
+        sleep 5
 done
