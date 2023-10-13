@@ -6,17 +6,13 @@ Once the cluster is deployed, you can use the same scripts to deploy any of the 
 
 ## Podman
 
-Podman is required as the Ansible Playbooks will run in a container using an execution environment.
+Podman is required as the Ansible Playbooks are executed in a container using an execution environment.
 
 If you wish to use Docker instead, create an alias from podman to docker:
 
 ```bash
 alias podman=docker
 ```
-
-## AWS Credentials
-
-As the scripts will deploy an OpenShift cluster on AWS, have your credentials and sanbox number ready.
 
 ## AgnosticD Home
 
@@ -27,6 +23,10 @@ export AGNOSTICD_HOME=<path to AgnosticD>
 ```
 
 It may be convenient to add this to your `.bashrc` or `.zshrc` file.
+
+## AWS Credentials
+
+As the scripts will deploy an OpenShift cluster on AWS, have your credentials and sanbox number ready.
 
 ## Usage
 
@@ -83,4 +83,13 @@ ocp4_workload_openshift_gitops_rbac_scopes: '[name,groups]'
 ocp4_workload_gitops_bootstrap_repo_url: https://github.com/OpenShiftDemos/coolstore-portfolio
 ocp4_workload_gitops_bootstrap_repo_revision: main
 ocp4_workload_gitops_bootstrap_repo_path: helm/coolstore
+```
+
+## Tips and Tricks
+
+Create alias for the scripts, so you never forget to `source` the init script as well as you can use the `caffeinate` command to prevent your machine from going to sleep.
+
+```bash
+alias agd-init=source $AGNOSTICD_HOME/tools/runner/init.sh
+alias agd-run=caffeinate -disu $AGNOSTICD_HOME/tools/runner/run.sh
 ```

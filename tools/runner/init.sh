@@ -11,6 +11,36 @@ export AGD_SECRETS_YAML=ansible/workdir/.agnosticd/secrets.yml
 
 mkdir -p ${AGD_HOME}/${AGD_EXECUTION_DIR}
 
+cat << EOF >${AGD_HOME}/${AGD_EXECUTION_DIR}/rosa.yml
+---
+# -------------------------------------------------------------------
+# User specific
+# -------------------------------------------------------------------
+guid: ${AGD_GUID}
+subdomain_base_suffix: .${AGD_SANDBOX}.opentlc.com
+output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
+
+# -------------------------------------------------------------------
+# Top level vars
+# -------------------------------------------------------------------
+cloud_provider: ec2
+env_type: rosa-consolidated
+
+# -------------------------------------------------------------------
+# Other vars
+# -------------------------------------------------------------------
+aws_region: ${AGD_AWS_REGION}
+agnosticd_aws_capacity_reservation_enabled: false
+
+rosa_version: latest
+rosa_setup_cluster_admin_login: true
+
+bastion_instance_type: t2.small
+bastion_instance_image: RHEL92GOLD-latest
+
+install_student_user: false
+EOF
+
 cat << EOF >${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp4-cluster.yml
 ---
 # -------------------------------------------------------------------
@@ -25,6 +55,7 @@ cloud_tags:
   - env_type: "{{ env_type }}"
   - guid: "${AGD_GUID}"
   - platform: labs
+# Todo check remove tag
 
 # -------------------------------------------------------------------
 # Top level vars
@@ -43,6 +74,7 @@ worker_instance_count: 1
 bastion_instance_type: t2.small
 bastion_instance_image: RHEL84GOLD-latest
 aws_region: ${AGD_AWS_REGION}
+agnosticd_aws_capacity_reservation_enabled: false
 
 # -------------------------------------------------------------------
 # OpenShift installer
@@ -74,7 +106,7 @@ ocp4_workload_authentication_htpasswd_user_count: 10
 ocp4_workload_authentication_remove_kubeadmin: true
 EOF
 
-cat << EOF >${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp-workloads.yml
+cat << EOF >${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp-workloads-base.yml
 ---
 # -------------------------------------------------------------------
 # User specific
@@ -128,6 +160,12 @@ set_repositories_satellite_org: Red_Hat_GPTE_Labs
 #         "registry.redhat.io":{"auth":"xyz","email":"me@acme.com"}
 #       }
 #   }
+
+# -------------------------------------------------------------------
+# ROSA Token
+# -------------------------------------------------------------------
+gpte_rosa_token: [redacted]
+
 EOF
 fi
 

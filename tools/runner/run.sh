@@ -21,18 +21,20 @@ AGD_CONFIG_NAME=$1
 AGD_OCP_WORKLOADS=$2
 
 if [[ "$AGD_CONFIG_NAME" = "ocp-workloads" ]] && [[ -f "$AGD_OCP_WORKLOADS" ]]; then
-  cat ${AGD_HOME}/${AGD_EXECUTION_DIR}/${AGD_CONFIG_NAME}.yml ${AGD_OCP_WORKLOADS} > ${AGD_HOME}/${AGD_EXECUTION_DIR}/${AGD_CONFIG_NAME}-tmp.yml
-  mv ${AGD_HOME}/${AGD_EXECUTION_DIR}/${AGD_CONFIG_NAME}-tmp.yml ${AGD_HOME}/${AGD_EXECUTION_DIR}/${AGD_CONFIG_NAME}.yml
+  cat ${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp-workloads-base.yml ${AGD_OCP_WORKLOADS} > ${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp-workloads.yml
+elif [[ "$AGD_CONFIG_NAME" = "ocp-workloads" ]]; then
+  echo "ERROR: $AGD_OCP_WORKLOADS file not found"
+  exit 1
 fi
 
-AGD_CONFIG_LIST=("ocp4-cluster" "ocp-workloads")
+AGD_CONFIG_LIST=("rosa" "ocp4-cluster" "ocp-workloads")
 if [[ " ${AGD_CONFIG_LIST[*]} " =~ " ${AGD_CONFIG_NAME} " ]]; then
   podman --version
   podman run \
   --interactive \
   --tty \
   --rm \
-  --name=agnosticd \
+  --name=agnosticd-${AGD_GUID} \
   --volume=${AGD_HOME}:/runner/agnosticd \
   --workdir=/runner/agnosticd \
   quay.io/agnosticd/ee-multicloud:latest \
