@@ -1,0 +1,94 @@
+---
+- name: Grab Route53 Zone ID
+  route53_zone:
+    zone: "{{ sandbox_zone }}"
+  register: AWSINFO
+
+- name: Grab aws user info
+  amazon.aws.aws_caller_info:
+    region: "{{ aws_region }}"
+  register: whoami
+
+- name: Save username of AWS user
+  set_fact:
+    aws_user: '{{ whoami.arn.split("/")[-1] }}'
+
+- name: Save account id of AWS user
+  set_fact:
+    aws_account: '{{ whoami.account }}'
+
+- name: Grab control node info
+  amazon.aws.ec2_instance_info:
+    region: "{{ aws_region }}"
+    filters:
+      "tag:AnsibleGroup": bastions
+  register: r_control
+
+- name: Save aws vpc id
+  set_fact:
+    ec2_vpc_id: "{{ r_control.instances.0.vpc_id }}"
+
+# - debug:
+#     msg: |
+#       "vpcid = {{ r_instance.instances.0.vpc_id }}"
+#       "instanceid = {{ r_instance.instances.0.instance_id }}"
+#       "owner_account = {{ r_instance.instances.0.network_interfaces.0.owner_id }}"
+
+- name: Save control node instance_id
+  set_fact:
+    control_instance_id: "{{ r_control.instances.0.instance_id }}"
+
+- name: Create VPC Lock Down role
+  community.aws.iam_role:
+    name: "VPCLockDown_{{ guid }}"
+    assume_role_policy_document: "{{ lookup('file','AssumeRole_policy.json') }}"
+    create_instance_profile: true
+    description: VPC Lockdown role for  {{ guid }} workshop
+
+- name: Generate IAM policy for control node IAM instance role
+  community.aws.iam_policy:
+    iam_type: role
+    iam_name: "ControlNode_{{ guid }}"
+    policy_name: "IAMPolicy_{{ guid }}"
+    state: present
+    policy_json: "{{ lookup( 'template', 'iam_vpc_lockdown_policy.json.j2') }}"
+      
+- name: Associate IAM instance profile with control node
+  amazon.aws.ec2_instance:
+    instance_ids: "{{ control_instance_id }}"
+    region: "{{ aws_region }}"
+    instance_role: "ControlNode_{{ guid }}"
+    state: running
+    wait: true
+  register: associate_iam_instance_profile
+  until: associate_iam_instance_profile is not failed
+  retries: 12
+  delay: 10
+
+- name: Check associate_iam_instance_profile
+  debug:
+    msg: "{{ associate_iam_instance_profile }}"
+
+- name: Grab centos/rhel nodes instance ids
+  amazon.aws.ec2_instance_info:
+    region: "{{ aws_region }}"
+    filters:
+      "tag:AnsibleGroup": ["nodes", "centos_nodes"]
+  register: r_nodes
+
+- name: Associate IAM instance profile with rhel/centos nodes
+  amazon.aws.ec2_instance:
+    instance_ids: "{{ item }}"
+    region: "{{ aws_region }}"
+    instance_role: "VPCLockDown_{{ guid }}"
+    state: running
+    wait: true
+  register: associate_iam_instance_profile
+  loop: "{{ r_nodes.instances | json_query('[*].instance_id') | list }}"
+  until: associate_iam_instance_profile is not failed
+  retries: 12
+  delay: 10
+
+- name: Check associate_iam_instance_profile
+  debug:
+    msg: "{{ associate_iam_instance_profile }}"
