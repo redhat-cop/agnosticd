@@ -19,6 +19,7 @@ echo "----------------------------------------"
 
 AGD_CONFIG_NAME=$1
 AGD_OCP_WORKLOADS=$2
+AGD_EXTRA_PARAMS=$3
 
 if [[ "$AGD_CONFIG_NAME" = "ocp-workloads" ]] && [[ -f "$AGD_OCP_WORKLOADS" ]]; then
   cat ${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp-workloads-base.yml ${AGD_OCP_WORKLOADS} > ${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp-workloads.yml
@@ -43,8 +44,8 @@ if [[ " ${AGD_CONFIG_LIST[*]} " =~ " ${AGD_CONFIG_NAME} " ]]; then
   --extra-vars=@${AGD_EXECUTION_DIR}/${AGD_CONFIG_NAME}.yml \
   --extra-vars=@${AGD_SECRETS_YAML} \
   --extra-vars=aws_access_key_id=${AGD_AWS_ACCESS_KEY_ID} \
-  --extra-vars=aws_secret_access_key=${AGD_AWS_SECRET_ACCESS_KEY}
-  # aws keys not required for workloads and could be set in the ocp4-cluster.yml
+  --extra-vars=aws_secret_access_key=${AGD_AWS_SECRET_ACCESS_KEY} $3
 else
   echo "ERROR: Config [${AGD_CONFIG_NAME}] not found"
+  exit 1
 fi

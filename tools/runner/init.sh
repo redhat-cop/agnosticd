@@ -49,13 +49,6 @@ cat << EOF >${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp4-cluster.yml
 guid: ${AGD_GUID}
 subdomain_base_suffix: .${AGD_SANDBOX}.opentlc.com
 output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
-cloud_tags:
-  - owner: developer@redhat.com
-  - Purpose: development
-  - env_type: "{{ env_type }}"
-  - guid: "${AGD_GUID}"
-  - platform: labs
-# Todo check remove tag
 
 # -------------------------------------------------------------------
 # Top level vars
