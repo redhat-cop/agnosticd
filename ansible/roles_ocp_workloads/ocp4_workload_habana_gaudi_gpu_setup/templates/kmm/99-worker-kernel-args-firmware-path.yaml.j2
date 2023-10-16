@@ -1,3 +1,4 @@
+---
 apiVersion: machineconfiguration.openshift.io/v1
 kind: MachineConfig
 metadata:
