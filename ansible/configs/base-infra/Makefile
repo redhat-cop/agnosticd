@@ -1,12 +1,16 @@
 ENV_TYPE=base-infra
+CLOUD_PROVIDER=ec2
 SANDBOX=1
+
 # Adjust GUID to taste e.g. make deploy GUID=foo-01
 
 GUID=showroom0$(SANDBOX)
-OUTPUT_DIR=/tmp/output_dir/$(GUID)
+OUTPUT_DIR=/tmp/output_dir/$(GUID)-$(CLOUD_PROVIDER)
+
 # TODO: ~/tmp seems to fail, related to accessing tha ssh file at least in aws's ping during post_infra
 # ~/tmp persists through reboots which can be useful
 # showroom0$(SANDBOX)
+
 PLAYBOOK_DIR=ansible
 
 # AWS Uses Sandbox creds typically
@@ -18,7 +22,7 @@ SECRETS_FILE=$(SECRETS_DIR)/secrets-showroom-sandbox0$(SANDBOX).yaml
 #SECRETS_BOOKBAG=~/secrets/bookbag-shared-410.yaml
 
 VARS_DIR=~/vars
-VARS_FILE=$(VARS_DIR)/vars-showroom-sandbox0$(SANDBOX).yaml
+VARS_FILE=$(VARS_DIR)/vars-showroom-$(CLOUD_PROVIDER)-sandbox0$(SANDBOX).yaml
 
 TARGET=bastion
 EXTRA_ARGS=
@@ -68,8 +72,8 @@ destroy: ## Destroy the config
 	$(MAKE) ansible-execute PLAYBOOK=destroy.yml
 
 user-data: ## Assumes an existing output_dir, outputs contenst of user-data.yaml
-	ansible-playbook rhdp.agnostic_utilities.agd_user_info.yml -e @$(OUTPUT_DIR)/user-data.yaml -e SANDBOX=$(SANDBOX)
-
+	ansible-playbook rhdp.agnostic_utilities.agd_user_info.yml -e output_dir=$(OUTPUT_DIR) 
+	
 ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
 	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf $(TARGET)
 
@@ -90,5 +94,5 @@ bounce: ## Bounce the deploy IE stop then start
 bounce: stop start
 
 relog: ## Zero out the ANSIBLE_LOG_PATH log file
-	rm $(OUTPUT_DIR)/aap2sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log
+	rm $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log
 
