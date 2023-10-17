@@ -1,50 +1,58 @@
 ---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
-- name: Setup Workload
-  environment:
-    KUBECONFIG: "{{ tmp_kubeconfig }}"
-  block:
+# To Do: Implement your workload deployment tasks here
+# -------------------------------------------------------------------------
 
-    - name: Create Showroom
-      kubernetes.core.k8s:
-        state: present
-        definition: "{{ lookup('template', item) | from_yaml }}"
-      loop:
-        - namespace.yaml.j2
-        - imagestream.yaml.j2
-        - buildconfig.yaml.j2
-        - deployment.yaml.j2
-        - service.yaml.j2
-        - route.yaml.j2
+- name: Read user-data.yaml
+  ansible.builtin.slurp:
+    src: "{{ hostvars.localhost.output_dir ~ '/user-data.yaml' }}"
+  delegate_to: localhost
+  register: r_user_data
 
-    - name: Get the Showroom route
-      kubernetes.core.k8s_info:
-        api_version: route.openshift.io/v1
-        kind: Route
-        name: "{{ ocp4_workload_showroom_name }}"
-        namespace: "{{ ocp4_workload_showroom_namespace }}"
-      register: r_showroom_route
-      failed_when: r_showroom_route.resources | default([]) | length != 1
-      until: r_showroom_route is successful
-      retries: 10
-      delay: 5
+- name: Read user-info.yaml
+  ansible.builtin.slurp:
+    src: "{{ hostvars.localhost.output_dir ~ '/user-info.yaml' }}"
+  delegate_to: localhost
+  register: r_user_info
 
-- name: Output agnosticd_user_info for showroom
-  ansible.builtin.debug:
-    msg:
-      - "Lab instructions: {{ _showroom_url }}"
-      - "showroom_url: {{ _showroom_url }}"
+- name: Set fact for user data and info
+  ansible.builtin.set_fact:
+    _showroom_user_data: "{{ r_user_data.content | b64decode | from_yaml | default({}, true) }}"
+    _showroom_user_info: '{{ r_user_info.content | b64decode | from_yaml | default([], true) | join("\n") }}'
+
+- name: Deploy showroom for single user
+  when:
+  - _showroom_user_data.users is undefined
+  ansible.builtin.include_tasks:
+    file: deploy-showroom.yaml
   vars:
-    _route: "{{ r_showroom_route.resources[0] }}"
-    _showroom_url: >-
-      {{ 'https' if 'tls' in _route.spec else 'http' }}://{{ _route.spec.host }}/
+    _bookbag_instance_name: "{{ bookbag_name }}"
+    _bookbag_user_info_messages: "{{ _bookbag_user_info }}"
+    _bookbag_vars: >-
+      {{ _bookbag_user_data | combine({'guid': guid}) }}
 
-- name: Output agnosticd_user_info for showroom
-  agnosticd_user_info:
-    msg: "Lab instructions: {{ _showroom_url }}"
-    data:
-      showroom_url: "{{ _showroom_url }}"
+- name: Deploy bookbag for users
+  when:
+  - _bookbag_user_data.users is defined
+  loop: >-
+    {{ _bookbag_user_data.users | dict2items }}
+  loop_control:
+    loop_var: _bookbag_users_item
+  ansible.builtin.include_tasks:
+    file: deploy-bookbag.yaml
   vars:
-    _route: "{{ r_showroom_route.resources[0] }}"
-    _showroom_url: >-
-      {{ 'https' if 'tls' in _route.spec else 'http' }}://{{ _route.spec.host }}/
+    _bookbag_instance_name: "{{ bookbag_name }}-{{ _bookbag_user }}"
+    _bookbag_user: "{{ _bookbag_users_item.key }}"
+    _bookbag_user_info_messages: "{{ _bookbag_vars.msg | default('') }}"
+    _bookbag_vars: >-
+      {{ _bookbag_users_item.value | combine({'guid': guid, 'user': _bookbag_user}) }}
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
