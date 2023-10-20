@@ -30,10 +30,10 @@ As the scripts will deploy an OpenShift cluster on AWS, have your credentials an
 
 ## Usage
 
-For every new cluster run:
+For every new cluster run (example of value for sandbox: "sandbox123"):
 
 ```bash
-$AGNOSTICD_HOME/tools/runner/init.sh <sandbox number> <aws access key> <aws secret key>
+$AGNOSTICD_HOME/tools/runner/init.sh <aws access key> <aws secret key> <sandbox>
 ```
 
 The first time you run you will get a warning about the secrets.yml file being created. It is expected that you add the `satelite` and `ocp-pull-secrets` there.
