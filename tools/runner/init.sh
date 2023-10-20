@@ -16,7 +16,7 @@ cat << EOF >${AGD_HOME}/${AGD_EXECUTION_DIR}/rosa.yml
 # -------------------------------------------------------------------
 # User specific
 # -------------------------------------------------------------------
-guid: ${AGD_GUID}
+guid: "${AGD_GUID}"
 subdomain_base_suffix: .${AGD_SANDBOX}.opentlc.com
 output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
 
@@ -46,7 +46,7 @@ cat << EOF >${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp4-cluster.yml
 # -------------------------------------------------------------------
 # User specific
 # -------------------------------------------------------------------
-guid: ${AGD_GUID}
+guid: "${AGD_GUID}"
 subdomain_base_suffix: .${AGD_SANDBOX}.opentlc.com
 output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
 
