@@ -34,8 +34,10 @@ history -c
 Connect to the PostgreSQL Kubevirt VM from another container.
 
 ```
-oc run psql -it --rm --image=registry.redhat.io/rhel8/postgresql-13:latest --restart=Never -- bash
-psql -h postgresql.postgresql-vm.svc.cluster.local -U redhat customers
+oc run psql-${RANDOM} -it --rm --image=registry.redhat.io/rhel8/postgresql-13:latest --restart=Never \
+--annotations=k8s.v1.cni.cncf.io/networks='[{"name":"postgresql-net","interface":"net1","ips":["10.10.10.40/24"]}]' \
+--env="PGPASSWORD=redhat" \
+-- psql -h 10.10.10.30 -U redhat customers
 ```
 
 ## Image size optimization
@@ -44,3 +46,5 @@ psql -h postgresql.postgresql-vm.svc.cluster.local -U redhat customers
 qemu-img convert postgresql-database.img postgresql-database.qcow2
 qemu-img convert -O qcow2 postgresql-database.img postgresql-database.qcow2
 ```
+
+sudo subscription-manager register --org 11009103 --activationkey rhdp-kubevirt-postgresql
