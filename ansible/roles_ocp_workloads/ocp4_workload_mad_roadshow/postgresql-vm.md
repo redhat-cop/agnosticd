@@ -46,5 +46,3 @@ oc run psql-${RANDOM} -it --rm --image=registry.redhat.io/rhel8/postgresql-13:la
 qemu-img convert postgresql-database.img postgresql-database.qcow2
 qemu-img convert -O qcow2 postgresql-database.img postgresql-database.qcow2
 ```
-
-sudo subscription-manager register --org 11009103 --activationkey rhdp-kubevirt-postgresql
