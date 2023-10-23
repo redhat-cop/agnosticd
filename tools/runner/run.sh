@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -x
+
 set -eo pipefail
 
 REQUIRED_VARS=("AGD_AWS_ACCESS_KEY_ID" "AGD_AWS_SECRET_ACCESS_KEY" "AGD_HOME" "AGD_EXECUTION_DIR" "AGD_SECRETS_YAML")
@@ -30,21 +32,40 @@ fi
 
 AGD_CONFIG_LIST=("rosa" "ocp4-cluster" "ocp-workloads")
 if [[ " ${AGD_CONFIG_LIST[*]} " =~ " ${AGD_CONFIG_NAME} " ]]; then
-  podman --version
-  podman run \
-  --interactive \
-  --tty \
-  --rm \
-  --name=agnosticd-${AGD_GUID} \
-  --volume=${AGD_HOME}:/runner/agnosticd \
-  --workdir=/runner/agnosticd \
-  quay.io/agnosticd/ee-multicloud:latest \
-  ansible-playbook \
-  ansible/main.yml \
-  --extra-vars=@${AGD_EXECUTION_DIR}/${AGD_CONFIG_NAME}.yml \
-  --extra-vars=@${AGD_SECRETS_YAML} \
-  --extra-vars=aws_access_key_id=${AGD_AWS_ACCESS_KEY_ID} \
-  --extra-vars=aws_secret_access_key=${AGD_AWS_SECRET_ACCESS_KEY} $3
+  if [[ "$ACTION" == "provision" ]]; then
+    podman --version
+    podman run \
+    --interactive \
+    --tty \
+    --rm \
+    --name=agnosticd-${AGD_GUID} \
+    --volume=${AGD_HOME}/:/runner/agnosticd \
+    --workdir=/runner/agnosticd \
+    quay.io/agnosticd/ee-multicloud:latest \
+    ansible-playbook \
+    ansible/main.yml \
+    --extra-vars=@${AGD_EXECUTION_DIR}/${AGD_CONFIG_NAME}.yml \
+    --extra-vars=@${AGD_SECRETS_YAML} \
+    --extra-vars=aws_access_key_id=${AGD_AWS_ACCESS_KEY_ID} \
+    --extra-vars=aws_secret_access_key=${AGD_AWS_SECRET_ACCESS_KEY} $3
+  fi
+  if [[ "$ACTION" == "destroy" ]]; then
+    podman --version
+    podman run \
+    --interactive \
+    --tty \
+    --rm \
+    --name=agnosticd-${AGD_GUID} \
+    --volume=${AGD_HOME}/:/runner/agnosticd \
+    --workdir=/runner/agnosticd \
+    quay.io/agnosticd/ee-multicloud:latest \
+    ansible-playbook \
+    ansible/destroy.yml \
+    --extra-vars=@${AGD_EXECUTION_DIR}/${AGD_CONFIG_NAME}.yml \
+    --extra-vars=@${AGD_SECRETS_YAML} \
+    --extra-vars=aws_access_key_id=${AGD_AWS_ACCESS_KEY_ID} \
+    --extra-vars=aws_secret_access_key=${AGD_AWS_SECRET_ACCESS_KEY} $3
+  fi
 else
   echo "ERROR: Config [${AGD_CONFIG_NAME}] not found"
   exit 1
