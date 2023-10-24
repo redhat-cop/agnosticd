@@ -77,6 +77,10 @@ user-data: ## Assumes an existing output_dir, outputs contenst of user-data.yaml
 ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
 	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf $(TARGET)
 
+
+ssh: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
+	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf showroom@$(TARGET)
+
 last-status: ## Output last status file
 	ls -l $(OUTPUT_DIR)/status.txt
 	cat $(OUTPUT_DIR)/status.txt
