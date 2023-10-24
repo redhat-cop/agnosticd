@@ -30,7 +30,7 @@ env_type: rosa-consolidated
 # Other vars
 # -------------------------------------------------------------------
 aws_region: ${AGD_AWS_REGION}
-agnosticd_aws_capacity_reservation_enable: false
+agnosticd_aws_capacity_reservation_enabled: false
 
 rosa_version: latest
 rosa_setup_cluster_admin_login: true
