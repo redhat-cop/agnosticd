@@ -1,0 +1,89 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user = {{ ocp4_username }}"
+
+- name: Run setup routine
+  include_tasks: "{{ item }}"
+  loop:
+  - setup_infrastructure_prerequisites.yml
+  - setup_stackrox.yml
+  - setup_cosign.yml
+  - setup_gitea_requirements.yml
+  - setup_demo_requirements.yml
+
+- name: Set up globex-ui pipeline application
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'templates/application-globex-ui-pipeline.yaml.j2' ) | from_yaml }}"
+
+- name: Wait for pipeline to be deployed
+  kubernetes.core.k8s_info:
+    api_version: tekton.dev/v1beta1
+    kind: Pipeline
+    name: app-globex-ui-pipeline
+    namespace: "{{ ocp4_workload_blackhat_secured_container_pipelines_namespace }}"
+  register: r_pipeline
+  retries: 60
+  delay: 5
+  until:
+  - r_pipeline is defined
+  - r_pipeline.resources is defined
+  - r_pipeline.resources | length > 0
+
+- name: Wait for event listener deployment to complete
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ ocp4_workload_blackhat_secured_container_pipelines_namespace }}"
+    label_selectors:
+    - eventlistener = app-globex-ui-event-listener
+  register: r_el_deployment
+  retries: 60
+  delay: 10
+  until:
+  - r_el_deployment is defined
+  - r_el_deployment.resources is defined
+  - r_el_deployment.resources | length > 0
+  - r_el_deployment.resources[0].status is defined
+  - r_el_deployment.resources[0].status.readyReplicas is defined
+  - r_el_deployment.resources[0].status.readyReplicas > 0
+
+- name: Trigger pipeline run
+  include_tasks: trigger_globex_webhook.yml
+
+- name: Wait for pipeline to finish run
+  kubernetes.core.k8s_info:
+    api_version: tekton.dev/v1beta1
+    kind: PipelineRun
+    namespace: "{{ ocp4_workload_blackhat_secured_container_pipelines_namespace }}"
+    label_selectors:
+    - tekton.dev/pipeline = app-globex-ui-pipeline
+  register: r_pipeline
+  retries: 100
+  delay: 10
+  until:
+  - r_pipeline is defined
+  - r_pipeline.resources is defined
+  - r_pipeline.resources | length > 0
+  - r_pipeline.resources | json_query('[*].status.conditions[?reason==`Succeeded`][].status') | select ('match','True') | list | length == 1
+
+- name: Set up globex application
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'templates/application-globex-app.yaml.j2' ) | from_yaml }}"
+
+- name: Setup bookbag
+  include_tasks: setup_bookbag.yml
+
+- name: Reduce Openshift Gitops sync interval
+  shell: |
+    oc patch ArgoCD openshift-gitops -n openshift-gitops \
+    -p='[{"op" : "add", "path": "/spec/controller/appSync", "value" : "15s"}]' --type json
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
