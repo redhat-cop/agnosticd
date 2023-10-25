@@ -29,8 +29,12 @@ spec:
 ** habana.ai/gaudi: '1'
  memory: 8Gi
 
-### KMM, NFD and Habana Gaudi Accelerators / GPU Setup Role ###
-# Role to setup Habana Gaudi HPY's for RHODS requirements.
+# Following notebook to be used to do a quick start check using habana jupyterhub notebook image.
+https://github.com/HabanaAI/Gaudi-tutorials/blob/main/PyTorch/quickstart_tutorial/quickstart_tutorial.ipynb
+
+# Following is the image you can use as notebook image in RHODS if it doesn't show any habana specific image for jupyterhub notebook creation. This is for 1.10.x Habana Gaudi Operator version specific.
+quay.io/opendatahub/workbench-images:habana-jupyter-1.10.0-ubi8-python-3.8-2023b-20231024-34c3405
+
 
 === Deploy a Workload with the `ocp-workload` playbook [Mostly for testing]
 
