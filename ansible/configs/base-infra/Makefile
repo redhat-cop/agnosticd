@@ -24,7 +24,7 @@ SECRETS_FILE=$(SECRETS_DIR)/secrets-showroom-sandbox0$(SANDBOX).yaml
 VARS_DIR=~/vars
 VARS_FILE=$(VARS_DIR)/vars-showroom-$(CLOUD_PROVIDER)-sandbox0$(SANDBOX).yaml
 
-TARGET=bastion
+TARGET ?= bastion
 EXTRA_ARGS=
 USER_EXTRA_ARGS=
 # Adjust to taste
@@ -76,6 +76,10 @@ user-data: ## Assumes an existing output_dir, outputs contenst of user-data.yaml
 	
 ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
 	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf $(TARGET)
+
+
+ssh: ## ssh to your bastion by default or use `make ssh target=hostname` 
+	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf showroom@$(TARGET)
 
 last-status: ## Output last status file
 	ls -l $(OUTPUT_DIR)/status.txt
