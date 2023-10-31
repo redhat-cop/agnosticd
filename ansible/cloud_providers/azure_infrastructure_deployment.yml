@@ -11,9 +11,36 @@
     AZURE_CLIENT_ID: "{{azure_service_principal}}"
     AZURE_TENANT: "{{azure_tenant}}"
     AZURE_SECRET: "{{azure_password}}"
-    AZURE_SUBSCRIPTION_ID: "{{azure_subscription_id}}"
+      #AZURE_SUBSCRIPTION_ID: "{{azure_subscription_id}}"
     AZURE_CONFIG_DIR: "{{ output_dir }}/.azure-{{project_tag}}"
   tasks:
+
+    # shouldn't this be in defaults/main.yml?
+    - name: Generate Azure bastion password
+      when: generated_password is not defined
+      ansible.builtin.set_fact:
+        generated_password: >-
+          {{- lookup('ansible.builtin.password', '/dev/null length=1 chars=letters') -}}
+          {{- lookup('ansible.builtin.password', '/dev/null length=10') -}}
+          {{- lookup('ansible.builtin.password', '/dev/null length=1 chars=digits') -}}
+
+    - name: Create fact _subscription_id = azure_subscription_id if not subs based
+      when: env_type != "open-environment-azure-subscription"
+      ansible.builtin.set_fact:
+        _subscription_id: "{{ azure_subscription_id }}"
+
+    - name: Create fact _subscription_id = subscription_id if subs based
+      when: env_type == "open-environment-azure-subscription"
+      ansible.builtin.set_fact:
+        _subscription_id: "{{ subscription_id }}"
+
+    - debug:
+        msg: "asi: {{ azure_subscription_id }} si: {{ subscription_id }} _s: {{ _subscription_id }}"
+      when: subscription_id is defined
+
+#    - name: Set AZ account subscription_id
+#      command: "az account set --subscription {{ _subscription_id }}"
+
     - name: Create ssh provision key
       include_role:
         name: create_ssh_provision_key
@@ -43,7 +70,9 @@
       tags:
         - create_inventory
         - must
+
     - name: Create the resource group
+      when: env_type != "open-environment-azure-subscription"
       tags:
         - azure_infrastructure_deployment
         - validate_azure_template
@@ -64,6 +93,7 @@
       azure.azcollection.azure_rm_deployment_info:
         name: "{{ env_type }}.{{ guid }}"
         resource_group: "{{ az_resource_group }}"
+        subscription_id: "{{ _subscription_id }}"
       register: az_dg_check
       ignore_errors: true
 
@@ -72,6 +102,7 @@
       azure.azcollection.azure_rm_deployment:
         name: "{{ env_type }}.{{ guid }}"
         resource_group: "{{ az_resource_group }}"
+        subscription_id: "{{ _subscription_id }}"
         location: "{{ azure_region }}"
         parameters: "{{ lookup('ansible.builtin.template', '../configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_parameters_template.j2') }}"
         template: "{{ lookup('ansible.builtin.template', '../configs/{{ env_type }}/files/cloud_providers/{{cloud_provider}}_cloud_template.j2') }}"
@@ -88,6 +119,7 @@
       azure.azcollection.azure_rm_dnsrecordset_info:
         zone_name: "{{guid}}.{{HostedZoneId}}"
         resource_group: "{{az_resource_group}}"
+        subscription_id: "{{ _subscription_id }}"
         record_type: NS
         relative_name: '@'
       register: subzone_ns
@@ -99,11 +131,13 @@
 
     - name: Add delegation for NS to the main DNSZone
       azure.azcollection.azure_rm_dnsrecordset:
-        resource_group: "{{az_dnszone_resource_group|default('dns')}}"
-        relative_name: "{{guid}}"
-        zone_name: "{{HostedZoneId}}"
-        record_type: NS
         state: present
+        zone_name: "{{HostedZoneId}}"
+        resource_group: "{{az_dnszone_resource_group|default('dns')}}"
+        subscription_id: "{{ _subscription_id }}"
+        record_type: NS
+          # changed to support subs based DNS
+        relative_name: "{{guid}}"
         records: "{{ subzone_ns | json_query('ansible_facts.azure_dnsrecordset[0].properties.NSRecords[*].{entry: nsdname}') }}"
       tags:
         - azure_infrastructure_deployment
@@ -111,11 +145,50 @@
         - dns_delegation is defined
         - dns_delegation == true
 
+    - name: Provide installed bastion data as soon as we have it
+      when:
+        - azure_deploy_bastion | default(false) | bool
+      agnosticd_user_info:
+        msg:
+          - "bastion_ssh_command: ssh {{ remote_user }}@bastion.{{ guid }}.{{ cluster_dns_zone }}"
+          - "bastion_password: {{ generated_password }}"
+        data:
+          bastion_ssh_command: "ssh {{ remote_user }}@bastion.{{ guid }}.{{ cluster_dns_zone }}"
+          bastion_password: "{{ generated_password }}"
+          common_password: "{{ generated_password }}"
+          ssh_password: "{{ generated_password }}"
+          ssh_username: "{{ remote_user }}"
+          targethost: "bastion.{{ guid }}.{{ cluster_dns_zone }}"
+
+    - name: Set facts for Showroom
+      when:
+        - showroom_deploy | default(false) | bool
+      ansible.builtin.set_fact:
+        bastion_ssh_command: "ssh {{ remote_user }}@bastion.{{ guid }}.{{ cluster_dns_zone }}"
+        bastion_password: "{{ generated_password }}"
+        common_password: "{{ generated_password }}"
+        ssh_password: "{{ generated_password }}"
+        ssh_username: "{{ remote_user }}"
+        targethost: "bastion.{{ guid }}.{{ cluster_dns_zone }}"
+
+    - name: Set _zone_name fact to account for subs vs RG deploy
+      when: env_type != "open-environment-azure-subscription"
+      ansible.builtin.set_fact:
+        _relative_name: "bastion-{{ guid }}"
+        _zone_name: "{{ HostedZoneId }}"
+
+    - name: Set _zone_name fact to account for subs vs RG deploy
+      when: env_type == "open-environment-azure-subscription"
+      ansible.builtin.set_fact:
+        _relative_name: "bastion"
+        _zone_name: "{{ guid }}.{{ HostedZoneId }}"
+
     - name: Add CNAME for bastion to the main DNSZone
       azure.azcollection.azure_rm_dnsrecordset:
         resource_group: "{{az_dnszone_resource_group|default('dns')}}"
-        relative_name: "bastion.{{guid}}"
-        zone_name: "{{HostedZoneId}}"
+        subscription_id: "{{ _subscription_id }}"
+        relative_name: "{{ _relative_name }}"
+        zone_name: "{{ _zone_name }}"
         record_type: CNAME
         state: present
         records:
@@ -182,7 +255,7 @@
         AZURE_CLIENT_ID: "{{azure_service_principal}}"
         AZURE_TENANT: "{{azure_tenant}}"
         AZURE_SECRET: "{{azure_password}}"
-        AZURE_SUBSCRIPTION_ID: "{{azure_subscription_id}}"
+        AZURE_SUBSCRIPTION_ID: "{{_subscription_id}}"
         AZURE_CONFIG_DIR: "{{ output_dir }}/.azure-{{project_tag}}"
       command: "az vm restart --resource-group {{az_resource_group}} --name '{{inventory_hostname}}'"
       delegate_to: localhost
@@ -264,7 +337,7 @@
         AZURE_CLIENT_ID: "{{azure_service_principal}}"
         AZURE_TENANT: "{{azure_tenant}}"
         AZURE_SECRET: "{{azure_password}}"
-        AZURE_SUBSCRIPTION_ID: "{{azure_subscription_id}}"
+        AZURE_SUBSCRIPTION_ID: "{{_subscription_id}}"
         AZURE_CONFIG_DIR: "{{ output_dir }}/.azure-{{project_tag}}"
       command: "az vm restart --resource-group {{az_resource_group}} --name '{{inventory_hostname}}'"
       delegate_to: localhost
@@ -311,7 +384,7 @@
             }}
           ignore_errors: true
 
-- name: Create Azure Service Principal for OSBA/Cloud Provider
+- name: Create Azure Service Principal for OSBA/Cloud Provider (Open Service Broker for Azure)
   hosts: localhost
   connection: local
   gather_facts: false

@@ -1,0 +1,296 @@
+---
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: openshift-gitops
+  namespace: openshift-gitops
+spec:
+  resourceTrackingMethod: annotation
+  applicationSet: {}
+  extraConfig:
+    resource.ignoreResourceUpdatesEnabled: 'true'
+    resource.customizations.ignoreResourceUpdates.external-secrets.io_ExternalSecret: |
+      jsonPointers:
+      - /status/refreshTime
+    resource.customizations.ignoreResourceUpdates.ocs.openshift.io_StorageCluster: |
+      jsonPointers:
+      - /status
+      - /metadata/resourceVersion
+    resource.customizations.ignoreResourceUpdates.ocs.openshift.io_StorageSystem: |
+      jsonPointers:
+      - /status
+      - /metadata/resourceVersion
+    resource.customizations.ignoreResourceUpdates.noobaa.io_Noobaa: |
+      jsonPointers:
+      - /status
+      - /metadata/resourceVersion
+    resource.customizations.ignoreResourceUpdates.noobaa.io_BackingStore: |
+      jsonPointers:
+      - /status
+      - /metadata/resourceVersion
+    resource.customizations.health.PersistentVolumeClaim: |
+      hs = {}
+      if obj.status ~= nil then
+        if obj.status.phase ~= nil then
+          if obj.status.phase == "Pending" then
+            hs.status = "Healthy"
+            hs.message = obj.status.phase
+            return hs
+          end
+          if obj.status.phase == "Bound" then
+            hs.status = "Healthy"
+            hs.message = obj.status.phase
+            return hs
+          end
+        end
+      end
+      hs.status = "Progressing"
+      hs.message = "Waiting for PVC"
+      return hs
+  kustomizeBuildOptions: "--enable-helm --enable-alpha-plugins"
+  controller:
+    resources:
+      limits:
+        memory: 4Gi
+      requests:
+        cpu: 1000m
+        memory: 3Gi
+  monitoring:
+    enabled: true
+  repo:
+    sidecarContainers:
+      - name: setenv-plugin
+        command: [/var/run/argocd/argocd-cmp-server]
+        env:
+          - name: SUB_DOMAIN
+            value: {{ sub_domain }}
+        image: quay.io/gnunn/tools:latest
+        imagePullPolicy: Always
+        securityContext:
+          runAsNonRoot: true
+        volumeMounts:
+          - mountPath: /var/run/argocd
+            name: var-files
+          - mountPath: /home/argocd/cmp-server/plugins
+            name: plugins
+          - mountPath: /tmp
+            name: tmp
+          - mountPath: /home/argocd/cmp-server/config/plugin.yaml
+            subPath: plugin.yaml
+            name: setenv-cmp-plugin
+    volumes:
+      - configMap:
+          name: setenv-cmp-plugin
+        name: setenv-cmp-plugin
+    resources:
+      limits:
+        cpu: '1'
+        memory: 1.5Gi
+      requests:
+        cpu: 250m
+        memory: 768Mi
+  redis:
+    resources:
+      limits:
+        cpu: 500m
+        memory: 512Mi
+      requests:
+        cpu: 250m
+        memory: 256Mi
+  server:
+    insecure: true
+    route:
+      enabled: true
+      tls:
+        termination: edge
+        insecureEdgeTerminationPolicy: Redirect
+  sso:
+    dex:
+      openShiftOAuth: true
+    provider: dex
+  notifications:
+    enabled: true
+  resourceHealthChecks:
+    - group: argoproj.io
+      kind: Application
+      check: |
+        hs = {}
+        hs.status = "Progressing"
+        hs.message = ""
+        if obj.status ~= nil then
+          if obj.status.health ~= nil then
+            hs.status = obj.status.health.status
+            hs.message = obj.status.health.message
+          end
+        end
+        return hs
+    - group: operators.coreos.com
+      kind: Subscription
+      check: |
+        health_status = {}
+        if obj.status ~= nil then
+          if obj.status.conditions ~= nil then
+            numDegraded = 0
+            numPending = 0
+            msg = ""
+            for i, condition in pairs(obj.status.conditions) do
+              msg = msg .. i .. ": " .. condition.type .. " | " .. condition.status .. "\n"
+              if condition.type == "InstallPlanPending" and condition.status == "True" then
+                numPending = numPending + 1
+              elseif (condition.type == "InstallPlanMissing" and condition.reason ~= "ReferencedInstallPlanNotFound") then
+                numDegraded = numDegraded + 1
+              elseif (condition.type == "CatalogSourcesUnhealthy" or condition.type == "InstallPlanFailed" or condition.type == "ResolutionFailed") and condition.status == "True" then
+                numDegraded = numDegraded + 1
+              end
+            end
+            if numDegraded == 0 and numPending == 0 then
+              health_status.status = "Healthy"
+              health_status.message = msg
+              return health_status
+            elseif numPending > 0 and numDegraded == 0 then
+              health_status.status = "Progressing"
+              health_status.message = "An install plan for a subscription is pending installation"
+              return health_status
+            else
+              health_status.status = "Degraded"
+              health_status.message = msg
+              return health_status
+            end
+          end
+        end
+        health_status.status = "Progressing"
+        health_status.message = "An install plan for a subscription is pending installation"
+        return health_status
+    - group: operators.coreos.com
+      kind: InstallPlan
+      check: |
+        hs = {}
+        if obj.status ~= nil then
+          if obj.status.phase ~= nil then
+            if obj.status.phase == "Complete" then
+              hs.status = "Healthy"
+              hs.message = obj.status.phase
+              return hs
+            end
+          end
+        end
+        hs.status = "Progressing"
+        hs.message = "Waiting for InstallPlan to complete"
+        return hs
+    - group: platform.stackrox.io
+      kind: Central
+      check: |
+        hs = {}
+        if obj.status ~= nil and obj.status.conditions ~= nil then
+            for i, condition in ipairs(obj.status.conditions) do
+              if condition.status == "True" or condition.reason == "InstallSuccessful" or condition.reason == "UpgradeSuccessful" then
+                  hs.status = "Healthy"
+                  hs.message = "Install Successful"
+                  return hs
+              end
+            end
+        end
+        hs.status = "Progressing"
+        hs.message = "Waiting for Central to deploy."
+        return hs
+    - group: image.openshift.io
+      kind: ImageStream
+      check: |
+        hs = {}
+        hs.status = "Progressing"
+        hs.message = ""
+        if obj.status ~= nil then
+          if obj.status.tags ~= nil then
+            numTags = 0
+            for _ , item in pairs(obj.status.tags) do
+              numTags = numTags + 1
+              numItems = 0
+              if item.tags ~= nil then
+                for _ , item in pairs(item.tags) do
+                  numItems = numItems + 1
+                end
+                if numItems == 0 then
+                  return hs
+                end
+              end
+            end
+            if numTags > 0 then
+              hs.status = "Healthy"
+              hs.message = "ImageStream has tags resolved"
+              return hs
+            end
+          end
+        end
+        return hs
+    - group: build.openshift.io
+      kind: Build
+      check: |
+        hs = {}
+        if obj.status ~= nil then
+          if obj.status.phase ~= nil then
+            if obj.status.phase == "Complete" then
+              hs.status = "Healthy"
+              hs.message = obj.status.phase
+              return hs
+            end
+          end
+        end
+        hs.status = "Progressing"
+        hs.message = "Waiting for Build to complete"
+        return hs
+    - kind: PersistentVolumeClaim
+      check: |
+        hs = {}
+        if obj.status ~= nil then
+          if obj.status.phase ~= nil then
+            if obj.status.phase == "Pending" then
+              hs.status = "Healthy"
+              hs.message = obj.status.phase
+              return hs
+            end
+            if obj.status.phase == "Bound" then
+              hs.status = "Healthy"
+              hs.message = obj.status.phase
+              return hs
+            end
+          end
+        end
+        hs.status = "Progressing"
+        hs.message = "Waiting for PVC"
+        return hs
+  resourceIgnoreDifferences:
+    resourceIdentifiers:
+      - group: route.openshift.io
+        kind: Route
+        customization:
+          jsonPointers:
+            - /status/ingress
+            - /metadata/annotations
+      - group: quay.redhat.com
+        kind: QuayRegistry
+        customization:
+          jsonPointers:
+            - /status/ingress
+  resourceExclusions: |
+    - apiGroups:
+      - tekton.dev
+      clusters:
+      - '*'
+      kinds:
+      - TaskRun
+      - PipelineRun
+  ha:
+    enabled: false
+  rbac:
+    defaultPolicy: 'role:none'
+    policy: |
+      p, role:none, applications, get, */*, deny
+      p, role:none, certificates, get, *, deny
+      p, role:none, clusters, get, *, deny
+      p, role:none, repositories, get, *, deny
+      p, role:none, projects, get, *, deny
+      p, role:none, accounts, get, *, deny
+      p, role:none, gpgkeys, get, *, deny
+      g, system:cluster-admins, role:admin
+      g, cluster-admins, role:admin
+    scopes: "[groups]"

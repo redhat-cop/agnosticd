@@ -1,44 +1,71 @@
 ---
-- name: Clone and Inject Showroom Tasks
+- name: Clone and Inject Showroom repo and vars
   block:
 
-    - name: Clone showroom primary repo - asciidoc source
+    - name: Clone showroom primary repo - lab content in adoc
       ansible.builtin.git:
         repo: "{{ showroom_git_repo }}"
-        dest: /opt/showroom/content
+        dest: "{{ showroom_user_home_dir }}/content"
         force: true
-        version: master
+        version: "{{ showroom_git_ref | default(showroom_git_tag) | default('main') }}"
       become_user: "{{ showroom_user }}"
 
-    # TODO: Add the "view" injection code
-    #   - a default index.html
-    #   - (future) ability to add multiple views
-
-    - name: Inject the index.html
-      ansible.builtin.debug:
-        msg: "Inject index.html"
-
-    - name: Setup and inject userdata
+    - name: Setup and inject userdata into showroom repo
+      when: showroom_var_inject | default(true) | bool
       block:
 
-        - name: Load AgnosticD User Data
-          ansible.builtin.set_fact:
-            f_user_data: >-
-              {{ lookup('file', hostvars.localhost.output_dir ~ '/user-data.yaml', errors='ignore') | from_yaml }}
+        - name: Fetch antora.yml from the showroom content dir
+          ansible.builtin.fetch:
+            src: "{{ showroom_user_home_dir }}/content/content/antora.yml"
+            dest: "{{ output_dir }}/antora.yml"
+            flat: true
 
-        - name: Fallback for AgnosticD User Data
+        - name: Include antora.yml data
+          ansible.builtin.include_vars:
+            file: "{{ output_dir }}/antora.yml"
+            name: antora_data
+
+        - name: Include user-data.yml
+          ansible.builtin.include_vars:
+            file: "{{ output_dir }}/user-data.yaml"
+            name: f_user_data
+
+        - name: Fallback for an empty AgnosticD User Data
           when: f_user_data | default({}) | length == 0
           ansible.builtin.set_fact:
-            f_user_data: []
+            f_user_data: {}
 
-        - name: Create KV file
+        - name: Write back the user-data as attributes
           ansible.builtin.template:
-            src: include_vars.adoc.j2
-            dest: "{{ showroom_home_dir }}/content/documentation/modules/ROOT/pages/include_vars.adoc"
-            owner: "{{ showroom_user }}"
-            group: "{{ showroom_group }}"
-            mode: '0644'
-          tags:
-            - showroom-var-injection
-  tags:
-    - showroom-clone-and-inject
+            src: user-data-as-attributes.j2
+            dest: "{{ output_dir }}/user-data-as-attributes.yml"
+          delegate_to: localhost
+          become: false
+
+        - name: Include user-data.yml
+          ansible.builtin.include_vars:
+            file: "{{ output_dir }}/user-data-as-attributes.yml"
+            name: attribute_user_data
+
+        - name: Merge repo's asciidoc.attributes antora_data with user-data taking precedence
+          ansible.builtin.set_fact:
+            merged_vars: "{{ antora_data | combine(attribute_user_data | from_yaml, recursive=true) }}"
+
+        - name: Write merged_vars to a file
+          ansible.builtin.copy:
+            content: "{{ merged_vars | to_nice_yaml(indent=2) }}"
+            dest: "{{ showroom_user_home_dir }}/content/content/antora.yml"
+
+        # - name: OverWrite merged vars back to antora.yml
+        #   ansible.builtin.copy:
+        #     content: "{{ __merged_vars | to_nice_yaml(indent=2) }}"
+        #     # content: "{{ user_data | combine(file_vars) | to_nice_yaml(indent=2) }}"
+        #     dest: "{{ showroom_user_home_dir }}/content/content/antora.yml"
+        #     backup: true  # TODO: Remove after validation
+        # - name: create kv file
+        #   ansible.builtin.template:
+        #     src: include_vars.adoc.j2
+        #     dest: "{{ showroom_user_home_dir }}/content/content/modules/root/pages/include_vars.adoc"
+        #     owner: "{{ showroom_user }}"
+        #     group: "{{ showroom_user_group }}"
+        #     mode: "u=rw,o=r,g=r"

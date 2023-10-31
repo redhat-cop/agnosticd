@@ -1,0 +1,482 @@
+---
+- name: Set Ansible Python interpreter to k8s virtualenv
+  ansible.builtin.set_fact:
+    ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+
+- name: Set URLs for OpenShift GA releases (specific version)
+  when:
+    - not ocp4_installer_use_dev_preview | default(false) | bool
+    - (ocp4_installer_version | string).split('.') | length >= 3
+  ansible.builtin.set_fact:
+    ocp4_client_url: >-
+      {{ '{0}/ocp/{1}/openshift-client-linux-{1}.tar.gz'.format(
+        ocp4_installer_root_url | default("https://mirror.openshift.com/pub/openshift-v4/clients"),
+        ocp4_installer_version
+      ) }}
+
+- name: Get the OpenShift CLI
+  become: true
+  ansible.builtin.unarchive:
+    src: "{{ ocp4_client_url }}"
+    remote_src: true
+    dest: /usr/bin
+    mode: 0775
+    owner: root
+    group: root
+  register: r_client
+  until: r_client is success
+  retries: 10
+  delay: 30
+
+
+- name: Log in (obtain access token)
+  community.okd.openshift_auth:
+    username: "{{ openshift_cnv_username }}"
+    password: "{{ openshift_cnv_password }}"
+    host: "{{ openshift_cnv_api_uri }}"
+  register: k8s_auth_results
+
+
+- name: Install OCP using Assisted Installed
+  module_defaults:
+    group/k8s:
+      host: "{{ openshift_cnv_api_uri }}"
+      api_key: "{{ k8s_auth_results.k8s_auth.api_key }}"
+      validate_certs: false
+
+  block:
+    - name: Configure a SNO cluster
+      when: worker_instance_count == 0
+      block:
+        - name: Add the service (type LoadBalancer) for SNO
+          kubernetes.core.k8s:
+            definition: "{{ lookup('ansible.builtin.template', 'templates/sno_svc.yaml') }}"
+            wait: true
+            wait_timeout: 300
+          vars:
+            svcname: "{{ ai_ocp_vmname_master_prefix }}-svc"
+            namespace: "{{ ai_ocp_namespace }}"
+
+        - name: Wait for the LoadBalancer value - masters
+          register: full_svc_masters
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Service
+            name: "{{ ai_ocp_vmname_master_prefix }}-svc"
+            namespace: "{{ ai_ocp_namespace }}"
+          until: full_svc_masters.resources[0].status.loadBalancer.ingress[0].ip | default('') != ''
+          retries: 10
+          delay: 2
+
+        - name: Add A dns record - masters
+          ansible.builtin.nsupdate:
+            server: >-
+              {{ cluster_dns_server
+              | ipaddr
+              | ternary(cluster_dns_server, lookup('dig', cluster_dns_server))
+              }}
+            zone: "{{ cluster_dns_zone }}"
+            record: "api.{{ cluster_name}}"
+            type: A
+            ttl: 30
+            port: "{{ cluster_dns_port | d('53') }}"
+            value: "{{ full_svc_masters.resources[0].status.loadBalancer.ingress[0].ip }}"
+            key_name: "{{ ddns_key_name }}"
+            key_secret: "{{ ddns_key_secret }}"
+
+
+        - name: Add A dns record - workers
+          ansible.builtin.nsupdate:
+            server: >-
+              {{ cluster_dns_server
+              | ipaddr
+              | ternary(cluster_dns_server, lookup('dig', cluster_dns_server))
+              }}
+            zone: "{{ cluster_dns_zone }}"
+            record: "*.apps.{{ cluster_name}}"
+            type: A
+            ttl: 30
+            port: "{{ cluster_dns_port | d('53') }}"
+            value: "{{ full_svc_masters.resources[0].status.loadBalancer.ingress[0].ip }}"
+            key_name: "{{ ddns_key_name }}"
+            key_secret: "{{ ddns_key_secret }}"
+
+    - name: Configure a full cluster
+      when: worker_instance_count|int > 0
+      block:
+        - name: Add the service (type LoadBalancer) for Full Clusters - masters
+          kubernetes.core.k8s:
+            definition: "{{ lookup('ansible.builtin.template', 'templates/masters_svc.yaml') }}"
+            wait: true
+            wait_timeout: 300
+          vars:
+            svcname: "{{ ai_ocp_vmname_master_prefix }}-svc"
+            namespace: "{{ ai_ocp_namespace }}"
+
+        - name: Wait for the LoadBalancer value - masters
+          register: full_svc_masters
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Service
+            name: "{{ ai_ocp_vmname_master_prefix }}-svc"
+            namespace: "{{ ai_ocp_namespace }}"
+          until: full_svc_masters.resources[0].status.loadBalancer.ingress[0].ip | default('') != ''
+          retries: 10
+          delay: 2
+
+        - name: Add A dns record - masters
+          ansible.builtin.nsupdate:
+            server: >-
+              {{ cluster_dns_server
+              | ipaddr
+              | ternary(cluster_dns_server, lookup('dig', cluster_dns_server))
+              }}
+            zone: "{{ cluster_dns_zone }}"
+            record: "api.{{ cluster_name}}"
+            type: A
+            ttl: 30
+            port: "{{ cluster_dns_port | d('53') }}"
+            value: "{{ full_svc_masters.resources[0].status.loadBalancer.ingress[0].ip }}"
+            key_name: "{{ ddns_key_name }}"
+            key_secret: "{{ ddns_key_secret }}"
+
+
+        - name: Add the service (type LoadBalancer) for Full Clusters - workers
+          kubernetes.core.k8s:
+            definition: "{{ lookup('ansible.builtin.template', 'templates/workers_svc.yaml') }}"
+            wait: true
+            wait_timeout: 300
+          vars:
+            svcname: "{{ ai_ocp_vmname_worker_prefix }}-svc"
+            namespace: "{{ ai_ocp_namespace }}"
+
+        - name: Wait for the LoadBalancer value - workers
+          register: full_svc_workers
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Service
+            name: "{{ ai_ocp_vmname_worker_prefix }}-svc"
+            namespace: "{{ ai_ocp_namespace }}"
+          until: full_svc_workers.resources[0].status.loadBalancer.ingress[0].ip | default('') != ''
+          retries: 10
+          delay: 2
+
+        - name: Add A dns record - workers
+          ansible.builtin.nsupdate:
+            server: >-
+              {{ cluster_dns_server
+              | ipaddr
+              | ternary(cluster_dns_server, lookup('dig', cluster_dns_server))
+              }}
+            zone: "{{ cluster_dns_zone }}"
+            record: "*.apps.{{ cluster_name}}"
+            type: A
+            ttl: 30
+            port: "{{ cluster_dns_port | d('53') }}"
+            value: "{{ full_svc_workers.resources[0].status.loadBalancer.ingress[0].ip }}"
+            key_name: "{{ ddns_key_name }}"
+            key_secret: "{{ ddns_key_secret }}"
+
+    - name: Create OVN secondary network
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'templates/net-attach-def.yaml') }}"
+        wait: true
+        wait_timeout: 300
+      vars:
+        network_name: "{{ cluster_name }}-openshift"
+        namespace: "{{ ai_ocp_namespace }}"
+
+    - name: Create Assisted Installer Cluster
+      rhpds.assisted_installer.create_cluster:
+        name: "{{ cluster_name }}"
+        openshift_version: "{{ ai_cluster_version }}"
+        base_dns_domain: "{{ cluster_dns_zone }}"
+        offline_token: "{{ ai_offline_token }}"
+        pull_secret: "{{ ai_pull_secret }}"
+        high_availability_mode: "{{ 'Full' if master_instance_count|int > 1 else 'None' }}"
+        schedulable_masters: false
+        olm_operators: []
+        service_networks:
+          - cidr: "172.31.0.0/16"
+        machine_networks:
+          - cidr: "{{ ai_network_prefix }}.0/24"
+        cluster_networks:
+          - cidr: "10.132.0.0/14"
+            host_prefix: 23
+        api_vip: "{{ ai_network_prefix }}.100"
+        api_vips:
+          - ip: "{{ ai_network_prefix }}.100"
+        ingress_vip: "{{ ai_network_prefix }}.101"
+        ingress_vips:
+          - ip: "{{ ai_network_prefix }}.101"
+      register: newcluster
+
+    - name: Add etcd manifest
+      rhpds.assisted_installer.create_manifest:
+        cluster_id: "{{ newcluster.result.id }}"
+        offline_token: "{{ ai_offline_token }}"
+        content: "{{lookup('ansible.builtin.file', 'files/etcd_disk.yaml') | b64encode }}"
+        file_name: "10-masters-etcd-config.yaml"
+        folder: "openshift"
+
+    - name: Add routers replicas manifest
+      rhpds.assisted_installer.create_manifest:
+        cluster_id: "{{ newcluster.result.id }}"
+        offline_token: "{{ ai_offline_token }}"
+        content: "{{lookup('ansible.builtin.template', 'files/router_replicas.yaml') | b64encode }}"
+        file_name: "99_router-replicas.yaml"
+        folder: "openshift"
+
+    - name: Add OVN-Kubernetes to switch to local gateway mode manifest
+      rhpds.assisted_installer.create_manifest:
+        cluster_id: "{{ newcluster.result.id }}"
+        offline_token: "{{ ai_offline_token }}"
+        content: "{{lookup('ansible.builtin.file', 'files/network_config.yaml') | b64encode }}"
+        file_name: "cluster-network-03-config.yml"
+        folder: "openshift"
+
+    - name: Enable ip_forwarding for control plane
+      rhpds.assisted_installer.create_manifest:
+        cluster_id: "{{ newcluster.result.id }}"
+        offline_token: "{{ ai_offline_token }}"
+        content: "{{lookup('ansible.builtin.file', 'files/sysctl-control-plane.yaml') | b64encode }}"
+        file_name: "98_sysctl-control-plane.yaml"
+        folder: "openshift"
+      when: ai_cluster_version is version_compare('4.14', '>=')
+
+    - name: Enable ip_forwarding for workers
+      rhpds.assisted_installer.create_manifest:
+        cluster_id: "{{ newcluster.result.id }}"
+        offline_token: "{{ ai_offline_token }}"
+        content: "{{lookup('ansible.builtin.file', 'files/sysctl-workers.yaml') | b64encode }}"
+        file_name: "98_sysctl-workers.yaml"
+        folder: "openshift"
+      when: ai_cluster_version is version_compare('4.14', '>=')
+
+    - name: Generate mac addresses for control plane
+      ansible.builtin.set_fact:
+        ai_masters_macs: >
+          {{ ai_masters_macs + ['f6:45:ae' |
+              community.general.random_mac(ai_ocp_namespace + cluster_name + 'm' + _index|string)] }}
+      loop: "{{ range(1,master_instance_count|int+1)|list }}"
+      loop_control:
+        loop_var: _index
+
+    - name: Generate mac addresses for workers
+      ansible.builtin.set_fact:
+        ai_workers_macs: >
+            {{ ai_workers_macs + ['f6:45:ae' |
+               community.general.random_mac(ai_ocp_namespace + cluster_name + 'w' + _index|string)] }}
+      loop: "{{ range(1,worker_instance_count|int+1)|list }}"
+      loop_control:
+        loop_var: _index
+
+    - name: Set static_network_config variable
+      ansible.builtin.set_fact:
+        static_network_config: "{{ lookup('template','static_network_config_full.j2') | from_yaml}}"
+
+
+    - name: Create Infrastructure environment
+      rhpds.assisted_installer.create_infra_env:
+        name: "{{ cluster_name }}-infra-env"
+        image_type: "{{ ai_cluster_iso_type }}"
+        cluster_id: "{{ newcluster.result.id }}"
+        ssh_authorized_key: "{{ ai_ssh_authorized_key }}"
+        offline_token: "{{ ai_offline_token }}"
+        pull_secret: "{{ ai_pull_secret }}"
+        static_network_config: "{{ static_network_config }}"
+      register: newinfraenv
+
+
+    - name: Create PVC for the installation ISO
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'templates/installation-iso.yaml') }}"
+        wait: true
+        wait_timeout: 300
+      vars:
+        image_url: "{{ newinfraenv.result.download_url }}"
+        namespace: "{{ ai_ocp_namespace }}"
+        pvcname: "installation-iso"
+
+    - name: Create a three master VMs for Full cluster
+      ansible.builtin.include_tasks: kubevirt/create_masters_etcd.yaml
+      vars:
+        pvcinstall: "installation-iso"
+        vmname: "{{ ai_ocp_vmname_master_prefix }}-{{ _index }}"
+        namespace: "{{ ai_ocp_namespace }}"
+        storageclass: "{{ ai_storage_class }}"
+        network: "{{ cluster_name }}-openshift"
+        network_name: "{{ cluster_name }}-openshift"
+        pod_network: "192.168.{{ _index }}.0/24"
+      loop: "{{ range(1,master_instance_count|int+1)|list }}"
+      loop_control:
+        loop_var: _index
+
+    - name: Create a {{ worker_instance_count }} worker VMs for Full cluster
+      include_tasks: kubevirt/create_workers.yaml
+      vars:
+        pvcinstall: "installation-iso"
+        vmname: "{{ ai_ocp_vmname_worker_prefix }}-{{ _index }}"
+        namespace: "{{ ai_ocp_namespace }}"
+        storageclass: "{{ ai_storage_class }}"
+        network: "{{ cluster_name}}-openshift"
+        network_name: "{{ cluster_name }}-openshift"
+        pod_network: "192.168.1{{ _index }}.0/24"
+      loop: "{{ range(1,worker_instance_count|int+1)|list }}"
+      loop_control:
+        loop_var: _index
+
+    - name: Set the variable ai_configure_hosts for control-plane
+      ansible.builtin.set_fact:
+        ai_configure_hosts: >-
+          {{ ai_configure_hosts + [
+          {'hostname': ai_ocp_vmname_master_prefix + "-" + _index|string,
+          'role': 'master',
+          'installation_disk': '/dev/vda'}] }}
+      loop: "{{ range(1,master_instance_count|int+1)|list }}"
+      loop_control:
+        loop_var: _index
+
+
+    - name: Set the variable ai_configure_hosts for workers
+      ansible.builtin.set_fact:
+        ai_configure_hosts: >-
+          {{ ai_configure_hosts + [
+          {'hostname': ai_ocp_vmname_worker_prefix + "-" + _index|string,
+          'role': 'worker',
+          'installation_disk': '/dev/vda'}] }}
+      loop: "{{ range(1,worker_instance_count|int+1)|list }}"
+      loop_control:
+        loop_var: _index
+
+    - name: Wait for the hosts to be ready
+      rhpds.assisted_installer.wait_for_hosts:
+        cluster_id: "{{ newcluster.result.id }}"
+        offline_token: "{{ ai_offline_token }}"
+        expected_hosts: "{{ master_instance_count|int + worker_instance_count|int }}"
+        infra_env_id: "{{ newinfraenv.result.id }}"
+        configure_hosts: "{{ ai_configure_hosts }}"
+        wait_timeout: 600
+
+    - name: Start cluster installation
+      rhpds.assisted_installer.install_cluster:
+        cluster_id: "{{ newcluster.result.id }}"
+        offline_token: "{{ ai_offline_token }}"
+        wait_timeout: 5400
+      async: 5400
+      poll: 60
+    - name: Obtain OpenShift cluster credentials
+      register: credentials
+      rhpds.assisted_installer.get_credentials:
+        cluster_id: "{{ newcluster.result.id }}"
+        offline_token: "{{ ai_offline_token }}"
+
+    - name: Display credentials
+      ansible.builtin.debug:
+        var: credentials.result
+
+    - name: Create directory for downloaded credential files
+      ansible.builtin.file:
+        state: directory
+        path: "{{ ai_ocp_output_dir }}/{{ cluster_name }}/auth"
+        recurse: true
+
+    - name: Downloads OpenShift cluster credentials
+      rhpds.assisted_installer.download_credentials:
+        cluster_id: "{{ newcluster.result.id }}"
+        offline_token: "{{ ai_offline_token }}"
+        file_name: "{{ item }}"
+        dest: "{{ ai_ocp_output_dir }}/{{ cluster_name }}/auth/{{ item }}"
+      loop:
+        - kubeadmin-password
+        - kubeconfig
+        - kubeconfig-noingress
+
+    - name: Downloads OpenShift cluster files
+      rhpds.assisted_installer.download_files:
+        cluster_id: "{{ newcluster.result.id }}"
+        offline_token: "{{ ai_offline_token }}"
+        file_name: "{{ item }}"
+        dest: "{{ ai_ocp_output_dir }}/{{ cluster_name }}/{{ item }}"
+      loop:
+        - bootstrap.ign
+        - master.ign
+        - metadata.json
+        - worker.ign
+        - install-config.yaml
+        - custom_manifests.json
+        - custom_manifests.yaml
+
+    - name: Fetch kube config
+      ansible.builtin.fetch:
+        flat: true
+        src: /home/{{ ansible_user }}/{{ cluster_name }}/auth/{{ item }}
+        dest: "{{ hostvars.localhost.output_dir }}/{{ env_type }}_{{ guid }}_{{ item }}"
+      loop:
+        - kubeconfig
+        - kubeadmin-password
+
+    - name: Make sure .kube directory exists for {{ ansible_user }}
+      ansible.builtin.file:
+        state: directory
+        path: /home/{{ ansible_user }}/.kube
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: 0700
+
+    - name: Make sure .kube directory exists for root
+      become: true
+      ansible.builtin.file:
+        state: directory
+        path: /root/.kube
+        owner: root
+        group: root
+        mode: 0700
+
+    - name: Copy cluster kubeconfig to /home/{{ ansible_user }}/.kube/config
+      ansible.builtin.copy:
+        remote_src: true
+        src: "/home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig"
+        dest: "/home/{{ ansible_user }}/.kube/config"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: 0600
+
+    - name: Copy cluster kubeconfig to /root/.kube/config
+      become: true
+      ansible.builtin.copy:
+        remote_src: true
+        src: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+        dest: /root/.kube/config
+        owner: root
+        group: root
+        mode: 0600
+
+    - name: Set up Student User
+      when: install_student_user | bool
+      block:
+        - name: Make sure .kube directory exists in /home/{{ student_name }}
+          become: true
+          ansible.builtin.file:
+            state: directory
+            path: "/home/{{ student_name }}/.kube"
+            owner: "{{ student_name }}"
+            group: users
+            mode: 0700
+
+        - name: Copy /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig to /home/{{ student_name }}/.kube
+          become: true
+          ansible.builtin.copy:
+            src: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+            dest: /home/{{ student_name }}/.kube/config
+            remote_src: true
+            owner: "{{ student_name }}"
+            group: users
+            mode: 0600
+
+    - name: Create OpenShift Bash completion file
+      become: true
+      ansible.builtin.shell: oc completion bash >/etc/bash_completion.d/openshift
+
+- name: Gather and Print cluster info
+  ansible.builtin.import_tasks: print_cluster_info.yml
