@@ -35,7 +35,7 @@ Connect to the PostgreSQL Kubevirt VM from another container.
 
 ```
 oc run psql-${RANDOM} -it --rm --image=registry.redhat.io/rhel8/postgresql-13:latest --restart=Never \
---annotations=k8s.v1.cni.cncf.io/networks='[{"name":"postgresql-net","interface":"net1","ips":["10.10.10.40/24"]}]' \
+--annotations=k8s.v1.cni.cncf.io/networks='[{"name":"postgresql-net", "namespace":"default", "interface":"net1","ips":["10.10.10.40/24"]}]' \
 --env="PGPASSWORD=redhat" \
 -- psql -h 10.10.10.30 -U redhat customers
 ```
