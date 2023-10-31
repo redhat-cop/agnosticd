@@ -117,7 +117,7 @@
       command: >-
         az ad sp create-for-rbac
         --name "api://openenv-{{ guid }}"
-        --role Owner
+        --role "{{ azure_owner_role_name }}"
         --scopes "{{ subscription_fqid }}"
       register: azappcreate
       retries: 10
@@ -139,6 +139,73 @@
     - name: Get password
       when: azappcreate.changed
       set_fact: azpass="{{ azappcreate.stdout | from_json | json_query('password') }}"
+
+    - name: Log out of Azure CLI
+      command: >
+        az logout
+
+- name: Create ARO SP
+  when: ( install_aro | default(false) | bool )
+  block:
+    - name: Log into Azure CLI
+      no_log: True
+      command: >
+        az login --service-principal -u {{ azure_service_principal }}
+        -p {{ azure_password }} --tenant {{ azure_tenant }}
+
+    - name: Create the Service Principal for ARO
+      ansible.builtin.command: >-
+        az ad sp create-for-rbac
+        --name "api://openenv-aro-{{ guid }}"
+        --role "{{ azure_owner_role_name }}"
+        --scopes "{{ subscription_fqid }}"
+      register: azaroappcreate
+      retries: 10
+      delay: 10
+      until: azaroappcreate is succeeded
+
+    - name: Get ARO app info
+      azure.azcollection.azure_rm_adapplication_info:
+        auth_source: cli
+        tenant: "{{ azure_tenant }}"
+        app_id: "{{ azaroappcreate.stdout | from_json | json_query('appId') }}"
+        subscription_id: "{{ azure_subscription_id }}"
+      register: azaroapp
+      retries: 30
+      delay: 10
+      until:
+        - azaroapp.applications | length > 0
+
+    - name: Get ARO app SP info
+      azure.azcollection.azure_rm_adserviceprincipal_info:
+        auth_source: cli
+        app_id: "{{ azaroapp.applications[0].app_id }}"
+        tenant: "{{ azure_tenant }}"
+      register: azaroappsp
+
+    - name: Build payload for role assignment
+      ansible.builtin.set_fact:
+        payload:
+          {
+            '@odata.type': '#microsoft.graph.unifiedRoleAssignment',
+            'principalId': "{{ azaroappsp.service_principals[0].object_id }}",
+            'roleDefinitionId': '8e2e22ca-bde6-4977-bc67-7f189cc47557',
+            'directoryScopeId': '/'
+          }
+
+    - name: Assign Application Administrator role to ARO SP
+      ansible.builtin.command: >-
+        az rest -m post
+        --headers Content-type=application/json
+        -u https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments
+        -b "{{ payload }}"
+      register: rest_post
+      failed_when:
+        - rest_post.rc != 0
+        - '"A conflicting object with one or more of the specified property values is present in the directory" not in rest_post.stderr'
+
+    - name: Save ARO SP password
+      ansible.builtin.set_fact: az_aro_pass="{{ azaroappcreate.stdout | from_json | json_query('password') }}"
 
     - name: Log out of Azure CLI
       command: >
