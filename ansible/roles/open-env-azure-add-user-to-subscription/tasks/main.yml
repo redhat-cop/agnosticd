@@ -1,11 +1,20 @@
 ---
 - name: Check if email is Red Hat associate
-  fail:
-    msg: User is not a Red Hat associate
+  set_fact:
+    internal_user: True
+  when:
+    - '"@redhat.com" in requester_email'
+    - agnosticd_open_environment | default(false) | bool
+
+- name: Check if email is not a Red Hat associate
+  set_fact:
+    internal_user: False
   when:
     - '"@redhat.com" not in requester_email'
 
 - name: Checking if user is in Active Directory
+  when:
+    - internal_user | default(false) | bool
   azure.azcollection.azure_rm_aduser_info:
     auth_source: env
     user_principal_name: "{{ requester_email }}"
@@ -61,6 +70,8 @@
       register: role_definition
 
     - name: Set user as Owner for the subscription
+      when:
+        - internal_user | default(false) | bool
       azure.azcollection.azure_rm_roleassignment:
         auth_source: env
         scope: "{{ subscription_fqid }}"
@@ -106,7 +117,7 @@
       command: >-
         az ad sp create-for-rbac
         --name "api://openenv-{{ guid }}"
-        --role Owner
+        --role "{{ azure_owner_role_name }}"
         --scopes "{{ subscription_fqid }}"
       register: azappcreate
       retries: 10
@@ -128,6 +139,52 @@
     - name: Get password
       when: azappcreate.changed
       set_fact: azpass="{{ azappcreate.stdout | from_json | json_query('password') }}"
+
+    - name: Log out of Azure CLI
+      command: >
+        az logout
+
+- name: Create ARO SP
+  when: ( install_aro | default(false) | bool )
+  block:
+    - name: Log into Azure CLI
+      no_log: True
+      command: >
+        az login --service-principal -u {{ azure_service_principal }}
+        -p {{ azure_password }} --tenant {{ azure_tenant }}
+
+    - name: Create the Service Principal for ARO
+      ansible.builtin.command: >-
+        az ad sp create-for-rbac
+        --name "api://openenv-aro-{{ guid }}"
+        --role "{{ azure_owner_role_name }}"
+        --scopes "{{ subscription_fqid }}"
+      register: azaroappcreate
+      retries: 10
+      delay: 10
+      until: azaroappcreate is succeeded
+
+    - name: Get ARO app info
+      azure.azcollection.azure_rm_adapplication_info:
+        auth_source: cli
+        tenant: "{{ azure_tenant }}"
+        app_id: "{{ azaroappcreate.stdout | from_json | json_query('appId') }}"
+        subscription_id: "{{ azure_subscription_id }}"
+      register: azaroapp
+      retries: 30
+      delay: 10
+      until:
+        - azaroapp.applications | length > 0
+
+    - name: Get ARO app SP info
+      azure.azcollection.azure_rm_adserviceprincipal_info:
+        auth_source: cli
+        app_id: "{{ azaroapp.applications[0].app_id }}"
+        tenant: "{{ azure_tenant }}"
+      register: azaroappsp
+
+    - name: Save ARO SP password
+      ansible.builtin.set_fact: az_aro_pass="{{ azaroappcreate.stdout | from_json | json_query('password') }}"
 
     - name: Log out of Azure CLI
       command: >
