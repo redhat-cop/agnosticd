@@ -1,0 +1,182 @@
+---
+- name: Create rocket chat project and wait for it to be completed
+  kubernetes.core.k8s:
+    name: "{{ ocp4_workload_rocket_chat_namespace }}"
+    api_version: v1
+    kind: Project
+    state: present
+  register: project_result
+  until: project_result is succeeded
+  retries: 10
+  delay: 10
+
+- name: Deploy Rocket Chat and register the route in route_result
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ ocp4_workload_rocket_chat_namespace }}"
+    definition: "{{ lookup('template', 'rocket_chat_deployment.yaml.j2') | from_yaml }}"
+  register: route_result
+  until: route_result is succeeded
+  retries: 10
+  delay: 30
+
+- name: Get route from the above registered output for rocket chat url 
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: rocket-chat # get from rocket_chat_deployment.yaml.j2 route creation task.
+    namespace: "{{ ocp4_workload_rocket_chat_namespace }}"
+  register: route_result
+  until:
+    - route_result.resources[0].spec.host is defined
+    - route_result.resources[0].spec.host | length > 0
+  retries: 10
+  delay: 10
+
+- name: Set RocketChat URL
+  ansible.builtin.set_fact:
+    _rocketchat_url: "http://{{ route_result.resources[0].spec.host }}"
+
+- name: Get User ID and Auth Token from RocketChat API
+  hosts: your_host
+  tasks:
+    - name: Get User ID
+      uri:
+        url: "{{ _rocketchat_url }}"
+        method: POST
+        body_format: json
+        headers:
+          Content-Type: application/json
+        body:
+          user: admin
+          password: admin
+        return_content: yes
+      register: response
+
+    - name: Extract User ID and AuthToken from response
+      set_fact:
+        _userId: "{{ response.content | regex_search('\"userId\":\"([^\"]+)', '\\1') }}"
+        _authToken: "{{ response.content | regex_search('\"authToken\":\"([^\"]+)', '\\1') }}"
+
+- name: Create channels and users in RocketChat
+  hosts: localhost
+  vars:
+    authToken: "{{ _authToken }}"
+    userId: "{{ _userId }}"
+    channels:
+      - name: clothing
+        members: [ "pm_clothing" ]
+      - name: utensils
+        members: [ "pm_utensils" ]
+    users:
+      - name: pm_clothing
+        roles: [ "user" ]
+      - name: pm_utensils
+        roles: [ "user" ]
+
+  tasks:
+    - name: Create channels
+      uri:
+        url: "{{ _rocketchat_url }}/api/v1/channels.create"
+        method: POST
+        body_format: json
+        headers:
+          X-Auth-Token: "{{ authToken }}"
+          X-User-Id: "{{ userId }}"
+          Content-Type: application/json
+        body: |
+          {
+            "name": "{{ item.name }}",
+            "members": {{ item.members | to_json }}
+          }
+        return_content: yes
+      with_items: "{{ channels }}"
+      register: channel_result
+
+    - name: Create users
+      uri:
+        url: "{{ _rocketchat_url }}/api/v1/users.create"
+        method: POST
+        body_format: json
+        headers:
+          X-Auth-Token: "{{ authToken }}"
+          X-User-Id: "{{ userId }}"
+          Content-Type: application/json
+        body: |
+          {
+            "name": "{{ item.name }}",
+            "password": "your_password",
+            "roles": {{ item.roles | to_json }}
+          }
+        return_content: yes
+      with_items: "{{ users }}"
+      register: user_result
+
+    - name: Assign pm_clothing user full access to clothing channel
+      uri:
+        url: "{{ _rocketchat_url }}/api/v1/channels.setRoles"
+        method: POST
+        body_format: json
+        headers:
+          X-Auth-Token: "{{ authToken }}"
+          X-User-Id: "{{ userId }}"
+          Content-Type: application/json
+        body: |
+          {
+            "roomId": "{{ (channel_result.results | selectattr('item.name', 'equalto', 'clothing') | list | first).json.channel._id }}",
+            "roles": {
+              "pm_clothing": ["owner"]
+            }
+          }
+        return_content: yes
+
+    - name: Assign pm_utensils user full access to utensils channel
+      uri:
+        url: "{{ _rocketchat_url }}/api/v1/channels.setRoles"
+        method: POST
+        body_format: json
+        headers:
+          X-Auth-Token: "{{ authToken }}"
+          X-User-Id: "{{ userId }}"
+          Content-Type: application/json
+        body: |
+          {
+            "roomId": "{{ (channel_result.results | selectattr('item.name', 'equalto', 'utensils') | list | first).json.channel._id }}",
+            "roles": {
+              "pm_utensils": ["owner"]
+            }
+          }
+        return_content: yes
+
+- name: Send message to the clothing channel
+  uri:
+    url: "{{ _rocketchat_url }}/api/v1/chat.postMessage"
+    method: POST
+    body_format: json
+    headers:
+      X-Auth-Token: "{{ authToken }}"
+      X-User-Id: "{{ userId }}"
+      Content-Type: application/json
+    body: |
+      {
+        "channel": "#clothing",
+        "text": "{{ Welcome to Clothing Channel }}"
+      }
+    return_content: yes
+
+- name: Send message to the utensils channel
+  uri:
+    url: "{{ _rocketchat_url }}/api/v1/chat.postMessage"
+    method: POST
+    body_format: json
+    headers:
+      X-Auth-Token: "{{ authToken }}"
+      X-User-Id: "{{ userId }}"
+      Content-Type: application/json
+    body: |
+      {
+        "channel": "#utensils",
+        "text": "{{ Welcome to Utensils Channel }}"
+      }
+    return_content: yes
+
