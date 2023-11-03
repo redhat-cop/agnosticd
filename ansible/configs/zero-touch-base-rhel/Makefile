@@ -1,4 +1,4 @@
-ENV_TYPE=rhel-zero-base
+ENV_TYPE=zero-touch-base-rhel
 CLOUD_PROVIDER=ec2
 SANDBOX=1
 
