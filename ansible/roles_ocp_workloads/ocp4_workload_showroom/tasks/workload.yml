@@ -29,49 +29,73 @@
   register: r_argo_present
 
 - name: Deploy via Argo when present
-  when: r_argo_present is defined
+  when: r_argo_present.resources | length > 0
   block:
 
-    - name: Debug r_argo_present
-      ansible.builtin.debug:
-        var: r_argo_present
-
-    - name: Install showroom (single user)
+    - name: Install showroom Application (single user)
+      when:
+        - _showroom_user_data.users is undefined
       kubernetes.core.k8s:
         state: present
         definition: "{{ lookup('template', 'application.yaml.j2') }}"
 
-    - name: Save code server information
-      agnosticd_user_info:
-        data:
-          codeserver_url: >-
-            https://{{ ocp4_workload_codeserver_name }}-{{ ocp4_workload_codeserver_namespace
-            }}.{{ _ocp4_workload_codeserver_wildcard_domain }}
-          codeserver_password: "{{ ocp4_workload_codeserver_password }}"
+    - name: Install showroom ApplicationSet (multi user)
+      when:
+        - _showroom_user_data.users is defined
+      vars:
+        _user_count: "{{ _showroom_user_data.users | length }}"
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'applicationset.yaml.j2') }}"
 
-    # argo single user app deploy
+      # send it the number of users
 
-- name: Deploy showroom for single user
-  when:
-  - _showroom_user_data.users is undefined
-  ansible.builtin.include_tasks:
-    file: deploy-showroom.yaml
-  vars:
-    _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}"
-    _showroom_user_info_messages: "{{ _showroom_user_info }}"
-    _showroom_vars: "{{ _showroom_user_data | combine({'guid': guid}) }}"
+- name: Argo NOT present, deploy via Helm
+  when: r_argo_present.resources | length == 0
+  block:
 
-- name: Deploy showroom for users
-  when:
-  - _showroom_user_data.users is defined
-  loop: >-
-    {{ _showroom_user_data.users | dict2items }}
+    - name: Deploy showroom via Helm for single user
+      when:
+        - _showroom_user_data.users is undefined
+      ansible.builtin.include_tasks:
+        file: deploy-showroom.yaml
+      vars:
+        _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}"
+        _showroom_user_info_messages: "{{ _showroom_user_info }}"
+        _showroom_vars: "{{ _showroom_user_data | combine({'guid': guid}) }}"
+
+    - name: Deploy showroom via Helm for users
+      when:
+        - _showroom_user_data.users is defined
+      loop: >-
+        {{ _showroom_user_data.users | dict2items }}
+      loop_control:
+        loop_var: _showroom_users_item
+      ansible.builtin.include_tasks:
+        file: deploy-showroom.yaml
+      vars:
+        _showroom_user: "{{ _showroom_users_item.key }}"
+        _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}-{{ _showroom_user }}"
+        _showroom_user_info_messages: "{{ _showroom_vars.msg | default('') }}"
+        _showroom_vars: "{{ _showroom_users_item.value | combine({'guid': guid, 'user': _showroom_user}) }}"
+
+    - name: Report Single User Variables to user_data
+      ansible.builtin.include_tasks: report-variables.yaml
+        # call with no loop, _showroom_namespace is ocp4_workload_showroom_namespace
+
+    - name: Report Multi User Variables to user_data
+      ansible.builtin.include_tasks: report-variables.yaml
+        # call no loop, _showroom_namespace is ocp4_workload_showroom_namespace + yser#
+
+- name: Save code server information for each user
+  agnosticd_user_info:
+    user: "{{ ocp4_workload_codeserver_multi_user_username_base }}{{ n }}"
+    data:
+      codeserver_url: >-
+        https://{{ ocp4_workload_codeserver_name }}-{{ ocp4_workload_codeserver_multi_user_namespace_base }}-{{
+        ocp4_workload_codeserver_multi_user_username_base }}{{ n }}.{{ _ocp4_workload_codeserver_wildcard_domain }}
+      codeserver_password: "{{ ocp4_workload_codeserver_password }}"
+  loop: "{{ range(1, 1 + ocp4_workload_codeserver_multi_user_num_users | int) | list }}"
   loop_control:
-    loop_var: _showroom_users_item
-  ansible.builtin.include_tasks:
-    file: deploy-showroom.yaml
-  vars:
-    _showroom_user: "{{ _showroom_users_item.key }}"
-    _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}-{{ _showroom_user }}"
-    _showroom_user_info_messages: "{{ _showroom_vars.msg | default('') }}"
-    _showroom_vars: "{{ _showroom_users_item.value | combine({'guid': guid, 'user': _showroom_user}) }}"
+    loop_var: n
+    label: "{{ ocp4_workload_codeserver_multi_user_username_base }}{{ n }}"
