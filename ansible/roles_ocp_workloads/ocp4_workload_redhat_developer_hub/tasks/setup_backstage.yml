@@ -31,17 +31,20 @@
   set_fact:
     ocp4_workload_redhat_developer_hub_argocd_host: "{{ r_argocd_route.resources[0].spec.host }}"
 
-- name: Create default service account cluster admin role
+- name: Create backstage pre-requisite resources
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', 'cluster-role-binding-default-sa-admin.yml.j2' ) | from_yaml }}"
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - cluster-role-binding-default-sa-admin.yml.j2
+  - object-bucket-claim.yml.j2
 
 - name: Get default token
   shell: oc get secret $(oc get secret -n default | grep default-token | awk '{print $1}') -n default -o json | jq -r '.data.token'
   register: r_default_token
 
 - name: Get Openshift REST API
-  shell: oc config view -o jsonpath='{.clusters[*].cluster.server}'
+  shell: oc config view -o jsonpath='{.clusters[0].cluster.server}'
   register: r_ocp_api
 
 - name: Decode default token
@@ -68,26 +71,48 @@
   set_fact:
     ocp4_workload_redhat_developer_hub_quay_admin_token: "{{ r_quay_token.resources[0].data.token | b64decode }}"
 
-- name: Retrieve s3 bucket route
+- name: Retrieve s3 bucket details
   kubernetes.core.k8s_info:
-    api_version: route.openshift.io/v1
-    kind: Route
-    name: s3
-    namespace: openshift-storage
-  register: r_s3_route
+    api_version: objectbucket.io/v1alpha1
+    kind: ObjectBucketClaim
+    name: backstage-bucket-claim
+    namespace: backstage
+  register: r_bucket_claim
   until:
-  - r_s3_route is defined
-  - r_s3_route.resources is defined
-  - r_s3_route.resources | length > 0
+  - r_bucket_claim is defined
+  - r_bucket_claim.resources is defined
+  - r_bucket_claim.resources | length > 0
 
-- name: Decode quay admin token
+- name: Retrieve bucket secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: backstage-bucket-claim
+    namespace: "{{ ocp4_workload_redhat_developer_hub_backstage_namespace }}"
+  register: r_bucket_secret
+  retries: 120
+  delay: 10
+  until:
+  - r_bucket_secret is defined
+  - r_bucket_secret.resources is defined
+  - r_bucket_secret.resources | length > 0
+
+- name: Extract S3 Details
   set_fact:
-    ocp4_workload_redhat_developer_hub_s3_bucket_url: "https://{{ r_s3_route.resources[0].spec.host }}"
+    ocp4_workload_redhat_developer_hub_s3_bucket_name: "{{ r_bucket_claim.resources[0].spec.bucketName }}"
+    ocp4_workload_redhat_developer_hub_s3_bucket_region: "{{ aws_region }}"
+    ocp4_workload_redhat_developer_hub_s3_bucket_endpoint: "https://s3-openshift-storage.{{ ocp4_workload_redhat_developer_hub_apps_domain }}"
+    ocp4_workload_redhat_developer_hub_s3_bucket_aws_access_key_id: "{{ r_bucket_secret.resources[0].data.AWS_ACCESS_KEY_ID | b64decode}}"
+    ocp4_workload_redhat_developer_hub_s3_bucket_aws_secret_access_key: "{{ r_bucket_secret.resources[0].data.AWS_SECRET_ACCESS_KEY | b64decode}}"
 
-- name: Create Backstage application
+- name: Setup Backstage Repo
+  include_tasks:
+    file: ./setup_backstage_repo.yml
+
+- name: Create Backstage Gitops application
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', 'application-backstage.yml.j2' ) | from_yaml }}"
+    definition: "{{ lookup('template', 'application-backstage-gitops.yml.j2' ) | from_yaml }}"
 
 - name: Create vault secret for common password
   shell: |
