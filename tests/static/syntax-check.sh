@@ -90,7 +90,7 @@ do_ansible_syntax() {
         if [ ! -d ${ansible_path}/workdir/${env_type} ]; then
             set +e
 
-            git clone --branch master \
+            git clone --branch devel \
                 https://github.com/ansible/workshops.git \
                 ${ansible_path}/workdir/${env_type} &> $output
 
