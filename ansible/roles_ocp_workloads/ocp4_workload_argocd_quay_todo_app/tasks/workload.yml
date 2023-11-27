@@ -1,0 +1,115 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Install OpenShift GitOps Operator
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'files/operator.yaml') | from_yaml }}"
+
+- name: Wait for OpenShift  GitOps Operator
+  ansible.builtin.pause:
+    seconds: 60
+
+- name: Install OpenShift Gitops
+  kubernetes.core.k8s:
+    definition: |
+      {{ lookup('kubernetes.core.kustomize',
+      dir='https://github.com/tosin2013/sno-quickstarts/gitops/cluster-config/openshift-gitops') }}
+    state: present
+  register: openshift_gitops_result
+  ignore_errors: true
+
+- name: Install Gitea
+  ansible.builtin.include_role:
+    name: ocp4_workload_gitea_operator
+
+- name: Install OpenShift Pipelines
+  kubernetes.core.k8s:
+    definition: |
+      {{ lookup('kubernetes.core.kustomize',
+      dir='https://github.com/tosin2013/sno-quickstarts/gitops/cluster-config/openshift-pipelines-operator/overlays/pipelines-1.9') }}
+    state: present
+  register: openshift_pipelines_result
+  ignore_errors: true
+
+- name: Wait for tkn-cli-serve pod to be ready
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: openshift-pipelines
+    label_selectors:
+      - app=tkn-cli-serve
+  register: tkn_pod_info
+  until: |
+    tkn_pod_info.resources[0].status.phase == "Running"
+    and tkn_pod_info.resources[0].status.conditions | selectattr("type", "equalto", "Ready")
+    | map(attribute="status") | first == "True"
+  retries: 30
+  delay: 10
+  ignore_errors: true
+
+- name: Install and Deploy Quay
+  ansible.builtin.include_tasks: quay-deployment.yml
+
+- name: Set gitea route
+  ansible.builtin.set_fact:
+    ocp4_workload_argocd_quay_todo_app_gitea_route: "{{ r_gitea.resources[0].status.giteaRoute }}"
+
+- name: Set gitea repo url
+  ansible.builtin.set_fact:
+    ocp4_workload_argocd_quay_todo_app_gitea_repo_url: |
+      {{ ocp4_workload_argocd_quay_todo_app_gitea_route }}/{{ ocp4_workload_gitea_user }}/todo-demo-app-helmrepo.git
+
+- name: Install Gitops Repo Secret
+  kubernetes.core.k8s:
+    state: present
+    merge_type:
+      - strategic-merge
+      - merge
+    definition: "{{ lookup('template', './templates/gitops-repo-secret.yml.j2') }}"
+
+- name: Add ArgoCD Task
+  kubernetes.core.k8s:
+    state: present
+    merge_type:
+      - strategic-merge
+      - merge
+    definition: "{{ lookup('template', './templates/cluster-config.yaml.j2') }}"
+
+- name: Create todo-demo-app namespace
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'files/todo-demo-app-namespace.yaml') | from_yaml }}"
+
+- name: Add Git Commit Task to todo-demo-app namespace
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'files/git-commit.yaml') | from_yaml }}"
+
+- name: Add Image pipeline resource to todo-demo-app namespace
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'files/image-pipeline-resource.yaml') | from_yaml }}"
+
+- name: Add Push to Quay Task to todo-demo-app namespace
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'files/push-image-to-quay.yaml') | from_yaml }}"
+
+- name: Create PVC for todo-demo-app
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'files/pvc.yml') | from_yaml }}"
+
+- name: Add Pipeline Task
+  kubernetes.core.k8s:
+    state: present
+    merge_type:
+      - strategic-merge
+      - merge
+    definition: "{{ lookup('template', './templates/argocd-deploy-pipeline.yaml.j2') }}"
+
+# Leave this as the last task in the playbook.
+- name: Workload tasks complete
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent

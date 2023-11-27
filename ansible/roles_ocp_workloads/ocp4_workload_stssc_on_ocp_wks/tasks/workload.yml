@@ -1,0 +1,125 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user = {{ ocp4_username }}"
+
+- name: Run setup routine
+  include_tasks: "{{ item }}"
+  loop:
+  - setup_infrastructure_prerequisites.yml
+  - setup_secure_source_code.yml
+  - setup_quay.yml
+  - setup_cosign.yml
+  - setup_sonarqube.yml
+  - setup_stackrox.yml
+  - setup_gitea_requirements.yml
+  - setup_cyclonedx_repo_server.yml
+  - setup_demo_requirements.yml
+
+- name: Set up globex-ui pipeline application
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'templates/application-pipeline-globex-ui.yml.j2' ) | from_yaml }}"
+
+- name: Wait for pipeline to be deployed
+  kubernetes.core.k8s_info:
+    api_version: tekton.dev/v1beta1
+    kind: Pipeline
+    name: app-globex-ui-pipeline
+    namespace: "{{ ocp4_workload_stssc_on_ocp_wks_ci_namespace }}"
+  register: r_pipeline
+  retries: 60
+  delay: 5
+  until: r_pipeline.resources | length > 0
+
+- name: Wait for event listener deployment to complete
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ ocp4_workload_stssc_on_ocp_wks_ci_namespace }}"
+    label_selectors:
+    - eventlistener = app-globex-ui-event-listener
+  register: r_el_deployment
+  retries: 60
+  delay: 10
+  until:
+  - r_el_deployment.resources is defined
+  - r_el_deployment.resources | length > 0
+  - r_el_deployment.resources[0].status is defined
+  - r_el_deployment.resources[0].status.readyReplicas is defined
+  - r_el_deployment.resources[0].status.readyReplicas > 0
+
+- name: Trigger pipeline run
+  include_tasks: trigger_globex_webhook.yml
+
+- name: Wait for pipeline to finish run
+  kubernetes.core.k8s_info:
+    api_version: tekton.dev/v1beta1
+    kind: PipelineRun
+    namespace: "{{ ocp4_workload_stssc_on_ocp_wks_ci_namespace }}"
+    label_selectors:
+    - tekton.dev/pipeline = app-globex-ui-pipeline
+  register: r_pipeline
+  retries: 100
+  delay: 10
+  until:
+  - r_pipeline.resources | length > 0
+  - r_pipeline.resources | json_query('[*].status.conditions[?reason==`Succeeded`][].status') | select ('match','True') | list | length == 1
+
+- name: Create globex application
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - templates/application-globex-kafka.yml.j2
+  - templates/application-globex.yml.j2
+
+- name: Set common password for ArgoCD
+  k8s:
+    validate_certs: false
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        namespace: openshift-gitops
+        name: openshift-gitops-cluster
+      data:
+        admin.password: "{{ common_password | b64encode }}"
+
+- name: Retrieve Ingress config
+  k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: r_ingress_config
+
+- name: Get OpenShift Apps Domain
+  set_fact:
+    _ocp4_workload_stssc_on_ocp_wks_ocp_apps_domain: "{{ r_ingress_config.resources[0].spec.domain }}"
+
+- name: Print Access information
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Globex UI url: https://globex-ui-{{ ocp4_workload_stssc_on_ocp_wks_app_namespace }}.{{ _ocp4_workload_stssc_on_ocp_wks_ocp_apps_domain }}"  # yamllint disable-line rule:line-length
+  - "Globex UI username: coolstore@redhat.com"
+  - "Globex UI password: coolstore"
+
+- name: Print Access information
+  agnosticd_user_info:
+    data:
+      app_dev_url: "https://globex-ui-{{ ocp4_workload_stssc_on_ocp_wks_app_namespace }}.{{ _ocp4_workload_stssc_on_ocp_wks_ocp_apps_domain }}"  # yamllint disable-line rule:line-length
+      app_dev_username: "coolstore@redhat.com"
+      app_dev_password: "coolstore"
+
+- name: Setup showroom data
+  include_tasks: setup_showroom_data.yml
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool
