@@ -1,0 +1,147 @@
+---
+- name: Evaluate {{ rocketchat_namespace }} namespace if not exists
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ rocketchat_namespace }}'
+    state: present
+
+- name: Create Mongo DB resources
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'im_rocketchat-db.yaml.j2') }}"
+
+- name: Wait for Mongo DB Pod Readyness
+  shell: oc get pods -o json -n {{ rocketchat_namespace }} -l name=mongodb
+  register: rocketchat_pod_db
+  until: rocketchat_pod_db.stdout|from_json|json_query('items[0].status.containerStatuses[0].ready') == true
+  retries: 30
+  delay: 10
+
+- name: Create RocketChat resources
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'im_rocketchat.yaml.j2') }}"
+
+- name: Wait for RocketChat Pod Readyness
+  shell: oc get pods -o json -n {{ rocketchat_namespace }} -l app=rocketchat
+  register: rocketchat_pod
+  until: rocketchat_pod.stdout|from_json|json_query('items[0].status.containerStatuses[0].ready') == true
+  retries: 30
+  delay: 10
+
+
+- name: Create RocketChat Admin
+  shell: 
+    cmd: >
+      HOST=rocketchat-rocketchat.{{ route_subdomain }} && 
+      curl -X POST 
+      -H 'Content-Type: application/json' 
+      https://$HOST/api/v1/users.register 
+      -d '{"name":"rcadmin", "pass":"camel", "email":"rcadmin@camel","username":"rcadmin"}'
+  register: output_admin
+
+
+- name: RocketChat Admin Login
+  shell: 
+    cmd: >
+      HOST=rocketchat-rocketchat.{{ route_subdomain }} &&
+      curl -X POST
+      -H 'Content-Type: application/json' 
+      https://$HOST/api/v1/login 
+      -d '{"user":"rcadmin", "password":"camel"}' 
+# | jq .data.authToken --raw-output
+  register: admin_login
+
+- name: Show RocketChat Admin Token
+  debug:
+    msg: "{{ admin_login }}"
+
+
+
+- name: Create RocketChat Users
+  shell: 
+    cmd: >
+      HOST=rocketchat-rocketchat.{{ route_subdomain }} && 
+      ADMIN={{admin_login.stdout|from_json|json_query('data.userId')}} && 
+      TOKEN={{admin_login.stdout|from_json|json_query('data.authToken')}} && 
+      curl -X POST 
+      -H "X-Auth-Token: $TOKEN" 
+      -H "X-User-Id: $ADMIN" 
+      -H 'Content-Type: application/json' 
+      https://$HOST/api/v1/users.create 
+      -d '{"name": "{{item}}", "email": "{{item}}@user.tld", "password": "openshift", "username": "{{item}}"}'
+  register: rc_users
+  loop: "{{users}}"
+
+- name: Show RocketChat Users
+  debug:
+    msg: "{{ rc_users }}"
+
+
+
+- name: Create RocketChat Channels
+  shell: 
+    cmd: >
+      HOST=rocketchat-rocketchat.{{ route_subdomain }} && 
+      ADMIN={{admin_login.stdout|from_json|json_query('data.userId')}} && 
+      TOKEN={{admin_login.stdout|from_json|json_query('data.authToken')}} && 
+      curl -X POST 
+      -H "X-Auth-Token: $TOKEN" 
+      -H "X-User-Id: $ADMIN" 
+      -H 'Content-Type: application/json' 
+      https://$HOST/api/v1/channels.create 
+      -d '{ "name": "room{{idx+1}}", "members": ["{{item}}"]}'
+  register: rc_channels
+  loop: "{{users}}"
+  loop_control:
+    index_var: idx
+
+- name: Show RocketChat Channels
+  debug:
+    msg: "{{ rc_channels }}"
+
+
+- name: Create Webhooks for RocketChat to Gitter integrations 
+  shell: 
+    cmd: >
+      HOST=rocketchat-rocketchat.{{ route_subdomain }} && 
+      ADMIN={{admin_login.stdout|from_json|json_query('data.userId')}} && 
+      TOKEN={{admin_login.stdout|from_json|json_query('data.authToken')}} && 
+      curl -X POST 
+      -H "X-Auth-Token: $TOKEN" 
+      -H "X-User-Id: $ADMIN" 
+      -H 'Content-Type: application/json' 
+      https://$HOST/api/v1/integrations.create 
+      -d '{ "type": "webhook-outgoing", "name": "Room {{idx+1}} webhook for {{item}} (r2m)", "event": "sendMessage", "enabled": true, "channel": "#room{{idx+1}}", "username": "{{item}}", "urls": ["http://r2m.{{item}}.svc:80/webhook"], "scriptEnabled": true, "script": "class Script {process_outgoing_response({ request, response }){return false;}}" }'
+  register: r2g_webhooks
+  loop: "{{users}}"
+  loop_control:
+    index_var: idx
+
+- name: Show r2g Webhooks
+  debug:
+    msg: "{{ r2g_webhooks }}"
+
+
+- name: Create Webhooks for RocketChat to Kafka integrations 
+  shell: 
+    cmd: >
+      HOST=rocketchat-rocketchat.{{ route_subdomain }} && 
+      ADMIN={{admin_login.stdout|from_json|json_query('data.userId')}} && 
+      TOKEN={{admin_login.stdout|from_json|json_query('data.authToken')}} && 
+      curl -X POST 
+      -H "X-Auth-Token: $TOKEN" 
+      -H "X-User-Id: $ADMIN" 
+      -H 'Content-Type: application/json' 
+      https://$HOST/api/v1/integrations.create 
+      -d '{ "type": "webhook-outgoing", "name": "Room {{idx+1}} webhook for {{item}} (r2k)", "event": "sendMessage", "enabled": true, "channel": "#room{{idx+1}}", "username": "{{item}}", "urls": ["http://r2k.{{item}}.svc:80/webhook"], "scriptEnabled": true, "script": "class Script {process_outgoing_response({ request, response }){return false;}}" }'
+  register: r2k_webhooks
+  loop: "{{users}}"
+  loop_control:
+    index_var: idx
+
+- name: Show r2k Webhooks
+  debug:
+    msg: "{{ r2k_webhooks }}"
+

@@ -1,0 +1,279 @@
+---
+- name: Set up bastion
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Generate user password if not defined
+      set_fact:
+        rosa_user_password: >-
+          {{ lookup('password', '/dev/null length={{ bastion_user_password_length }} chars=ascii_letters,digits') }}
+
+    - name: Create user with password
+      become: true
+      user:
+        state: present
+        name: "{{ bastion_user_name }}"
+        password: "{{ rosa_user_password | password_hash( 'sha512' ) }}"
+        password_lock: false
+        comment: ROSA User
+        group: users
+        groups: "{{ 'wheel' if bastion_user_enable_sudo | bool else '' }}"
+        shell: /bin/bash
+
+    - name: Enable password authentication
+      become: true
+      lineinfile:
+        line: PasswordAuthentication yes
+        regexp: '^ *PasswordAuthentication'
+        path: /etc/ssh/sshd_config
+
+    - name: Restart sshd
+      become: true
+      service:
+        name: sshd
+        state: restarted
+
+- name: Step 00xxxxx software
+  hosts: bastions
+  gather_facts: false
+  become: false
+  environment:
+    AWS_DEFAULT_REGION: "{{ aws_region }}"
+  tasks:
+    - tags:
+        - install_studentvm_role
+      block:
+        - name: Run student role
+          when: studentvm_roles | default( "" ) | length > 0
+          include_role:
+            name: "{{ studentvm_role }}"
+          loop: "{{ studentvm_roles }}"
+          loop_control:
+            loop_var: studentvm_role
+
+    - tags:
+        - install_awscli
+      block:
+        - name: Get awscli bundle
+          get_url:
+            url: https://s3.amazonaws.com/aws-cli/awscli-bundle-1.18.200.zip
+            dest: /tmp/awscli-bundle.zip
+        - name: Unzip awscli-bundle.zip
+          unarchive:
+            src: /tmp/awscli-bundle.zip
+            dest: /tmp/
+            remote_src: true
+        - name: Install awscli
+          command: /tmp/awscli-bundle/install -i /usr/local/aws -b /bin/aws
+          args:
+            creates: /usr/local/aws
+          become: true
+        - name: cleanup archive and tmp files
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/awscli-bundle
+            - /tmp/awscli-bundle.zip
+
+    - tags:
+        - create_aws_dir
+      block:
+        - name: Create .aws directory
+          file:
+            path: ~/.aws
+            state: directory
+
+    - tags:
+        - create_aws_creds
+      block:
+        - name: Add aws credentials
+          blockinfile:
+            path: ~/.aws/credentials
+            create: true
+            mode: 0600
+            block: |-
+              [default]
+              aws_access_key_id={{ hostvars.localhost.rosa_access_key_id }}
+              aws_secret_access_key={{ hostvars.localhost.rosa_secret_access_key }}
+
+    - tags:
+        - create_aws_config
+      block:
+        - name: Add aws config
+          blockinfile:
+            path: ~/.aws/config
+            create: true
+            mode: 0600
+            block: |-
+              [default]
+              region={{ aws_region }}
+
+    - tags:
+        - install_rosacli
+      block:
+        - name: Get ROSA CLI
+          get_url:
+            url: "{{ rosa_installer_url }}"
+            dest: /tmp/rosa-linux.tar.gz
+        - name: Unzip rosa-linux.tar.gz
+          unarchive:
+            src: /tmp/rosa-linux.tar.gz
+            dest: /usr/local/bin/
+            remote_src: true
+          become: true
+        - name: cleanup archive file
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/rosa-linux.tar.gz
+
+    - tags:
+        - verify_rosa_installer
+      block:
+        - set_fact:
+            rosa_token: "{{ gpte_rosa_token }}"
+          when: rosa_token == ""
+        - name: Log into ROSA
+          command: "/usr/local/bin/rosa login --token {{ rosa_token }}"
+        - name: Init AWS account for ROSA
+          command: "/usr/local/bin/rosa init"
+        - name: Verify permissions for ROSA
+          command: "/usr/local/bin/rosa verify permissions"
+        - name: Verify quota for ROSA
+          command: "/usr/local/bin/rosa verify quota"
+
+    - tags:
+        - run_rosa_installer
+      block:
+        - name: Create ROSA Cluster
+          command: "/usr/local/bin/rosa create cluster --cluster-name={{ rosa_cluster_name }} --compute-machine-type={{ rosa_machine_type }}"
+          register: _r_create_cluster
+          until: _r_create_cluster.rc == 0
+          retries: 5
+          delay: 30
+
+    - tags:
+        - wait_rosa_installer
+      block:
+        - name: Wait 5 minutes for the ROSA installer to start
+          pause:
+            minutes: 5
+        - name: Check for ROSA installer completion
+          shell: "/usr/local/bin/rosa describe cluster -c {{ rosa_cluster_name }} |grep ^State:|awk '{print $2}'"
+          register: rosa_installer_status
+          until: rosa_installer_status.stdout.find("ready") != -1
+          retries: 120
+          delay: 60
+
+    - tags:
+        - get_rosa_console_url
+      block:
+        - name: Get ROSA Console URL
+          shell: "/usr/local/bin/rosa describe cluster -c {{ rosa_cluster_name }} |grep '^Console URL:'|awk '{print $3}'"
+          register: rosa_console_url
+
+    - tags:
+        - create_rosa_admin
+      block:
+        - name: Create ROSA admin user
+          shell: "/usr/local/bin/rosa create admin --cluster={{ rosa_cluster_name }} |grep 'oc login' | awk '{print $7}'"
+          register: rosa_admin_result
+        - name: Create .config/ocm directory in rosa user homedir
+          become: true
+          file:
+            path: "~{{ bastion_user_name }}/.config/ocm"
+            owner: "{{ bastion_user_name }}"
+            state: directory
+        - name: Copy ROSA token to ec2 user dir
+          become: true
+          ansible.builtin.copy:
+            src: /home/ec2-user/.config/ocm/ocm.json
+            dest: "~{{ bastion_user_name }}/.config/ocm/ocm.json"
+            owner: "{{ bastion_user_name }}"
+            mode: '0600'
+            remote_src: true
+        - name: Create .aws directory in rosa user homedir
+          become: true
+          file:
+            path: "~{{ bastion_user_name }}/.aws"
+            owner: "{{ bastion_user_name }}"
+            state: directory
+        - name: Copy AWS credentials to rosa user dir
+          become: true
+          ansible.builtin.copy:
+            src: /home/ec2-user/.aws/credentials
+            dest: "~{{ bastion_user_name }}/.aws/credentials"
+            owner: "{{ bastion_user_name }}"
+            remote_src: true
+        - name: Copy AWS config to rosa user dir
+          become: true
+          ansible.builtin.copy:
+            src: /home/ec2-user/.aws/config
+            dest: "~{{ bastion_user_name }}/.aws/config"
+            owner: "{{ bastion_user_name }}"
+            remote_src: true
+
+    - when:
+        - rosa_admin_result is defined
+        - rosa_console_url is defined
+      block:
+        - name: Set ROSA token warning boolean true
+          when: rosa_token == gpte_rosa_token
+          set_fact:
+            rosa_token_warning: true
+
+        - name: Set ROSA token warning boolean false
+          when: rosa_token != gpte_rosa_token
+          set_fact:
+            rosa_token_warning: false
+
+        - name: Save ansible vars to user_info data
+          agnosticd_user_info:
+            data:
+              rosa_sandbox_account_id: "{{ sandbox_account_id }}"
+              rosa_console_user_name: "{{ hostvars.localhost.rosa_console_user_name }}"
+              rosa_console_password: "{{ hostvars.localhost.rosa_console_password }}"
+              rosa_bastion_user_name: "{{ bastion_user_name }}"
+              rosa_subdomain_base: "{{ subdomain_base }}"
+              rosa_user_password: "{{ rosa_user_password }}"
+              rosa_console_url: "{{ rosa_console_url.stdout }}"
+              rosa_admin_password: "{{ rosa_admin_result.stdout }}"
+              rosa_token_warning: "{{ rosa_token_warning }}"
+
+        - name: Print ROSA admin credentials as user.info
+          agnosticd_user_info:
+            msg: |
+
+              *NOTE:* With great power comes great responsibility. We monitor usage.
+
+              == AWS web console access:
+              * URL: https://{{ sandbox_account_id }}.signin.aws.amazon.com/console
+              * User: {{ hostvars.localhost.rosa_console_user_name }}
+              * Password: {{ hostvars.localhost.rosa_console_password }}
+
+              *IMPORTANT:* Please be very careful to not expose AWS credentials in GIT repos or anywhere else that could be public!
+              If your credentials are compromised, your environment will be deleted without warning.
+
+              == Bastion SSH access:
+              * ssh {{ bastion_user_name }}@bastion.{{ subdomain_base }}
+              * Password: {{ rosa_user_password }}
+              * Your AWS credentials are preconfigured in `~/.aws/credentials` on the bastion host.
+              * The ROSA CLI is preinstalled on the bastion host in `/usr/local/bin`. There is no need to use root.
+
+              == OpenShift console access:
+              * URL: {{ rosa_console_url.stdout }}
+
+        - name: Print ROSA token warning
+          when: rosa_token_warning
+          agnosticd_user_info:
+            msg: |
+
+              *IMPORTANT:* You did not provide a ROSA token.
+
+              This is fine as long as you do not need to access the managment console at
+              https://console.redhat.com/openshift. It is recommended that you generate and provide your own ROSA token when deploying
+              this catalog item so that you have full functionality and control of your cluster. You can generate a rosa token from
+              your Red Hat console account here: https://console.redhat.com/openshift/token/rosa

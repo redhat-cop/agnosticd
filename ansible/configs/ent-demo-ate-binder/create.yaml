@@ -1,0 +1,171 @@
+---
+
+# Create this project early to avoid contention
+
+- name: Create Azure Project
+  awx.awx.project:
+    name: "Azure Repo"
+    description: "Azure Demo Repo"
+    organization: Default
+    scm_type: git
+    scm_url: "https://github.com/agonzalezrh/azure.git"
+    wait: true
+  register: r_project
+  until: "r_project is not failed"
+  retries: 3
+  delay: 10
+
+- name: Pause for 1 minutes - prior project task seems sensitve
+  ansible.builtin.pause:
+    minutes: 1
+
+- name: Create execution environment for Azure
+  awx.awx.execution_environment:
+    name: "Azure"
+    image: "quay.io/pharriso/azure_ee:1.0"
+
+- name: Create AWS Credential
+  awx.awx.credential:
+    name: aws-demo
+    credential_type: "Amazon Web Services"
+    organization: Default
+    inputs:
+      username: "{{ ate_creds_aws_data.aws_access_key_id }}"
+      password: "{{ ate_creds_aws_data.aws_secret_access_key }}"
+    state: present
+
+- name: Create Azure Credential
+  awx.awx.credential:
+    name: azure-demo
+    credential_type: "Microsoft Azure Resource Manager"
+    organization: Default
+    inputs:
+      client: "{{ ate_creds_azure_data.azappid }}"
+      tenant: "{{ ate_creds_azure_data.azure_tenant }}"
+      subscription: "{{ ate_creds_azure_data.azure_subscription_id }}"
+      secret: "{{ ate_creds_azure_data.azpass }}"
+    state: present
+
+- name: Create Machine Credential
+  awx.awx.credential:
+    name: machine-demo
+    credential_type: "Machine"
+    organization: Default
+    inputs:
+      ssh_key_data: "{{ ate_base_data.ssh_private_key }}"
+    state: present
+
+- name: Create Controller Credential
+  awx.awx.credential:
+    name: controller-demo
+    credential_type: "Red Hat Ansible Automation Platform"
+    organization: Default
+    inputs:
+      host: "{{ ate_base_data.controller_host }}"
+      username: "{{ ate_base_data.controller_username }}"
+      password: "{{ ate_base_data.controller_password }}"
+    state: present
+
+- name: Create local inventory
+  awx.awx.inventory:
+    name: local-demo
+    organization: Default
+    state: present
+
+- name: Add localhost to local inventory
+  awx.awx.host:
+    name: localhost
+    inventory: local-demo
+    variables:
+      ansible_connection: local
+
+- name: Create default EE
+  awx.awx.execution_environment:
+    image: "aap-hub.{{ guid | regex_replace('-.*','') }}.internal/ee-supported-rhel8:latest"
+    name: "Default execution environment"
+
+- name: Create projects
+  awx.awx.project:
+    name: "{{ item['name'] }}"
+    organization: Default
+    scm_type: git
+    scm_url: "{{ item['url'] }}"
+    wait: true
+  loop: "{{ demos }}"
+  register: r_projects
+  until: "r_projects is not failed"
+  retries: 3
+  delay: 10
+
+- name: Pause for 3 minutes - prior project task seems sensitve even with wait
+  ansible.builtin.pause:
+    minutes: 3
+
+- name: Create templates
+  include_tasks: create_template.yaml
+  loop: "{{ demos }}"
+
+- name: Create inventories
+  include_tasks: create_inventory.yaml
+  loop: "{{ demos }}"
+
+- name: Create credentials
+  include_tasks: create_credential.yaml
+  loop: "{{ demos }}"
+
+- name: Run demo templates templates
+  include_tasks: run_template.yaml
+  loop: "{{ demos }}"
+
+- name: Replace AWS credential with aws-demo for templates
+  when: item['summary_fields']['credentials'] | json_query('[?name==`AWS`]') | length
+  awx.awx.job_template:
+    name: "{{ item['name'] }}"
+    credentials: "{{ item['summary_fields']['credentials'] | json_query('[?name!=`AWS`].name') + ['aws-demo'] }}"
+  loop: "{{ query('awx.awx.controller_api', 'job_templates', host=ate_base_data.controller_host,
+                           username=ate_base_data.controller_username,
+                           password=ate_base_data.controller_password, verify_ssl=False) }}"
+  loop_control:
+    label: "{{ item['name'] }}"
+
+- name: Replace Azure Infrastructure credential with azure-demo for templates
+  when: item['summary_fields']['credentials'] | json_query('[?name==`Azure Infrastructure`]') | length
+  awx.awx.job_template:
+    name: "{{ item['name'] }}"
+    credentials: "{{ item['summary_fields']['credentials'] | json_query('[?name!=`Azure Infrastructure`].name') + ['azure-demo'] }}"
+  loop: "{{ query('awx.awx.controller_api', 'job_templates', host=ate_base_data.controller_host,
+                           username=ate_base_data.controller_username,
+                           password=ate_base_data.controller_password, verify_ssl=False) }}"
+  loop_control:
+    label: "{{ item['name'] }}"
+
+- name: Replace AWS credential with aws-demo for inventories
+  when: item['summary_fields']['credentials'] | json_query('[?name==`AWS`]') | length
+  awx.awx.inventory_source:
+    name: "{{ item['name'] }}"
+    inventory: "{{ item['inventory'] }}"
+    credential: "aws-demo"
+    update_on_launch: true
+  loop: "{{ query('awx.awx.controller_api', 'inventory_sources', host=ate_base_data.controller_host,
+                           username=ate_base_data.controller_username,
+                           password=ate_base_data.controller_password, verify_ssl=False) }}"
+  loop_control:
+    label: "{{ item['name'] }}"
+
+- name: Replace Azure Infrastructure credential with aws-demo for inventories
+  when: item['summary_fields']['credentials'] | json_query('[?name==`Azure Infrastructure`]') | length
+  awx.awx.inventory_source:
+    name: "{{ item['name'] }}"
+    inventory: "{{ item['inventory'] }}"
+    credential: "azure-demo"
+    update_on_launch: true
+  loop: "{{ query('awx.awx.controller_api', 'inventory_sources', host=ate_base_data.controller_host,
+                           username=ate_base_data.controller_username,
+                           password=ate_base_data.controller_password, verify_ssl=False) }}"
+  loop_control:
+    label: "{{ item['name'] }}"
+
+- name: Create workflow
+  include_tasks: create_workflow.yaml
+  loop: "{{ demos }}"
+

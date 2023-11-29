@@ -1,0 +1,111 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: {{ globex_sentiment_analysis_application_name }}
+  namespace: {{ globex_sentiment_analysis_application_namespace }}
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io/foreground
+spec:
+  destination:
+    name: ""
+    namespace: {{ globex_sentiment_analysis_namespace }}
+    server: 'https://kubernetes.default.svc'
+  project: default
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: false
+  source:
+    repoURL: {{ globex_sentiment_analysis_application_repo }}
+    targetRevision: {{ globex_sentiment_analysis_application_repo_tag }}
+    path: {{ globex_sentiment_analysis_application_repo_path }}
+    helm:
+      values: |
+
+        kafka:
+          namespace: &namespace {{ globex_mw_namespace }}
+          bootstrapServer: &bootstrapServer {{ kafka_broker_name }}-kafka-bootstrap.{{ globex_mw_namespace }}.svc.cluster.local:9092
+
+        kafka-security: &kafka-security
+          securityProtocol: {{ kafka_security_protocol }}
+          saslMechanism: {{ kafka_sasl_mechanism }}
+          clientId: {{ kafka_client_id }}
+          clientSecret: {{ kafka_client_secret }}
+
+        kafka-topics:
+          kafka:
+            namespace: *namespace
+            cluster: {{ kafka_broker_name }}
+
+        knative-kafkasink:
+          kafka:
+            <<: *kafka-security
+            bootstrapServer: *bootstrapServer
+
+        knative-broker:
+          nameOverride: "globex-broker"
+
+        knative-kafkasource:
+          kafka:
+            <<: *kafka-security
+            bootstrapServer: *bootstrapServer
+
+          topics:
+            - globex.reviews
+            - reviews.moderated
+            - reviews.denied
+            - reviews.sentiment
+
+          broker: globex-broker
+
+        product-reviews:
+          kafkaSink:
+            reviews: http://kafka-sink-ingress.{{ serverless_eventing_namespace }}.svc.cluster.local/{{ globex_sentiment_analysis_namespace }}/reviews-sink
+
+        aiml-moderate-reviews:
+          image:
+            repository: quay.io/globex-sentiment-analysis/sentiment-analysis-moderate-reviews
+            tag: latest
+
+          kafkaSink:
+            moderated: http://kafka-sink-ingress.{{ serverless_eventing_namespace }}.svc.cluster.local/{{ globex_sentiment_analysis_namespace }}/moderated-reviews-sink
+            denied: http://kafka-sink-ingress.{{ serverless_eventing_namespace }}.svc.cluster.local/{{ globex_sentiment_analysis_namespace }}/denied-reviews-sink
+          
+          gunicorn:
+            threads: "4"
+            timeout: "180"
+
+        aiml-sentiment-reviews:
+          image:
+            repository: quay.io/globex-sentiment-analysis/sentiment-analysis-analyze-reviews
+            tag: latest
+
+          kafkaSink:
+            sentiment: http://kafka-sink-ingress.{{ serverless_eventing_namespace }}.svc.cluster.local/{{ globex_sentiment_analysis_namespace }}/reviews-sentiment-sink
+          
+          gunicorn:
+            threads: "4"
+            timeout: "180"
+
+        globex-web-reviews:
+          globexStoreApp:
+            url: http://globex-store-app.{{ globex_namespace }}.svc.cluster.local:8080
+          activityTrackingService:
+            url: http://activity-tracking.{{ globex_namespace }}.svc.cluster.local:8080
+            service: activity-tracking
+            path: /track
+          recommendationEngine:
+            url: http://recommendation-engine.{{ globex_namespace }}.svc.cluster.local:8080
+            service: recommendation-engine
+            path: /score/product
+
+          productReviews:
+            url: http://product-reviews.{{ globex_sentiment_analysis_namespace }}.svc.cluster.local:8080
+            submitReviewPath: /review/submit
+            fetchReviewPath: /review/list
+
+          sso:
+            url: "https://{{ rhsso_host }}.{{ r_openshift_subdomain }}/auth/realms/{{ rhsso_realm }}"
+            client: {{ rhsso_web_gateway_client }}
+            logoutUri: https://globex-web-{{ globex_sentiment_analysis_namespace }}.{{ r_openshift_subdomain }}/home
