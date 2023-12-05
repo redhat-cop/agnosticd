@@ -1,5 +1,4 @@
 ---
-
 # First target is OCP with bastion
 #
 # if we're using the shared cluster
@@ -18,68 +17,78 @@
 
 # setup namespaces
 
-    #- name: Detect presence of Argo
-    #  kubernetes.core.k8s_info:
-    #    api_version: argoproj.io/v1alpha1
-    #    kind: ArgoCD
-    #    name: openshfit-gitops
-    #  register: r_argo_present
-
-- name: Deploy via Argo when present
-  when: r_argo_present.resources | length > 0
+- name: Deploy via ArgoCD
+  when: ocp4_workload_showroom_deployment_type == "argocd"
   block:
 
-    - name: Debug showroom_user data
-      ansible.builtin.debug:
-        var: _showroom_user_data
+  - name: Check if ArgoCD has been installed
+    kubernetes.core.k8s_info:
+      kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+      api_version: argoproj.io/v1beta1
+      kind: ArgoCD
+      name: openshift-gitops
+      namespace: openshift-gitops
+    register: r_argocd_present
 
-    - name: Install showroom Application (single user)
-      when:
-        - _showroom_user_data.users is undefined
-      kubernetes.core.k8s:
-        kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
-        state: present
-        definition: "{{ lookup('template', 'application.yaml.j2') }}"
+  - name: Check if an older ArgoCD has been installed
+    kubernetes.core.k8s_info:
+      kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+      api_version: argoproj.io/v1alpha1
+      kind: ArgoCD
+      name: openshift-gitops
+      namespace: openshift-gitops
+    register: r_old_argocd_present
 
-    - name: Install showroom ApplicationSet (multi user)
-      when:
-        - _showroom_user_data.users is defined
-      kubernetes.core.k8s:
-        kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
-        state: present
-        definition: "{{ lookup('template', 'applicationset.yaml.j2') }}"
+  - name: Fail if no ArgoCD detected
+    when: not (r_argocd_present.resources | default([]) | length == 1 or r_old_argocd_present.resources | default([]) | length == 1)
+    ansible.builtin.fail:
+      msg: "ArgoCD Deployment requested yet no default ArgoCD installation found."
 
+  - name: Debug showroom_user data
+    ansible.builtin.debug:
+      var: _showroom_user_data
 
-- name: Argo NOT present, deploy via Helm
-  when: r_argo_present.resources | length == 0
+  - name: Install showroom Application (single user)
+    when: _showroom_user_data.users is undefined
+    kubernetes.core.k8s:
+      kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+      state: present
+      definition: "{{ lookup('template', 'application.yaml.j2') }}"
+
+  - name: Install showroom ApplicationSet (multi user)
+    when: _showroom_user_data.users is defined
+    kubernetes.core.k8s:
+      kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+      state: present
+      definition: "{{ lookup('template', 'applicationset.yaml.j2') }}"
+
+- name: Deploy using Helm directly
+  when: ocp4_workload_showroom_deployment_type == "helm"
   block:
 
-    - name: Deploy showroom via Helm for single user
-      when:
-        - _showroom_user_data.users is undefined
-      ansible.builtin.include_tasks:
-        file: deploy-showroom.yaml
-      vars:
-        _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}"
-        _showroom_vars: "{{ _showroom_user_data | combine({'guid': guid}) }}"
+  - name: Deploy showroom via Helm for single user
+    when: _showroom_user_data.users is undefined
+    ansible.builtin.include_tasks:
+      file: deploy-showroom-helm.yaml
+    vars:
+      _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}"
+      _showroom_vars: "{{ _showroom_user_data | combine({'guid': guid}) }}"
 
-    - name: Deploy showroom via Helm for multi users
-      when:
-        - _showroom_user_data.users is defined
-      loop: >-
-        {{ _showroom_user_data.users | dict2items }}
-      loop_control:
-        loop_var: _showroom_users_item
-      ansible.builtin.include_tasks:
-        file: deploy-showroom.yaml
-      vars:
-        _showroom_user: "{{ _showroom_users_item.key }}"
-        _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}-{{ _showroom_user }}"
-        _showroom_vars: "{{ _showroom_users_item.value | combine({'guid': guid, 'user': _showroom_user}) }}"
+  - name: Deploy showroom via Helm for multi users
+    when: _showroom_user_data.users is defined
+    loop: >-
+      {{ _showroom_user_data.users | dict2items }}
+    loop_control:
+      loop_var: _showroom_users_item
+    ansible.builtin.include_tasks:
+      file: deploy-showroom-helm.yaml
+    vars:
+      _showroom_user: "{{ _showroom_users_item.key }}"
+      _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}-{{ _showroom_user }}"
+      _showroom_vars: "{{ _showroom_users_item.value | combine({'guid': guid, 'user': _showroom_user}) }}"
 
 - name: Report Single User Variables to user_data
-  when:
-    - _showroom_user_data.users is undefined
+  when: _showroom_user_data.users is undefined
   ansible.builtin.include_tasks:
     file: report-variables.yaml
   vars:
@@ -87,8 +96,7 @@
     _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}"
 
 - name: Report Multi User Variables to user_data
-  when:
-    - _showroom_user_data.users is defined
+  when: _showroom_user_data.users is defined
   loop: >-
     {{ _showroom_user_data.users | dict2items }}
   loop_control:
