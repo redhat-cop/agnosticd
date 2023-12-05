@@ -48,7 +48,7 @@ spec:
   autoAssign: true
   avoidBuggyIPs: false
 EOF
-
+sleep 60
 
 cat << EOF | oc apply -f -
 apiVersion: metallb.io/v1beta1
