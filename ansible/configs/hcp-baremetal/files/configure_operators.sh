@@ -35,6 +35,7 @@ metadata:
   name: metallb
   namespace: metallb-system
 EOF
+sleep 60
 
 cat << EOF | oc apply -f -
 apiVersion: metallb.io/v1beta1
