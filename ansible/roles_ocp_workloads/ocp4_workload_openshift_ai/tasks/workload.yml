@@ -15,12 +15,85 @@
 - name: Create OpenShift AI Operator
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', './templates/redhat-ods-operator.yaml.j2' ) | from_yaml  }}"
+    definition: "{{ lookup('template', './templates/redhat-ods-operator-subscription.yaml.j2' ) | from_yaml  }}"
   register: r_ai_operator
 
 - debug:
     msg: r_ai_operator
     verbosity: 2
+
+- name: "{{ ocp4_workload_openshift_ai_operator_name }} - Wait until InstallPlan is created"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    namespace: "{{ ocp4_workload_openshift_ai_namespace }}"
+  register: r_install_plans
+  vars:
+    _query: >-
+      [?contains(spec.clusterServiceVersionNames[] | join(',', @), '{{ ocp4_workload_openshift_ai_csv_nameprefix }}') && status.phase ]
+  retries: 50
+  delay: 10
+  until:
+  - r_install_plans.resources | default([]) | length > 0
+  - r_install_plans.resources | to_json | from_json | json_query(_query)
+
+- name: "{{ ocp4_workload_openshift_ai_operator_name }} - Set InstallPlan name"
+  set_fact:
+    install_operator_install_plan_name: "{{ r_install_plans.resources | to_json | from_json | json_query(query) }}"
+  vars:
+    query: >-
+      [?contains(spec.clusterServiceVersionNames[] | join(',', @), '{{ ocp4_workload_openshift_ai_csv_nameprefix }}')].metadata.name|[0]
+
+- name: "{{ ocp4_workload_openshift_ai_operator_name }} - Print InstallPlan"
+  debug:
+    msg: "InstallPlan: {{ install_operator_install_plan_name }}"
+
+- name: "{{ ocp4_workload_openshift_ai_operator_name }} - Get InstallPlan"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: InstallPlan
+    name: "{{ install_operator_install_plan_name }}"
+    namespace: "{{ ocp4_workload_openshift_ai_namespace }}"
+  register: r_install_plan
+
+- name: "{{ ocp4_workload_openshift_ai_operator_name }} - Approve InstallPlan if necessary"
+  when: r_install_plan.resources[0].status.phase is match("RequiresApproval")
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup( 'template', 'installplan.yaml.j2' ) }}"
+
+- name: "{{ ocp4_workload_openshift_ai_operator_name }} - Get Installed CSV"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    name: "{{ ocp4_workload_openshift_ai_operator_name }}"
+    namespace: "{{ ocp4_workload_openshift_ai_namespace }}"
+  register: r_subscription
+  retries: 30
+  delay: 10
+  until:
+  - r_subscription.resources[0].status.currentCSV is defined
+  - r_subscription.resources[0].status.currentCSV | length > 0
+
+- name: "{{ ocp4_workload_openshift_ai_operator_name }} - Print CSV version to be installed"
+  when: install_operator_starting_csv is defined
+  debug:
+    msg: "Starting CSV: {{ ocp4_workload_openshift_ai_startingCSV: }}"
+
+- name: "{{ ocp4_workload_openshift_ai_operator_name }} - Wait until CSV is installed"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ r_subscription.resources[0].status.currentCSV }}"
+    namespace: "{{ ocp4_workload_openshift_ai_namespace }}"
+  register: r_csv
+  retries: 60
+  delay: 30
+  until:
+  - r_csv.resources[0].status.phase is defined
+  - r_csv.resources[0].status.phase | length > 0
+  - r_csv.resources[0].status.phase == "Succeeded"
+  ignore_errors: "{{ ocp4_workload_openshift_ai_install_csv_ignore_error }}"
 
 - name: Create OpenShift AI Data Science Cluster
   kubernetes.core.k8s:
@@ -56,10 +129,10 @@
     namespace: "{{ ocp4_workload_openshift_ai_applications_namespace }}"
   register: r_odh_dashboard_route
   until:
-    - r_odh_dashboard_route.resources is defined
-    - r_odh_dashboard_route.resources | length > 0
-    - r_odh_dashboard_route.resources.0.status.ingress.0.host is defined
-    - r_odh_dashboard_route.resources.0.status.ingress.0.host | length > 0
+  - r_odh_dashboard_route.resources is defined
+  - r_odh_dashboard_route.resources | length > 0
+  - r_odh_dashboard_route.resources.0.status.ingress.0.host is defined
+  - r_odh_dashboard_route.resources.0.status.ingress.0.host | length > 0
   retries: 30
   delay: 30
 
@@ -85,8 +158,8 @@
   agnosticd_user_info:
     msg: "{{ item }}"
   loop:
-    - ""
-    - "RedHat OpenShift AI Dashboard: https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
+  - ""
+  - "RedHat OpenShift AI Dashboard: https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
 
 - name: Report demo user info (for student)
   agnosticd_user_info:
@@ -102,14 +175,14 @@
   agnosticd_user_info:
     user: "{{ ocp4_workload_authentication_htpasswd_user_base }}{{ item }}"
     msg:
-      - "Please open the lab guide first, and follow the instructions you find there."
-      - ""
-      - "Red Hat OpenShift AI  Dashboard:     https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
-      - "OpenShift console: https://{{ r_console_route.resources[0].spec.host }}"
-      - ""
-      - "Username:          {{ ocp4_workload_openshift_ai_workshop_username_base }}{{ item }}"
-      - "Password:          {{ ocp4_workload_openshift_ai_workshop_password }}"
-      - "GUID:              {{ guid }}"
+    - "Please open the lab guide first, and follow the instructions you find there."
+    - ""
+    - "Red Hat OpenShift AI  Dashboard:     https://{{ r_odh_dashboard_route.resources[0].spec.host }}"
+    - "OpenShift console: https://{{ r_console_route.resources[0].spec.host }}"
+    - ""
+    - "Username:          {{ ocp4_workload_openshift_ai_workshop_username_base }}{{ item }}"
+    - "Password:          {{ ocp4_workload_openshift_ai_workshop_password }}"
+    - "GUID:              {{ guid }}"
   loop: "{{ range(1, 1 + ocp4_workload_openshift_ai_workshop_num_users | int) | list }}"
 
 # Leave this as the last task in the playbook.
