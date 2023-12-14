@@ -63,6 +63,9 @@ class LookupModule(LookupBase):
             user_data = user_data.get('users', {}).get(user)
 
         for term in terms:
-            ret.append(user_data.get(term) if user_data else None)
+            if term == '*':
+                ret.append(user_data)
+            else:
+                ret.append(user_data.get(term) if user_data else None)
 
         return ret

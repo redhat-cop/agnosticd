@@ -1,12 +1,16 @@
 ENV_TYPE=base-infra
+CLOUD_PROVIDER=ec2
 SANDBOX=1
+
 # Adjust GUID to taste e.g. make deploy GUID=foo-01
 
-GUID=showroom0$(SANDBOX)
-OUTPUT_DIR=/tmp/output_dir/$(GUID)
+GUID=aap2-0$(SANDBOX)
+OUTPUT_DIR=/tmp/output_dir/$(GUID)-$(CLOUD_PROVIDER)
+
 # TODO: ~/tmp seems to fail, related to accessing tha ssh file at least in aws's ping during post_infra
 # ~/tmp persists through reboots which can be useful
 # showroom0$(SANDBOX)
+
 PLAYBOOK_DIR=ansible
 
 # AWS Uses Sandbox creds typically
@@ -18,9 +22,9 @@ SECRETS_FILE=$(SECRETS_DIR)/secrets-showroom-sandbox0$(SANDBOX).yaml
 #SECRETS_BOOKBAG=~/secrets/bookbag-shared-410.yaml
 
 VARS_DIR=~/vars
-VARS_FILE=$(VARS_DIR)/vars-showroom-sandbox0$(SANDBOX).yaml
+VARS_FILE=$(VARS_DIR)/vars-aap2-$(CLOUD_PROVIDER)-sandbox0$(SANDBOX).yaml
 
-TARGET=bastion
+TARGET ?= bastion
 EXTRA_ARGS=
 USER_EXTRA_ARGS=
 # Adjust to taste
@@ -56,6 +60,7 @@ ansible-execute: ## Execute ansible-playbook with PLAYBOOK of choice
 		-e @$(SECRETS_FILE) \
 		-e output_dir=$(OUTPUT_DIR) \
 		-e env_type=$(ENV_TYPE) \
+		-e guid=$(GUID) \
 		$(USER_EXTRA_ARGS) $(EXTRA_ARGS)
 
 deploy: ## Deploy normally with package updates etc (can be slow)
@@ -68,10 +73,13 @@ destroy: ## Destroy the config
 	$(MAKE) ansible-execute PLAYBOOK=destroy.yml
 
 user-data: ## Assumes an existing output_dir, outputs contenst of user-data.yaml
-	ansible-playbook rhdp.agnostic_utilities.agd_user_info.yml -e @$(OUTPUT_DIR)/user-data.yaml -e SANDBOX=$(SANDBOX)
-
+	ansible-playbook rhdp.agnostic_utilities.agd_user_info.yml -e output_dir=$(OUTPUT_DIR) 
+	
 ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
 	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf $(TARGET)
+
+ssh: ## ssh to your bastion by default or use `make ssh target=hostname` 
+	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf showroom@$(TARGET)
 
 last-status: ## Output last status file
 	ls -l $(OUTPUT_DIR)/status.txt
@@ -89,6 +97,20 @@ start: ## Start stopped instances
 bounce: ## Bounce the deploy IE stop then start
 bounce: stop start
 
+showroom-remove: ## Remove showroom
+	ansible-playbook \
+		~/.ansible/collections/ansible_collections/rhdp/agnostic_utilities/playbooks/remove_showroom.yml \
+		-i $(OUTPUT_DIR)/inventory_post_software.yaml \
+		-e @$(OUTPUT_DIR)/user-data.yaml
+
+showroom-install: ## Install showroom
+	ANSIBLE_ROLES_PATH=../../roles \
+	ansible-playbook \
+		~/.ansible/collections/ansible_collections/rhdp/agnostic_utilities/playbooks/agd_role_runner.yml \
+		-i $(OUTPUT_DIR)/inventory_post_software.yaml \
+		-e @$(OUTPUT_DIR)/user-data.yaml \
+		-e role=showroom
+
 relog: ## Zero out the ANSIBLE_LOG_PATH log file
-	rm $(OUTPUT_DIR)/aap2sbox0$(SANDBOX)/base-app2-infra-sbox0$(SANDBOX).log
+	rm $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log
 
