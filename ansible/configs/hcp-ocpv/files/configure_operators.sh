@@ -60,4 +60,6 @@ metadata:
 spec:
   ipAddressPools:
     - ip-addresspool
+  interfaces:
+    - enp2s0
 EOF
