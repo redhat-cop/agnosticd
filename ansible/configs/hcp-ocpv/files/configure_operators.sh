@@ -61,5 +61,5 @@ spec:
   ipAddressPools:
     - ip-addresspool
   interfaces:
-    - enp2s0
+    - br-ex
 EOF
