@@ -65,27 +65,20 @@ spec:
 EOF
 
 cat << EOF | oc apply -f -
-apiVersion: operators.coreos.com/v1
-kind: OperatorGroup
-metadata:
-  name: local-operator-group
-  namespace: openshift-local-storage
-spec:
-  targetNamespaces:
-    - openshift-local-storage
-EOF
-cat << EOF | oc apply -f -
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
-  name: local-storage-operator
-  namespace: openshift-local-storage
+  labels:
+    operators.coreos.com/lvms-operator.openshift-storage: ''
+  name: lvms-operator
+  namespace: openshift-storage
 spec:
-  channel: stable
+  channel: stable-4.14
   installPlanApproval: Automatic
-  name: local-storage-operator
+  name: lvms-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace
+  startingCSV: lvms-operator.v4.14.1
 EOF
 
 until oc get lvmclusters.lvm.topolvm.io; do sleep 60; done
