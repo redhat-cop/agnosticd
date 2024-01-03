@@ -63,3 +63,47 @@ spec:
   interfaces:
     - br-ex
 EOF
+
+cat << EOF | oc apply -f -
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: local-operator-group
+  namespace: openshift-local-storage
+spec:
+  targetNamespaces:
+    - openshift-local-storage
+EOF
+cat << EOF | oc apply -f -
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: local-storage-operator
+  namespace: openshift-local-storage
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: local-storage-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+EOF
+
+until oc get lvmclusters.lvm.topolvm.io; do sleep 60; done
+cat << EOF | oc apply -f -
+apiVersion: lvm.topolvm.io/v1alpha1
+kind: LVMCluster
+metadata:
+ name: my-lvmcluster
+ namespace: openshift-storage
+spec:
+ storage:
+   deviceClasses:
+   - name: vg1
+     deviceSelector:
+       paths:
+       - /dev/vdd
+     thinPoolConfig:
+       name: thin-pool-1
+       sizePercent: 90
+       overprovisionRatio: 10
+EOF
