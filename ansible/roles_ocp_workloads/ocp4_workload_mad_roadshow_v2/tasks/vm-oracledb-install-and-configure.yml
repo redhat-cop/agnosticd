@@ -1,0 +1,125 @@
+---
+- name: Setup Oracle VM from scratch
+  block:
+  - name: Open firewall port 1521
+    ansible.builtin.firewalld:
+      state: enabled
+      immediate: true
+      permanent: true
+      port: 1521/tcp
+
+  - name: Install Oracle XE Preinstall RPMs
+    ansible.builtin.package:
+      state: present
+      disable_gpg_check: true
+      name: "{{ ocp4_workload_mad_roadshow_oracle_preinstall_rpm }}"
+    register: r_install_oracle_xe_preinstall
+
+  - name: Reboot the VM
+    when: r_install_oracle_xe_preinstall.changed
+    ansible.builtin.reboot:
+
+  - name: Install Oracle XE RPMs
+    ansible.builtin.package:
+      state: present
+      disable_gpg_check: true
+      name: "{{ ocp4_workload_mad_roadshow_oracle_rpm }}"
+    register: r_oracle_install
+
+  - name: Check if initial-configuration file exists
+    ansible.builtin.stat:
+      path: /root/initial-configuration
+    register: r_init_file
+
+  # Only configure Oracle on a first install
+  - name: Configure Oracle XE
+    when: not r_init_file.stat.exists | bool
+    block:
+    - name: Copy database setup shell script to VM
+      ansible.builtin.template:
+        src: oracle/initial-configuration.j2
+        dest: /root/initial-configuration
+        owner: root
+        group: root
+        mode: 0770
+
+    - name: Initial Oracle XE configuration
+      ansible.builtin.command: /root/initial-configuration
+
+    - name: Ensure database system service is enabled
+      ansible.builtin.systemd:
+        name: oracle-xe-21c
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Set up oracle user
+      ansible.builtin.blockinfile:
+        dest: "/home/oracle/.bash_profile"
+        create: true
+        mode: 0664
+        owner: oracle
+        group: oinstall
+        marker: "##### {mark} Oracle user configuration ######"
+        content: |
+          export ORACLE_HOME=/opt/oracle/product/21c/dbhomeXE
+          export PATH=$PATH:$ORACLE_HOME/bin
+          export ORACLE_SID=XE
+          export ORAENV_ASK=NO
+          . $ORACLE_HOME/bin/oraenv
+
+    - name: Copy customer database setup SQL file to VM
+      ansible.builtin.template:
+        src: oracle/setup-customer-database.sql.j2
+        dest: /home/oracle/setup-customer-database.sql
+        owner: oracle
+        group: oinstall
+        mode: 0660
+
+    - name: Copy customer database setup shell script file to VM
+      ansible.builtin.template:
+        src: oracle/setup-customer-database.j2
+        dest: /home/oracle/setup-customer-database
+        owner: oracle
+        group: oinstall
+        mode: 0775
+
+    - name: Create customer database
+      become_user: oracle
+      ansible.builtin.command: /home/oracle/setup-customer-database
+
+    # Oracle writes a reverse IP Address service into its configuration files
+    # Create a script to be called at system boot after networking and before
+    # Oracle to update the current IP Address in the configuration files
+    # This is necessary to move the VM to OpenShift Virtualization
+    - name: Copy ip address update script to VM
+      ansible.builtin.copy:
+        src: oracle/update_ipaddress.sh
+        dest: /usr/bin/update_ipaddress.sh
+        owner: root
+        group: root
+        mode: 0770
+
+    - name: Create ip address update systemd service
+      ansible.builtin.copy:
+        src: oracle/update_ipaddress.service
+        dest: /etc/systemd/system/update_ipaddress.service
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Enable ip address update systemd service
+      ansible.builtin.systemd:
+        name: update_ipaddress
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Execute the ip address update script
+      ansible.builtin.command: /usr/bin/update_ipaddress.sh nowait
+
+    - name: Restart database system service
+      ansible.builtin.systemd:
+        name: oracle-xe-21c
+        state: restarted
+        daemon_reload: true
