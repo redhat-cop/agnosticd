@@ -1,43 +1,53 @@
-cat >openshift-cnv.yaml <<EOF
+cat << EOF | oc apply -f -
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: openshift-cnv
----
+  labels:
+    kubernetes.io/metadata.name: openshift-nmstate
+    name: openshift-nmstate
+  name: openshift-nmstate
+spec:
+  finalizers:
+  - kubernetes
+EOF
+
+cat << EOF | oc apply -f -
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
-  name: kubevirt-hyperconverged-group
-  namespace: openshift-cnv
+  annotations:
+    olm.providedAPIs: NMState.v1.nmstate.io
+  generateName: openshift-nmstate-
+  name: openshift-nmstate-tn6k8
+  namespace: openshift-nmstate
 spec:
   targetNamespaces:
-    - openshift-cnv
----
+  - openshift-nmstate
+EOF
+
+cat << EOF| oc apply -f -
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
-  name: hco-operatorhub
-  namespace: openshift-cnv
+  labels:
+    operators.coreos.com/kubernetes-nmstate-operator.openshift-nmstate: ""
+  name: kubernetes-nmstate-operator
+  namespace: openshift-nmstate
 spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: kubernetes-nmstate-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace
-  name: kubevirt-hyperconverged
-  startingCSV: kubevirt-hyperconverged-operator.v4.11.2
-  channel: "stable"
-
 EOF
 
-oc create -f openshift-cnv.yaml
-sleep 300
-cat >openshift-cnv-operator.yaml <<EOF
-apiVersion: hco.kubevirt.io/v1beta1
-kind: HyperConverged
+until oc get nmstates.nmstate.io; do sleep 60; done
+cat << EOF | oc apply -f -
+apiVersion: nmstate.io/v1
+kind: NMState
 metadata:
-  name: kubevirt-hyperconverged
-  namespace: openshift-cnv
-spec:
+  name: nmstate
 EOF
-oc create -f openshift-cnv-operator.yaml 
 
 cat << EOF | oc apply -f -
 apiVersion: project.openshift.io/v1
@@ -62,14 +72,14 @@ metadata:
   name: mtv-operator
   namespace: openshift-mtv
 spec:
-  channel: release-v2.3.0
+  channel: release-v2.5
   installPlanApproval: Automatic
   name: mtv-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace
-  startingCSV: mtv-operator.v2.3.4
+  startingCSV: "mtv-operator.v2.5.3"
 EOF
-sleep 120
+until oc get ForkliftController.forklift.konveyor.io; do sleep 60; done
 cat << EOF | oc apply -f -
 apiVersion: forklift.konveyor.io/v1beta1
 kind: ForkliftController
