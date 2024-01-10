@@ -5,3 +5,4 @@ oc create secret tls router-certs-new --cert=fullchain.pem --key=privkey.pem -n 
 oc patch ingresscontroller default -n openshift-ingress-operator --type=merge --patch='{"spec": { "defaultCertificate": { "name": "router-certs-new" }}}'
 oc create secret tls api-certs-new --cert=fullchain.pem --key=privkey.pem -n openshift-config
 oc patch apiserver cluster --type merge --patch="{\"spec\": {\"servingCerts\": {\"namedCertificates\": [ { \"names\": [  \"$LE_API\"  ], \"servingCertificate\": {\"name\": \"api-certs-new\" }}]}}}"
+oc delete pod --all -n openshift-ingress --force
