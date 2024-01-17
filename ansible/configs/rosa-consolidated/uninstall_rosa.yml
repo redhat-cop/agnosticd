@@ -1,0 +1,86 @@
+---
+- name: Destroy ROSA Cluster
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa delete cluster
+    --cluster {{ item.name }}
+    --yes
+  register: r_rosa_delete
+  failed_when: >-
+    r_rosa_delete.rc != 0 and 'ERR: There is no cluster with identifier or name' not in r_rosa_delete.stderr
+
+- name: Wait for ROSA deletion to complete
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa describe cluster --cluster {{ item.name }}
+  register: r_rosa_cluster_status
+  ignore_errors: true
+  until: r_rosa_cluster_status.rc != 0
+  retries: 30
+  delay: 60
+
+- name: Force ROSA cluster removal
+  when: r_rosa_cluster_status.rc == 0
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa delete cluster
+    --cluster {{ item.name }}
+    --yes
+    --best-effort=true
+
+- name: Destroy Terraform resources for HCP
+  when: rosa_deploy_hcp | default(false) | bool
+  block:
+  - name: Install Terraform
+    when: rosa_install_terraform | default(true) | bool
+    become: true
+    ansible.builtin.unarchive:
+      src: "{{ rosa_terraform_url }}"
+      remote_src: true
+      dest: /usr/local/bin
+      mode: "0775"
+      owner: root
+      group: root
+    retries: 10
+    register: r_terraform
+    until: r_terraform is success
+    delay: 30
+
+  - name: Restore terraform-vpc directory from output-dir
+    become: true
+    ansible.builtin.unarchive:
+      src: "{{ output_dir }}/terraform-vpc.tar.gz"
+      dest: "/tmp/"
+      remote_src: false
+      extra_opts:
+      - --no-same-owner
+
+  # - name: Remove old providers
+  #   ansible.builtin.file:
+  #     state: absent
+  #     path: "{{ item }}"
+  #   loop:
+  #   - /tmp/terraform-vpc/.terraform
+  #   - /tmp/terraform-vpc/.terraform.lock.hcl
+
+  # - name: Run terraform init
+  #   ansible.builtin.command:
+  #     cmd: /usr/local/bin/terraform init
+  #     chdir: "/tmp/terraform-vpc/"
+  #   register: r_output
+
+  # - name: Print output
+  #   ansible.builtin.debug:
+  #     msg: "{{ r_output }}"
+
+  - name: Run Terraform destroy
+    ansible.builtin.command:
+      cmd: >-
+        /usr/local/bin/terraform destroy
+          -var region={{ aws_region }}
+          -var cluster_name=rosa-{{ guid }}
+          -auto-approve
+      chdir: "/tmp/terraform-vpc/"
+    ignore_errors: true
+    register: r_output_destroy
+
+  - name: Print Terraform destroy output
+    ansible.builtin.debug:
+      msg: "{{ r_output_destroy }}"

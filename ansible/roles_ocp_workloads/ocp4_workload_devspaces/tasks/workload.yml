@@ -1,0 +1,74 @@
+---
+- name: install devspaces operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_name: devspaces
+    install_operator_namespace: "{{ ocp4_workload_devspaces_namespace }}"
+    install_operator_csv_nameprefix: devspacesoperator
+    install_operator_channel: "{{ ocp4_workload_devspaces_channel }}"
+    install_operator_starting_csv: "{{ ocp4_workload_devspaces_startingcsv }}"
+    install_operator_catalogsource_setup: true
+    install_operator_catalogsource_image: "{{ ocp4_workload_devspaces_catalogsource_image }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_devspaces_catalogsource_tag }}"
+
+- name: create checluster
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'checluster.yml.j2') | from_yaml }}"
+
+- name: wait devspaces dashboard pod is ready
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    label_selectors:
+      - component=devspaces-dashboard
+    namespace: "{{ ocp4_workload_devspaces_namespace }}"
+  register: r_devspaces_dashboard_pod
+  failed_when: r_devspaces_dashboard_pod.resources[0].status.phase | default('') != 'Running'
+  until: r_devspaces_dashboard_pod is successful
+  retries: 30
+  delay: 10
+
+- name: get devspaces route
+  kubernetes.core.k8s_info:
+    kind: Route
+    name: devspaces
+    namespace: "{{ ocp4_workload_devspaces_namespace }}"
+  register: r_devspaces_route
+
+- name: set _ocp4_workload_devspaces_url
+  ansible.builtin.set_fact:
+    _ocp4_workload_devspaces_url: "https://{{ r_devspaces_route.resources[0].spec.host }}"
+
+- name: create devworkspace
+  when: ocp4_workload_devspaces_devworkspace | bool
+  vars:
+    # yamllint disable-line rule:line-length
+    _ocp4_workload_devspaces_devfile: "{{ _ocp4_workload_devspaces_url }}/plugin-registry/v3/plugins/che-incubator/che-code/latest/devfile.yaml"
+  block:
+    - name: check {{ _ocp4_workload_devspaces_devfile }}
+      ansible.builtin.uri:
+        url: "{{ _ocp4_workload_devspaces_devfile }}"
+      register: this
+      until: this.status == 200
+      retries: 10
+      delay: 5
+    - name: create devworkspace
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', item) | from_yaml }}"
+      loop:
+        - namespace.yml.j2
+        - devworkspace.yml.j2
+    - name: check devworkspace is running
+      kubernetes.core.k8s_info:
+        api_version: workspace.devfile.io/v1alpha2
+        kind: DevWorkspace
+        name: "{{ ocp4_workload_devspaces_devworkspace_name }}"
+        namespace: "{{ ocp4_workload_devspaces_devworkspace_namespace }}"
+      register: r_devworkspace
+      failed_when: r_devworkspace.resources[0].status.phase | default('') != 'Running'
+      until: r_devworkspace is successful
+      retries: 30
+      delay: 10

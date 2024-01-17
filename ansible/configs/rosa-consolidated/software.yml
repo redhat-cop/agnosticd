@@ -1,0 +1,158 @@
+---
+- name: Step 00xxxxx software
+  hosts: bastions
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Install and configure AWS cli
+    ansible.builtin.include_tasks: install_aws_cli.yml
+
+  - name: Install Helm
+    when: rosa_install_helm | default(true) | bool
+    ansible.builtin.include_tasks: install_helm.yml
+
+  - name: Install Terraform
+    when: rosa_install_terraform | default(true) | bool
+    become: true
+    ansible.builtin.unarchive:
+      src: "{{ rosa_terraform_url }}"
+      remote_src: true
+      dest: /usr/local/bin
+      mode: "0775"
+      owner: root
+      group: root
+    retries: 10
+    register: r_terraform
+    until: r_terraform is success
+    delay: 30
+
+  - name: Install additional tools
+    ansible.builtin.include_tasks: install_additional_tools.yml
+
+  - name: Set rosa binary location
+    ansible.builtin.set_fact:
+      rosa_binary_path: "/usr/local/bin"
+
+  - name: Install ROSA CLI
+    ansible.builtin.include_tasks: install_rosa_cli.yml
+
+  - name: Setup ROSA token
+    when: rosa_token == ""
+    ansible.builtin.set_fact:
+      rosa_token: "{{ gpte_rosa_token }}"
+
+  - name: Login to ROSA
+    ansible.builtin.command: >-
+      {{ rosa_binary_path}}/rosa login --token {{ rosa_token }}
+
+  - name: Set up rosa user's bastion home directory
+    ansible.builtin.include_tasks: install_rosa_user.yml
+
+  - name: Install ROSA
+    when: rosa_deploy | default(true) | bool
+    block:
+    - name: Install ROSA - Common pre-install tasks
+      ansible.builtin.include_tasks: install_rosa_common_pre.yml
+
+    - name: Install ROSA (STS)
+      when: not rosa_deploy_hcp | default(false) | bool
+      ansible.builtin.include_tasks: install_rosa_sts.yml
+
+    - name: Install ROSA (Hosted Control Planes)
+      when: rosa_deploy_hcp | default(false) | bool
+      ansible.builtin.include_tasks: install_rosa_hcp.yml
+
+    - name: Install ROSA - Common post-install tasks
+      ansible.builtin.include_tasks: install_rosa_common_post.yml
+
+    - name: Log cluster admin into OpenShift on bastion
+      when:
+      - rosa_setup_cluster_admin | default(true) | bool
+      - rosa_setup_cluster_admin_login | default(false) | bool
+      ansible.builtin.include_tasks: install_rosa_cluster_login.yml
+
+    always:
+    - name: Get ROSA install log
+      ansible.builtin.shell:
+        cmd: >-
+          {{ rosa_binary_path }}/rosa logs install \
+            --cluster rosa-{{ guid }} > /home/{{ ansible_user }}/rosa_install.log
+
+    - name: Gzip ROSA install log
+      ansible.builtin.archive:
+        path: /home/{{ ansible_user }}/rosa_install.log
+        dest: /home/{{ ansible_user }}/rosa_install.log.gz
+        format: gz
+
+    - name: Get ROSA install log and save in output dir
+      ansible.builtin.fetch:
+        src: /home/{{ ansible_user }}/rosa_install.log.gz
+        dest: "{{ output_dir }}/{{ env_type }}_{{ guid }}_log/"
+        flat: true
+
+    - name: Save output_dir archive
+      when: agnosticd_save_output_dir_archive is defined
+      ansible.builtin.include_role:
+        name: agnosticd_save_output_dir
+
+  - name: Install OpenShift CLI
+    ansible.builtin.include_tasks: install_ocp_cli.yml
+
+  - name: Set ROSA token warning boolean true
+    when: rosa_token == gpte_rosa_token
+    ansible.builtin.set_fact:
+      rosa_token_warning: true
+
+  - name: Set ROSA token warning boolean false
+    when: rosa_token != gpte_rosa_token
+    ansible.builtin.set_fact:
+      rosa_token_warning: false
+
+  - name: Save ROSA user data when ROSA has been installed
+    when: rosa_deploy | default(true) | bool
+    block:
+    - name: Save ROSA user data when ROSA has been installed
+      agnosticd_user_info:
+        data:
+          rosa_sandbox_account_id: "{{ hostvars.localhost.sandbox_account_id }}"
+          rosa_console_user_name: "{{ hostvars.localhost.rosa_console_user_name }}"
+          rosa_console_password: "{{ hostvars.localhost.rosa_console_password }}"
+          rosa_bastion_user_name: "{{ bastion_user_name }}"
+          rosa_subdomain_base: "{{ subdomain_base }}"
+          rosa_user_password: "{{ rosa_user_password }}"
+          rosa_console_url: "{{ rosa_console_url }}"
+          rosa_api_url: "{{ rosa_api_url }}"
+          rosa_token_warning: "{{ rosa_token_warning }}"
+          rosa_deploy_hcp: "{{ rosa_deploy_hcp }}"
+          rosa_version: "{{ _rosa_version_to_install }}"
+          rosa_version_next: "{{ _rosa_version_next | default('none') }}"
+          rosa_ocp_cli_version: "{{ _rosa_ocp_cli_version }}"
+
+    - name: Save ROSA admin user data when ROSA has been installed with admin user
+      when: rosa_setup_cluster_admin | default(false) | bool
+      agnosticd_user_info:
+        data:
+          rosa_admin_user: "cluster-admin"
+          rosa_admin_password: "{{ _rosa_cluster_admin_password }}"
+
+  - name: Save ROSA user data when ROSA has not been installed
+    when: not rosa_deploy | default(true) | bool
+    agnosticd_user_info:
+      data:
+        rosa_sandbox_account_id: "{{ hostvars.localhost.sandbox_account_id }}"
+        rosa_console_user_name: "{{ hostvars.localhost.rosa_console_user_name }}"
+        rosa_console_password: "{{ hostvars.localhost.rosa_console_password }}"
+        rosa_bastion_user_name: "{{ bastion_user_name }}"
+        rosa_subdomain_base: "{{ subdomain_base }}"
+        rosa_user_password: "{{ rosa_user_password }}"
+        rosa_token_warning: "{{ rosa_token_warning }}"
+        rosa_console_url: "none"
+
+  - name: Save SSH data (for Showroom)
+    agnosticd_user_info:
+      data:
+        ssh_command: "ssh {{ bastion_user_name }}@bastion.{{ subdomain_base }}"
+        ssh_password: "{{ rosa_user_password }}"
+        ssh_username: "{{ bastion_user_name }}"
+        targethost: "bastion.{{ subdomain_base }}"
+        guid: "{{ guid }}"
