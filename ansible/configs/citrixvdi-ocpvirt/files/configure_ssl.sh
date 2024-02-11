@@ -17,7 +17,7 @@ oc patch ingresscontroller.operator default \
      '{"spec":{"defaultCertificate": {"name": "letsencrypt"}}}' \
      -n openshift-ingress-operator
 
-oc create namespace openshift-cnv
+oc create namespace openshift-cnv || true
 
 oc create configmap custom-ca \
      --from-file=ca-bundle.crt=chain1.pem \
