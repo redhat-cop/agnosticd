@@ -52,28 +52,46 @@
       yum:
         name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
         disable_gpg_check: true
+      retries: 5
 
     - name: install certbot
       yum:
         name: "certbot"
 
-    - name: Generate certificate using certbot
-      command: >
-        certbot certonly  --standalone
-        -d console-openshift-console.apps.{{ guid }}.dynamic.opentlc.com,oauth-openshift.apps.{{ guid }}.dynamic.opentlc.com,virt-openshift-mtv.apps.{{ guid }}.dynamic.opentlc.com
-        -m josegonz@redhat.com --agree-tos -n
-      retries: 30
-      delay: 30
+    - name: Write Route53 credentials into /root/.aws/credentials
+      blockinfile:
+        dest: "/root/.aws/credentials"
+        create: true
+        owner: "root"
+        mode: u=rw,g=,o=
+        content: |
+          [default]
+          aws_access_key_id={{ route53_aws_access_key_id }}
+          aws_secret_access_key={{ route53_aws_secret_access_key }}
 
-    - name: Fetch letsencrypt SSL certificates to transfer to the bastion node
-      fetch:
-        src: "/etc/letsencrypt/archive/console-openshift-console.apps.{{ guid }}.dynamic.opentlc.com/{{ item }}"
-        dest: "{{ output_dir }}/{{ item }}"
-        flat: yes
-      loop:
-        - chain1.pem
-        - cert1.pem
-        - privkey1.pem
+    - name: Request Both Let's Encrypt Static and Wildcard Certificates
+      include_role:
+        name: host-lets-encrypt-certs-certbot
+      vars:
+        _certbot_domain: "api.{{ guid }}.{{ cluster_dns_zone }}"
+        _certbot_wildcard_domain: "*.apps.{{ guid }}.{{ cluster_dns_zone }}"
+        _certbot_production: True
+        _certbot_dns_provider: "route53"
+        _certbot_remote_dir: "/root/"
+        _certbot_cache_cert_file: "/tmp/server.cert"
+        _certbot_cache_key_file: "/tmp/server.key"
+        _certbot_cache_ca_file: "/tmp/server_ca.cer"
+        _certbot_cache_fullchain_file: "/tmp/fullchain.cer"
+        _certbot_cache_archive_file: "/tmp/certbot.tar.gz"
+        _certbot_renew_automatically: False
+        _certbot_force_issue: False
+        _certbot_user: "root"
+
+    - name: Remove credentials once LE certs complete
+      file:
+        state: absent
+        path: "/root/.aws"
+
 
     - name: install mariadb client
       yum:
@@ -120,49 +138,37 @@
   hosts: bastion-vm
   gather_facts: false
   tasks:
-    - when: build_lab|bool
-      block:
-        - include_role:
-            name: ocp4_aio_deploy_bastion
-          vars:
-            ocp4_aio_ssh_key: "{{ lookup('file', '{{ output_dir }}/{{ guid }}_id_rsa.pub' ) }}"
-          when: cloud_provider == 'equinix_metal'
+    - include_role:
+        name: ocp4_aio_deploy_bastion
+      vars:
+        ocp4_aio_ssh_key: "{{ lookup('file', '{{ output_dir }}/{{ guid }}_id_rsa.pub' ) }}"
+      when: cloud_provider == 'equinix_metal'
 
-        - include_role:
-            name: ocp4_aio_deploy_bastion
-          vars:
-            ocp4_aio_ssh_key: "{{ lookup('file', hostvars['localhost']['env_authorized_key_path_pub']) }}"
-          when: cloud_provider == 'ec2'
+    - include_role:
+        name: ocp4_aio_deploy_bastion
+      vars:
+        ocp4_aio_ssh_key: "{{ lookup('file', hostvars['localhost']['env_authorized_key_path_pub']) }}"
+      when: cloud_provider == 'ec2'
 
+    - name: Install httpd
+      yum:
+        name: httpd
 
-        - name: Copy letsencrypt files
-          copy:
-            src: "{{ output_dir }}/{{ item }}"
-            dest: "/root/{{ item }}"
-          loop:
-            - chain1.pem
-            - cert1.pem
-            - privkey1.pem
+    - name: Start and enable httpd
+      service:
+        name: httpd
+        state: restarted
+        enabled: yes
 
-        - name: Install httpd
-          yum:
-            name: httpd
-
-        - name: Start and enable httpd
-          service:
-            name: httpd
-            state: restarted
-            enabled: yes
-
-        - name: Download required files for the lab
-          get_url:
-            url: "https://www.opentlc.com/download/ocp4_virt_foundations/{{ item }}"
-            dest: "/var/www/html/{{ item }}"
-            owner: apache
-            group: apache
-          loop:
-            - Fedora35.qcow2
-            - Windows2019.iso
+    - name: Download required files for the lab
+      get_url:
+        url: "https://www.opentlc.com/download/ocp4_virt_foundations/{{ item }}"
+        dest: "/var/www/html/{{ item }}"
+        owner: apache
+        group: apache
+      loop:
+        - Fedora35.qcow2
+        - Windows2019.iso
 
 
 - name: PreSoftware flight-check
