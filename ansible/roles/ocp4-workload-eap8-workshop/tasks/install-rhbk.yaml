@@ -1,0 +1,260 @@
+---
+# create gitea operator  namespace
+- name: create rhbk namespace
+  k8s:
+    state: present
+    kind: Project
+    api_version: project.openshift.io/v1
+    definition:
+      metadata:
+        name: "rhbk"
+        annotations:
+          openshift.io/description: ""
+          openshift.io/display-name: "RHBK Project"
+
+# create sso operatorgroup
+- name: Create operator group for rhbk
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/rhbk_operatorgroup.yaml
+
+# deploy gitea operator
+- name: Create operator subscription for rhbk
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/rhbk_subscription.yaml
+
+- name: wait a minute and let the rhbk CRD become ready
+  pause:
+      minutes: 1
+
+# # wait for CRD to be a thing
+- name: Wait for keycloak CRD to be ready
+  k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: keycloaks.k8s.keycloak.org
+  register: r_keycloak_crd
+  retries: 200
+  delay: 20
+  until: r_keycloak_crd.resources | list | length == 1
+
+- name: Remove postgresdb if it exists
+  k8s:
+    state: absent
+    kind: StatefulSet
+    definition:
+      metadata:
+        name: postgresql-db
+        namespace: rhbk
+
+
+- name: create rhbk PostgreSQL database 
+  k8s:
+    state: present
+    kind: StatefulSet
+    api_version: apps/v1
+    definition: 
+      metadata:
+        name: postgresql-db
+        namespace: rhbk
+      spec:
+        serviceName: postgresql-db-service
+        selector:
+          matchLabels:
+            app: postgresql-db
+        replicas: 1
+        template:
+          metadata:
+            labels:
+              app: postgresql-db
+          spec:
+            containers:
+              - name: postgresql-db
+                image: postgres:latest
+                volumeMounts:
+                  - mountPath: /data
+                    name: cache-volume
+                env:
+                  - name: POSTGRES_PASSWORD
+                    value: testpassword
+                  - name: PGDATA
+                    value: /data/pgdata
+                  - name: POSTGRES_DB
+                    value: keycloak
+            volumes:
+              - name: cache-volume
+                emptyDir: {}
+
+- name: create rhbk PostgreSQL service 
+  k8s:
+    state: present
+    kind: Service
+    api_version: v1
+    definition: 
+      metadata:
+        name: postgres-db
+        namespace: rhbk
+      spec:
+        selector:
+          app: postgresql-db
+        type: LoadBalancer
+        ports:
+        - port: 5432
+          targetPort: 5432
+
+- name: Remove secret if it exists
+  k8s:
+    state: absent
+    kind: Secret
+    definition:
+      metadata:
+        name: tls-secret
+        namespace: rhbk
+
+- name: Generate certs
+  shell: |
+     openssl req -subj '/CN=keycloak.rhbk.{{ route_subdomain }}/O=Test demoshift./C=US' -newkey rsa:2048 -nodes -keyout key.pem -x509 -days 365 -out certificate.pem
+
+- name: Create secret from certs
+  shell: |
+     oc -n rhbk create secret tls tls-secret --key ./key.pem --cert ./certificate.pem
+
+- name: Remove postgres secret if it exists
+  k8s:
+    state: absent
+    kind: Secret
+    definition:
+      metadata:
+        name: keycloak-db-secret
+        namespace: rhbk
+
+- name: create postgres db secret
+  shell: |
+     oc create secret -n rhbk generic keycloak-db-secret --from-literal=username=postgres --from-literal=password=testpassword
+
+- name: Remove eap-keycloak if it exists
+  k8s:
+    state: absent
+    kind: Keycloak
+    api_version: k8s.keycloak.org/v2alpha1
+    definition:
+      metadata:
+        name: eap-keycloak
+        namespace: rhbk
+
+# deploy sso CR
+- name: create rhbk instance 
+  k8s:
+    state: present
+    kind: Keycloak
+    api_version: k8s.keycloak.org/v2alpha1
+    definition: 
+      metadata:
+        name: eap-keycloak
+        labels:
+          app: sso
+        namespace: rhbk
+      spec:
+        instances: 1
+        http:
+          tlsSecret: tls-secret
+        hostname:
+          hostname: keycloak.rhbk.{{ route_subdomain }}  
+        db:
+          vendor: postgres
+          host: postgres-db
+          usernameSecret:
+            name: keycloak-db-secret
+            key: username
+          passwordSecret:
+            name: keycloak-db-secret
+            key: password
+
+- name: Remove eap-realm if it exists
+  k8s:
+    state: absent
+    kind: KeycloakRealmImport
+    api_version: k8s.keycloak.org/v2alpha1
+    definition:
+      metadata:
+        name: eap-realm
+        namespace: rhbk
+
+- name: debug
+  debug:
+    msg: "{{ lookup('template', './rhbk_realm.j2') }}"
+# create sso realm
+- name: create rhbk realm 
+  k8s:
+    state: present
+    kind: KeycloakRealmImport
+    api_version: k8s.keycloak.org/v2alpha1
+    definition: "{{ lookup('template', './rhbk_realm.j2') }}"
+
+
+# # create sso client
+# - name: create sso client 
+#   k8s:
+#     state: present
+#     kind: KeycloakClient
+#     api_version: keycloak.org/v1alpha1
+#     definition:
+#       metadata:
+#         name: eap-app
+#         namespace: sso
+#         labels:
+#           app: sso
+#       spec:
+#         realmSelector:
+#           matchLabels:
+#             app: sso
+#         client:
+#           redirectUris:
+#             - '*'
+#           webOrigins:
+#             - '*'
+#           clientId: eap-app
+#           secret: client-secret
+#           clientAuthenticatorType: client-secret
+#           enabled: true
+#           publicClient: true
+#           standardFlowEnabled: true
+
+# # create sso user
+# - name: create sso users
+#   k8s:
+#     state: present
+#     api_version: keycloak.org/v1alpha1
+#     kind: KeycloakUser
+#     definition:
+#       metadata:
+#         name: example-realm-{{ item }}
+#         namespace: sso
+#         labels:
+#           app: sso
+#       spec:
+#         realmSelector:
+#           matchLabels:
+#             app: sso
+#         user:
+#           credentials:
+#             - type: password
+#               value: openshift
+#           username: "{{ item }}"
+#           firstName: "{{ item }}"
+#           lastName: Doe
+#           email: "{{ item }}@example.com"
+#           enabled: true
+#           emailVerified: false
+#   loop: "{{ users }}"
