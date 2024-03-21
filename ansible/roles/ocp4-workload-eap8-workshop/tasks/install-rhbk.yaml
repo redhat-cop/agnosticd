@@ -49,15 +49,24 @@
   delay: 20
   until: r_keycloak_crd.resources | list | length == 1
 
-- name: Remove postgresdb if it exists
-  k8s:
-    state: absent
-    kind: StatefulSet
-    definition:
-      metadata:
-        name: postgresql-db
-        namespace: rhbk
 
+- name: create postgreSQL PVC
+  k8s:
+    state: present
+    kind: PersistentVolumeClaim
+    api_version: v1
+    definition:
+      kind: PersistentVolumeClaim
+      apiVersion: v1
+      metadata:
+        name: postgresql
+        namespace: rhbk
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
 
 - name: create rhbk PostgreSQL database 
   k8s:
@@ -84,7 +93,7 @@
                 image: postgres:latest
                 volumeMounts:
                   - mountPath: /data
-                    name: cache-volume
+                    name: postgresql-data
                 env:
                   - name: POSTGRES_PASSWORD
                     value: testpassword
@@ -93,8 +102,9 @@
                   - name: POSTGRES_DB
                     value: keycloak
             volumes:
-              - name: cache-volume
-                emptyDir: {}
+            - name: postgresql-data
+              persistentVolumeClaim:
+                claimName: postgresql
 
 - name: create rhbk PostgreSQL service 
   k8s:
@@ -113,47 +123,23 @@
         - port: 5432
           targetPort: 5432
 
-- name: Remove secret if it exists
+
+- name: create postgres db secret
   k8s:
-    state: absent
+    state: present
     kind: Secret
-    definition:
-      metadata:
-        name: tls-secret
-        namespace: rhbk
-
-- name: Generate certs
-  shell: |
-     openssl req -subj '/CN=keycloak.rhbk.{{ route_subdomain }}/O=Test demoshift./C=US' -newkey rsa:2048 -nodes -keyout key.pem -x509 -days 365 -out certificate.pem
-
-- name: Create secret from certs
-  shell: |
-     oc -n rhbk create secret tls tls-secret --key ./key.pem --cert ./certificate.pem
-
-- name: Remove postgres secret if it exists
-  k8s:
-    state: absent
-    kind: Secret
+    api_version: v1
     definition:
       metadata:
         name: keycloak-db-secret
         namespace: rhbk
+      data:
+        database-name: c2FtcGxlZGI=
+        password: dGVzdHBhc3N3b3Jk
+        username: cG9zdGdyZXM=
 
-- name: create postgres db secret
-  shell: |
-     oc create secret -n rhbk generic keycloak-db-secret --from-literal=username=postgres --from-literal=password=testpassword
 
-- name: Remove eap-keycloak if it exists
-  k8s:
-    state: absent
-    kind: Keycloak
-    api_version: k8s.keycloak.org/v2alpha1
-    definition:
-      metadata:
-        name: eap-keycloak
-        namespace: rhbk
-
-# deploy sso CR
+# deploy rhbk
 - name: create rhbk instance 
   k8s:
     state: present
@@ -168,9 +154,11 @@
       spec:
         instances: 1
         http:
-          tlsSecret: tls-secret
+          httpEnabled: true
+          # tlsSecret: example-tls-secret
         hostname:
-          hostname: keycloak.rhbk.{{ route_subdomain }}  
+          strict: false
+          strictBackchannel: false
         db:
           vendor: postgres
           host: postgres-db
@@ -181,80 +169,33 @@
             name: keycloak-db-secret
             key: password
 
-- name: Remove eap-realm if it exists
+- name: create the Route for rhbk
   k8s:
-    state: absent
-    kind: KeycloakRealmImport
-    api_version: k8s.keycloak.org/v2alpha1
+    api_version: route.openshift.io/v1
+    namespace: rhbk
+    state: present
+    kind: Route
     definition:
       metadata:
-        name: eap-realm
-        namespace: rhbk
+        name: rhbk
+        labels:
+          app: rhbk
+      spec:
+        host: ''
+        to:
+          kind: Service
+          name: eap-keycloak-service
+          weight: 100
+        port:
+          targetPort: http
+        tls:
+          termination: edge
+          insecureEdgeTerminationPolicy: Allow
+  register: Route
 
-- name: debug
-  debug:
-    msg: "{{ lookup('template', './rhbk_realm.j2') }}"
-# create sso realm
 - name: create rhbk realm 
   k8s:
     state: present
     kind: KeycloakRealmImport
     api_version: k8s.keycloak.org/v2alpha1
     definition: "{{ lookup('template', './rhbk_realm.j2') }}"
-
-
-# # create sso client
-# - name: create sso client 
-#   k8s:
-#     state: present
-#     kind: KeycloakClient
-#     api_version: keycloak.org/v1alpha1
-#     definition:
-#       metadata:
-#         name: eap-app
-#         namespace: sso
-#         labels:
-#           app: sso
-#       spec:
-#         realmSelector:
-#           matchLabels:
-#             app: sso
-#         client:
-#           redirectUris:
-#             - '*'
-#           webOrigins:
-#             - '*'
-#           clientId: eap-app
-#           secret: client-secret
-#           clientAuthenticatorType: client-secret
-#           enabled: true
-#           publicClient: true
-#           standardFlowEnabled: true
-
-# # create sso user
-# - name: create sso users
-#   k8s:
-#     state: present
-#     api_version: keycloak.org/v1alpha1
-#     kind: KeycloakUser
-#     definition:
-#       metadata:
-#         name: example-realm-{{ item }}
-#         namespace: sso
-#         labels:
-#           app: sso
-#       spec:
-#         realmSelector:
-#           matchLabels:
-#             app: sso
-#         user:
-#           credentials:
-#             - type: password
-#               value: openshift
-#           username: "{{ item }}"
-#           firstName: "{{ item }}"
-#           lastName: Doe
-#           email: "{{ item }}@example.com"
-#           enabled: true
-#           emailVerified: false
-#   loop: "{{ users }}"
