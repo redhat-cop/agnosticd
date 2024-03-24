@@ -23,16 +23,90 @@
       include_role:
         name: letsencrypt_ca_trust
 
-- name: Install Ansible automation controller
+- name: Install Software on bastion and Ansible automation controller
   hosts: bastions[0]
   gather_facts: false
   become: true
 
   tasks:
 
+    - name: Do very annoying normalization of domain name
+      set_fact:
+        agnosticd_domain_name: >-
+          {% if cloud_provider == 'osp' -%}
+            {{ guid }}.{{ osp_cluster_dns_zone }}
+          {% elif cloud_provider == 'ec2' -%}
+            {{ guid }}{{ subdomain_base_suffix }}
+          {%- endif %}
+
     - name: Install code-server
       include_role:
         name: vscode-server
+
+    # we should move those into a new Gitea role
+    - name: Install Gitea
+      include_role:
+        name: l3d.git.gitea
+        public: true  # defaults and vars variables are available to following tasks
+        apply:
+          tags: gitea
+      vars:
+        # gitea_fqdn: "bastion.{{ agnosticd_domain_name }}"
+        gitea_db_pasword: "{{ student_password }}"  # shouldn't matter for sqlite3
+      tags:
+        - gitea
+    - name: copy nginx config for Gitea (assuming previous nginx install by vscode-server)
+      ansible.builtin.copy:
+        src: files/nginx_gitea.conf
+        dest: /etc/nginx/conf.d/gitea.conf
+      tags:
+        - gitea
+    - name: Reload the nginx configuration
+      ansible.builtin.command: /usr/sbin/nginx -s reload  # as root
+      tags:
+        - gitea
+      changed_when: false  # no real change
+
+    - name: Use gitea cli to create user
+      ansible.builtin.command: >
+        /usr/local/bin/gitea -c /etc/gitea/gitea.ini admin user create
+        --username "{{ student_name }}"
+        --password "{{ student_password }}"
+        --email {{ student_name }}@{{ agnosticd_domain_name }}
+        --must-change-password=false
+      become_user: gitea  # we assume the default
+      register: gitearesult
+      failed_when:
+        - '"successfully created" not in gitearesult.stdout'
+        - '"user already exists" not in gitearesult.stderr'
+      changed_when:
+        - '"successfully created" in gitearesult.stdout'
+      tags:
+        - gitea
+
+    - name: Wait for Gitea to come up
+      ansible.builtin.wait_for:
+        host: "{{ gitea_http_domain }}"
+        port: "{{ gitea_http_port }}"
+        state: started
+      tags:
+        - gitea
+    - name: Import Git projects to gitea student user
+      ansible.builtin.uri:
+        url: "{{ gitea_protocol }}://{{ gitea_http_domain }}:{{ gitea_http_port }}/api/v1/repos/migrate"
+        method: POST
+        body_format: json
+        body: {"clone_addr": "{{ item.url }}", "repo_name": "{{ item.name }}"}
+        status_code: [201, 409]  # Created or Conflict
+        headers:
+          Content-Type: "application/json"
+        user: "{{ student_name }}"
+        password: "{{ student_password }}"
+        force_basic_auth: yes
+        validate_certs: no
+      loop: "{{ gitea_migrate_git_repos }}"  # defined in env_vars
+      tags:
+        - gitea
 
     - name: Download Manifest for Controller
       get_url:
@@ -52,15 +126,6 @@
         name: ansible
         state: present
         disablerepo: epel
-
-    - name: Do very annoying normalization of domain name
-      set_fact:
-        agnosticd_domain_name: >-
-          {% if cloud_provider == 'osp' -%}
-            {{ guid }}.{{ osp_cluster_dns_zone }}
-          {% elif cloud_provider == 'ec2' -%}
-            {{ guid }}{{ subdomain_base_suffix }}
-          {%- endif %}
 
     - name: install AAP development tools when required
       include_role:
