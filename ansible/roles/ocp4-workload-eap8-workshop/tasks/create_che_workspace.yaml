@@ -1,0 +1,339 @@
+---
+
+- name: create project for {{ user }}
+  k8s:
+    state: present
+    kind: Project
+    api_version: project.openshift.io/v1
+    definition:
+      metadata:
+        name: "{{ user }}-devspaces"
+        annotations:
+          openshift.io/description: ""
+          openshift.io/display-name: "devspaces project for {{ user }}"
+          che.eclipse.org/username: "{{ user }}"
+- name: Create dev workspace template for {{ user }}
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: 
+
+      apiVersion: workspace.devfile.io/v1alpha1
+      kind: DevWorkspaceTemplate
+      metadata:
+        name: che-code-quarkus-quickstart
+        namespace: "{{ user }}-devspaces"
+      spec:
+        commands:
+          - apply:
+              component: che-code-injector
+              id: init-container-command
+        components:
+          - volume:
+              name: checode
+          - container:
+              command:
+                - /entrypoint-init-container.sh
+              env:
+                - name: CHE_DASHBOARD_URL
+                  value: 'https://devspaces.{{ route_subdomain }}'
+                - name: CHE_PLUGIN_REGISTRY_URL
+                  value: >-
+                    https://devspaces.{{ route_subdomain }}/plugin-registry/v3
+                - name: CHE_PLUGIN_REGISTRY_INTERNAL_URL
+                  value: 'http://plugin-registry.devspaces.svc:8080/v3'
+                - name: OPENVSX_REGISTRY_URL
+                  value: 'https://open-vsx.org'
+              image: >-
+                registry.redhat.io/devspaces/code-rhel8
+              memoryLimit: 128Mi
+              name: che-code-injector
+              sourceMapping: /projects
+              volumeMounts:
+                - name: checode
+                  path: /checode
+        events:
+          preStart:
+            - init-container-command
+
+
+- name: Create workspace for {{ user }}
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: 
+      apiVersion: workspace.devfile.io/v1alpha2
+      kind: DevWorkspace
+      metadata:
+        annotations:
+          # che.eclipse.org/devfile-source: |
+          #   scm:
+          #     repo: >-
+          #       https://gitea-gitea.apps.cluster-dw7pj.dw7pj.sandbox3174.opentlc.com/user1/workshop.git
+          #     fileName: devfile.yaml
+          #   factory:
+          #     params: >-
+          #       url=https://gitea-gitea.apps.cluster-dw7pj.dw7pj.sandbox3174.opentlc.com/user1/workshop/raw/branch/main/devfile.yaml
+          # che.eclipse.org/devfile-source: |
+          #   scm:
+          #     repo: >-
+          #       https://gitea-gitea.apps.cluster-dw7pj.dw7pj.sandbox3174.opentlc.com/user1/workshop.git
+          #     fileName: devfile.yaml
+          #   factory:
+          #     params: >-
+          #       url=https://gitea-gitea.apps.cluster-dw7pj.dw7pj.sandbox3174.opentlc.com/user1/workshop/raw/branch/main/devfile.yaml
+          che.eclipse.org/che-editor: che-incubator/che-code/insiders
+        name: jboss-workshop
+        namespace: "{{ user }}-devspaces"
+        finalizers:
+          - storage.controller.devfile.io
+      spec:
+        routingClass: che
+        started: true
+        template:  
+          commands:
+            - apply:
+                component: installs
+              id: init-install
+          attributes:
+            controller.devfile.io/devworkspace-config:
+              name: devworkspace-config
+              namespace: devspaces
+            controller.devfile.io/storage-type: per-user
+            # dw.metadata.annotations:
+            #   che.eclipse.org/devfile-source: |
+            #     scm:
+            #       repo: >-
+            #         https://gitea-gitea.apps.cluster-dw7pj.dw7pj.sandbox3174.opentlc.com/user1/workshop.git
+            #       fileName: devfile.yaml
+            #     factory:
+            #       params: >-
+            #         url=https://gitea-gitea.apps.cluster-dw7pj.dw7pj.sandbox3174.opentlc.com/user1/workshop/raw/branch/main/devfile.yaml
+          projects:
+            - name: workshop
+              git:
+                remotes:
+                  origin: "https://gitea-gitea.{{ route_subdomain }}/{{ user }}/workshop.git"
+                checkoutFrom:
+                  revision: main
+          components:
+            - container:
+                cpuRequest: 500m
+                memoryLimit: 500M
+                image: >-
+                  docker.io/library/postgres
+                env:
+                  - name: POSTGRES_USER
+                    value: postgresUser
+                  - name: POSTGRES_PASSWORD
+                    value: postgresPW
+                  - name: POSTGRES_DB
+                    value: postgresDB
+                  - name: PGDATA 
+                    value: /var/lib/postgresql/data/pgdata
+                endpoints:
+                  - exposure: internal
+                    name: postgresql
+                    protocol: tcp
+                    targetPort: 5432
+              name: postgres
+            - container:
+                command:
+                  - '/opt/jboss/jboss-eap-8/entrypoint-init-container.sh'
+                cpuRequest: 500m
+                memoryLimit: 1G
+                image: >-
+                  quay.io/hayesphilip/eapwip
+                env:
+                - name: DOWNLOAD_PATH
+                  value: http://download-server.artifacts.svc.cluster.local:8080/upload
+                - name: FILELIST
+                  value: "{{ filelist|to_json }}"
+                volumeMounts:
+                  - name: shared
+                    path: /shared
+              name: installs
+            - container:
+                cpuRequest: 500m
+                memoryLimit: 1G
+                image: >-
+                  quay.io/hayesphilip/run-server
+                env:
+                - name: JBOSS_HOME
+                  value: /shared/jboss-eap-7.4
+                - name: FILE_PATH
+                  value: http://download-server.artifacts.svc.cluster.local:8080/upload
+                - name: FILE_NAME
+                  value: jboss-eap-7.4.0.zip
+                - name: FILE_FOLDER
+                  value: jboss-eap-7.4
+                - name: OFFSET
+                  value: '100'
+                - name: CONFIG
+                  value: 'standalone-full.xml'
+                - name: DEST
+                  value: '/shared'
+                - name: CLUSTER_NAME
+                  value: eap7
+                - name: HOSTNAME
+                  value: https://{{ user }}-jboss-workshop-eap7-console.{{ route_subdomain }}
+                endpoints:
+                  - exposure: public
+                    name: eap7
+                    protocol: https
+                    path: /
+                    targetPort: 8180
+                  - exposure: public
+                    name: eap7-console
+                    protocol: https
+                    path: /
+                    targetPort: 10090
+                volumeMounts:
+                  - name: shared
+                    path: /shared
+              name: jboss-7
+            - container:
+                cpuRequest: 500m
+                memoryLimit: 1G
+                image: >-
+                  quay.io/hayesphilip/run-server
+                env:
+                - name: JBOSS_HOME
+                  value: /shared/jboss-eap-8.0
+                - name: FILE_PATH
+                  value: http://download-server.artifacts.svc.cluster.local:8080/upload
+                - name: FILE_NAME
+                  value: jboss-eap-8.0.zip
+                - name: FILE_FOLDER
+                  value: jboss-eap-8.0
+                - name: OFFSET
+                  value: '200'
+                - name: CONFIG
+                  value: 'standalone-full.xml'
+                - name: DEST
+                  value: '/shared'
+                - name: CLUSTER_NAME
+                  value: eap8
+                - name: HOSTNAME
+                  value: https://{{ user }}-jboss-workshop-eap8-console.{{ route_subdomain }}
+                endpoints:
+                  - exposure: public
+                    name: eap8
+                    protocol: https
+                    path: /
+                    targetPort: 8280
+                  - exposure: public
+                    name: eap8-console
+                    protocol: https
+                    path: /
+                    targetPort: 10190
+                volumeMounts:
+                  - name: shared
+                    path: /shared
+              name: jboss-8
+            - attributes:
+                che-code.eclipse.org/contribute-endpoint/code-redirect-1: 13131
+                che-code.eclipse.org/contribute-memoryLimit: true
+                che-code.eclipse.org/contribute-endpoint/code-redirect-2: 13132
+                che-code.eclipse.org/contribute-cpuRequest: true
+                che-code.eclipse.org/contribute-endpoint/code-redirect-3: 13133
+                che-code.eclipse.org/original-memoryLimit: 4G
+                che-code.eclipse.org/contributed-container: quarkus-tools
+                che-code.eclipse.org/contribute-cpuLimit: true
+                che-code.eclipse.org/contribute-memoryRequest: true
+                che-code.eclipse.org/contribute-endpoint/che-code: 3100
+                che-code.eclipse.org/contribute-entry-point: true
+                che-code.eclipse.org/contribute-volume-mount/checode: /checode
+              container:
+                cpuRequest: 500m
+                command:
+                  - /checode/entrypoint-volume.sh
+                env:
+                  - name: EAP7_HOME
+                    value: /shared/jboss-eap-7.4
+                  - name: EAP8_HOME
+                    value: /shared/jboss-eap-8.0
+                  - name: MAVEN_CONFIG
+                    value: /home/jboss/.m2
+                  - name: QUARKUS_HTTP_HOST
+                    value: 0.0.0.0
+                  - name: CHE_DASHBOARD_URL
+                    value: >-
+                      https://devspaces.{{ route_subdomain }}
+                  - name: CHE_PLUGIN_REGISTRY_URL
+                    value: >-
+                      https://devspaces.{{ route_subdomain }}/plugin-registry/v3
+                  - name: CHE_PLUGIN_REGISTRY_INTERNAL_URL
+                    value: 'http://plugin-registry.devspaces.svc:8080/v3'
+                  - name: OPENVSX_REGISTRY_URL
+                    value: 'https://open-vsx.org'
+                memoryLimit: 5.07G
+                image: >-
+                  quay.io/openshiftlabs/quarkus-workshop-stack:2.15
+                endpoints:
+                  - attributes:
+                      contributed-by: che-code.eclipse.org
+                      cookiesAuthEnabled: true
+                      discoverable: false
+                      type: main
+                      urlRewriteSupported: true
+                    exposure: public
+                    name: che-code
+                    path: '?tkn=eclipse-che'
+                    protocol: https
+                    secure: false
+                    targetPort: 3100
+                  - attributes:
+                      contributed-by: che-code.eclipse.org
+                      discoverable: false
+                      urlRewriteSupported: true
+                    exposure: public
+                    name: code-redirect-1
+                    protocol: http
+                    targetPort: 13131
+                  - attributes:
+                      contributed-by: che-code.eclipse.org
+                      discoverable: false
+                      urlRewriteSupported: true
+                    exposure: public
+                    name: code-redirect-2
+                    protocol: http
+                    targetPort: 13132
+                  - attributes:
+                      contributed-by: che-code.eclipse.org
+                      discoverable: false
+                      urlRewriteSupported: true
+                    exposure: public
+                    name: code-redirect-3
+                    protocol: http
+                    targetPort: 13133
+                  - exposure: public
+                    name: jboss-admin
+                    protocol: https
+                    targetPort: 9990
+                volumeMounts:
+                  - name: m2
+                    path: /home/user/.m2
+                  - name: checode
+                    path: /checode
+                  - name: shared
+                    path: /shared
+                mountSources: true
+              name: workshop-tools
+            - name: m2
+              volume:
+                size: 1G
+            - name: shared
+              volume:
+                size: 50G
+            - name: che-code-quarkus-quickstart
+              plugin:
+                kubernetes:
+                  name: che-code-quarkus-quickstart
+          events:
+            preStart:
+              - init-install

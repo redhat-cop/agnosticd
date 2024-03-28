@@ -1,0 +1,42 @@
+set -e
+echo "*** Deleting qa project ***"
+oc delete project qa || echo "*** Project deleted... ***"
+
+echo "*** Logging into podman... ***"
+podman login -u {{ ocp4_workload_tap_wks_sno_setup_docker_username }} -p {{ ocp4_workload_tap_wks_sno_setup_docker_password }} quay-{{ ocp4_workload_tap_wks_sno_setup_dev_guid }}.{{ ocp4_workload_tap_wks_sno_setup_dev_apps_domain }}
+
+echo "*** Pulling the secured image for latest SHA... ***"
+podman pull quay-{{ ocp4_workload_tap_wks_sno_setup_dev_guid }}.{{ ocp4_workload_tap_wks_sno_setup_dev_apps_domain }}/quayadmin/secured-app:latest
+IMAGE=$(podman inspect --format={{ "'{{index .RepoDigests 0}}'" }} quay-{{ ocp4_workload_tap_wks_sno_setup_dev_guid }}.{{ ocp4_workload_tap_wks_sno_setup_dev_apps_domain }}/quayadmin/secured-app:latest)
+
+echo "*** Inspecting $IMAGE ***"
+podman inspect $IMAGE
+echo "*** Recreating project qa... ***"
+oc new-project qa
+
+echo "*** Creating pull secret for quay... ***"
+PULL_SECRET=$(cat $XDG_RUNTIME_DIR/containers/auth.json | tr -d "[:space:]\n\r" | base64 -w 0)
+echo "apiVersion: v1
+metadata:
+  name: quay-pull
+data:
+  .dockerconfigjson: "$PULL_SECRET"
+type: kubernetes.io/dockerconfigjson
+kind: Secret" > secret.yaml
+oc apply -f secret.yaml -n qa
+
+echo "*** Linking secret to default service account... ***"
+oc secrets link default quay-pull --for=pull -n qa
+
+echo "*** Scan image with Red Hat Advanced Cluster Security... ***"
+roxctl image check --insecure-skip-tls-verify -e "$ROX_CENTRAL_ADDRESS:443" --image $IMAGE
+
+echo "*** Creating deployment for image $IMAGE ***"
+oc create deployment secure --image $IMAGE --port 8080 -n qa
+
+echo "*** Exposing route... ***"
+oc expose deployment/secure --type="NodePort" --port 8080 -n qa
+oc create route edge --service secure -n qa
+ROUTE=https://$(oc get route secure -n qa -o json | jq -r .spec.host)
+
+echo "*** Secured app available at $ROUTE ***"
