@@ -1,0 +1,193 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  ansible.builtin.debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Install Red Hat Cert Manager Operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_namespace: cert-manager-operator
+    install_operator_name: openshift-cert-manager-operator
+    install_operator_csv_nameprefix: cert-manager-operator
+    install_operator_manage_namespaces:
+    - cert-manager-operator
+    install_operator_channel: "{{ ocp4_workload_cert_manager_channel }}"
+    install_operator_catalog: redhat-operators
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_cert_manager_automatic_install_plan_approval | default(true) }}"
+    install_operator_starting_csv: "{{ ocp4_workload_cert_manager_starting_csv }}"
+    install_operator_catalogsource_setup: "{{ ocp4_workload_cert_manager_use_catalog_snapshot | default(false) }}"
+    install_operator_catalogsource_name: "{{ ocp4_workload_cert_manager_catalogsource_name | default('') }}"
+    install_operator_catalogsource_namespace: cert-manager-operator
+    install_operator_catalogsource_image: "{{ ocp4_workload_cert_manager_catalog_snapshot_image | default('') }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_cert_manager_catalog_snapshot_image_tag | default('') }}"
+
+- name: Create CertManager
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'certmanager.yaml.j2') }}"
+
+- name: Determine API server URL
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: r_api_url
+
+- name: Determine cluster wildcard domain
+  kubernetes.core.k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: r_ingress_controller
+
+- name: Set DNS facts
+  ansible.builtin.set_fact:
+    _ocp4_workload_cert_manager_api_hostname: >-
+      {{ r_api_url.resources[0].status.apiServerURL | urlsplit('hostname') }}
+    _ocp4_workload_cert_manager_wildcard_domain: >-
+      {{ r_ingress_controller.resources[0].status.domain }}
+
+- name: Print API and Wildcard Domain
+  ansible.builtin.debug:
+    msg: >-
+      API: {{ _ocp4_workload_cert_manager_api_hostname }},
+      Wildcard Domain: {{ _ocp4_workload_cert_manager_wildcard_domain }}
+
+- name: Wait until Cert Manager is ready
+  kubernetes.core.k8s_info:
+    api_version: operator.openshift.io/v1alpha1
+    kind: CertManager
+    name: cluster
+    wait: true
+    wait_sleep: 5
+    wait_timeout: 120
+    wait_condition:
+      type: "cert-manager-controller-deploymentAvailable"
+      status: "True"
+  register: r_cert_manager
+
+- name: Set up cert manager prerequisites for EC2
+  when: ocp4_workload_cert_manager_cloud_provider == "ec2"
+  ansible.builtin.include_tasks: cert_manager_ec2.yml
+
+- name: Set up cert manager prerequisites for Azure
+  when: ocp4_workload_cert_manager_cloud_provider == "azure"
+  ansible.builtin.fail:
+    msg: "Azure is not yet implemented for Cert Manager Operator"
+
+- name: Set up cert manager prerequisites for GCP
+  when: ocp4_workload_cert_manager_cloud_provider == "gcp"
+  ansible.builtin.fail:
+    msg: "GCP is not yet implemented for Cert Manager Operator"
+
+- name: Set up cert manager prerequisites for OpenStack
+  when: ocp4_workload_cert_manager_cloud_provider == "osp"
+  ansible.builtin.fail:
+    msg: "OpenStack is not yet implemented for Cert Manager Operator"
+
+- name: Set up cert manager prerequisites for VMC
+  when: ocp4_workload_cert_manager_cloud_provider == "vmc"
+  ansible.builtin.fail:
+    msg: "VMC is not yet implemented for Cert Manager Operator"
+
+- name: Set up ClusterIssuer and request certificates
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) }}"
+  loop:
+  - clusterissuer.yaml.j2
+  - certificate-ingress.yaml.j2
+  - certificate-api.yaml.j2
+
+- name: Install Ingress controller certificate
+  when: ocp4_workload_cert_manager_install_ingress_certificates | bool
+  block:
+  - name: Wait until Ingress Certificate is ready
+    kubernetes.core.k8s_info:
+      api_version: certmanager.k8s.io/v1alpha1
+      kind: Certificate
+      name: cert-manager-ingress-cert
+      namespace: openshift-ingress
+      wait: true
+      wait_sleep: 5
+      wait_timeout: 120
+      wait_condition:
+        type: "Ready"
+        status: "True"
+    register: r_certificate_ingress
+
+  - name: Update Ingress controller to use certificate
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'default-ingress-controller.yaml.j2') }}"
+
+- name: Install API Server certificate
+  when: ocp4_workload_cert_manager_install_api_certificates | bool
+  block:
+  - name: Wait until API Certificate is ready
+    kubernetes.core.k8s_info:
+      api_version: certmanager.k8s.io/v1alpha1
+      kind: Certificate
+      name: cert-manager-api-cert
+      namespace: openshift-config
+      wait: true
+      wait_sleep: 5
+      wait_timeout: 120
+      wait_condition:
+        type: "Ready"
+        status: "True"
+    register: r_certificate_api
+
+  - name: Update API server to use certificate
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'api-server.yaml.j2') }}"
+
+  # It takes about 4 minutes per API Server to
+  # restart with certificates (due to AWS
+  # Load Balancer). Can't really check the cluster operator because once the updates have rolled out
+  # subsequent checks will fail. :-(. Need to just sleep.
+  - name: Wait for Cluster Operator kube-apiserver to finish rolling out
+    ansible.builtin.pause:
+      minutes: "{{ ocp4_workload_cert_manager_wait_after_api_cert_setup | int }}"
+
+  - name: Find all Kube Configs
+    become: true
+    ansible.builtin.find:
+      file_type: file
+      hidden: true
+      paths:
+      - /root
+      - /home
+      contains: "^ +certificate-authority-data:"
+      patterns: "*config*"
+      recurse: true
+    register: r_config_files
+
+  - name: Fix Kube Configs
+    become: true
+    ansible.builtin.replace:
+      path: "{{ item.path }}"
+      regexp: "^ +certificate-authority-data:.*"
+    loop: "{{ r_config_files.files }}"
+
+  - name: Make sure API calls succeed
+    kubernetes.core.k8s_info:
+      api_version: config.openshift.io/v1
+      kind: Ingress
+      name: cluster
+    register: r_ingress_config
+    retries: 30
+    delay: 10
+    until: not r_ingress_config.failed
+
+# Leave this as the last task in the playbook.
+- name: Workload tasks complete
+  when: not silent | bool
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
