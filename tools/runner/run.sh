@@ -32,6 +32,7 @@ AGD_CONFIG_LIST=("rosa" "ocp4-cluster" "ocp-workloads")
 if [[ " ${AGD_CONFIG_LIST[*]} " =~ " ${AGD_CONFIG_NAME} " ]]; then
   podman --version
   podman run \
+  --privileged \
   --interactive \
   --tty \
   --rm \
