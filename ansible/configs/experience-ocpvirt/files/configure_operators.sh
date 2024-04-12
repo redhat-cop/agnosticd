@@ -31,6 +31,10 @@ until oc get hyperconvergeds.hco.kubevirt.io; do sleep 60; done
 
 sleep 30
 
+export VERSION=$(curl https://storage.googleapis.com/kubevirt-prow/release/kubevirt/kubevirt/stable.txt)
+wget -O /usr/bin/virtctl  https://github.com/kubevirt/kubevirt/releases/download/${VERSION}/virtctl-${VERSION}-linux-amd64
+chmod 775 /usr/bin/virtctl
+
 cat << EOF | oc apply -f -
 ---
 apiVersion: hco.kubevirt.io/v1beta1
