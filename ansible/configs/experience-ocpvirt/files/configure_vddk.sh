@@ -1,4 +1,5 @@
 cat << EOF | oc apply -f -
+---
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
@@ -7,6 +8,7 @@ metadata:
 EOF
 
 cat << EOF | oc apply -f -
+---
 kind: BuildConfig
 apiVersion: build.openshift.io/v1
 metadata:
@@ -37,5 +39,7 @@ spec:
       imageChange: {}
     - type: ConfigChange
 EOF
+
 sleep 10
+
 oc -n openshift annotate is vddk test="$(date)"

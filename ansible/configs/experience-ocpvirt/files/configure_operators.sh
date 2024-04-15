@@ -9,7 +9,7 @@ metadata:
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
-  name: kubevirt-hyperconverged-group
+  name: openshift-cnv
   namespace: openshift-cnv
 spec:
   targetNamespaces:
@@ -18,7 +18,7 @@ spec:
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
-  name: hco-operatorhub
+  name: openshift-cnv
   namespace: openshift-cnv
 spec:
   source: redhat-operators
@@ -58,7 +58,7 @@ cat << EOF | oc apply -f -
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
-  name: migration
+  name: openshift-mtv
   namespace: openshift-mtv
 spec:
   targetNamespaces:
@@ -70,7 +70,7 @@ cat << EOF | oc apply -f -
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
-  name: mtv-operator
+  name: openshift-mtv
   namespace: openshift-mtv
 spec:
   channel: release-v2.5
@@ -106,8 +106,6 @@ cat << EOF | oc apply -f -
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
-  annotations:
-    olm.providedAPIs: NMState.v1.nmstate.io
   name: openshift-nmstate
   namespace: openshift-nmstate
 spec:
@@ -120,7 +118,7 @@ cat << EOF| oc apply -f -
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
-  name: kubernetes-nmstate-operator
+  name: openshift-nmstate
   namespace: openshift-nmstate
 spec:
   channel: stable
@@ -153,7 +151,7 @@ cat << EOF | oc apply -f -
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
-  name: metallb-operator
+  name: metallb-system
   namespace: metallb-system
 EOF
 
@@ -162,7 +160,7 @@ cat << EOF | oc apply -f -
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
-  name: metallb-operator-sub
+  name: metallb-system
   namespace: metallb-system
 spec:
   channel: stable

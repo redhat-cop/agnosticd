@@ -1,25 +1,27 @@
 cat << EOF | oc apply -f -
+---
 apiVersion: nmstate.io/v1
 kind: NodeNetworkConfigurationPolicy
 metadata:
-  name: br-flat
+  name: ovs-br-flat
 spec:
   nodeSelector:
-    node-role.kubernetes.io/worker: ""
+    node-role.kubernetes.io/worker: ''
   desiredState:
     interfaces:
-      - name: br-flat
-        description: Linux bridge with enp3s0 as a port
-        type: linux-bridge
-        state: up
-        ipv4:
-          dhcp: false
-          enabled: false
-        bridge:
-          options:
-            stp:
-              enabled: false
-          port:
-            - name: enp3s0
+    - name: ovs-br
+      description: |-
+        An OVS with enp3s0 uplink
+      type: ovs-bridge
+      state: up
+      bridge:
+        options:
+          stp: false
+        port:
+        - name: enp3s0
+    ovn:
+      bridge-mappings:
+      - localnet: vm-network
+        bridge: ovs-br
+        state: present
 EOF
-

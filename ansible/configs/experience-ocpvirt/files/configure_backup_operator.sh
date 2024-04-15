@@ -1,4 +1,5 @@
 cat << EOF | oc apply -f -
+---
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -31,6 +32,7 @@ spec:
 EOF
 
 cat << EOF | oc apply -f -
+---
 apiVersion: objectbucket.io/v1alpha1
 kind: ObjectBucketClaim
 metadata:
@@ -48,7 +50,6 @@ AWS_SECRET_ACCESS_KEY=$(oc get secret obc-backups -n openshift-storage -o jsonpa
 BUCKET_HOST=$(oc get cm obc-backups -n openshift-storage -o jsonpath='{.data.BUCKET_HOST}{"\n"}')
 BUCKET_NAME=$(oc get cm obc-backups -n openshift-storage -o jsonpath='{.data.BUCKET_NAME}{"\n"}')
 
-
 cat << EOF > ./credentials-velero
 [default]
 aws_access_key_id=${AWS_ACCESS_KEY_ID}
@@ -59,6 +60,7 @@ oc create secret generic cloud-credentials -n openshift-adp --from-file cloud=cr
 
 until oc get dataprotectionapplications.oadp.openshift.io; do sleep 30; done
 cat << EOF | oc apply -f -
+---
 apiVersion: oadp.openshift.io/v1alpha1
 kind: DataProtectionApplication
 metadata:
@@ -68,29 +70,27 @@ spec:
   configuration:
     velero:
       featureFlags:
-        - EnableCSI
+      - EnableCSI
       defaultPlugins:
-        - csi 
-        - openshift
-        - aws
-        - kubevirt
+      - csi 
+      - openshift
+      - aws
+      - kubevirt
   backupLocations:
-    - velero:
-        config:
-          profile: "default"
-          region: "localstorage"
-          s3Url: "http://${BUCKET_HOST}"
-          s3ForcePathStyle: "true"
-        provider: aws
-        credential:
-          name: cloud-credentials
-          key: cloud
-        default: true
-        objectStorage:
-          bucket: ${BUCKET_NAME}
-          prefix: velero
+  - velero:
+      config:
+        profile: "default"
+        region: "localstorage"
+        s3Url: "http://${BUCKET_HOST}"
+        s3ForcePathStyle: "true"
+      provider: aws
+      credential:
+        name: cloud-credentials
+        key: cloud
+      default: true
+      objectStorage:
+        bucket: ${BUCKET_NAME}
+        prefix: velero
 EOF
 
 oc label volumesnapshotclass ocs-storagecluster-rbdplugin-snapclass velero.io/csi-volumesnapshot-class=true
-
-
