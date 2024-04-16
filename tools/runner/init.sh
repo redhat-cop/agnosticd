@@ -60,7 +60,7 @@ software_to_deploy: openshift4
 # -------------------------------------------------------------------
 # VM configuration
 # -------------------------------------------------------------------
-master_instance_type: c6in.4xlarge
+master_instance_type: m6a.4xlarge
 master_instance_count: 1
 worker_instance_type: m6a.4xlarge
 worker_instance_count: 0
