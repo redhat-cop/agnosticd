@@ -35,9 +35,9 @@ spec:
       RUN mkdir -p /opt
       ENTRYPOINT ["cp", "-r", "/vmware-vix-disklib-distrib", "/opt"]
   triggers:
-    - type: ImageChange
-      imageChange: {}
-    - type: ConfigChange
+  - type: ImageChange
+    imageChange: {}
+  - type: ConfigChange
 EOF
 
 sleep 10
