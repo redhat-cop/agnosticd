@@ -25,3 +25,13 @@ spec:
         bridge: ovs-br
         state: present
 EOF
+
+cat << EOF | oc apply -f -
+---
+apiVersion: operator.openshift.io/v1
+kind: Network
+metadata:
+  name: cluster
+spec:
+  useMultiNetworkPolicy: true
+EOF
