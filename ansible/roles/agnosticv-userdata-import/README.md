@@ -7,10 +7,8 @@ agnosticd_user_info
 
 ## Role Variables
 
-importdata: >-
+agnosticv_importdata: >-
   {
-  {% for i in range(1,num_users + 1) %}
-  "user{{i}}": {
     "bastion_ssh_command": "{{ bastion_ssh_command }}",
     "bastion_public_hostname": "{{bastion_public_hostname }}",
     "bastion_ssh_user_name": "{{ bastion_ssh_user_name }}",
@@ -36,15 +34,7 @@ importdata: >-
       {"url": "https://github.com/oamg/leapp-supplements", "text": "GitHub: leapp-supplements"},
       {"url": "https://www.martinfowler.com/ieeeSoftware/failFast.pdf", "text": "Fail Fast"}
     ]
-    },
-  {% endfor %}
   }
-
-agnosticv_importdata: |
-  {{ {}
-   | combine( {
-     "users": importdata })
-  }}
 
 License
 -------
