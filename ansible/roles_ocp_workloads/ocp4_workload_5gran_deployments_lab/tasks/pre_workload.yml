@@ -17,10 +17,6 @@
     fail_msg: controller_manifest.url variable must be defined
     success_msg: controller_manifest.url variable is defined
 
-- name: Ensure ansible module requirements are installed
-  ansible.builtin.pip:
-    name: kubernetes, passlib
-
 - name: Find an extra disk for libvirt folder
   ansible.builtin.set_fact:
     _disks: "{{ _disks|default([]) + [ item ] }}"
@@ -51,6 +47,12 @@
   when:
     - _diskname is defined
 
+- name: Create /var/lib/libvirt directory if it does not exist
+  ansible.builtin.file:
+    path: /var/lib/libvirt
+    state: directory
+    mode: '0755'
+
 - name: Mount up device in /var/lib/libvirt
   ansible.posix.mount:
     path: /var/lib/libvirt
@@ -69,24 +71,44 @@
     name:
       - libvirt
       - libvirt-daemon-driver-qemu
-      - qemu-kvm
+      #- qemu-kvm
       - git
       - dnsmasq
       - policycoreutils-python-utils
       - podman
       - httpd-tools
       - haproxy
-      - python3-pyOpenSSL
+      - pip
     state: present
 
-- name: Ensure ksushy requirements are installed
+- name: Ensure required Python modules are installed
   ansible.builtin.pip:
-    name: cherrypy
+    name: kubernetes, passlib, pyopenssl, cherrypy, firewall
 
 - name: Ensure kcli rpm is installed
   ansible.builtin.dnf:
     name: "{{ kcli_rpm }}"
     disable_gpg_check: true
+
+- name: Add the RHEL9 Beta repo for QEMU SR-IOV support
+  ansible.builtin.shell:
+    cmd: >
+      grep -Pzo '\[rhel-9-for-x86_64-appstream-rpms\]\n(?:.|\n)*?(?=\n\[|$)' /etc/yum.repos.d/redhat.repo
+      | sed "s|content/dist|content/beta|g"
+      | sed "s|name = .*|name = Red Hat Enterprise Linux 9 for x86_64 - AppStream Beta (RPMs)|g"
+      | sed "s|appstream-rpms|appstream-beta-rpms|g" | tr -d '\0'
+      | sudo tee /etc/yum.repos.d/rhel9-appstream-beta.repo
+
+- name: Upgrade QEMU from BETA for SR-IOV support
+  ansible.builtin.dnf:
+    name:
+      - qemu-kvm
+    state: present
+
+- name: Remove the RHEL 9 BETA repo
+  ansible.builtin.file:
+    path: /etc/yum.repos.d/rhel9-appstream-beta.repo
+    state: absent
 
 - name: Ensure libvirtd service is enabled and running
   ansible.builtin.systemd:
@@ -106,6 +128,10 @@
 - name: Ensure lab network is present
   ansible.builtin.shell:
     cmd: "kcli create network -c {{ lab_network_cidr }} -P dhcp=false -P dns=false --domain {{ lab_network_domain }} 5gdeploymentlab"
+
+- name: Ensure sriov-network is present
+  ansible.builtin.shell:
+    cmd: "kcli create network -c {{ lab_sriov_cidr }} -P dhcp=false -P dns=false --domain {{ lab_sriov_domain }} -i sriov-network"
 
 - name: Ensure oc/kubectl tooling is present
   ansible.builtin.shell:
@@ -159,16 +185,27 @@
     path: /opt/dnsmasq/hosts.leases
     state: touch
     mode: "0644"
+    setype: "dnsmasq_lease_t"
 
 - name: Ensure DNSMasq lease file has the proper SELinux context
   community.general.sefcontext:
-    target: "/opt/dnsmasq/hosts.leases"
+    target: '/opt/dnsmasq/(.*)?\.leases'
     setype: dnsmasq_lease_t
     state: present
 
+- name: Ensure DNSMasq config files has the proper SELinux context
+  community.general.sefcontext:
+    target: "{{ item }}"
+    setype: dnsmasq_etc_t
+    state: present
+  with_items:
+    - '/opt/dnsmasq/include.d(/.*)?'
+    - '/opt/dnsmasq/(.*)?\.conf'
+    - '/opt/dnsmasq'
+
 - name: Ensure DNSMasq file applies the proper SELinux context
   ansible.builtin.shell:
-    cmd: restorecon /opt/dnsmasq/hosts.leases
+    cmd: restorecon -rv /opt/dnsmasq/
 
 - name: Ensure DNSMasq service is enabled and running
   ansible.builtin.systemd:
@@ -293,6 +330,37 @@
 #    enabled: false
 #    name: firewalld
 
+- name: Permit Lab traffic in public and libvirt zones for services
+  ansible.posix.firewalld:
+    zone: "{{ item[0] }}"
+    service: "{{ item[1] }}"
+    permanent: true
+    state: enabled
+  with_nested:
+    - [ 'public', 'libvirt' ]
+    - [ 'https', 'http', 'dns', 'libvirt', 'git' ]
+  register: firewalld_service
+
+- name: Permit Lab traffic in public and libvirt zones for haproxy, webcache, registry, ksushy, git
+  ansible.posix.firewalld:
+    zone: "{{ item[0] }}"
+    port: "{{ item[1] }}"
+    permanent: true
+    state: enabled
+  with_nested:
+    - [ 'public', 'libvirt' ]
+    - [ '6443/tcp', '8080/tcp', '8443/tcp', '9000/tcp', '3000/tcp', '2222/tcp' ]
+  register: firewalld_port
+
+- name: Ensure firewalld service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: false
+    enabled: true
+    name: firewalld
+  when: firewalld_service.changed or
+      firewalld_port.changed
+
 - name: Wait for registry port {{ lab_registry_host.split(":")[1] }} to become open on the host
   ansible.builtin.wait_for:
     port: "{{ lab_registry_host.split(':')[1] }}"
@@ -370,7 +438,7 @@
 - name: Ensure lab VMs exist
   ansible.builtin.shell:
     # yamllint disable rule:line-length
-    cmd: "kcli create vm -P start=False -P uefi_legacy=true -P plan=hub -P memory={{ item.memory }} -P numcpus={{ item.cpus }} -P disks=[{{ item.disk }},{{ item.disk }}] -P nets=['{\"name\": \"5gdeploymentlab\", \"mac\": \"{{ item.mac }}\"}'] -P uuid={{ item.uuid }} -P name={{ item.name }}"
+    cmd: "kcli create vm -P start=False -P uefi_legacy=true -P plan=hub -P memory={{ item.memory }} -P numcpus={{ item.cpus }} -P disks=[{{ item.disk }},{{ item.disk }}] -P nets=['{\"name\": \"5gdeploymentlab\", \"mac\": \"{{ item.mac}}\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"0\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"1\"}'] -P uuid={{ item.uuid }} -P name={{ item.name }}"
     # yamllint enable rule:line-length
   register: result
   failed_when: result.rc != 0 and "not created because VM" not in result.stderr
