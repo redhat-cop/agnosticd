@@ -1,0 +1,85 @@
+- name: Provision User Namespaces for {{ num_users }}
+  kubernetes.core.k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'user-projects.yaml.j2') }}"
+  retries: 10
+  delay: 30
+
+- name: Give users access to projects for {{ num_users }}
+  kubernetes.core.k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'user-rolebinding.yaml.j2') }}"
+  vars:
+    bindings:
+      - namespace: "user-lab1-mlops"
+        role: "admin"
+  retries: 15
+  delay: 30
+
+- name: Create  user accounts for {{ num_users }}
+  ansible.builtin.shell: >-
+    oc exec -n openshift-storage $(oc get pod -n {{ storage_namespace }} -l app=rook-ceph-tools -o jsonpath='{.items[0].metadata.name}')
+    -- radosgw-admin user create --uid={{ __user }} --display-name={{ __user }} --access-key={{ __user }} --secret-key=secret
+  register: my_output
+  changed_when: my_output.rc != 0
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: __user
+
+- name: Create user buckets (central) for {{ num_users }}
+  amazon.aws.s3_bucket:
+    aws_access_key: "{{ __bucket | replace('-workbench', '') | replace('-production', '') | replace('-data', '') }}"
+    aws_secret_key: "secret"
+    name: "{{ __bucket }}"
+    state: present
+    region: us-east-1
+    endpoint_url: "https://s3-rgw-openshift-storage.{{ route_subdomain }}"
+    validate_certs: false
+  loop: "{{ users | product(['workbench', 'production', 'data']) | map('join', '-') }}"
+  loop_control:
+    loop_var: __bucket
+
+- name: Create user buckets (edge) for {{ num_users }}
+  amazon.aws.s3_bucket:
+    aws_access_key: "{{ __bucket | replace('-valid', '') | replace('-unclassified', '') }}"
+    aws_secret_key: "secret"
+    name: "{{ __bucket }}"
+    state: present
+    region: us-east-1
+    endpoint_url: "https://s3-rgw-openshift-storage.{{ route_subdomain }}"
+    validate_certs: false
+  loop: "{{ users | product(['valid', 'unclassified']) | map('join', '-') }}"
+  loop_control:
+    loop_var: __bucket
+
+- name: Deploy TensorFlow Servers for {{ num_users }}
+  kubernetes.core.k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'edge-tensorflow-server.yaml.j2') }}"
+  vars:
+    model_name: "redbag"
+
+- name: Deploy Shopper Smart Apps for {{ num_users }}
+  kubernetes.core.k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'edge-camel-shopper.yaml.j2') }}"
+
+# Provision shared resources
+- name: Create Shared Namespace
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Namespace
+    name: shared
+    state: present
+
+- name: Deploy shared AMQ Broker instance
+  kubernetes.core.k8s:
+    state: present
+    namespace: shared
+    resource_definition: "{{ lookup('template', 'edge-broker.yaml.j2') }}"
+
+- name: Deploy shared Price Engine
+  kubernetes.core.k8s:
+    state: present
+    namespace: shared
+    resource_definition: "{{ lookup('template', 'edge-camel-price.yaml.j2') }}"
