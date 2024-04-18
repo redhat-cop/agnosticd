@@ -91,6 +91,7 @@ metadata:
   namespace: openshift-mtv
 spec:
   olm_managed: true
+  controller_max_vm_in_flight: 1
 EOF
 
 cat << EOF | oc apply -f -
