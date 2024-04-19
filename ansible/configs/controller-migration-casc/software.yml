@@ -1,0 +1,126 @@
+---
+- name: Step 00xxxxx software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - debug:
+        msg: "Software tasks Started"
+
+- name: dump all variables and deploy CA trust
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Dump all variables
+      local_action:
+        module: template
+        src: dumpall.j2
+        dest: /tmp/ansible_dump.all
+      run_once: true
+      when: dump_vars|default(false)|bool
+
+    - name: deploy Let's Encrypt CA trust
+      include_role:
+        name: letsencrypt_ca_trust
+
+- name: Install Software on bastion and Ansible automation controller
+  hosts: bastions[0]
+  gather_facts: false
+  become: true
+
+  tasks:
+
+    - name: Do very annoying normalization of domain name
+      set_fact:
+        agnosticd_domain_name: >-
+          {% if cloud_provider == 'osp' -%}
+            {{ guid }}.{{ osp_cluster_dns_zone }}
+          {% elif cloud_provider == 'ec2' -%}
+            {{ guid }}{{ subdomain_base_suffix }}
+          {%- endif %}
+
+    - name: Install code-server
+      include_role:
+        name: vscode-server
+
+    - name: Install and configure Gitea on VM
+      include_role:
+        name: gitea_vm_setup
+        apply:
+          tags: gitea
+      vars:
+        gitea_db_pasword: "{{ student_password }}"  # shouldn't matter for sqlite3
+      tags:
+        - gitea
+
+    - name: Download Manifest for Controller
+      get_url:
+        url: "{{ controller_manifest.url }}"
+        dest: /tmp
+        username: "{{ controller_manifest.username | default(omit) }}"
+        password: "{{ controller_manifest.password | default(omit) }}"
+
+    - name: Install Ansible Automation Platform with controller and/or private hub
+      include_role:
+        name: aap_deploy
+
+    # note that we remove YUM/RPM installed ansible before installing
+    # automationcontroller, now we install it back to avoid needing EPEL
+    - name: install ansible on the bastion (avoiding EPEL)
+      dnf:
+        name: ansible
+        state: present
+        disablerepo: epel
+
+    - name: install AAP development tools when required
+      include_role:
+        name: aap_devel_tools
+      vars:
+        aap_devel_tools_users: ["{{ student_name }}"]
+        aap_devel_tools_ee_image: pah.{{ agnosticd_domain_name }}/ee-supported-rhel8:latest
+        aap_devel_tools_env_pass:  # e.g. can help in the context of AgnosticD
+          - GUID
+        aap_devel_tools_env_set:  # e.g. for controller automation
+          CONTROLLER_HOST: "https://{{ tower_instance_name }}1.{{ agnosticd_domain_name }}"
+          CONTROLLER_USERNAME: "{{ automationcontroller_admin_user | default('admin') }}"
+          CONTROLLER_PASSWORD: "{{ tower_admin_password }}"
+          CONTROLLER_VERIFY_SSL: true
+
+- name: Install license and LE certs on autoctl nodes
+  hosts: automationcontroller
+  gather_facts: false
+  become: true
+
+  tasks:
+
+    - name: License autoctl nodes (config role)
+      include_role:
+        # role formerly known as  tower-license-injector_cfg
+        name: aap_controller_manifest_load
+      run_once: true
+
+    - name: call issue_cert role (config role)
+      include_role:
+        name: aap_controller_cert_issue
+
+- name: install Let's Encrypt certificate on PAH
+  hosts: pah
+  gather_facts: false
+  become: true
+
+  tasks:
+
+    - name: call issue_cert role (config role)
+      include_role:
+        name: aap_pah_cert_issue
+
+- name: Software flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Software checks completed successfully"
