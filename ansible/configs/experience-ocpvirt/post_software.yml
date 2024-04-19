@@ -1,0 +1,228 @@
+---
+- name: Step 005 Post Software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Step 005
+    ansible.builtin.debug:
+      msg: "Step 005 Post Software"
+
+  - name: Set admin password
+    ansible.builtin.set_fact:
+      openshift_admin_password: >-
+        {{- lookup('password', '/dev/null length=1 chars=letters') -}}
+        {{- lookup('password', '/dev/null length=10') -}}
+        {{- lookup('password', '/dev/null length=1 chars=digits') -}}
+
+  - name: Print admin password
+    ansible.builtin.debug:
+      msg: "OpenShift admin password: {{ openshift_admin_password }}"
+
+- name: Bastion post install tasks
+  hosts: bastion_vms
+  tasks:
+  - name: Approve certificates
+    ansible.builtin.shell: /usr/bin/oc get csr|grep Pending|awk '{print $1}'|xargs -i /usr/bin/oc adm certificate approve {}
+    register: approve_certs
+    until: approve_certs.stderr_lines|length == 0
+    retries: 30
+    delay: 30
+
+  - name: Post install tasks
+    block:
+    - name: Make .kube directory
+      when: ocp4_aio_deploy_type == 'sno'
+      ansible.builtin.file:
+        path: /root/.kube/
+        state: directory
+
+    - name: Make rhacm the default cluster for bastion oc commands
+      when: ocp4_aio_deploy_type == 'sno'
+      ansible.builtin.copy:
+        remote_src: true
+        src: /root/sno-rhacm/auth/kubeconfig
+        dest: /root/.kube/config
+
+    - name: Copy file htpasswd.yaml
+      ansible.builtin.copy:
+        src: "htpasswd.yaml"
+        dest: "/tmp/htpasswd.yaml"
+
+    - name: Configure admin user
+      ansible.builtin.shell: "{{ item }}"
+      args:
+        chdir: /tmp/
+      loop:
+      - htpasswd -c -B -b users.htpasswd admin "{{ hostvars['localhost']['openshift_admin_password'] }}"
+      - /usr/bin/oc create secret generic htpass-secret --from-file=htpasswd=users.htpasswd -n openshift-config
+      - /usr/bin/oc apply -f htpasswd.yaml
+      - /usr/bin/oc adm policy add-cluster-role-to-user cluster-admin admin
+      - /usr/bin/oc delete secrets kubeadmin -n kube-system
+      # - htpasswd -c -B -b users.htpasswd admin "{{ hostvars['hypervisor']['student_password'] | default(hostvars[groups.bastions.0]['student_password']) }}"
+
+    - name: Setting up OCS Storage
+      when: ocp4_aio_deploy_ocs and ocp4_aio_deploy_type == 'ipi'
+      ansible.builtin.include_role:
+        name: ocp4_aio_role_ocs
+
+    - name: Configure image registry
+      ansible.builtin.shell: >
+        oc patch configs.imageregistry.operator.openshift.io cluster
+        --type merge --patch '{"spec":{"storage":{"pvc":{"claim":"ocs-imgreg"}},"managementState":"Managed"}}'
+
+    - name: Enable the route for the image registry
+      ansible.builtin.shell: >
+        oc patch configs.imageregistry.operator.openshift.io/cluster --patch '{"spec":{"defaultRoute":true}}'
+        --type=merge
+
+    - name: Pre-install operators
+      when: preinstall_operators | default(false)
+      ansible.builtin.script: files/configure_operators.sh
+      register: r_preinstall
+      until: "r_preinstall is not failed"
+      retries: 10
+      delay: 30
+
+    - name: Configure Node Network
+      ansible.builtin.script: files/configure_nodenetworkconfigurationpolicy.sh
+      register: configure_linux_bridge
+      until: "configure_linux_bridge is not failed"
+      retries: 5
+      delay: 10
+
+    - name: Install OADP Operator
+      ansible.builtin.script: files/configure_backup_operator.sh
+
+    - name: Configue VDDK
+      ansible.builtin.script: files/configure_vddk.sh
+      register: configure_vddk
+      until: "configure_vddk is not failed"
+      retries: 5
+      delay: 10
+
+    - name: Copy configureMTV.sh
+      ansible.builtin.template:
+        src: configureMTV.sh.j2
+        dest: /root/configureMTV.sh
+        mode: "0755"
+
+    - name: Execute configureMTV.sh
+      ansible.builtin.shell: /root/configureMTV.sh
+
+    - name: Copy importVMs.sh
+      ansible.builtin.template:
+        src: importVMs.sh.j2
+        dest: /root/importVMs.sh
+        mode: "0755"
+
+    - name: Execute importVMs.sh
+      ansible.builtin.shell: /root/importVMs.sh
+
+  - name: Set agnosticd user info data for bastion
+    agnosticd_user_info:
+      data:
+        preinstall_operators: "{{ preinstall_operators }}"
+        vcenter_user: "{{ hostvars['jumphost']['vcenter_student_username'] }}@{{ vcenter_domain }}"
+        vcenter_password: "{{ hostvars['jumphost']['vcenter_student_password'] }}"
+        guid: "{{ guid }}"
+        bastion_host_ip: "{{ hostvars['hypervisor']['public_ip_address'] | default(hostvars[groups.bastions.0]['public_ip_address']) }}"
+        bastion_host_dns: "hypervisor.{{ guid }}.{{ cluster_dns_zone }}"
+        bastion_host_ssh_user: "{{ student_name }}"
+        bastion_host_ssh_password: "{{ hostvars['hypervisor']['student_password'] | default(hostvars[groups.bastions.0]['student_password']) }}"
+
+  - name: Save Kube Configuration for IPI
+    when: ocp4_aio_deploy_ipi
+    agnosticd_user_info:
+      data:
+        openshift_api_server: "https://api.{{ guid }}.{{ cluster_dns_zone }}:6443"
+        openshift_web_console: "https://console-openshift-console.apps.{{ guid }}.{{ cluster_dns_zone }}"
+        openshift_admin_user: admin
+        openshift_admin_password: "{{ hostvars['localhost']['openshift_admin_password'] }}"
+
+  - name: Install OpenShift workloads
+    when: infra_workloads | default("") | length > 0
+    block:
+    - name: Install OpenShift workloads
+      ansible.builtin.include_role:
+        name: "{{ workload_loop_var }}"
+      vars:
+        ocp_username: "system:admin"
+        ACTION: "provision"
+      loop: "{{ infra_workloads }}"
+      loop_control:
+        loop_var: workload_loop_var
+
+- name: Prepare Hypervisor for proxypass
+  hosts: hypervisor
+  gather_facts: false
+  become: true
+  tasks:
+  - name: Disabling SELinux state
+    ansible.posix.selinux:
+      state: disabled
+
+  - name: Install required packages
+    ansible.builtin.yum:
+      name: "{{ item }}"
+      state: present
+    loop:
+    - httpd
+    - mod_ssl
+
+  - name: Copy ssl.conf
+    ansible.builtin.template:
+      src: httpd/ssl.conf
+      dest: /etc/httpd/conf.d/ssl.conf
+
+  - name: Copy ocp.conf
+    ansible.builtin.template:
+      src: httpd/ocp.conf
+      dest: /etc/httpd/conf.d/ocp.conf
+
+  - name: Enable httpd service
+    ansible.builtin.service:
+      name: httpd
+      state: started
+      enabled: true
+
+  - name: Fill /etc/hosts with internal names
+    ansible.builtin.blockinfile:
+      dest: /etc/hosts
+      content: |
+        192.168.123.11 console-openshift-console.apps.ocp.example.com
+        192.168.123.11 oauth-openshift.apps.ocp.example.com
+        192.168.123.11 zzzzz.apps.ocp.example.com
+
+- name: Print informations
+  hosts: localhost
+  tasks:
+  - name: Print Bastion Connection Information
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - "The host you will be using for lab: {{ hostvars['hypervisor']['public_ip_address'] | default(hostvars[groups.bastions.0]['public_ip_address']) }}"
+    - "  DNS name: hypervisor.{{ guid }}.{{ cluster_dns_zone }}"
+    - "SSH User:     {{ student_name }}"
+    - "SSH Password: {{ hostvars['hypervisor']['student_password'] | default(hostvars[groups.bastions.0]['student_password']) }}"
+
+  - name: Print OpenShift connection information for IPI
+    when: ocp4_aio_deploy_ipi
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - "OpenShift web console: https://console-openshift-console.apps.{{ guid }}.{{ cluster_dns_zone }}"
+    - "OpenShift API server: https://api.{{ guid }}.{{ cluster_dns_zone }}:6443"
+    - "OpenShift Admin User: admin"
+    - "OpenShift Admin Password: {{ hostvars['localhost']['openshift_admin_password'] }}"
+    - "To connect to the Bastion VM for system:admin CLI access: sudo ssh root@192.168.123.100"
+
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Post Sofware Checks
+    ansible.builtin.debug:
+      msg: "Post-Software checks completed successfully"
