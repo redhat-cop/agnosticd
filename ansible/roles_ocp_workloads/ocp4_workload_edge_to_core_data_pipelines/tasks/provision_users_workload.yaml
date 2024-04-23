@@ -118,6 +118,62 @@
   vars:
     __user: "{{ __user_n }}"
 
+- name: Create WORKBENCH bucket
+  amazon.aws.s3_bucket:
+    endpoint_url: "https://minio-api-{{ __user }}-lab2-edge.{{ route_subdomain }}"
+    aws_access_key: "minio"
+    aws_secret_key: "minio123"
+    name: "workbench"
+    state: present
+    validate_certs: false
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: __user_n
+  vars:
+    __user: "{{ __user_n }}"
+
+- name: Create DATA bucket (Edge)
+  amazon.aws.s3_bucket:
+    endpoint_url: "https://minio-api-{{ __user }}-lab2-edge.{{ route_subdomain }}"
+    aws_access_key: "minio"
+    aws_secret_key: "minio123"
+    name: "{{ __user }}-data"
+    state: present
+    validate_certs: false
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: __user_n
+  vars:
+    __user: "{{ __user_n }}"
+
+- name: Create MODELS bucket (Edge)
+  amazon.aws.s3_bucket:
+    endpoint_url: "https://minio-api-{{ __user }}-lab2-edge.{{ route_subdomain }}"
+    aws_access_key: "minio"
+    aws_secret_key: "minio123"
+    name: "{{ __user }}-models"
+    state: present
+    validate_certs: false
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: __user_n
+  vars:
+    __user: "{{ __user_n }}"
+
+- name: Create READY bucket (Edge)
+  amazon.aws.s3_bucket:
+    endpoint_url: "https://minio-api-{{ __user }}-lab2-edge.{{ route_subdomain }}"
+    aws_access_key: "minio"
+    aws_secret_key: "minio123"
+    name: "{{ __user }}-ready"
+    state: present
+    validate_certs: false
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: __user_n
+  vars:
+    __user: "{{ __user_n }}"
+
 - name: Create VALID bucket
   amazon.aws.s3_bucket:
     endpoint_url: "https://minio-api-{{ __user }}-lab2-edge.{{ route_subdomain }}"
@@ -197,6 +253,49 @@
   vars:
     __user: "{{ __user_n }}"
 
+- name: Upload Default Training Data to S3-Central
+  ansible.builtin.s3_sync:
+    endpoint_url: "https://minio-api-{{ __user }}-lab2-edge.{{ route_subdomain }}"
+    aws_access_key: "minio"
+    aws_secret_key: "minio123"
+    bucket: "{{ __user }}-data"
+    file_root: "{{ download_data_tmp }}/edge-to-cloud-data-pipelines-workshop-{{ ocp4_workload_edge_to_core_data_pipelines_release_tag }}\
+      /dataset/images"
+    key_prefix: images
+  register: s3entries
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: __user_n
+  vars:
+    __user: "{{ __user_n }}"
+
+- name: Upload Default Pipeline Assets to S3-Central
+  ansible.builtin.s3_sync:
+    endpoint_url: "https://minio-api-{{ __user }}-lab2-edge.{{ route_subdomain }}"
+    aws_access_key: "minio"
+    aws_secret_key: "minio123"
+    bucket: "workbench"
+    file_root: "{{ download_data_tmp }}/edge-to-cloud-data-pipelines-workshop-{{ ocp4_workload_edge_to_core_data_pipelines_release_tag }}\
+      /pipeline"
+    validate_certs: false
+  register: s3entries
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: __user_n
+  vars:
+    __user: "{{ __user_n }}"
+
+- name: Create Model Training Pipeline
+  kubernetes.core.k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'rhoai-pipeline.yaml.j2') }}"
+  vars:
+    deployments:
+      - namespace: "user-lab2-mlops"
+        s3_endpoint: "http://minio-service.user-lab2-edge.svc.cluster.local:9000"
+        access_key: "minio"
+        secret_key: "minio123"
+
 - name: Deploy TensorFlow Servers for {{ num_users }}
   kubernetes.core.k8s:
     state: present
@@ -230,6 +329,13 @@
         endpoint_detections_path: "/v1/models/tea_model_b64:predict"
         access_key: "minio"
         secret_key: "minio123"
+        feeder_uri: http://feeder.user-lab2-mlops.svc.cluster.local:80/zip
+
+- name: Deploy AMQ Streams instance
+  kubernetes.core.k8s:
+    namespace: shared
+    state: present
+    resource_definition: "{{ lookup('template', 'central-kafka.yaml.j2') }}"
 
 - name: Deploy AMQ Broker instance for shared + {{ num_users }}
   kubernetes.core.k8s:
@@ -237,6 +343,42 @@
     resource_definition: "{{ lookup('template', 'edge-broker.yaml.j2') }}"
   vars:
     deployments: "{{ ((users | product(['lab2-edge']) | map('join', '-')) + ['shared']) | map('community.general.dict_kv', 'namespace') }}"
+
+- name: Deploy Camel Feeder Application for {{ num_users }}
+  kubernetes.core.k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'central-camel-feeder.yaml.j2') }}"
+  vars:
+    deployments:
+      - namespace: "user-lab2-mlops"
+        s3_endpoint: http://minio-service.user-lab2-edge.svc.cluster.local:9000
+
+- name: Deploy Camel Delivery Application for {{ num_users }}
+  kubernetes.core.k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'central-camel-delivery.yaml.j2') }}"
+  vars:
+    deployments:
+      - namespace: "user-lab2-mlops"
+        listener_endpoint: "http://el-train-model-listener.user-lab2-mlops.svc.cluster.local:8080"
+
+- name: Deploy Camel Manager Application for {{ num_users }}
+  kubernetes.core.k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'edge-camel-manager.yaml.j2') }}"
+  vars:
+    deployments:
+      - namespace: "user-lab2-edge"
+        access_key: "minio"
+        secret_key: "minio123"
+
+- name: Deploy Camel Monitor Application for {{ num_users }}
+  kubernetes.core.k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'edge-camel-monitor.yaml.j2') }}"
+  vars:
+    deployments:
+      - namespace: "user-lab2-edge"
 
 - name: Deploy Price Engine for shared + {{ num_users }}
   kubernetes.core.k8s:
