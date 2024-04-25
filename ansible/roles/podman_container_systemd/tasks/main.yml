@@ -1,0 +1,313 @@
+---
+- name: Get user information
+  user:
+    name: "{{ container_run_as_user }}"
+  check_mode: true
+  changed_when: false
+  register: user_info
+
+- name: Fails if user "{{ container_run_as_user }}" doesn't exist
+  fail:
+    msg: User "{{ container_run_as_user }}" doesn't exist.
+  when: user_info.name is not defined
+
+- name: prepare rootless stuff if needed
+  block:
+    - name: set systemd dir if user is not root
+      set_fact:
+        service_files_dir: "{{ user_info.home }}/.config/systemd/user"
+        systemd_scope: user
+      changed_when: false
+
+    - name: ensure systemd files directory exists if user not root
+      file:
+        path: "{{ service_files_dir }}"
+        state: directory
+        owner: "{{ container_run_as_user }}"
+        group: "{{ container_run_as_group }}"
+
+  when: container_run_as_user != "root"
+
+- name: set systemd runtime dir
+  set_fact:
+    xdg_runtime_dir: "/run/user/{{ user_info.uid }}"
+  changed_when: false
+
+- name: set systemd scope to system if needed
+  set_fact:
+    systemd_scope: system
+    service_files_dir: "{{ service_files_dir }}"
+  when: container_run_as_user == "root"
+  changed_when: false
+
+- name: create local systemd directory
+  file:
+    group: root
+    mode: u=rwX,go=rX
+    owner: root
+    path: /usr/local/lib/systemd/system/
+    state: directory
+  become: true
+  when: container_run_as_user == "root" and service_files_dir == '/usr/local/lib/systemd/system'
+
+
+- name: do tasks when "{{ service_name }}" state is "running"
+  block:
+
+  - name: Check for user namespace support in kernel
+    stat:
+      path: /proc/sys/kernel/unprivileged_userns_clone
+    register: unprivileged_userns_clone
+    changed_when: false
+
+  - name: Allow unprivileged users on Debian
+    ansible.posix.sysctl:
+      name: kernel.unprivileged_userns_clone
+      value: '1'
+      state: present
+      sysctl_file: /etc/sysctl.d/userns.conf
+      sysctl_set: true
+    when:
+      - ansible_distribution == 'Debian'
+      - unprivileged_userns_clone.stat.exists
+
+  - name: Install rootless dependencies on Debian-based
+    package:
+      name: "{{ podman_dependencies_rootless }}"
+      state: present
+    when:
+      - ansible_os_family == 'Debian'
+      - container_run_as_user != 'root'
+
+  - name: ensure podman is installed
+    package:
+      name: podman
+      state: present
+    when: not skip_podman_install
+
+  - name: Check subuid & subgid
+    import_tasks: check_subid.yml
+
+  - name: Ensure empty internal variable _container_image_list
+    set_fact:
+      _container_image_list: []
+    changed_when: false
+
+  - name: Convert container_image_list to new form
+    set_fact:
+      _container_image_list: "{{ _container_image_list + [{'image': item}] }}"
+    with_items: "{{ container_image_list }}"
+    when: not (container_image_list | selectattr("image", "defined"))
+    changed_when: false
+    no_log: true
+
+  - name: Always use internal variable for container_image_list
+    set_fact:
+      _container_image_list: "{{ container_image_list }}"
+    when: _container_image_list | length == 0
+    changed_when: false
+    no_log: true
+
+  - name: running single container, ensure we have up to date container image
+    containers.podman.podman_image:
+      name: "{{ item.image }}"
+      force: true
+      username: "{{ item.user | default(container_image_user) | default(omit) }}"
+      password: "{{ item.password | default(container_image_password) | default(omit) }}"
+    notify: restart service
+    become: true
+    become_user: "{{ container_run_as_user }}"
+    when:
+      - _container_image_list | length == 1
+      - container_run_as_user == 'root'
+      - not (item.image | regex_search ('^localhost/.*'))
+    loop: "{{ _container_image_list }}"
+    no_log: true
+
+      #  - name: seems we use several container images, ensure all are up to date
+      #    containers.podman.podman_image:
+      #      name: "{{ item.image }}"
+      #      force: true
+      #      username: "{{ item.user | default(container_image_user) | default(omit) }}"
+      #      password: "{{ item.password | default(container_image_password) | default(omit) }}"
+      #    become: true
+      #    become_user: "{{ container_run_as_user }}"
+      #    when:
+      #      - _container_image_list | length > 1
+      #      - not (item.image | regex_search ('^localhost/.*'))
+      #    loop: "{{ _container_image_list }}"
+      #    no_log: true
+
+  - name: Include pod yaml templating
+    ansible.builtin.include_tasks: deploy_pod_yaml.yml
+    when:
+      - container_pod_yaml is defined
+      - container_pod_yaml_deploy
+
+  - name: if running pod, ensure configuration file exists
+    stat:
+      path: "{{ container_pod_yaml }}"
+    register: pod_file
+    when: container_pod_yaml is defined
+
+  - name: fail if pod configuration file is missing
+    fail:
+      msg: >
+        "Error: Asking to run pod, but pod definition yaml file is missing: "
+        "{{ container_pod_yaml }}"
+    when:
+      - container_pod_yaml is defined
+      - not pod_file.stat.exists
+
+  - name: Check if user is lingering
+    stat:
+      path: "/var/lib/systemd/linger/{{ container_run_as_user }}"
+    register: user_lingering
+    when: container_run_as_user != "root"
+
+  - name: Enable lingering is needed
+    command: "loginctl enable-linger {{ container_run_as_user }}"
+    when:
+      - container_run_as_user != "root"
+      - not user_lingering.stat.exists
+
+  - name: Ensure volume directories exist for {{ container_name }}
+    file:
+      path: "{{ item }}"
+      owner: "{{ container_dir_owner | default(container_run_as_user) }}"
+      group: "{{ container_dir_group | default(container_run_as_group) }}"
+      mode: "{{ container_dir_mode | default(omit) }}"
+      state: directory
+    become: true
+    loop: "{{ container_run_args | regex_findall('-v ([^:]*)') }}"
+    when:
+      - _container_image_list | length == 1
+      - container_run_args is defined and container_run_args | length > 0
+      - container_pod_yaml is undefined
+
+  - name: Create systemd service file for {{ container_name }}
+    template:
+      src: "{% if _container_image_list | length == 1 %}systemd-service-single.j2{% else %}systemd-service-pod.j2{% endif %}"
+      dest: "{{ service_files_dir }}/{{ service_name }}"
+      owner: "{{ service_files_owner }}"
+      group: "{{ service_files_group }}"
+      mode: "{{ service_files_mode }}"
+    become: true
+    notify:
+      - reload systemctl
+      - restart service
+    register: service_file
+
+  - name: ensure auto update is running for images
+    become: true
+    become_user: "{{ container_run_as_user }}"
+    environment:
+      XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+    systemd:
+      name: podman-auto-update.timer
+      daemon_reload: true
+      scope: "{{ systemd_scope }}"
+      state: started
+      enabled: true
+
+  when: container_state == "running"
+
+- name: configure firewall if container_firewall_ports is defined
+  block:
+
+  - name: ensure firewalld is installed
+    tags: firewall
+    package: name=firewalld state=present
+    become: true
+    when: ansible_pkg_mgr != "atomic_container"
+
+  - name: Ensure firewalld is installed (rpm-ostree)
+    when: ansible_pkg_mgr == "atomic_container"
+    block:
+      - name: Ensure firewalld is installed (rpm-ostree)
+        tags: firewall
+        community.general.rpm_ostree_pkg:
+          name: firewalld
+        become: true
+        register: ostree
+
+      - name: Reboot if firewalld was installed
+        reboot:
+          reboot_timeout: 300
+        become: true
+        when: ostree is changed
+
+  - name: Ensure firewall service is running
+    tags: firewall
+    service:
+      name: firewalld
+      state: started
+    become: true
+
+  - name: Ensure container's exposed ports firewall state
+    tags: firewall
+    ansible.posix.firewalld:
+      port: "{{ item }}"
+      permanent: true
+      immediate: true
+      state: "{% if container_state == 'running' %}enabled{% else %}disabled{% endif %}"
+    become: true
+    with_items: "{{ container_firewall_ports }}"
+
+  when: container_firewall_ports is defined
+
+
+- name: do cleanup stuff when container_state is "absent"
+  block:
+
+  - name: Check if service file exists
+    stat:
+      path: "{{ service_files_dir }}/{{ service_name }}"
+    register: service_file
+
+  - name: Ensure "{{ service_name }}" is stopped and disabled at boot
+    become: true
+    become_user: "{{ container_run_as_user }}"
+    # become_method: machinectl
+    environment:
+      XDG_RUNTIME_DIR: "{{ xdg_runtime_dir }}"
+    systemd:
+      name: "{{ service_name }}"
+      state: stopped
+      enabled: false
+      scope: "{{ systemd_scope }}"
+    when:
+      - service_file.stat.exists
+
+  - name: Remove the pod
+    shell: podman pod rm -f {{ container_name }}
+
+  - name: clean up systemd service file
+    file:
+      path: "{{ service_files_dir }}/{{ service_name }}"
+      state: absent
+    become: true
+    notify: reload systemctl
+
+  - name: Check if user is lingering
+    stat:
+      path: "/var/lib/systemd/linger/{{ container_run_as_user }}"
+    register: user_lingering
+    when: container_run_as_user != "root"
+
+  - name: Disable lingering (are we sure we want to do this always?)
+    command: "loginctl disable-linger {{ container_run_as_user }}"
+    when:
+      - container_run_as_user != "root"
+      - user_lingering.stat.exists
+
+  - name: clean up pod configuration file
+    file:
+      path: "{{ container_pod_yaml }}"
+      state: absent
+    when: container_pod_yaml is defined
+
+  when: container_state == "absent"
+
+- name: Force all notified handlers to run at this point
+  meta: flush_handlers
