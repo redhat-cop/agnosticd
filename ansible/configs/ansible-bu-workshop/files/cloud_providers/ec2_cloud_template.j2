@@ -193,6 +193,7 @@ Resources:
 {%   endif %}
 
 {%   for c in range(1,(instance['count'] |int)+1) %}
+{%   if instance['name'] != "satellite" %}
   {{ instance.name | replace('-', '') }}{{ loop.index }}:
     Type: "AWS::EC2::Instance"
     Properties:
@@ -262,12 +263,6 @@ Resources:
           Ebs:
             VolumeSize: "{{ instance['rootfs_size'] | default(aws_default_rootfs_size) }}"
             VolumeType: "{{ aws_default_volume_type }}"
-{%     if aws_ebs_volume_iops is defined
-       and instance['name'] == "satellite"
-%}
-            Iops: "{{ aws_ebs_volume_iops }}"
-      EbsOptimized: true
-{%     endif %}
 {%     endif %}
 {%     for vol in instance.volumes|default([]) if vol.enable|d(true) %}
         - DeviceName: "{{ vol.name | default(vol.device_name) }}"
@@ -340,6 +335,164 @@ Resources:
               - {{ instance.name | replace('-', '') }}{{loop.index}}EIP
               - PublicIp
 {%     endif %}
+{%   endif %}
+{%   if instance['name'] == "satellite" %}
+  {{ instance.name | replace('-', '') }}LaunchTemplate:
+    Type: "AWS::EC2::LaunchTemplate"
+    Properties:
+      LaunchTemplateName: "{{ instance.name | replace('-', '') }}LaunchTemplate"
+      LaunchTemplateData:
+{%     if instance.name in agnosticd_images | default({}) %}
+        ImageId: {{ agnosticd_images[instance.name].image_id }}
+{%     elif custom_image is defined %}
+        ImageId: {{ custom_image.image_id }}
+{%     else %}
+        ImageId:
+          Fn::FindInMap:
+          - RegionMapping
+          - Ref: AWS::Region
+          - {{ instance.image | default(aws_default_image) }}
+{%     endif %}
+        InstanceType: "{{instance['flavor'][cloud_provider]}}"
+        KeyName: "{{instance.key_name | default(ssh_provision_key_name) | default(key_name)}}"
+{%     if instance['UserData'] is defined %}
+      {{instance['UserData']}}
+{%     endif %}
+{%     if instance['security_groups'] is defined %}
+        SecurityGroupIds:
+{%       for sg in instance.security_groups %}
+          - Ref: {{ sg }}
+{%       endfor %}
+{%     else %}
+        SecurityGroupIds:
+          - Ref: DefaultSG
+{%     endif %}
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+{%     if instance['unique'] | d(false) | bool %}
+              - Key: Name
+                Value: {{instance['name']}}
+              - Key: internaldns
+                Value: {{instance['name']}}.{{aws_dns_zone_private_chomped}}
+{%     else %}
+              - Key: Name
+                Value: {{instance['name']}}{{loop.index}}
+              - Key: internaldns
+                Value: {{instance['name']}}{{loop.index}}.{{aws_dns_zone_private_chomped}}
+{%     endif %}
+              - Key: "owner"
+                Value: "{{ requester_email | default(email, true) | default(requester_username, true) | default('unknownuser', true) }}"
+              - Key: "Project"
+                Value: "{{project_tag}}"
+              - Key: "{{project_tag}}"
+                Value: "{{ instance['name'] }}"
+{%     if instance.ansible_user is defined %}
+              - Key: ansible_user
+                Value: "{{ instance.ansible_user }}"
+{%     endif %}
+{%     if instance.remote_user is defined %}
+              - Key: remote_user
+                Value: "{{ instance.remote_user }}"
+{%     endif %}
+{%     for tag in instance['tags'] %}
+              - Key: {{tag['key']}}
+                Value: {{tag['value']}}
+{%     endfor %}
+        BlockDeviceMappings:
+{%     if '/dev/sda1' not in instance.volumes | default([]) | json_query('[].device_name')
+       and '/dev/sda1' not in instance.volumes | default([]) | json_query('[].name')
+%}
+          - DeviceName: "/dev/sda1"
+            Ebs:
+              VolumeSize: "{{ instance['rootfs_size'] | default(aws_default_rootfs_size) }}"
+              VolumeType: "{{ aws_default_volume_type }}"
+              Iops: "{{ aws_ebs_volume_iops }}"
+              Throughput: "{{ aws_ebs_volume_throughput }}"
+        EbsOptimized: true
+{%     endif %}
+{%     for vol in instance.volumes|default([]) if vol.enable|d(true) %}
+          - DeviceName: "{{ vol.name | default(vol.device_name) }}"
+            Ebs:
+{%       if cloud_provider in vol and 'type' in vol.ec2 %}
+              VolumeType: "{{ vol[cloud_provider].type }}"
+{%       else %}
+              VolumeType: "{{ aws_default_volume_type }}"
+{%       endif %}
+{%       if vol.snapshot_id is defined %}
+              SnapshotId: "{{ vol.snapshot_id}}"
+{%       endif %}
+              VolumeSize: "{{ vol.size }}"
+{%     endfor %}
+
+  {{ instance.name | replace('-', '') }}{{ loop.index }}:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref "{{ instance.name | replace('-', '') }}LaunchTemplate"
+        Version: 1
+      SubnetId:
+        Ref: PublicSubnet
+      EbsOptimized: true
+
+  {{ instance.name | replace('-', '') }}{{loop.index}}InternalDns:
+    Type: "AWS::Route53::RecordSetGroup"
+    Properties:
+      HostedZoneId:
+        Ref: DnsZonePrivate
+      RecordSets:
+{%     if instance['unique'] | d(false) | bool %}
+        - Name: "{{instance['name']}}.{{aws_dns_zone_private}}"
+{%     else %}
+        - Name: "{{instance['name']}}{{loop.index}}.{{aws_dns_zone_private}}"
+{%     endif %}
+          Type: A
+          TTL: {{ aws_dns_ttl_private }}
+          ResourceRecords:
+            - "Fn::GetAtt":          
+              - {{ instance.name | replace('-', '') }}{{ loop.index }}
+              - PrivateIp
+
+{%     if instance['public_dns'] %}
+  {{ instance.name | replace('-', '') }}{{ loop.index }}EIP:
+    Type: "AWS::EC2::EIP"
+    DependsOn:
+    - VpcGA
+    Properties:
+      InstanceId:
+        Ref: {{ instance.name | replace('-', '') }}{{ loop.index }}
+
+  {{ instance.name | replace('-', '') }}{{ loop.index }}PublicDns:
+    Type: "AWS::Route53::RecordSetGroup"
+    DependsOn:
+      - {{ instance.name | replace('-', '') }}{{ loop.index }}EIP
+    Properties:
+{%     if instance.public_dns_zone is defined %}
+      HostedZoneName: {{ instance.public_dns_zone }}
+{%     elif aws_dns_create_public_zone | bool %}
+{%       if secondary_stack is defined %}
+      HostedZoneName: "{{ aws_dns_zone_public }}"
+{%       else %}
+      HostedZoneId:
+        Ref: DnsZonePublic
+{%       endif %}
+{%     else %}
+      HostedZoneName: "{{ aws_dns_zone_root }}"
+{%     endif %}
+      RecordSets:
+{%       if instance['unique'] | d(false) | bool %}
+        - Name: {{ instance.name }}.{{ instance.public_dns_zone | default(aws_dns_zone_public_prefix | default('') ~ aws_dns_zone_public) }}
+{%       else %}
+        - Name: {{ instance.name }}{{ loop.index }}.{{ instance.public_dns_zone | default(aws_dns_zone_public_prefix | default('') ~ aws_dns_zone_public) }}
+{%       endif %}
+          Type: A
+          TTL: {{ aws_dns_ttl_public }}
+          ResourceRecords:
+            - "Fn::GetAtt":
+              - {{ instance.name | replace('-', '') }}{{loop.index}}EIP
+              - PublicIp
+{%     endif %}
+{%   endif %}
 {%   endfor %}
 {% endfor %}
 
