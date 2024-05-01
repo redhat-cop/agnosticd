@@ -90,7 +90,7 @@ metadata:
   name: forklift-controller
   namespace: openshift-mtv
 spec:
-  controller_max_vm_in_flight: 2
+  controller_max_vm_inflight: 1
 EOF
 
 cat << EOF | oc apply -f -
