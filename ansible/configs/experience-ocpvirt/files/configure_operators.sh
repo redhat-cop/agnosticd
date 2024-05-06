@@ -81,6 +81,7 @@ spec:
 EOF
 
 until oc get forkliftcontrollers.forklift.konveyor.io; do sleep 60; done
+sleep 30
 
 cat << EOF | oc apply -f -
 ---
@@ -130,6 +131,7 @@ spec:
 EOF
 
 until oc get nmstates.nmstate.io; do sleep 60; done
+sleep 30
 
 cat << EOF | oc apply -f -
 ---
@@ -171,6 +173,7 @@ spec:
 EOF
 
 until oc get metallbs.metallb.io; do sleep 60; done
+sleep 30
 
 cat << EOF | oc apply -f -
 ---
