@@ -29,7 +29,7 @@ EOF
 
 until oc get hyperconvergeds.hco.kubevirt.io; do sleep 60; done
 
-sleep 30
+sleep 60
 
 export VERSION=$(curl https://storage.googleapis.com/kubevirt-prow/release/kubevirt/kubevirt/stable.txt)
 wget -O /usr/bin/virtctl  https://github.com/kubevirt/kubevirt/releases/download/${VERSION}/virtctl-${VERSION}-linux-amd64
@@ -81,7 +81,7 @@ spec:
 EOF
 
 until oc get forkliftcontrollers.forklift.konveyor.io; do sleep 60; done
-sleep 30
+sleep 60
 
 cat << EOF | oc apply -f -
 ---
@@ -130,7 +130,7 @@ spec:
 EOF
 
 until oc get nmstates.nmstate.io; do sleep 60; done
-sleep 30
+sleep 60
 
 cat << EOF | oc apply -f -
 ---
@@ -172,7 +172,7 @@ spec:
 EOF
 
 until oc get metallbs.metallb.io; do sleep 60; done
-sleep 30
+sleep 60
 
 cat << EOF | oc apply -f -
 ---
