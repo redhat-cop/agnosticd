@@ -1,0 +1,195 @@
+---
+
+# TODO: Make this GPU agnostic, building it initially around Nvidia and CUDA
+# TODO: Extract vars to defaults/main.yml
+
+- name: Set CUDA related vars for all users
+  ansible.builtin.blockinfile:
+    path: /etc/environment
+    block: |
+      CUDA_HOME={{ ai_setup_ilab_cuda_home }}
+      LD_LIBRARY_PATH={{ ai_setup_ilab_cuda_lib_path }}
+    marker: "# {mark} ANSIBLE MANAGED BLOCK"
+    create: true
+
+- name: Set CUDA related vars etc in .bashrc
+  ansible.builtin.blockinfile:
+    path: "/home/{{ ai_setup_ilab_user }}/.bashrc"
+    block: |
+      export CUDA_HOME={{ ai_setup_ilab_cuda_home }}
+      export LD_LIBRARY_PATH={{ ai_setup_ilab_cuda_lib_path }}
+      export PATH=$PATH:/usr/local/cuda/bin
+      echo "Welcome to the InstructLab VM"
+      echo
+      echo "- To get started see https://github.com/instructlab"
+      echo "- To chat: ilab chat"
+      echo
+    marker: "# {mark} ANSIBLE MANAGED BLOCK"
+    create: true
+  become_user: "{{ ai_setup_ilab_user | default('instruct') }}"
+
+# TODO: Extract vars to defaults/main.yml
+
+- name: Setup AI developer packages
+  ansible.builtin.dnf:
+    name: "{{ package }}"
+    state: present
+  loop: "{{ ai_setup_ilab_developer_packages }}"
+  loop_control:
+    loop_var: package
+
+- name: Set system default Python version, to 3.11
+  ansible.builtin.alternatives:
+    name: python
+    link: /usr/bin/python3
+    path: /usr/bin/python3.11
+
+# TODO: Extract vars to defaults/main.yml and make more generic
+- name: Setup the users InstructLab environment
+  block:
+
+    - name: Clone InstructLab repository
+      ansible.builtin.git:
+        repo: "{{ ai_setup_ilab_repo_url }}"
+        dest: "{{ ai_setup_ilab_install_path_base }}/instructlab"
+        version: "main"
+        clone: true
+        update: true
+      register: r_git_clone_instructlab
+
+    - name: Clone taxonomy repository if not present
+      ansible.builtin.git:
+        repo: "{{ ai_setup_ilab_taxonomy_repo_url }}"
+        dest: "{{ ai_setup_ilab_install_path_base }}/taxonomy"
+        version: "main"
+        clone: true
+        update: true
+      register: r_git_clone_taxonomy
+
+  become_user: "{{ ai_setup_ilab_user | default('instruct') }}"
+
+# TODO: THis python setup seems hideous but it works, need to find a better way
+# TODO: Remove hard paths etc
+
+- name: Venv and iLab Python setup
+  block:
+
+    - name: Setup a Python 3.11 virtual environment
+      ansible.builtin.command:
+        cmd: "python3.11 -m venv /home/{{ ai_setup_ilab_user }}/instructlab/venv"
+      args:
+        creates: "/home/{{ ai_setup_ilab_user }}/instructlab/venv"
+
+    - name: Upgrade venv pip
+      ansible.builtin.command:
+        cmd: "/home/{{ ai_setup_ilab_user }}/instructlab/venv/bin/python -m pip install --upgrade pip"
+
+    # - name: Install InstructLab package
+    #   when: r_git_clone_instructlab.changed
+    #   ansible.builtin.command:
+    #     cmd: >- 
+    #     /home/{{ ai_setup_ilab_user }}/instructlab/venv/bin/pip
+    #     install {{ ai_setup_ilab_install_path_base }}/instructlab/
+
+    - name: Install InstructLab package
+      when: r_git_clone_instructlab.changed
+      ansible.builtin.command:
+        cmd: >-
+          /home/{{ ai_setup_ilab_user }}/instructlab/venv/bin/pip 
+          install git+https://github.com/instructlab/instructlab.git@stable
+
+    # TODO: Validate optimal way to llama-cpp-python with CUDA
+    #
+    # - name: Setup llama-cpp-python with CUDA Support
+    #   ansible.builtin.command:
+    #     cmd: >-
+    #         /home/{{ ai_setup_ilab_user }}/instructlab/venv/bin/pip install --force-reinstall 
+    #         --no-cache-dir "llama-cpp-python[server]==0.2.55"
+    #   environment:
+    #     CMAKE_ARGS: "-DLLAMA_CUBLAS=on"
+
+    - name: Setup llama-cpp-python with CUDA Support
+      ansible.builtin.command:
+        cmd: >-
+            /home/{{ ai_setup_ilab_user }}/instructlab/venv/bin/pip install --force-reinstall 
+            --no-cache-dir "llama-cpp-python[server]==0.2.55"
+      environment:
+        CUDACXX: /usr/local/cuda-12/bin/nvcc 
+        CMAKE_ARGS: "-DLLAMA_CUBLAS=on -DCMAKE_CUDA_ARCHITECTURES=all-major" 
+        FORCE_CMAKE: 1 
+
+      #
+      # TODO: Explore this:
+      # pip install llama-cpp-python --no-cache-dir --force-reinstall --upgrade
+
+    # - name: Initialize InstructLab non-interactively init
+    #   ansible.builtin.command:
+    #     cmd: >-
+    #      /home/{{ ai_setup_ilab_user }}/instructlab/venv/bin/ilab init --non-interactive
+    #      --model-path models/merlinite-7b-lab-Q4_K_M.gguf --taxonomy-path taxonomy
+
+    # - name: Initialize InstructLab download LLM
+    #   ansible.builtin.shell:
+    #     cmd: "/home/{{ ai_setup_ilab_user }}/instructlab/venv/bin/ilab download"
+    
+    - name: Initialize InstructLab non-interactively
+      ansible.builtin.shell: >-
+        source {{ ai_setup_ilab_install_path_base }}/instructlab/venv/bin/activate && 
+        ilab init --non-interactive --model-path models/merlinite-7b-lab-Q4_K_M.gguf --taxonomy-path taxonomy 
+        && ilab download
+      args:
+        chdir: "{{ ai_setup_ilab_install_path_base }}"
+
+    - name: Setup AI Developer Preview with Mixtral and Granite and ai-lab images
+      when: ai_setup_ilab_developer_preview | default(false) | bool
+      block:
+
+        # TODO:
+        # loop the LLMs
+        # Make the LLMs a list in defaults/main.yml so we can drive via AgnosticV
+        # But need this out the door today!
+
+        - name: Load Mixtral LLM via ilab
+          ansible.builtin.shell: >-
+            source {{ ai_setup_ilab_install_path_base }}/instructlab/venv/bin/activate && 
+            ilab download --repository mistralai/Mixtral-8x7B-Instruct-v0.1 
+            --hf-token {{ huggingface_token }}
+          args:
+            chdir: "{{ ai_setup_ilab_install_path_base }}"
+
+        - name: Load Granite LLM via ilab
+          ansible.builtin.shell: >-
+            source {{ ai_setup_ilab_install_path_base }}/instructlab/venv/bin/activate && 
+            ilab download  --repository ibm/granite-7b-base
+            --hf-token {{ huggingface_token }}
+          args:
+            chdir: "{{ ai_setup_ilab_install_path_base }}"
+
+          #TODO: move to Defaults/main.yml, drive from AgV   
+
+        - name: Podman Pull  
+          containers.podman.podman_image:
+            name: "quay.io/{{ __image }}"
+            username: "{{ quay_io_username }}"
+            password: "{{ quay_io_password }}"
+          loop: 
+            - "ai-lab/instructlab-nvidia:latest"
+            - "ai-lab/vllm:latest"
+            - "ai-lab/deepspeed-trainer:latest"
+          loop_control:
+            loop_var: __image
+
+
+      # End of AI Developer Preview block
+
+
+    - name: Automatically activate venv at login via .bashrc
+      ansible.builtin.lineinfile:
+        path: "/home/{{ ai_setup_ilab_user }}/.bashrc"
+        line: 'source instructlab/venv/bin/activate'
+        create: true
+        state: present
+        insertafter: EOF
+
+  become_user: "{{ ai_setup_ilab_user | default('instruct') }}"
+  become: true

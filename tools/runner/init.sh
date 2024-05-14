@@ -72,7 +72,7 @@ agnosticd_aws_capacity_reservation_enabled: false
 # -------------------------------------------------------------------
 # OpenShift installer
 # -------------------------------------------------------------------
-ocp4_installer_version: "4.14"
+ocp4_installer_version: "4.15"
 ocp4_installer_root_url: https://mirror.openshift.com/pub/openshift-v4/clients
 
 # -------------------------------------------------------------------
