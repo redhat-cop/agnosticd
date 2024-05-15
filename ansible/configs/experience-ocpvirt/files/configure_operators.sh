@@ -83,6 +83,7 @@ EOF
 until oc get forkliftcontrollers.forklift.konveyor.io; do sleep 60; done
 sleep 60
 
+
 cat << EOF | oc apply -f -
 ---
 apiVersion: forklift.konveyor.io/v1beta1
@@ -132,6 +133,7 @@ EOF
 until oc get nmstates.nmstate.io; do sleep 60; done
 sleep 60
 
+
 cat << EOF | oc apply -f -
 ---
 apiVersion: nmstate.io/v1
@@ -173,6 +175,7 @@ EOF
 
 until oc get metallbs.metallb.io; do sleep 60; done
 sleep 60
+
 
 cat << EOF | oc apply -f -
 ---
