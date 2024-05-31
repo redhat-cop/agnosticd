@@ -1,6 +1,6 @@
 # To build this stack:
-# docker build -t quay.io/username/quarkus-workshop-stack:VVV -f stack.Dockerfile .
-# docker push quay.io/username/quarkus-workshop-stack:VVVV
+# docker build -t quay.io/openshiftlabs/quarkus-workshop-stack:3.13 -f stack.Dockerfile .
+# docker push quay.io/username/quarkus-workshop-stack:3.13
 # macOS M1: --platform linux/x86_64
 
 FROM registry.redhat.io/devspaces/udi-rhel8:latest
