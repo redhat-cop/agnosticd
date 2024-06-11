@@ -1,0 +1,473 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Base stack to create AWS resources for ACS Challenge
+
+Parameters:
+
+  KubernetesVersion:
+    Description: Kubernetes version
+    Type: String
+    Default: "1.28"
+  EKSClusterName:
+    Description: Name of EKS Cluster
+    Type: String
+    Default: eks-cluster
+  WorkerNodeInstanceType:
+    Description: Worker Node cluster instances
+    Type: String
+    Default: m5.large
+  EKSC9InstanceType:
+    Description: EKS Cloud9 instance type
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t3.small
+      - t3.medium
+    ConstraintDescription: Must be a valid Cloud9 instance type
+  VpcCIDR:
+    Type: String
+    Default: 10.192.0.0/16 
+  PublicSubnetCIDR:
+    Type: String
+    Default: 10.192.10.0/24 
+
+
+Resources:
+
+  EKSC9Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: eks-admin
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - codebuild.amazonaws.com
+                - lambda.amazonaws.com
+                - ecr.amazonaws.com
+                - s3.amazonaws.com
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  KMSSecretsKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "key for EKS secrets encryption"
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+         Version: '2012-10-17'
+         Id: key-default-1
+         Statement:
+         - Sid: Enable IAM User Permissions
+           Effect: Allow
+           Principal:
+             AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+           Action: kms:*
+           Resource: '*'
+
+  KMSAlias:
+    Type: AWS::KMS::Alias
+    Properties: 
+      AliasName: alias/KMSKey
+      TargetKeyId: !GetAtt KMSSecretsKey.Arn
+
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn: [EKSC9Instance, EKSC9InstanceProfile]
+    Properties:
+      Name: !Sub CodeBuild-${AWS::StackName}
+      ServiceRole: !Sub arn:aws:iam::${AWS::AccountId}:role/eks-admin
+      Artifacts:
+        Type: NO_ARTIFACTS
+      LogsConfig:
+        CloudWatchLogs:
+          Status:  ENABLED
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:4.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: CFN_RESPONSE_URL
+            Value: !Ref WaitForStackCreationHandle
+          - Name: CLOUD9_INSTANCE_PROFILE_NAME
+            Value: !Ref EKSC9InstanceProfile
+          - Name: CLOUD9_ENVIRONMENT_ID
+            Value: !Ref EKSC9Instance
+          - Name: KMS_ARN
+            Value: !GetAtt KMSSecretsKey.Arn
+
+      Source:
+        Type: NO_SOURCE
+        BuildSpec:
+          !Sub |
+            version: 0.2
+            phases:
+              install:
+                runtime-versions:
+                  python: 3.9
+                commands:
+                  - echo ">>> installed python 3.9"
+              pre_build:
+                commands:
+                  - echo ">>> build cluster config"
+                  - |
+                    cat <<EOF > cluster-config.yaml
+
+                    apiVersion: eksctl.io/v1alpha5
+                    kind: ClusterConfig
+
+                    #Only use these availability zones
+                    availabilityZones:
+                      - ${AWS::Region}a
+                      - ${AWS::Region}b
+                      - ${AWS::Region}c
+
+                    metadata:
+                      name: ${EKSClusterName}
+                      region: ${AWS::Region}
+                      version: "${KubernetesVersion}"
+
+                    cloudWatch:
+                        clusterLogging:
+                            enableTypes: ["*"]
+
+                    secretsEncryption:
+                      keyARN: $KMS_ARN
+                      
+                    managedNodeGroups:
+                      - name: nodegroup
+                        instanceType: ${WorkerNodeInstanceType}
+                        desiredCapacity: 3
+                        minSize: 2
+                        maxSize: 4
+                        privateNetworking: true
+                        volumeSize: 100
+                        volumeType: gp3
+                        volumeEncrypted: true
+                        tags:
+                          'eks:cluster-name': ${EKSClusterName}
+                        iam:
+                          withAddonPolicies:
+                            imageBuilder: true
+                            autoScaler: true
+                            externalDNS: true
+                            certManager: true
+                            appMesh: true
+                            ebs: true
+                            fsx: true
+                            efs: true
+                            albIngress: true
+                            xRay: true
+                            cloudWatch: true
+                    EOF
+                  # example of ECR create if needed
+                  # - IMAGEREPO=your-repo
+                  # - aws ecr create-repository --repository-name $IMAGEREPO
+                  # - IMAGEREPOURI="$(aws ecr describe-repositories --query "repositories[].[repositoryUri]" --output text | grep $IMAGEREPO)"
+                  # - aws ecr get-login-password | docker login --username AWS --password-stdin $IMAGEREPOURI
+                  # - docker pull quay.io/augustrh/jam2023:latest
+                  # - docker tag quay.io/augustrh/jam2023:latest $IMAGEREPOURI:latest 
+                  # - docker push $IMAGEREPOURI
+
+              build:
+                commands:
+                  - CLOUD9_INSTANCE_ID=$(aws ec2 describe-instances --filter Name=tag:aws:cloud9:environment,Values=$CLOUD9_ENVIRONMENT_ID --query Reservations[0].Instances[0].InstanceId --output text)
+                  - aws ec2 associate-iam-instance-profile --instance-id $CLOUD9_INSTANCE_ID --iam-instance-profile Name=$CLOUD9_INSTANCE_PROFILE_NAME
+                  - eksctl create cluster -f cluster-config.yaml
+                  - aws eks update-kubeconfig --name ${EKSClusterName} --region ${AWS::Region}
+
+              post_build:
+                commands:
+                  # CODEBUILD_BUILD_SUCCEEDING = 1 Set to 0 if the build is failing, or 1 if the build is succeeding.
+                  - echo ">>> build status $CODEBUILD_BUILD_SUCCEEDING "
+                  - |
+                    if [ "$CODEBUILD_BUILD_SUCCEEDING" -eq "1" ]
+                    then
+                      curl -X PUT -H 'Content-Type:' --data-binary '{"Status" : "SUCCESS","Reason" : "Creation Complete", "UniqueId" : "$CODEBUILD_BUILD_ID","Data" : "Creation complete"}' $CFN_RESPONSE_URL
+                    else
+                      curl -X PUT -H 'Content-Type:' --data-binary '{"Status" : "FAILURE","Reason" : "Creation Failed", "UniqueId" : "$CODEBUILD_BUILD_ID","Data" : "See Codebuild logs for details. $CODEBUILD_LOG_PATH"}' $CFN_RESPONSE_URL
+                    fi
+
+      TimeoutInMinutes: 120
+
+  WaitForStackCreationHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  WaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    # dont start till we create a lambda function
+    DependsOn: [CustomTriggerBuild]
+    Properties:
+      Handle: !Ref WaitForStackCreationHandle
+      # wait for 105 minutes before giving up
+      Timeout: 6300
+      # success or failure signal count
+      Count: 1
+
+  CustomTriggerBuild:
+    Type: Custom::ManageCloud9IDEIamRole
+    DependsOn: BuildProject
+    Properties:
+      ServiceToken: !GetAtt TriggerBuildLambda.Arn
+      CodebuildProjectName: !Ref BuildProject
+
+  TriggerBuildLambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Policies:
+        - PolicyName: !Sub IAMPolicy-${AWS::StackName}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:ListReportsForReportGroup
+                  - codebuild:DescribeTestCases
+                  - codebuild:ListBuildsForProject
+                  - codebuild:UpdateWebhook
+                  - codebuild:BatchGetBuilds
+                  - codebuild:UpdateProject
+                  - codebuild:StopBuildBatch
+                  - codebuild:ListReports
+                  - codebuild:BatchPutCodeCoverages
+                  - codebuild:ListProjects
+                  - codebuild:ListConnectedOAuthAccounts
+                  - codebuild:DeleteBuildBatch
+                  - codebuild:DeleteWebhook
+                  - codebuild:BatchGetReports
+                  - codebuild:DeleteReportGroup
+                  - codebuild:ListCuratedEnvironmentImages
+                  - codebuild:CreateProject
+                  - codebuild:GetReportGroupTrend
+                  - codebuild:ListBuildBatches
+                  - codebuild:DeleteReport
+                  - codebuild:ListBuilds
+                  - codebuild:BatchDeleteBuilds
+                  - codebuild:ListBuildBatchesForProject
+                  - codebuild:DeleteOAuthToken
+                  - codebuild:StartBuild
+                  - codebuild:PersistOAuthToken
+                  - codebuild:BatchPutTestCases
+                  - codebuild:BatchGetBuildBatches
+                  - codebuild:UpdateProjectVisibility
+                  - codebuild:GetResourcePolicy
+                  - codebuild:StopBuild
+                  - codebuild:ListReportGroups
+                  - codebuild:DescribeCodeCoverages
+                  - codebuild:RetryBuild
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:ImportSourceCredentials
+                  - codebuild:BatchGetReportGroups
+                  - codebuild:BatchGetProjects
+                  - codebuild:RetryBuildBatch
+                  - codebuild:InvalidateProjectCache
+                  - codebuild:ListSourceCredentials
+                  - codebuild:DeleteResourcePolicy
+                  - codebuild:ListRepositories
+                  - codebuild:CreateWebhook
+                  - codebuild:ListSharedProjects
+                  - codebuild:UpdateReportGroup
+                  - codebuild:CreateReportGroup
+                  - codebuild:ListSharedReportGroups
+                  - codebuild:StartBuildBatch
+                  - codebuild:PutResourcePolicy
+                  - codebuild:DeleteProject
+                  - codebuild:DeleteSourceCredentials
+                Resource: !GetAtt BuildProject.Arn
+
+  TriggerBuildLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: function to retrieve User info
+      Handler: index.handler
+      Role: !GetAtt TriggerBuildLambdaIamRole.Arn
+      Runtime: python3.12
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+          import sys
+          import json
+          import urllib3
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          http = urllib3.PoolManager()
+
+
+          codebuild_client = boto3.client('codebuild')
+
+          # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-lambda-function-code-cfnresponsemodule.html
+          def handler(event, context):
+              logger.info('Incoming Event: {0}'.format(event))
+              response = {}
+              response['PhysicalResourceId'] = 'hardcodedphyscialid'
+              response['StackId'] = event['StackId']
+              response['RequestId'] = event['RequestId']
+              response['LogicalResourceId'] = event['LogicalResourceId']
+              cfn_response_url = event['ResponseURL']
+
+              if event['RequestType'] == 'Delete':
+                  # return
+                  logger.info('Nothing to do. Request Type : {0}'.format(event['RequestType']))
+                  response['Status'] = 'SUCCESS'
+
+              elif event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+
+                try:
+                  codebuild_client.start_build(projectName=event['ResourceProperties']['CodebuildProjectName'])
+                  response['Status'] = 'SUCCESS'
+
+                except:
+                  logging.error('Error: {0}'.format(sys.exc_info() ))
+                  response['Status'] = 'FAILED'
+
+              http.request('PUT', cfn_response_url, body=json.dumps(response).encode('utf-8'), headers={'Content-Type': 'application/json'})
+              return 'Done'
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR 
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway 
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC 
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: !Ref PublicSubnetCIDR
+      MapPublicIpOnLaunch: true 
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC 
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway 
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet 
+
+################## INSTANCE #####################
+  EKSC9InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DependsOn: EKSC9Role
+    Properties:
+      Path: "/"
+      Roles:
+        - eks-admin
+
+  EKSC9Instance:
+    Description: "-"
+    Type: AWS::Cloud9::EnvironmentEC2
+    Properties:
+      Name: Cloud9-Instance
+      Description: "AWS Cloud9 instance"
+      ImageId: amazonlinux-2-x86_64
+      AutomaticStopTimeMinutes: 3600
+      SubnetId: !Ref PublicSubnet
+      InstanceType:
+        Ref: EKSC9InstanceType
+      # Uncomment below lines for Jam environment. Comment for RHDP AWS Blank Open Environment
+      # OwnerArn: !Sub 'arn:aws:sts::${AWS::AccountId}:assumed-role/${LabUserRoleName}/team-console'
+      # OwnerArn: !Sub 'arn:aws:sts::${AWS::AccountId}:assumed-role/eks-admin/AdministratorAccess'
+
+  ECRGroup:
+    Type: AWS::IAM::Group
+    Properties: 
+      GroupName: ECRGroup
+      Policies:
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:PutImage'
+                  - 'ecr:InitiateLayerUpload'
+                  - 'ecr:UploadLayerPart'
+                  - 'ecr:CompleteLayerUpload'
+                  - 'ecr:DescribeRepositories'
+                  - 'ecr:GetRepositoryPolicy'
+                  - 'ecr:ListImages'
+                  - 'ecr:DeleteRepository'
+                  - 'ecr:BatchDeleteImage'
+                  - 'ecr:SetRepositoryPolicy'
+                  - 'ecr:DeleteRepositoryPolicy'
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:BatchGetImage'
+                Resource: "*"
+
+  ECRUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: "ecr-user"
+      Groups:
+        - ECRGroup
+
+  ECRUserAccessKey:
+      DependsOn: ECRUser
+      Type: AWS::IAM::AccessKey
+      Properties:
+        UserName:
+          Ref: ECRUser
+
+Outputs:
+
+  Cloud9URL:
+    Description: Cloud9 Environment
+    Value:
+      Fn::Join:
+      - ''
+      - - !Sub https://${AWS::Region}.console.aws.amazon.com/cloud9/ide/
+        - !Ref 'EKSC9Instance'
+
+  ECRUser:
+    Value:
+      Ref: ECRUser
+    Description: IAM ECR User
+
+  ECRUserAccessKey:
+    Value:
+      Ref: ECRUserAccessKey
+    Description: IAM access key for ECRuser
+
+  ECRUserSecretAccessKey:
+    Value:
+      Fn::GetAtt:
+        - ECRUserAccessKey
+        - SecretAccessKey
+    Description: IAM User access key for ECRuser
