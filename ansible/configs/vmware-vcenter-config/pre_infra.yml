@@ -4,30 +4,158 @@
   gather_facts: false
   become: false
   tasks:
-  - name: Step 000
-    ansible.builtin.debug:
-      msg: "Step 000 Pre Infrastructure"
+    - name: Step 000
+      ansible.builtin.debug:
+        msg: "Step 000 Pre Infrastructure"
 
-  - name: Create private key
-    ansible.builtin.copy:
-      dest: /tmp/jumphostldap.pem
-      content: "{{ vmware_ibm_ldap_jumphost_privatekey }}"
-      mode: "0600"
+    - name: Create private key
+      ansible.builtin.copy:
+        dest: /tmp/jumphostldap.pem
+        content: "{{ vmware_ibm_ldap_jumphost_privatekey }}"
+        mode: "0600"
 
-  - name: Add ldap jumphost host to the temporary inventory
-    ansible.builtin.add_host:
-      groupname: network
-      name: jumphostldap
-      bastion: ""
-      isolated: true
-      ansible_ssh_host: "{{ vmware_ibm_ldap_jumphost }}"
-      ansible_ssh_user: "{{ vmware_ibm_ldap_jumphost_user }}"
-      ansible_ssh_private_key_file: /tmp/jumphostldap.pem
-      private_ip_address: "{{ vmware_ibm_ldap_jumphost }}"
-      public_ip_address: "{{ vmware_ibm_ldap_jumphost }}"
+    - name: Add ldap jumphost host to the temporary inventory
+      ansible.builtin.add_host:
+        groupname: network
+        name: jumphostldap
+        bastion: ""
+        isolated: true
+        ansible_ssh_host: "{{ vmware_ibm_ldap_jumphost }}"
+        ansible_ssh_user: "{{ vmware_ibm_ldap_jumphost_user }}"
+        ansible_ssh_private_key_file: /tmp/jumphostldap.pem
+        private_ip_address: "{{ vmware_ibm_ldap_jumphost }}"
+        public_ip_address: "{{ vmware_ibm_ldap_jumphost }}"
 
-  - name: Create webapp VMs
-    ansible.builtin.include_tasks: vcenter-setup-webapp-vms.yml
+    - name: Create folder and VMs
+      block:
+        - name: Get vSphere login session
+          ansible.builtin.uri:
+            url: "https://{{ vcenter_hostname }}/rest/com/vmware/cis/session"
+            validate_certs: false
+            method: POST
+            headers:
+              Content-Type: "application/json"
+            body_format: json
+            force_basic_auth: true
+            url_username: "{{ vcenter_username }}"
+            url_password: "{{ vcenter_password }}"
+          register: r_login_response
 
-  - name: Create user in AD and assign permissions on vSphere
-    ansible.builtin.include_tasks: vcenter-setup-user.yml
+        - name: Get list of datastores
+          ansible.builtin.uri:
+            url: "https://{{ vcenter_hostname }}/rest/vcenter/datastore"
+            validate_certs: false
+            method: GET
+            headers:
+              Content-Type: "application/json"
+              vmware-api-session-id: "{{ r_login_response.json.value }}"
+          register: datastore_response
+
+        - name: Filter datastores starting with prefix 'workload_share'
+          ansible.builtin.set_fact:
+            filtered_datastores: "{{ datastore_response.json.value | json_query(query) }}"
+          vars:
+            query: "[?starts_with(name, 'workload_share')].{name: name, free_space: free_space}"
+
+        - name: Choose the least used datastore
+          ansible.builtin.set_fact:
+            vcenter_datastore: "{{ (filtered_datastores | sort(attribute='free_space') | last).name }}"
+
+        - name: Debug datastore
+          ansible.builtin.debug:
+            msg: "vcenter_datastore: {{ vcenter_datastore }}"
+
+        - name: Create folder for the project
+          community.vmware.vcenter_folder:
+            validate_certs: false
+            hostname: "{{ vcenter_hostname }}"
+            username: "{{ vcenter_username }}"
+            password: "{{ vcenter_password }}"
+            datacenter: "{{ vcenter_datacenter }}"
+            folder_name: "{{ hostvars['localhost']['vcenter_folder'] }}"
+            parent_folder: Workloads
+            folder_type: vm
+            state: present
+          register: r_vcenter_folder
+          until: r_vcenter_folder is success
+          retries: 10
+          delay: 15
+
+        - name: Create instance(s)
+          register: r_vmc_instance
+          community.vmware.vmware_guest:
+            validate_certs: false
+            hostname: "{{ vcenter_hostname }}"
+            username: "{{ vcenter_username }}"
+            password: "{{ vcenter_password }}"
+            datacenter: "{{ vcenter_datacenter }}"
+            cluster: "{{ vcenter_cluster }}"
+            state: poweredoff
+            folder: "/Workloads/{{ hostvars['localhost']['vcenter_folder'] }}"
+            template: "{{ item.template }}"
+            name: "{{ item.name }}"
+            wait_for_ip_address: false
+            disk:
+              - datastore: "{{ vcenter_datastore }}"
+                size_gb: "{{ item.rootfs_size }}"
+                type: thin
+            networks:
+              - name: segment-migrating-to-ocpvirt
+          loop:
+            - name: haproxy
+              template: rhel9-tpl
+              rootfs_size: 5
+            - name: database
+              template: roadshow-tpl-database
+              rootfs_size: 7
+            - name: winweb01
+              template: roadshow-tpl-winweb01
+              rootfs_size: 21
+            - name: winweb02
+              template: roadshow-tpl-winweb02
+              rootfs_size: 21
+          until: r_vmc_instance is success
+          retries: 10
+          delay: 15
+
+    - name: Set student facts
+      ansible.builtin.set_fact:
+        vcenter_student_password: >-
+          {{- lookup('password', '/dev/null length=1 chars=letters') -}}
+          {{- lookup('password', '/dev/null length=10') -}}
+          {{- lookup('password', '/dev/null length=1 chars=digits') -}}
+
+    - name: Debug user and password
+      ansible.builtin.debug:
+        msg: "User: '{{ vcenter_student_username }}' with password '{{ vcenter_student_password }}' on VCenter Domain '{{ vcenter_domain }}' will be created."
+
+    # yamllint disable rule:line-length
+    - name: Run playbook in the LDAP jumphost to create the user
+      ansible.builtin.command: |
+        ansible-playbook
+        /home/{{ vmware_ibm_ldap_jumphost_user }}/sandbox_ad_user.yaml
+        -e '{"vmware_add_create_user":{"name":"{{ vcenter_student_username }}","firstname":"{{ vcenter_student_username }}","surname":"{{ vcenter_student_username }}","password":"{{ hostvars.localhost.vcenter_student_password }}","group":"sandbox-users"}}'
+      delegate_to: jumphostldap
+      register: r_create_user
+    # yamllint enable rule:line-length
+
+    - name: Print result of create user
+      ansible.builtin.debug:
+        msg: "Result of creating user: {{ r_create_user.stdout }}"
+
+    - name: Assign user to roles for different objects on VCenter
+      community.vmware.vmware_object_role_permission:
+        validate_certs: false
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        role: "{{ vcenter_role }}"
+        principal: "{{ vcenter_student_username }}@{{ vcenter_domain }}"
+        recursive: "{{ true if item.key == 'Folder' else false }}"
+        object_name: "{{ item.value }}"
+        object_type: "{{ item.key }}"
+      register: r_vmware_object_role_permission
+      until: r_vmware_object_role_permission is success
+      retries: 1
+      delay: 5
+      loop: "{{ vcenter_permissions | dict2items }}"
