@@ -30,13 +30,16 @@ env_type: rosa-consolidated
 # Other vars
 # -------------------------------------------------------------------
 aws_region: ${AGD_AWS_REGION}
-agnosticd_aws_capacity_reservation_enabled: false
+agnosticd_aws_capacity_reservation_enable: false
 
 rosa_version: latest
+rosa_deploy_hcp: true
+rosa_compute_machine_type: m6a.xlarge
+rosa_compute_replicas: 2
 rosa_setup_cluster_admin_login: true
 
 bastion_instance_type: t2.small
-bastion_instance_image: RHEL92GOLD-latest
+bastion_instance_image: RHEL93GOLD-latest
 
 install_student_user: false
 EOF
@@ -67,7 +70,7 @@ worker_instance_count: 0
 bastion_instance_type: t2.small
 bastion_instance_image: RHEL93GOLD-latest
 aws_region: ${AGD_AWS_REGION}
-agnosticd_aws_capacity_reservation_enabled: false
+agnosticd_aws_capacity_reservation_enable: false
 
 # -------------------------------------------------------------------
 # OpenShift installer
@@ -155,9 +158,10 @@ set_repositories_satellite_org: Red_Hat_GPTE_Labs
 #   }
 
 # -------------------------------------------------------------------
-# ROSA Token
+# ROSA
 # -------------------------------------------------------------------
 gpte_rosa_token: [redacted]
+aws_billing_account_id: [redacted]
 
 EOF
 fi
