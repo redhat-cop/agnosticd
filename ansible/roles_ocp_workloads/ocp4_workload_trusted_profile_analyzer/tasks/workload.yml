@@ -5,19 +5,68 @@
     dest: "~/{{ ocp4_workload_trusted_profile_analyzer_install_repo_name }}"
     version: "{{ ocp4_workload_trusted_profile_analyzer_install_repo_branch }}"
 
-- name: Install TPA
+- name: Template infra values file to remote host
+  ansible.builtin.template:
+    src: templates/values-rhtpa.yml.j2
+    dest: ~{{ ansible_user }}/values-rhtpa-infra.yml
+  vars:
+    ocp4_workload_trusted_profile_analyzer_install_stage: infra
+
+- name: Install TPA Infrastructure
+  environment:
+    NAMESPACE: "{{ ocp4_workload_trusted_profile_analyzer_namespace }}"
+    TRUSTIFICATION_VALUES: "/home/{{ ansible_user }}/values-rhtpa-infra.yml"
   shell: |
-    NAMESPACE={{ ocp4_workload_trusted_profile_analyzer_namespace }}
     oc new-project $NAMESPACE
-    APP_DOMAIN=-$NAMESPACE.$(oc -n openshift-ingress-operator get ingresscontrollers.operator.openshift.io default -o jsonpath='{.status.domain}')
-    helm upgrade --install --dependency-update -n $NAMESPACE infrastructure charts/trustification-infrastructure \
-    --values values-ocp-no-aws.yaml --set-string minio.persistence.size=20Gi --set-string keycloak.ingress.hostname=sso$APP_DOMAIN \
-    --set-string appDomain=$APP_DOMAIN
-    helm upgrade --install -n $NAMESPACE trustification charts/trustification --values values-ocp-no-aws.yaml \
-    --set-string appDomain=$APP_DOMAIN --set-string keycloak.auth.adminPassword={{
-    ocp4_workload_trusted_profile_analyzer_admin_password }}
+    INGRESS_DOMAIN=$(oc --namespace=openshift-ingress-operator \
+    get ingresscontrollers.operator.openshift.io default \
+    --output=jsonpath='{.status.domain}')
+    APP_DOMAIN="-${NAMESPACE}.${INGRESS_DOMAIN}"
+    rm values.yaml
+    helm upgrade \
+    --install \
+    --dependency-update \
+    --namespace=${NAMESPACE} \
+    --timeout=10m \
+    --values=${TRUSTIFICATION_VALUES} \
+    --set-string=keycloak.ingress.hostname=sso${APP_DOMAIN} \
+    --set-string=appDomain=${APP_DOMAIN} \
+    --debug \
+    tpa-infrastructure \
+    charts/trustification-infrastructure
   args:
     chdir: ~/{{ ocp4_workload_trusted_profile_analyzer_install_repo_name }}/deploy/k8s
+
+- name: Template app values file to remote host
+  ansible.builtin.template:
+    src: templates/values-rhtpa.yml.j2
+    dest: ~{{ ansible_user }}/values-rhtpa-app.yml
+  vars:
+    ocp4_workload_trusted_profile_analyzer_install_stage: app
+
+- name: Install TPA
+  environment:
+    NAMESPACE: "{{ ocp4_workload_trusted_profile_analyzer_namespace }}"
+    TRUSTIFICATION_VALUES: "/home/{{ ansible_user }}/values-rhtpa-app.yml"
+  shell: |
+    INGRESS_DOMAIN=$(oc --namespace=openshift-ingress-operator \
+    get ingresscontrollers.operator.openshift.io default \
+    --output=jsonpath='{.status.domain}')
+    APP_DOMAIN="-${NAMESPACE}.${INGRESS_DOMAIN}"
+    helm repo add openshift-helm-charts {{
+    ocp4_workload_trusted_profile_analyzer_helm_chart_repo }} >/dev/null
+    helm upgrade \
+    --install \
+    --namespace=${NAMESPACE} \
+    --timeout=10m \
+    --values=${TRUSTIFICATION_VALUES} \
+    --version={{ ocp4_workload_trusted_profile_analyzer_helm_chart_version }} \
+    --set-string minio.persistence.size=20Gi \
+    --set-string=keycloak.ingress.hostname=sso${APP_DOMAIN} \
+    --set-string appDomain=${APP_DOMAIN} \
+    --debug \
+    tpa \
+    {{ ocp4_workload_trusted_profile_analyzer_helm_chart_name }}
   register: r_tpa_output
 
 - name: Show output log
@@ -37,4 +86,4 @@
       tpa_console_url: https://console-{{ ocp4_workload_trusted_profile_analyzer_namespace }}.{{
         r_ingress_config.resources[0].spec.domain }}
       tpa_username: admin
-      tpa_password: "{{ ocp4_workload_trusted_profile_analyzer_admin_password }}"
+      tpa_password: "{{ ocp4_workload_trusted_profile_analyzer_keycloak_realm_admin_password }}"
