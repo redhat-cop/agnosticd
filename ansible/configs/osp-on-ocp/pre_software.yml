@@ -1,0 +1,230 @@
+---
+- name: Step 003 Pre Software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - ansible.builtin.debug:
+        msg: "Step 003 Pre Software"
+
+    - ansible.builtin.include_role:
+        name: infra-local-create-ssh_key
+      when: set_env_authorized_key | bool
+
+- name: Prepare Hypervisor for RHPDS
+  hosts: hypervisor
+  gather_facts: true
+  roles:
+    - role: set_env_authorized_key
+      when: set_env_authorized_key | bool
+  tasks:
+    - name: Add GUID to /etc/skel/.bashrc
+      ansible.builtin.lineinfile:
+        path: "/etc/skel/.bashrc"
+        regexp: "^export GUID"
+        line: "export GUID={{ guid }}"
+
+
+- name: Prepare Hypervisor for RHTE
+  hosts: hypervisor
+  gather_facts: true
+  tasks:
+
+    - name: Install required software
+      ansible.builtin.yum:
+        name: "{{ item }}"
+      loop:
+        - gcc
+        - python3
+        - python3-devel
+        - python3-libselinux
+        - python3-pip
+        - libcurl-devel
+        - openssl-devel
+        - libxml2-devel
+
+    - name: Install ovirt-engine-sdk-python==4.5.0
+      ansible.builtin.pip:
+        name: ovirt-engine-sdk-python==4.5.0
+
+    - name: Create a VMs in RHV
+      environment:
+        OVIRT_URL: "https://{{ ocp4_workload_ama_demo_rhev_host }}/ovirt-engine/api"
+        OVIRT_USERNAME: "opentlc-mgr@internal"
+        OVIRT_PASSWORD: "{{ ocp4_workload_ama_demo_rhev_admin_user_password }}"
+      block:
+        # Create webrhv VM
+        - name: Create webrhv VM
+          ansible.builtin.include_tasks: rhev-setup-webrhv-vm.yml
+
+        - name: Assign permissions in RHV
+          ansible.builtin.include_tasks: rhev-setup-user.yml
+
+    - name: Install epel-release
+      ansible.builtin.yum:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
+        disable_gpg_check: true
+
+    - name: install mariadb client
+      ansible.builtin.yum:
+        name: "mariadb"
+
+- name: Prepare Hypervisor for AIO
+  hosts: hypervisor
+  gather_facts: false
+  tasks:
+    - when: install_student_user | bool
+      ansible.builtin.include_role:
+        name: bastion-student-user
+
+
+    - name: Write Route53 credentials into /root/.aws/credentials
+      ansible.builtin.blockinfile:
+        dest: "/root/.aws/credentials"
+        create: true
+        owner: "root"
+        mode: u=rw,g=,o=
+        content: |
+          [default]
+          aws_access_key_id={{ route53_aws_access_key_id }}
+          aws_secret_access_key={{ route53_aws_secret_access_key }}
+
+    - name: Request Both Let's Encrypt Static and Wildcard Certificates
+      ansible.builtin.include_role:
+        name: host-lets-encrypt-certs-certbot
+      vars:
+        _certbot_domain: "api.{{ guid }}.{{ cluster_dns_zone }}"
+        _certbot_wildcard_domain: "*.apps.{{ guid }}.{{ cluster_dns_zone }}"
+        _certbot_production: true
+        _certbot_dns_provider: "route53"
+        _certbot_remote_dir: "/root/"
+        _certbot_cache_cert_file: "/tmp/server.cert"
+        _certbot_cache_key_file: "/tmp/server.key"
+        _certbot_cache_ca_file: "/tmp/server_ca.cer"
+        _certbot_cache_fullchain_file: "/tmp/fullchain.cer"
+        _certbot_cache_archive_file: "/tmp/certbot.tar.gz"
+        _certbot_renew_automatically: false
+        _certbot_force_issue: false
+        _certbot_user: "root"
+
+    - name: Remove credentials once LE certs complete
+      ansible.builtin.file:
+        state: absent
+        path: "/root/.aws"
+
+    - name: Deploy base software
+      ansible.builtin.include_role:
+        name: ocp4_aio_base_software
+      vars:
+        ocp4_aio_baremetal_provider: "{{ cloud_provider }}"
+
+    - name: Setup base virt
+      ansible.builtin.include_role:
+        name: ocp4_aio_base_virt
+      vars:
+        aio_host_ip_address: "{{ hostvars['hypervisor']['public_ip_address'] }}"
+
+    - name: Prepare Bastion VM
+      ansible.builtin.include_role:
+        name: ocp4_aio_prepare_bastion
+      vars:
+        ocp4_aio_ssh_key: "{{ lookup('file', '{{ output_dir }}/{{ guid }}_id_rsa.pub' ) }}"
+        ocp4_aio_root_password: "{{ lookup('password', '/dev/null length=12 chars=ascii_letters,digits') }}"
+
+#    - name: Download database.qcow2
+#      command: curl -o /var/lib/libvirt/images/database.qcow2 https://www.opentlc.com/download/mig_to_ocpvirt/database.qcow2
+
+# https://catalog-item-assets.s3.us-east-2.amazonaws.com/qcow_images/database.qcow2
+# https://catalog-item-assets.s3.us-east-2.amazonaws.com/qcow_images/rhel-9.3-x86_64-kvm.qcow2
+
+    - name: Download desired qcow2 images from S3 for libvirt
+      ansible.builtin.get_url:
+        url: "https://catalog-item-assets.s3.us-east-2.amazonaws.com/qcow_images/{{ item }}"
+        dest: "/var/lib/libvirt/images/{{ item }}"
+      loop:
+        - database.qcow2
+        - rhel-9.3-x86_64-kvm.qcow2
+      async: 600
+      poll: 0
+      register: qcow_download_results
+
+    - name: Wait 6 minutes max for qcow image downloads to complete
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      register: qcow_job_results
+      loop: "{{ qcow_download_results.results }}"
+      retries: 70
+      delay: 10
+      until: qcow_job_results.finished
+
+    - name: Run virt-install for legacy VM
+      ansible.builtin.command: >
+        virt-install --ram 2048 --vcpus 1 --os-variant rhel8.0
+        --disk path=/var/lib/libvirt/images/database.qcow2,device=disk,bus=virtio,format=qcow2
+        --import --noautoconsole --vnc
+        --network network=ocp4-flat --name legacy
+        --cpu host,+vmx --boot bios.rebootTimeout=0
+
+- name: Setup Bastion VM
+  hosts: bastion-vm
+  gather_facts: false
+  tasks:
+    - ansible.builtin.include_role:
+        name: ocp4_aio_deploy_bastion
+      vars:
+        ocp4_aio_ssh_key: "{{ lookup('file', '{{ output_dir }}/{{ guid }}_id_rsa.pub' ) }}"
+
+    - name: Install httpd
+      ansible.builtin.yum:
+        name: httpd
+
+    - name: Start and enable httpd
+      ansible.builtin.service:
+        name: httpd
+        state: restarted
+        enabled: true
+
+#    - name: Download required files for the lab
+#      ansible.builtin.get_url:
+#        url: "https://www.opentlc.com/download/ocp4_virt_foundations/{{ item }}"
+#        dest: "/var/www/html/{{ item }}"
+#        owner: apache
+#        group: apache
+#      loop:
+
+# https://catalog-item-assets.s3.us-east-2.amazonaws.com/qcow_images/database.qcow2
+# https://catalog-item-assets.s3.us-east-2.amazonaws.com/qcow_images/rhel-9.3-x86_64-kvm.qcow2
+
+    - name: Download required os images for the lab from S3
+      ansible.builtin.get_url:
+        url: "https://catalog-item-assets.s3.us-east-2.amazonaws.com/qcow_images/{{ item }}"
+        dest: "/var/www/html/{{ item }}"
+        mode: '0440'
+        owner: apache
+        group: apache
+      loop:
+        - Fedora35.qcow2
+        - Windows2019.iso
+      async: 600
+      poll: 0
+      register: download_results
+
+    - name: Wait 6 minutes max for all lab os images downloads to complete
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      loop: "{{ download_results.results }}"
+      retries: 70
+      delay: 10
+      register: job_results
+      until: job_results.finished
+
+- name: PreSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - presoftware_flight_check
+  tasks:
+    - ansible.builtin.debug:
+        msg: "Pre-Software checks completed successfully"
