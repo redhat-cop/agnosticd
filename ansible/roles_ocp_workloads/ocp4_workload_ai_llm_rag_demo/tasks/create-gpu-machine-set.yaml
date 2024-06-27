@@ -1,0 +1,67 @@
+---
+
+- name: "[create-gpu-machine-set] Get the infrai-id for the cluster"
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: infrastructure
+    name: cluster
+  register: infraInfo
+
+- name: "[create-gpu-machine-set] Get Platform Name"
+  ansible.builtin.set_fact:
+    cloudProvider: "{{ infraInfo.resources[0].status.platform | lower}}"
+
+- name: "[create-gpu-machine-set] Set fact Region"
+  ansible.builtin.set_fact:
+    cloudRegion: "{{ infraInfo.resources[0].status.platformStatus[cloudProvider].region }}"
+
+- name: Debug cloudRegion
+  ansible.builtin.debug: 
+    var: cloudRegion
+
+# - name: "[create-gpu-machine-set] Gather information about all availability zones"
+#   amazon.aws.aws_az_info:
+#   register: awszoneinfo
+
+# - name: "[create-gpu-machine-set] Debug AWS Zone Info"
+#   ansible.builtin.debug:
+#     var: awszoneinfo.availability_zones[0].zone_name
+
+- name: "[create-gpu-machine-set] Search for MachineSets"
+  kubernetes.core.k8s_info:
+    api: machine.openshift.io/v1beta1
+    kind: MachineSet
+    namespace: openshift-machine-api
+  register: machineset
+
+- name: "[create-gpu-machine-set] Get the availability zone from the first worker MachineSets"
+  ansible.builtin.set_fact:
+    cloudAvailabilityZone: "{{ item.spec.template.spec.providerSpec.value.placement.availabilityZone}}"
+  with_items: 
+    - "{{ machineset.resources[0] }}"
+
+- name: "[create-gpu-machine-set] Search for worker MachineSets"
+  kubernetes.core.k8s_info:
+    api: machine.openshift.io/v1beta1
+    kind: Machine
+    namespace: openshift-machine-api
+    label_selectors:
+      - "machine.openshift.io/cluster-api-machine-type=worker"
+  register: machines
+
+- name: "[create-gpu-machine-set] Setting facts to be used in MachineSet template"
+  ansible.builtin.set_fact:
+    clusterId: "{{ infraInfo.resources[0].status.infrastructureName }}"
+    instanceAmi: "{{ machines.resources[0].spec.providerSpec.value.ami.id }}"
+    cacheable: no
+
+- name: "[create-gpu-machine-set] Generate machineset"
+  ansible.builtin.template:
+    src: templates/gpu-machine-sets.j2
+    dest: /tmp/gpu-machineset.yaml
+
+- name: "[create-gpu-machine-set] Apply machineset to cluster {{ clusterId }}"
+  kubernetes.core.k8s:
+    state: present
+    src: /tmp/gpu-machineset.yaml
+  when: cloudRegion == "us-west-2" or cloudRegion == "us-east-1"
