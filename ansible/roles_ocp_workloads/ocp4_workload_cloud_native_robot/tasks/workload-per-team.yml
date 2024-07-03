@@ -1,0 +1,108 @@
+---
+- name: Handle OpenShift AI Data Connections
+  include_tasks: workload-per-team-create-connection.yml
+  with_items:
+  - model-store
+  - model-store-pipeline
+  loop_control:
+    loop_var: bucket_name
+
+- name: "Delete Gitea Token {{ ocp4_workload_cloud_native_robot_user }}/pipeline-as-code-token"
+  ansible.builtin.uri:
+    url: "{{ _gitea_api_uri }}/api/v1/users/{{ ocp4_workload_cloud_native_robot_user }}/tokens/pipeline-as-code-token"
+    method: DELETE
+    force_basic_auth: true
+    status_code:
+      - 204
+      - 404
+    url_username: "{{ ocp4_workload_cloud_native_robot_user }}"
+    url_password: "{{ ocp4_workload_gitea_operator_user_password }}"
+    headers:
+      Content-Type: application/json
+      accept: application/json
+
+
+- name: "Create Gitea Token {{ ocp4_workload_cloud_native_robot_user }}/pipeline-as-code-token"
+  ansible.builtin.uri:
+    url: "{{ _gitea_api_uri }}/api/v1/users/{{ ocp4_workload_cloud_native_robot_user }}/tokens"
+    method: POST
+    force_basic_auth: true
+    status_code:
+      - 200
+      - 201
+    url_username: "{{ ocp4_workload_cloud_native_robot_user }}"
+    url_password: "{{ ocp4_workload_gitea_operator_user_password }}"
+    headers:
+      Content-Type: application/json
+      accept: application/json
+    body_format: json
+    body: '{"name": "pipeline-as-code-token","scopes": ["write:repository"]}'
+  register: r_gitea_token
+
+- name: Generate webhook secret
+  ansible.builtin.set_fact:
+    webhook_secret: "{{ lookup('community.general.random_string',length=32,special=false) }}"
+
+- name: "Create Gitea Webhook {{ ocp4_workload_cloud_native_robot_user }}"
+  ansible.builtin.uri:
+    url: "{{ _gitea_api_uri }}/api/v1/repos/{{ ocp4_workload_cloud_native_robot_user }}/starter-app-python/hooks"
+    method: POST
+    force_basic_auth: true
+    status_code:
+      - 200
+      - 201
+    url_username: "{{ ocp4_workload_cloud_native_robot_user }}"
+    url_password: "{{ ocp4_workload_gitea_operator_user_password }}"
+    headers:
+      Content-Type: application/json
+      accept: application/json
+    body_format: json
+    body: |
+      {
+        "active": true,
+        "branch_filter": "*",
+          "config": {
+            "content_type": "json",
+            "url": "https://pipelines-as-code-controller-openshift-pipelines.{{ openshift_cluster_ingress_domain }}",
+            "secret": "{{ webhook_secret }}"
+          },
+          "events": [
+            "push"
+          ],
+      "type": "gitea"
+      }
+
+- name: "Create Webhook secret - {{ ocp4_workload_cloud_native_robot_user }}"
+  kubernetes.core.k8s:
+    state: present
+    definition: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: git-starter-app-python-token
+        namespace: "{{ ocp4_workload_cloud_native_robot_user }}-dev"
+      type: Opaque
+      stringData:
+        provider.token: "{{ r_gitea_token.json.sha1 }}"
+        webhook.secret: "{{ webhook_secret }}"
+
+
+- name: "Create Pipeline as Code Repository - {{ ocp4_workload_cloud_native_robot_user }}"
+  kubernetes.core.k8s:
+    state: present
+    definition: |
+      apiVersion: pipelinesascode.tekton.dev/v1alpha1
+      kind: Repository
+      metadata:
+        name: git-starter-app-python
+        namespace: {{ ocp4_workload_cloud_native_robot_user }}-dev
+      spec:
+        git_provider:
+          secret:
+            key: provider.token
+            name: git-starter-app-python-token
+          url: '{{ _gitea_api_uri }}/'
+          webhook_secret:
+            key: webhook.secret
+            name: git-starter-app-python-token
+        url: '{{ _gitea_api_uri }}/{{ ocp4_workload_cloud_native_robot_user }}/starter-app-python'
