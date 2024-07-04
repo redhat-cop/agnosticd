@@ -34,7 +34,7 @@ agnosticd_aws_capacity_reservation_enable: false
 
 rosa_version: latest
 rosa_deploy_hcp: true
-rosa_compute_machine_type: m6a.xlarge
+rosa_compute_machine_type: m6a.2xlarge
 rosa_compute_replicas: 2
 rosa_setup_cluster_admin_login: true
 
@@ -42,6 +42,26 @@ bastion_instance_type: t2.small
 bastion_instance_image: RHEL93GOLD-latest
 
 install_student_user: false
+
+# -------------------------------------------------------------------
+# Workloads
+# -------------------------------------------------------------------
+infra_workloads:
+- ocp4_workload_authentication_rosa
+
+# -------------------------------------------------------------------
+# ocp4_workload_authentication_rosa
+# -------------------------------------------------------------------
+ocp4_workload_authentication_rosa_user_count: 5
+ocp4_workload_authentication_rosa_user_base: user
+ocp4_workload_authentication_rosa_user_password: openshift
+
+ocp4_workload_authentication_rosa_token: "{{ rosa_token }}"
+
+ocp4_workload_authentication_rosa_aws_access_key_id: "{{ aws_access_key_id | mandatory }}"
+ocp4_workload_authentication_rosa_aws_secret_access_key: "{{ aws_secret_access_key | mandatory }}"
+ocp4_workload_authentication_rosa_aws_region: "{{ aws_region | mandatory }}"
+
 EOF
 
 cat << EOF >${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp4-cluster.yml
@@ -65,7 +85,7 @@ software_to_deploy: openshift4
 # -------------------------------------------------------------------
 master_instance_type: m6a.4xlarge
 master_instance_count: 1
-worker_instance_type: m6a.4xlarge
+worker_instance_type: m6a.2xlarge
 worker_instance_count: 0
 bastion_instance_type: t2.small
 bastion_instance_image: RHEL93GOLD-latest
