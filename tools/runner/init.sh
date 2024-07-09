@@ -33,6 +33,7 @@ aws_region: ${AGD_AWS_REGION}
 agnosticd_aws_capacity_reservation_enable: false
 
 rosa_version: latest
+rosa_version_base: "openshift-v4.15"
 rosa_deploy_hcp: true
 rosa_compute_machine_type: m6a.2xlarge
 rosa_compute_replicas: 2
@@ -42,6 +43,8 @@ bastion_instance_type: t2.small
 bastion_instance_image: RHEL93GOLD-latest
 
 install_student_user: false
+
+agnosticd_preserve_user_data: true
 
 # -------------------------------------------------------------------
 # Workloads
@@ -79,6 +82,7 @@ output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
 cloud_provider: ec2
 env_type: ocp4-cluster
 software_to_deploy: openshift4
+agnosticd_preserve_user_data: true
 
 # -------------------------------------------------------------------
 # VM configuration
@@ -137,6 +141,8 @@ output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
 # -------------------------------------------------------------------
 cloud_provider: none
 env_type: ocp-workloads
+
+agnosticd_preserve_user_data: true
 
 EOF
 
