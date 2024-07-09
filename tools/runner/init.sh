@@ -33,6 +33,7 @@ aws_region: ${AGD_AWS_REGION}
 agnosticd_aws_capacity_reservation_enable: false
 
 rosa_version: latest
+rosa_version_base: "openshift-v4.15"
 rosa_deploy_hcp: true
 rosa_compute_machine_type: m6a.2xlarge
 rosa_compute_replicas: 2
