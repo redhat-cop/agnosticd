@@ -44,6 +44,8 @@ bastion_instance_image: RHEL93GOLD-latest
 
 install_student_user: false
 
+agnosticd_preserve_user_data: true
+
 # -------------------------------------------------------------------
 # Workloads
 # -------------------------------------------------------------------
@@ -80,6 +82,7 @@ output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
 cloud_provider: ec2
 env_type: ocp4-cluster
 software_to_deploy: openshift4
+agnosticd_preserve_user_data: true
 
 # -------------------------------------------------------------------
 # VM configuration
@@ -138,6 +141,8 @@ output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
 # -------------------------------------------------------------------
 cloud_provider: none
 env_type: ocp-workloads
+
+agnosticd_preserve_user_data: true
 
 EOF
 
