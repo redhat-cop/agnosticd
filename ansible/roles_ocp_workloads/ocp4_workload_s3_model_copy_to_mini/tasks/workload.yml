@@ -1,0 +1,94 @@
+---
+- name: Create OpenShift Objects for Minio Object Storage
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) | from_yaml }}"
+  loop:
+  - ./templates/namespace.yaml.j2
+  - ./templates/secret.yaml.j2
+  - ./templates/persistentvolumeclaim.yaml.j2
+  - ./templates/deployment.yaml.j2
+  - ./templates/service.yaml.j2
+
+- name: Create OpenShift routes for Minio Object Storage
+  when: ocp4_workload_minio_expose_route | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) | from_yaml }}"
+  loop:
+  - ./templates/route_minio.yaml.j2
+  - ./templates/route_console.yaml.j2
+
+- name: Set up a Minio Bucket
+  when: ocp4_workload_minio_bucket_setup | bool
+  block:
+  - name: Wait until Minio Deployment is running
+    kubernetes.core.k8s_info:
+      api_version: "apps/v1"
+      kind: Deployment
+      name: minio
+      namespace: "{{ ocp4_workload_minio_project }}"
+      wait: true
+      wait_sleep: 10
+      wait_timeout: 360
+
+  - name: Get Minio Pod
+    kubernetes.core.k8s_info:
+      api_version: v1
+      kind: Pod
+      namespace: "{{ ocp4_workload_minio_project }}"
+      label_selectors:
+      - app = minio
+    register: r_minio_pod
+
+  # Set up Minio with a bucket
+  # POD=$(oc get pod -n minio -lapp=minio -o jsonpath='{range.items[*]}{.metadata.name}{"\n"}{end}')
+  # oc -n minio rsh ${POD} mc alias set --insecure localminio localhost:9000 root-user root-user-password
+  # oc -n minio rsh ${POD} mc mb localminio/testbucket
+  # Validate the bucket exists:
+  # oc -n minio rsh ${POD} mc ls localminio
+  - name: Set up local Minio in pod
+    kubernetes.core.k8s_exec:
+      namespace: "{{ ocp4_workload_minio_project }}"
+      pod: "{{ r_minio_pod.resources[0].metadata.name }}"
+      command: |
+        mc alias set --insecure
+          localminio http://localhost:9000
+          {{ ocp4_workload_minio_root_user }} {{ ocp4_workload_minio_root_password }}
+    register: r_minio_setup
+    retries: 3
+    delay: 5
+    until: r_minio_setup.rc == 0
+
+  - name: Set up Minio bucket (Single-User)
+    when: not ocp4_workload_minio_bucket_multi_user | bool
+    kubernetes.core.k8s_exec:
+      namespace: "{{ ocp4_workload_minio_project }}"
+      pod: "{{ r_minio_pod.resources[0].metadata.name }}"
+      command: |
+        mc mb localminio/{{ ocp4_workload_minio_bucket_name }}
+    register: r_minio_bucket
+    retries: 3
+    delay: 5
+    until: r_minio_bucket.rc == 0
+
+  - name: Set up Minio bucket (Multi-User)
+    when: ocp4_workload_minio_bucket_multi_user | bool
+    kubernetes.core.k8s_exec:
+      namespace: "{{ ocp4_workload_minio_project }}"
+      pod: "{{ r_minio_pod.resources[0].metadata.name }}"
+      command: |
+        mc mb localminio/{{ ocp4_workload_minio_bucket_base }}{{ ocp4_workload_minio_bucket_userbase }}{{ user_number }}
+    register: r_minio_bucket_mu
+    retries: 3
+    delay: 5
+    until: r_minio_bucket_mu.rc == 0
+    loop: "{{ range(1, ocp4_workload_minio_bucket_num_users | int + 1) | list }}"
+    loop_control:
+      loop_var: user_number
+
+# Leave this as the last task in the playbook.
+- name: Workload tasks complete
+  when: not silent | bool
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
