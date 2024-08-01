@@ -1,0 +1,76 @@
+---
+- name: Extract aws instance info
+  amazon.aws.ec2_instance_info:
+    region: "{{ aws_region }}"
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+  register: r_instances_info
+
+- name: Gather aws subnet info
+  amazon.aws.ec2_vpc_subnet_info:
+    region: "{{ aws_region }}"
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    filters:
+      vpc-id: "{{ r_instances_info.instances[0].network_interfaces[0].vpc_id }}"
+  register: r_vpc_info
+
+- name: Create subnet for eth1 connection
+  amazon.aws.ec2_vpc_subnet:
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    region: "{{ aws_region }}"
+    state: present
+    az: "{{ r_vpc_info.subnets[0].availability_zone }}"
+    vpc_id: "{{ r_vpc_info.subnets[0].vpc_id }}"
+    cidr: "{{ ec2_add_subnet_and_nic_cidr }}"
+    resource_tags:
+      Name: "{{ ec2_add_subnet_and_nic_subnet_name }}"
+  register: r_new_subnet
+
+- name: Get route table information
+  amazon.aws.ec2_vpc_route_table_info:
+    region: "{{ aws_region }}"
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    filters:
+      vpc-id: "{{ r_vpc_info.subnets[0].vpc_id }}"
+  register: r_route_table_info
+
+- name: Create fact for gateway_id
+  ansible.builtin.set_fact:
+    _gateway_id: "{{ r_route_table_info.route_tables | selectattr('routes', 'defined') | map(attribute='routes') | map('selectattr', 'gateway_id', 'ne', 'local') | map('selectattr', 'gateway_id') | flatten }}"
+
+- name: Associate the subnet with the route table
+  amazon.aws.ec2_vpc_route_table:
+    region: "{{ aws_region }}"
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    state: present
+    vpc_id: "{{ r_vpc_info.subnets[0].vpc_id }}"
+    subnets:
+    - "{{ r_vpc_info.subnets[0].id }}"
+    - "{{ r_new_subnet.subnet.id }}"
+    routes:
+    - dest: 0.0.0.0/0
+      gateway_id: "{{ _gateway_id[0].gateway_id }}"
+    - dest: 192.168.0.0/16
+      gateway_id: "local"
+    route_table_id: "{{ r_route_table_info.route_tables[1].route_table_id }}"
+    lookup: "id"
+  register: subnet_association_info
+
+- name: Create a new network interface
+  amazon.aws.ec2_eni:
+    region: "{{ aws_region }}"
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    subnet_id: "{{ r_new_subnet.subnet.id }}"
+    description: "Additional NIC"
+    instance_id: "{{ r_instances_info.instances[0].instance_id }}"
+    attached: true
+    device_index: 1
+    security_groups:
+    - "{{ r_instances_info.instances[0].network_interfaces[0].groups[0].group_name }}"
+    state: present
+  register: new_nic

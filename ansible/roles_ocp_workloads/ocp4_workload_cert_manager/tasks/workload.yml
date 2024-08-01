@@ -65,7 +65,7 @@
     name: cluster
     wait: true
     wait_sleep: 5
-    wait_timeout: 600
+    wait_timeout: 800
     wait_condition:
       type: "cert-manager-controller-deploymentAvailable"
       status: "True"
@@ -119,9 +119,24 @@
       wait_condition:
         type: "Ready"
         status: "True"
+    ignore_errors: true
     register: r_certificate_ingress
 
+  - name: Handle ingress certificate failure
+    when: r_certificate_ingress is failed
+    block:
+    - name: Print error message if requesting certificates failed
+      when: ocp4_workload_cert_manager_ignore_errors | bool
+      ansible.builtin.debug:
+        msg: "Requesting certificate for Ingress controllers failed."
+
+    - name: Fail if requesting certificates failed
+      when: not ocp4_workload_cert_manager_ignore_errors | bool
+      ansible.builtin.fail:
+        msg: "Requesting certificate for Ingress controllers failed."
+
   - name: Update Ingress controller to use certificate
+    when: not r_certificate_ingress is failed
     kubernetes.core.k8s:
       state: present
       definition: "{{ lookup('template', 'default-ingress-controller.yaml.j2') }}"
@@ -137,54 +152,70 @@
       namespace: openshift-config
       wait: true
       wait_sleep: 5
-      wait_timeout: 600
+      wait_timeout: 800
       wait_condition:
         type: "Ready"
         status: "True"
     register: r_certificate_api
 
-  - name: Update API server to use certificate
-    kubernetes.core.k8s:
-      state: present
-      definition: "{{ lookup('template', 'api-server.yaml.j2') }}"
+  - name: Handle API certificate failure
+    when: r_certificate_api is failed
+    block:
+    - name: Print error message if requesting certificates failed
+      when: ocp4_workload_cert_manager_ignore_errors | bool
+      ansible.builtin.debug:
+        msg: "Requesting certificate for API servers failed."
 
-  # It takes about 4 minutes per API Server to
-  # restart with certificates (due to AWS
-  # Load Balancer). Can't really check the cluster operator because once the updates have rolled out
-  # subsequent checks will fail. :-(. Need to just sleep.
-  - name: Wait for Cluster Operator kube-apiserver to finish rolling out
-    ansible.builtin.pause:
-      minutes: "{{ ocp4_workload_cert_manager_wait_after_api_cert_setup | int }}"
+    - name: Fail if requesting certificates failed
+      when: not ocp4_workload_cert_manager_ignore_errors | bool
+      ansible.builtin.fail:
+        msg: "Requesting certificate for API servers failed."
 
-  - name: Find all Kube Configs
-    become: true
-    ansible.builtin.find:
-      file_type: file
-      hidden: true
-      paths:
-      - /root
-      - /home
-      contains: "^ +certificate-authority-data:"
-      patterns: "*config*"
-      recurse: true
-    register: r_config_files
+  - name: API Certificate successfull
+    when: not r_certificate_api is failed
+    block:
+    - name: Update API server to use certificate
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'api-server.yaml.j2') }}"
 
-  - name: Fix Kube Configs
-    become: true
-    ansible.builtin.replace:
-      path: "{{ item.path }}"
-      regexp: "^ +certificate-authority-data:.*"
-    loop: "{{ r_config_files.files }}"
+    # It takes about 4 minutes per API Server to
+    # restart with certificates (due to AWS
+    # Load Balancer). Can't really check the cluster operator because once the updates have rolled out
+    # subsequent checks will fail. :-(. Need to just sleep.
+    - name: Wait for Cluster Operator kube-apiserver to finish rolling out
+      ansible.builtin.pause:
+        minutes: "{{ ocp4_workload_cert_manager_wait_after_api_cert_setup | int }}"
 
-  - name: Make sure API calls succeed
-    kubernetes.core.k8s_info:
-      api_version: config.openshift.io/v1
-      kind: Ingress
-      name: cluster
-    register: r_ingress_config
-    retries: 30
-    delay: 10
-    until: not r_ingress_config.failed
+    - name: Find all Kube Configs
+      become: true
+      ansible.builtin.find:
+        file_type: file
+        hidden: true
+        paths:
+        - /root
+        - /home
+        contains: "^ +certificate-authority-data:"
+        patterns: "*config*"
+        recurse: true
+      register: r_config_files
+
+    - name: Fix Kube Configs
+      become: true
+      ansible.builtin.replace:
+        path: "{{ item.path }}"
+        regexp: "^ +certificate-authority-data:.*"
+      loop: "{{ r_config_files.files }}"
+
+    - name: Make sure API calls succeed
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: Ingress
+        name: cluster
+      register: r_ingress_config
+      retries: 30
+      delay: 10
+      until: not r_ingress_config.failed
 
 # Leave this as the last task in the playbook.
 - name: Workload tasks complete

@@ -33,6 +33,7 @@ aws_region: ${AGD_AWS_REGION}
 agnosticd_aws_capacity_reservation_enable: false
 
 rosa_version: latest
+rosa_version_base: "openshift-v4.16"
 rosa_deploy_hcp: true
 rosa_compute_machine_type: m6a.2xlarge
 rosa_compute_replicas: 2
@@ -43,6 +44,8 @@ bastion_instance_image: RHEL93GOLD-latest
 
 install_student_user: false
 
+agnosticd_preserve_user_data: true
+
 # -------------------------------------------------------------------
 # Workloads
 # -------------------------------------------------------------------
@@ -52,9 +55,10 @@ infra_workloads:
 # -------------------------------------------------------------------
 # ocp4_workload_authentication_rosa
 # -------------------------------------------------------------------
-ocp4_workload_authentication_rosa_user_count: 5
+ocp4_workload_authentication_rosa_user_count: 10
 ocp4_workload_authentication_rosa_user_base: user
 ocp4_workload_authentication_rosa_user_password: openshift
+ocp4_workload_authentication_rosa_admin: false
 
 ocp4_workload_authentication_rosa_token: "{{ rosa_token }}"
 
@@ -79,6 +83,7 @@ output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
 cloud_provider: ec2
 env_type: ocp4-cluster
 software_to_deploy: openshift4
+agnosticd_preserve_user_data: true
 
 # -------------------------------------------------------------------
 # VM configuration
@@ -95,7 +100,7 @@ agnosticd_aws_capacity_reservation_enable: false
 # -------------------------------------------------------------------
 # OpenShift installer
 # -------------------------------------------------------------------
-ocp4_installer_version: "4.15"
+ocp4_installer_version: "4.16"
 ocp4_installer_root_url: https://mirror.openshift.com/pub/openshift-v4/clients
 
 # -------------------------------------------------------------------
@@ -137,6 +142,8 @@ output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
 # -------------------------------------------------------------------
 cloud_provider: none
 env_type: ocp-workloads
+
+agnosticd_preserve_user_data: true
 
 EOF
 
