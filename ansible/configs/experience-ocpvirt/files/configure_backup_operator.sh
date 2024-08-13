@@ -25,7 +25,7 @@ metadata:
   name: redhat-oadp-operator-subscription
   namespace: openshift-adp
 spec:
-  channel: "stable-1.2"
+  channel: stable-1.4
   name: redhat-oadp-operator
   source: redhat-operators
   sourceNamespace: openshift-marketplace
