@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 import requests
 import urllib3
 from ansible.module_utils.basic import AnsibleModule
