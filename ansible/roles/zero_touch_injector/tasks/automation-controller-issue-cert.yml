@@ -1,0 +1,91 @@
+---
+
+- name: Set Automation Controller hostname
+  ansible.builtin.set_fact:
+    _internal_aap_controller_hostname: >-
+      localhost{{
+      ':' + zero_touch_injector_automation_controller_nginx_https_port | string
+      if zero_touch_injector_automation_controller_nginx_https_port is defined
+      }}
+    _external_aap_controller_hostname: >-
+      {{ zero_touch_injector_automation_controller_fqdn }}{{
+      ':' + zero_touch_injector_automation_controller_nginx_https_port | string
+      if zero_touch_injector_automation_controller_nginx_https_port is defined
+      }}
+
+- name: Make sure Ansible Automation Controller is online before changing Controller base URL
+  ansible.builtin.service:
+    name: automation-controller.service
+    state: started
+  register: r_start_controller
+  until: r_start_controller is not failed
+  retries: 5
+
+- name: Check Ansible Automation Controller status
+  ansible.builtin.shell: |
+    curl \
+      --user '{{ zero_touch_injector_automation_controller_username }}:{{ zero_touch_injector_automation_controller_password }}' \
+      -vkL -XGET https://{{ _internal_aap_controller_hostname }}/api/v2/ping/
+  register: r_check2
+
+- name: Display /api/v2/ping results (stdout)
+  ansible.builtin.debug:
+    msg: '{{ r_check2.stdout }}'
+
+- name: Display /api/v2/ping results (stderr)
+  ansible.builtin.debug:
+    msg: '{{ r_check2.stderr }}'
+
+- name: Change Base url
+  awx.awx.settings:
+    name: TOWER_URL_BASE
+    value: "https://{{ _external_aap_controller_hostname }}"
+    tower_verify_ssl: false
+    tower_host: "https://{{ _internal_aap_controller_hostname }}/"
+    tower_username: "{{ zero_touch_injector_automation_controller_username }}"
+    tower_password: "{{ zero_touch_injector_automation_controller_password }}"
+  register: r_change_base_url
+  until: r_change_base_url is not failed
+  retries: 12
+  delay: 5
+
+- name: Ensure Ansible Controller is stopped
+  ansible.builtin.service:
+    name: automation-controller.service
+    state: stopped
+  register: r_stop_controller
+  until: r_stop_controller is not failed
+  retries: 5
+
+- name: Issue Lets Encrypt Cert for Ansible Automation Controller
+  ansible.builtin.shell: |
+    certbot certonly \
+    --no-bootstrap \
+    --standalone \
+    -d {{ zero_touch_injector_automation_controller_fqdn }} \
+    --email ansible-network@redhat.com \
+    --noninteractive \
+    --agree-tos
+  register: r_issue_cert
+  until: r_issue_cert is not failed
+  retries: 5
+
+- name: Copy SSL key to /etc/tower/tower.key
+  ansible.builtin.copy:
+    remote_src: true
+    src: "/etc/letsencrypt/live/{{ zero_touch_injector_automation_controller_fqdn }}/privkey.pem"
+    dest: /etc/tower/tower.key
+
+- name: Copy SSL cert chain to /etc/tower/tower.cert
+  ansible.builtin.copy:
+    remote_src: true
+    src: "/etc/letsencrypt/live/{{ zero_touch_injector_automation_controller_fqdn }}/fullchain.pem"
+    dest: /etc/tower/tower.cert
+
+- name: Ensure Ansible Controller is started
+  ansible.builtin.service:
+    name: automation-controller.service
+    state: started
+  register: r_start_controller
+  until: r_start_controller is not failed
+  retries: 5
