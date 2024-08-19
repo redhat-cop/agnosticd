@@ -4,33 +4,38 @@
   ansible.builtin.command: "oc adm groups remove-users {{ item }} {{ ocp4_workload_shared_cluster_username }}"
   loop: "{{ ocp4_workload_shared_cluster_user_groups }}"
 
-- name: get all namespaces for user {{ ocp4_workload_shared_cluster_username }}
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Namespace
-    label_selectors:
-    - '!AAD'
-    - '!usernamespace.gpte.redhat.com/user-uid'
-  register: r_get_namespaces
-
-- name: remove all namespaces for user {{ ocp4_workload_shared_cluster_username }}
+- name: delete user from keycloak {{ ocp4_workload_shared_cluster_username }}
   kubernetes.core.k8s:
-    api_version: v1
-    kind: namespace
-    name: "{{ user_namespace }}"
     state: absent
-  vars:
-    user_namespace_query: >-
-      [?@.metadata.annotations."openshift.io/requester"==`{{ ocp4_workload_shared_cluster_username | to_json }}`].metadata.name
-  loop: >
-    {{ r_get_namespaces.resources | default([]) | json_query(user_namespace_query) }}
-  loop_control:
-    loop_var: user_namespace
+    definition: "{{ lookup('template', 'keycloak_user.yaml.j2') }}"
+
+- name: delete user from openshift {{ ocp4_workload_shared_cluster_username }}
+  ansible.builtin.command: |-
+    oc delete user {{ ocp4_workload_shared_cluster_username }}
+  register: this
+  failed_when: this.rc != 0 and 'not found' not in this.stderr
+  changed_when: this.rc == 0
 
 - name: remove ClusterResourceQuota
   when: ocp4_workload_shared_cluster_create_quota | bool
   kubernetes.core.k8s:
     state: absent
-    definition: "{{ lookup('template', item) | from_yaml }}"
-  loop:
-  - ./templates/cluster_resource_quota.yaml.j2
+    definition: "{{ lookup('template', 'cluster_resource_quota.yaml.j2') }}"
+
+- name: list all namespaces
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+  register: namespaces
+
+- name: delete namespaces for user {{ ocp4_workload_shared_cluster_username }}
+  when:
+    - item.metadata.annotations['openshift.io/requester'] is defined
+    - item.metadata.annotations['openshift.io/requester'] == ocp4_workload_shared_cluster_username
+  kubernetes.core.k8s:
+    state: absent
+    kind: Namespace
+    name: "{{ item.metadata.name }}"
+  loop: "{{ namespaces.resources }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
