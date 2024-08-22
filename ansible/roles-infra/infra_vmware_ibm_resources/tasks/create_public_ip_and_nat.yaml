@@ -1,0 +1,97 @@
+---
+- name: Check if Public IP exists
+  uri:
+    url: "{{ nsxt_proxy_url }}/policy/api/v1/infra/ip-pools/public-ips/ip-allocations/{{ env_type }}-{{ guid }}-{{ item.instance.hw_name }}"
+    method: GET
+    status_code: [200, 404, 500]
+    url_username: "{{ nsxt_username }}"
+    url_password: "{{ nsxt_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: _public_ip_exists
+
+- name: Request a Public IP
+  when: _public_ip_exists.status in [404,500]
+  uri:
+    url: "{{ nsxt_proxy_url }}/policy/api/v1/infra/ip-pools/public-ips/ip-allocations/{{ env_type }}-{{ guid }}-{{ item.instance.hw_name }}"
+    method: PUT
+    url_username: "{{ nsxt_username }}"
+    url_password: "{{ nsxt_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      display_name: "{{ env_type }}-{{ guid }}-{{ item.instance.hw_name }}"
+    return_content: false
+  register: _public_ip_request
+
+# On IBM NSX-T doesnt return the IP from the ip-allocations, we need to find it
+- name: Get the IP assigned
+  uri:
+    url: "{{ nsxt_proxy_url }}/policy/api/v1/infra/realized-state/realized-entities?intent_path=/infra/ip-pools/public-ips/ip-allocations/{{ env_type }}-{{ guid }}-{{ item.instance.hw_name }}"
+    method: GET
+    url_username: "{{ nsxt_username }}"
+    url_password: "{{ nsxt_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      display_name: "{{ env_type }}-{{ guid }}-{{ item.instance.hw_name }}"
+    return_content: false
+  register: _public_ip_info
+
+- name: Set the IP in a variable
+  set_fact:
+    _vm_public_ip: "{{ _public_ip_info.json.results[0]['extended_attributes'][0]['values'][0] }}"
+
+- name: Add public IP to VM guest attributes
+  community.vmware.vmware_guest_custom_attributes:
+    folder: "/Workloads/{{env_type}}-{{ guid }}"
+    name: "{{ item.instance.hw_name }}"
+    state: present
+    attributes: "{{ [{'name':'public_ip', 'value': _vm_public_ip}]  }}"
+  register: r_vmware_guest_custom_attributes
+  until: r_vmware_guest_custom_attributes is success
+  retries: 5
+  delay: 10
+
+- name: Set a new variable appending the IP to the lab public ips
+  set_fact:
+    _lab_public_ips_new: "{{ _lab_public_ips.json.expression.0.ip_addresses|default([]) + [_vm_public_ip] }}"
+
+- name: Create a DNAT configuration
+  when: _public_ip_exists.status in [404,500]
+  uri:
+    url: "{{ nsxt_proxy_url }}/policy/api/v1/infra/tier-0s/T0-workload-vcs-nsx-vcs-shared/nat/USER/nat-rules/dnat-{{ env_type }}-{{ guid }}-{{ item.instance.hw_name }}"
+    method: PUT
+    url_username: "{{ nsxt_username }}"
+    url_password: "{{ nsxt_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      display_name: "dnat-{{ env_type }}-{{ guid }}-{{ item.instance.hw_name }}"
+      action: DNAT
+      sequence_number: 100
+      destination_network: "{{ _vm_public_ip }}"
+      translated_network: "{{ item.instance.ipv4 }}"
+    return_content: true
+  register: _nat_request
+
+- name: Create a SNAT configuration
+  when: _public_ip_exists.status in [404,500]
+  uri:
+    url: "{{ nsxt_proxy_url }}/policy/api/v1/infra/tier-0s/T0-workload-vcs-nsx-vcs-shared/nat/USER/nat-rules/snat-{{ env_type }}-{{ guid }}-{{ item.instance.hw_name }}"
+    method: PUT
+    url_username: "{{ nsxt_username }}"
+    url_password: "{{ nsxt_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      display_name: "snat-{{ env_type }}-{{ guid }}-{{ item.instance.hw_name }}"
+      action: SNAT
+      sequence_number: 100
+      translated_network: "{{ _vm_public_ip }}"
+      source_network: "{{ item.instance.ipv4 }}"
+    return_content: true
+  register: _nat_request
+
+- set_fact:
+    publicips: "{{ publicips + [{'name': item.instance.hw_name, 'ip': _vm_public_ip}] }}"

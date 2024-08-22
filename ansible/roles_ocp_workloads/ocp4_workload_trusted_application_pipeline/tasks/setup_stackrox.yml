@@ -1,0 +1,96 @@
+---
+- name: Get stackrox route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: "{{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }}"
+    name: central
+  register: r_route
+
+- name: Set stackrox endpoint and url
+  ansible.builtin.set_fact:
+    _ocp4_workload_trusted_application_pipeline_central_stackrox_endpoint: "{{ r_route.resources[0].spec.host }}:443" # yamllint disable-line rule:line-length
+    _ocp4_workload_trusted_application_pipeline_centeral_stackrox_url: https://{{ r_route.resources[0].spec.host }} # yamllint disable-line rule:line-length
+
+- name: Create stackrox token
+  uri:
+    url: "{{ _ocp4_workload_trusted_application_pipeline_centeral_stackrox_url }}/v1/apitokens/generate"
+    user: admin
+    password: "{{ ocp4_workload_trusted_application_pipeline_rhacs_admin_password }}"
+    method: POST
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body: {"name":"admin", "role":"Admin"}
+  register: r_uri
+
+- name: Create vault secret for stackrox token
+  shell: |
+    oc exec vault-0 -n {{ ocp4_workload_trusted_application_pipeline_vault_namespace
+    }} -- vault kv put kv/secrets/janusidp/stackrox token={{ r_uri.json.token }}
+
+- name: Stackrox imagestream integration - add registry integration
+  uri:
+    url: "{{ _ocp4_workload_trusted_application_pipeline_centeral_stackrox_url }}/v1/imageintegrations"
+    user: admin
+    password: "{{ ocp4_workload_trusted_application_pipeline_rhacs_admin_password }}"
+    method: POST
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body: >-
+      {
+      "name": "registry-admin-quay",
+      "type": "quay",
+      "categories": ["REGISTRY"],
+      "quay": {
+      "endpoint": "{{ ocp4_workload_trusted_application_pipeline_docker_registry }}",
+      "oauthToken": "{{ lookup('agnosticd_user_data', 'quay_admin_token') }}",
+      "insecure": true,
+      "registryRobotCredentials": null
+      },
+      "skipTestIntegration": false
+      }
+
+- name: Expose registry
+  command: oc patch configs.imageregistry.operator.openshift.io/cluster --type=merge --patch '{"spec":{"defaultRoute":true}}'
+
+- name: Set up signature integration
+  when: not ocp4_workload_trusted_application_pipeline_workshop_enabled
+  block:
+  - name: Read cosign public key
+    ansible.builtin.set_fact:
+      _ocp4_workload_trusted_application_pipeline_cosign_pub: "{{ lookup('file', '/tmp/cosign.pub') | replace('\n', '\\n') }}"
+
+  - name: Stackrox imagestream integration - add signature integration
+    uri:
+      url: "{{ _ocp4_workload_trusted_application_pipeline_centeral_stackrox_url }}/v1/signatureintegrations"
+      user: admin
+      password: "{{ ocp4_workload_trusted_application_pipeline_rhacs_admin_password }}"
+      method: POST
+      force_basic_auth: true
+      validate_certs: false
+      body_format: json
+      headers:
+        Content-Type: application/json
+      body: >-
+        {
+          "name": "cosign",
+          "cosign": {
+            "publicKeys": [
+              {
+                "name": "cosign.pub",
+                "publicKeyPemEnc": "{{ _ocp4_workload_trusted_application_pipeline_cosign_pub }}"
+              }
+            ]
+          }
+        }
+    register: r_integration_response
+
+- name: Inform only policies
+  include_tasks: inform_only_policy_tasks.yml
+  loop: "{{ ocp4_workload_trusted_application_pipeline_inform_only_policies }}"

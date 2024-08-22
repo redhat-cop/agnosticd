@@ -1,0 +1,138 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Create smartvillage-operator namespace
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Namespace
+    name: "smartvillage"
+    state: present
+
+- name: Clone smartvillage-operator repository
+  ansible.builtin.git:
+    repo: https://github.com/smartabyar-smartvillage/smartvillage-operator.git
+    dest: "/tmp/smartvillage-operator"
+    # version: main
+
+# git clone https://github.com/smartabyar-smartvillage/smartabyar-smartvillage.git
+- name: Clone smartabyar-smartvillage repository
+  ansible.builtin.git:
+    repo: https://github.com/smartabyar-smartvillage/smartabyar-smartvillage.git
+    dest: "/tmp/smartabyar-smartvillage"
+    # version: main
+
+# oc apply -f smartvillage-operator/static/demo-auth-secret.yaml
+- name: Create the Secret for Auth
+  kubernetes.core.k8s:
+    state: present
+      # definition: "{{ lookup('file',
+      #  '/tmp/smartvillage-operator/static/demo-auth-secret.yaml') | from_yaml }}"
+    namespace: "smartvillage"
+    src: /tmp/smartvillage-operator/static/demo-auth-secret.yaml
+
+- name: Slurp up the sql file
+  ansible.builtin.slurp:
+    src: /tmp/smartabyar-smartvillage/src/main/resources/sql/db-create.sql
+  register: db_create
+
+# oc create configmap smartvillage-db-create --from-file smartabyar-smartvillage/src/main/resources/sql/db-create.sql
+- name: Create the ConfigMap for db sql
+  kubernetes.core.k8s:
+    state: present
+    namespace: "smartvillage"
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: smartvillage-db-create
+        namespace: "smartvillage"
+      data:
+        db-create.sql: "{{ db_create.content | b64decode }}"
+
+- name: Run `make deploy`
+  ansible.builtin.shell:
+    cmd: make deploy
+    chdir: /tmp/smartvillage-operator/
+
+# oc apply -k kustomize/overlays/sandbox/edgemongodbs/
+# oc apply -k kustomize/overlays/sandbox/edgerabbitmqs/
+# oc apply -k kustomize/overlays/sandbox/edgepostgress/
+# oc apply -k kustomize/overlays/sandbox/edgezookeepers/
+# oc apply -k kustomize/overlays/sandbox/edgesolrs/
+# oc apply -k kustomize/overlays/sandbox/scorpiobrokers/
+# oc apply -k kustomize/overlays/sandbox/iotagentjsons/
+# oc apply -k kustomize/overlays/sandbox/smartabyarsmartvillages/
+- name: Apply all manifests in the kustomize folder
+  kubernetes.core.k8s:
+    namespace: "smartvillage"
+    definition: |
+      {{ lookup('kubernetes.core.kustomize',
+      dir='https://github.com/smartabyar-smartvillage/smartvillage-operator/' + path_item) }}
+  register: openshift_gitops_result
+  ignore_errors: false
+  loop_control:
+    loop_var: path_item
+  loop:
+    - kustomize/overlays/sandbox/edgemongodbs/
+    - kustomize/overlays/sandbox/edgerabbitmqs/
+    - kustomize/overlays/sandbox/edgepostgress/
+    - kustomize/overlays/sandbox/edgezookeepers/
+    - kustomize/overlays/sandbox/edgesolrs/
+    - kustomize/overlays/sandbox/scorpiobrokers/
+    - kustomize/overlays/sandbox/iotagentjsons/
+    - kustomize/overlays/sandbox/smartabyarsmartvillages/
+
+- name: Add cluster role bindings for users
+  ansible.builtin.shell:
+    cmd: oc create clusterrolebinding smartvillage-user{{ item }} --user user{{ item }} --clusterrole smartvillage-operator-manager-role
+  register: _cluster_role_binding_result
+  ignore_errors: true
+  retries: 3
+  delay: 10
+  loop: "{{ range(1, num_users + 1) | list }}"
+
+- name: Check database schema setup
+  ansible.builtin.shell:
+    cmd: >
+      oc -n smartvillage exec pod/postgres-smartvillage-0 -- bash -c \
+      'psql -U smartvillage smartvillage < /etc/postgres/smartvillage-db-create/db-create.sql'
+  register: _db_setup_result
+  ignore_errors: true
+  retries: 3
+  delay: 10
+
+- name: Restart IoT Agent if needed
+  ansible.builtin.shell:
+    cmd: "oc -n smartvillage delete pod -l app.kubernetes.io/name=iotagent-json"
+  register: _iot_agent_restart_result
+  ignore_errors: true
+  retries: 3
+  delay: 10
+
+- name: Ensure proper labeling of smartvillage namespace
+  kubernetes.core.k8s:
+    definition:
+      kind: Namespace
+      apiVersion: v1
+      metadata:
+        name: smartvillage
+        labels:
+          visibility: users
+          access: granted
+
+- name: Print task results
+  ansible.builtin.debug:
+    msg: "{{ item }}"
+  loop:
+    - "{{ _cluster_role_binding_result.results }}"
+    - "{{ _db_setup_result.stdout }}"
+    - "{{ _iot_agent_restart_result.stdout }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

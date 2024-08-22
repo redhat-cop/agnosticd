@@ -3,10 +3,10 @@
   set_fact:
     find_ip_query: >-
       {%- if cloud_provider == 'osp' -%}
-      ansible_facts.openstack_servers[?name=='{{ _instance_name }}'].public_v4 | [0]
+      openstack_servers[?name=='{{ _instance_name }}'].public_v4 | [0]
       {%- elif cloud_provider == 'equinix_metal' -%}
-      results[].devices[?hostname=='{{ _instance_name }}'].public_ipv4[]|[0]
-      {%- elif cloud_provider == 'vmc' -%}
+      results[?hostname=='{{ _instance_name }}']|[0].ip_addresses[?public==`true` && address_family==`4`].address|[0]
+      {%- elif cloud_provider == 'vmc' or cloud_provider == 'vmware_ibm' -%}
       localhost.publicips[?name=='{{ _instance_name }}'].ip
       {%- endif -%}
 
@@ -19,6 +19,7 @@
           is {{ vars[infra_dns_inventory_var] | json_query(find_ip_query) }}
 
     - name: DNS entry ({{ _dns_state | default('present') }})
+      when: cluster_dns_server is defined
       nsupdate:
         server: >-
           {{ cluster_dns_server
@@ -35,13 +36,29 @@
         key_algorithm: "{{ ddns_key_algorithm | d('hmac-md5') }}"
         key_secret: "{{ ddns_key_secret }}"
 
+    - name: DNS entry ({{ _dns_state | default('present') }})
+      when: route53_aws_zone_id is defined
+      route53:
+        state: present
+        aws_access_key_id: "{{ route53_aws_access_key_id }}"
+        aws_secret_access_key: "{{ route53_aws_secret_access_key }}"
+        hosted_zone_id: "{{ route53_aws_zone_id }}"
+        record: "{{ _instance_name }}.{{ guid }}.{{ cluster_dns_zone }}"
+        zone: "{{ cluster_dns_zone  }}"
+        value: "{{ vars[infra_dns_inventory_var] | json_query(find_ip_query) }}"
+        type: A
+      register: _route53_record
+      retries: 10
+      delay: "{{ 60|random(start=5, step=1) }}"
+      until: _route53_record is succeeded
+
     - name: Add public_dns entry to host
       add_host:
         name: "{{ _instance_name }}"
         public_dns_name: "{{ _instance_name }}.{{ guid }}.{{ cluster_dns_zone }}"
 
     - name: DNS alternative entry ({{ _dns_state | default('present') }})
-      when: _alt_names | length > 0
+      when: cluster_dns_server is defined and _alt_names | length > 0
       loop: "{{ _alt_names }}"
       loop_control:
         loop_var: _alt_name
@@ -61,10 +78,31 @@
         key_algorithm: "{{ ddns_key_algorithm | d('hmac-md5') }}"
         key_secret: "{{ ddns_key_secret }}"
 
+    - name: DNS alternative entry ({{ _dns_state | default('present') }})
+      when: route53_aws_zone_id is defined and _alt_names | length > 0
+      loop: "{{ _alt_names }}"
+      loop_control:
+        loop_var: _alt_name
+      route53:
+        state: present
+        aws_access_key_id: "{{ route53_aws_access_key_id }}"
+        aws_secret_access_key: "{{ route53_aws_secret_access_key }}"
+        hosted_zone_id: "{{ route53_aws_zone_id }}"
+        record: "{{ _alt_name }}{{_index}}.{{ guid }}.{{ cluster_dns_zone }}"
+        zone: "{{ cluster_dns_zone  }}"
+        value: "{{ vars[infra_dns_inventory_var] | json_query(find_ip_query) }}"
+        type: A
+      register: _route53_record
+      retries: 10
+      delay: "{{ 60|random(start=5, step=1) }}"
+      until: _route53_record is succeeded
+
+
 # When state == absent, don't use inventory var (should not be needed)
 - when: _dns_state == 'absent'
   block:
     - name: DNS entry ({{ _dns_state | default('present') }})
+      when: cluster_dns_server is defined
       nsupdate:
         server: >-
           {{ cluster_dns_server
@@ -81,8 +119,23 @@
         key_secret: "{{ ddns_key_secret }}"
         state: absent
 
+    - name: DNS entry ({{ _dns_state | default('present') }})
+      when: route53_aws_zone_id is defined
+      route53:
+        state: absent
+        aws_access_key_id: "{{ route53_aws_access_key_id }}"
+        aws_secret_access_key: "{{ route53_aws_secret_access_key }}"
+        hosted_zone_id: "{{ route53_aws_zone_id }}"
+        record: "{{ _instance_name }}.{{ guid }}.{{ cluster_dns_zone }}"
+        zone: "{{ cluster_dns_zone  }}"
+        type: A
+      register: _route53_record
+      retries: 10
+      delay: "{{ 60|random(start=5, step=1) }}"
+      until: _route53_record is succeeded
+
     - name: DNS alternative entry ({{ _dns_state | default('present') }})
-      when: _alt_names | length > 0
+      when: cluster_dns_server is defined and _alt_names | length > 0
       loop: "{{ _alt_names }}"
       loop_control:
         loop_var: _alt_name
@@ -102,3 +155,21 @@
         key_algorithm: "{{ ddns_key_algorithm | d('hmac-md5') }}"
         key_secret: "{{ ddns_key_secret }}"
         state: absent
+
+    - name: DNS alternative entry ({{ _dns_state | default('present') }})
+      when: route53_aws_zone_id is defined and _alt_names | length > 0
+      loop: "{{ _alt_names }}"
+      loop_control:
+        loop_var: _alt_name
+      route53:
+        state: absent
+        aws_access_key_id: "{{ route53_aws_access_key_id }}"
+        aws_secret_access_key: "{{ route53_aws_secret_access_key }}"
+        hosted_zone_id: "{{ route53_aws_zone_id }}"
+        record: "{{ _alt_name }}{{_index}}.{{ guid }}.{{ cluster_dns_zone }}"
+        zone: "{{ cluster_dns_zone  }}"
+        type: A
+      register: _route53_record
+      retries: 10
+      delay: "{{ 60|random(start=5, step=1) }}"
+      until: _route53_record is succeeded

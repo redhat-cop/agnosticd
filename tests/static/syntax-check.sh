@@ -90,7 +90,7 @@ do_ansible_syntax() {
         if [ ! -d ${ansible_path}/workdir/${env_type} ]; then
             set +e
 
-            git clone --branch master \
+            git clone --branch devel \
                 https://github.com/ansible/workshops.git \
                 ${ansible_path}/workdir/${env_type} &> $output
 
@@ -208,7 +208,7 @@ if [[ ${baseref} ]]; then
         | uniq > ${changed_configs}
 
     while read f; do
-        for i in $(find ansible/configs/${f} -name 'sample_vars*.y*ml' | sort); do
+        for i in $(find ansible/configs/${f} ! -path "ansible/configs/archive/*" -name 'sample_vars*.y*ml' | sort); do
             do_ansible_syntax "${i}"
         done
     done < ${changed_configs}
@@ -219,12 +219,12 @@ else
     # Push
     # LONG version for push action
     ##########################################################
-    for YAMLLINT in $(find ansible -name .yamllint); do
+    for YAMLLINT in $(find ansible -name .yamllint ! -path "ansible/configs/archive/*"); do
         do_yamllint "$(dirname ${YAMLLINT})"
     done
     set -e
 
-    for i in $(find ${ORIG}/ansible/configs -name 'sample_vars*.y*ml' | sort); do
+    for i in $(find ${ORIG}/ansible/configs ! -path "${ORIG}/ansible/configs/archive/*" -name 'sample_vars*.y*ml' | sort); do
         do_ansible_syntax "${i}"
     done
 fi

@@ -2,26 +2,26 @@
 # Implement your Workload deployment tasks here
 
 - name: Setting up workload for user
-  debug:
+  ansible.builtin.debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
 - name: Only execute the role when ocp4_workload_le_certificates_install_certificates is true
   when: ocp4_workload_le_certificates_install_certificates | bool
   block:
   - name: Determine API server URL
-    k8s_info:
+    kubernetes.core.k8s_info:
       api_version: config.openshift.io/v1
       kind: Infrastructure
       name: cluster
     register: r_api_url
 
   - name: Set API Server hostname
-    set_fact:
+    ansible.builtin.set_fact:
       ocp4_workload_le_certificates_api_hostname: >-
         {{ r_api_url.resources[0].status.apiServerURL | urlsplit('hostname') }}
 
   - name: Determine Wildcard Domain
-    k8s_info:
+    kubernetes.core.k8s_info:
       api_version: operator.openshift.io/v1
       kind: IngressController
       name: default
@@ -29,17 +29,29 @@
     register: r_ingress_controller
 
   - name: Print API and Wildcard Domain
-    debug:
+    ansible.builtin.debug:
       msg: >-
         API: {{ ocp4_workload_le_certificates_api_hostname }},
-        Wildcard Domain: {{ r_ingress_controller.resources[0].status.domain }}
+        Wildcard Domain: *.{{ r_ingress_controller.resources[0].status.domain }}
 
-  - name: Get Certificates for AWS
-    when: cloud_provider == "ec2"
+  - name: Get Certificates for AWS or OpenShift Virtualization
+    when: cloud_provider in ["ec2","openshift_cnv"]
     block:
-    # /home/{{ ansible_user }}/.aws/credentials needs to exist before calling this role
-    - name: Create Let's Encrypt Certificates for AWS
-      include_role:
+    - name: Create AWS credentials file with Route53 credentials for certificate renewals using certbot
+      ansible.builtin.blockinfile:
+        dest: "~{{ ansible_user }}/.aws/credentials"
+        create: true
+        mode: "0640"
+        owner: "{{ ansible_user }}"
+        content: |
+          [default]
+          # {{ ocp4_workload_le_certificates_ec2_route53_user }}
+          # Route53 credentials for Certbot Let's Encrypt renewal
+          aws_access_key_id = {{ ocp4_workload_le_certificates_ec2_access_key_id }}
+          aws_secret_access_key = {{ ocp4_workload_le_certificates_ec2_secret_access_key }}
+
+    - name: Create Let's Encrypt Certificates for AWS or OpenShift Virtualization
+      ansible.builtin.include_role:
         name: host-lets-encrypt-certs-certbot
       vars:
       - _certbot_domain: "{{ ocp4_workload_le_certificates_api_hostname }}"
@@ -49,7 +61,7 @@
       - _certbot_remote_dir_owner: "{{ ansible_user }}"
       - _certbot_install_dir: "/home/{{ ansible_user }}/certificates"
       - _certbot_install_dir_owner: "{{ ansible_user }}"
-      - _certbot_cache_archive_file: "{{ output_dir|default('/tmp') }}/{{ guid }}-certs.tar.gz"
+      - _certbot_cache_archive_file: "{{ output_dir | default('/tmp') }}/{{ guid }}-certs.tar.gz"
       - _certbot_renew_automatically: true
       - _certbot_use_cache: true
       - _certbot_force_issue: false
@@ -58,19 +70,20 @@
       - use_python3: "{{ all_use_python3 | default(true) | bool }}"
       # production false results in unusable certificates
       # (not possible to login to OCP)
-      # - _certbot_production: "{{ lets_encrypt_production|default(False)|bool}}"
+      # - _certbot_production: "{{ lets_encrypt_production | default(false) | bool}}"
 
   - name: Get Certificates for Azure
     when: cloud_provider == "azure"
     block:
     - name: Copy credentials to host temporarily
-      template:
+      ansible.builtin.template:
         src: ./templates/azure.ini.j2
         dest: /home/{{ ansible_user }}/.azure.ini
         owner: "{{ ansible_user }}"
+        mode: "0664"
 
     - name: Create Let's Encrypt Certificates for Azure
-      include_role:
+      ansible.builtin.include_role:
         name: host-lets-encrypt-certs-certbot
       vars:
       - _certbot_domain: "{{ ocp4_workload_le_certificates_api_hostname }}"
@@ -80,7 +93,7 @@
       - _certbot_remote_dir_owner: "{{ ansible_user }}"
       - _certbot_install_dir: "/home/{{ ansible_user }}/certificates"
       - _certbot_install_dir_owner: "{{ ansible_user }}"
-      - _certbot_cache_archive_file: "{{ output_dir|default('/tmp') }}/{{ guid }}-certs.tar.gz"
+      - _certbot_cache_archive_file: "{{ output_dir | default('/tmp') }}/{{ guid }}-certs.tar.gz"
       - _certbot_renew_automatically: true
       - _certbot_use_cache: true
       - _certbot_force_issue: false
@@ -92,7 +105,7 @@
     when: cloud_provider == "gcp"
     block:
     - name: Create Let's Encrypt Certificates for GCP
-      include_role:
+      ansible.builtin.include_role:
         name: host-lets-encrypt-certs-certbot
       vars:
       - _certbot_domain: "{{ ocp4_workload_le_certificates_api_hostname }}"
@@ -102,7 +115,7 @@
       - _certbot_remote_dir_owner: "{{ ansible_user }}"
       - _certbot_install_dir: "/home/{{ ansible_user }}/certificates"
       - _certbot_install_dir_owner: "{{ ansible_user }}"
-      - _certbot_cache_archive_file: "{{ output_dir|default('/tmp') }}/{{ guid }}-certs.tar.gz"
+      - _certbot_cache_archive_file: "{{ output_dir | default('/tmp') }}/{{ guid }}-certs.tar.gz"
       - _certbot_renew_automatically: true
       - _certbot_use_cache: true
       - _certbot_force_issue: false
@@ -111,16 +124,17 @@
       - use_python3: "{{ all_use_python3 | default(true) | bool }}"
 
   - name: Get Certificates for OpenStack
-    when: cloud_provider == "osp"
+    when: cloud_provider in ["osp"]
     block:
     - name: Copy credentials to host temporarily
-      template:
+      ansible.builtin.template:
         src: ./templates/rfc2136.ini.j2
         dest: /home/{{ ansible_user }}/.rfc2136.ini
         owner: "{{ ansible_user }}"
+        mode: "0664"
 
-    - name: Create Let's Encrypt Certificates for OpenStack
-      include_role:
+    - name: Create Let's Encrypt Certificates for OpenStack or OpenShift Virtualization
+      ansible.builtin.include_role:
         name: host-lets-encrypt-certs-certbot
       vars:
       - _certbot_domain: "{{ ocp4_workload_le_certificates_api_hostname }}"
@@ -130,7 +144,7 @@
       - _certbot_remote_dir_owner: "{{ ansible_user }}"
       - _certbot_install_dir: "/home/{{ ansible_user }}/certificates"
       - _certbot_install_dir_owner: "{{ ansible_user }}"
-      - _certbot_cache_archive_file: "{{ output_dir|default('/tmp') }}/{{ guid }}-certs.tar.gz"
+      - _certbot_cache_archive_file: "{{ output_dir | default('/tmp') }}/{{ guid }}-certs.tar.gz"
       - _certbot_renew_automatically: true
       - _certbot_use_cache: true
       - _certbot_force_issue: false
@@ -139,10 +153,10 @@
       - use_python3: "{{ all_use_python3 | default(true) | bool }}"
       # production false results in unusable certificates
       # (not possible to login to OCP)
-      # - _certbot_production: "{{ lets_encrypt_production|default(False)|bool}}"
+      # - _certbot_production: "{{ lets_encrypt_production | default(false) | bool }}"
 
     - name: Remove credentials once LE certs have been created
-      file:
+      ansible.builtin.file:
         state: absent
         path: /home/{{ ansible_user }}/.rfc2136.ini
       when: _certbot_setup_complete
@@ -151,13 +165,14 @@
     when: cloud_provider == "vmc"
     block:
     - name: Copy credentials to host temporarily
-      template:
+      ansible.builtin.template:
         src: ./templates/rfc2136.ini.j2
         dest: /home/{{ ansible_user }}/.rfc2136.ini
         owner: "{{ ansible_user }}"
+        mode: "0664"
 
     - name: Create Let's Encrypt Certificates for VMC
-      include_role:
+      ansible.builtin.include_role:
         name: host-lets-encrypt-certs-certbot
       vars:
       - _certbot_domain: "{{ ocp4_workload_le_certificates_api_hostname }}"
@@ -167,7 +182,7 @@
       - _certbot_remote_dir_owner: "{{ ansible_user }}"
       - _certbot_install_dir: "/home/{{ ansible_user }}/certificates"
       - _certbot_install_dir_owner: "{{ ansible_user }}"
-      - _certbot_cache_archive_file: "{{ output_dir|default('/tmp') }}/{{ guid }}-certs.tar.gz"
+      - _certbot_cache_archive_file: "{{ output_dir | default('/tmp') }}/{{ guid }}-certs.tar.gz"
       - _certbot_renew_automatically: true
       - _certbot_use_cache: true
       - _certbot_force_issue: false
@@ -176,32 +191,32 @@
       - use_python3: "{{ all_use_python3 | default(true) | bool }}"
 
     - name: Remove credentials once LE certs have been created
-      file:
+      ansible.builtin.file:
         state: absent
         path: /home/{{ ansible_user }}/.rfc2136.ini
       when: _certbot_setup_complete
 
 
   - name: Install redeploy hook scripts
-    template:
+    ansible.builtin.template:
       src: ./templates/deploy_certs.sh.j2
       dest: "/home/{{ ansible_user }}/certbot/renewal-hooks/deploy/deploy_certs.sh"
       owner: "{{ ansible_user }}"
-      mode: 0775
+      mode: "0775"
 
   - name: Install redeploy hook playbook
-    copy:
+    ansible.builtin.copy:
       src: "./files/deploy_certs.yaml"
       dest: "/home/{{ ansible_user }}/certbot/renewal-hooks/deploy/deploy_certs.yaml"
       owner: "{{ ansible_user }}"
-      mode: 0664
+      mode: "0664"
 
   - name: Install redeploy hook templates
-    copy:
+    ansible.builtin.copy:
       src: "./templates/{{ item }}"
       dest: "/home/{{ ansible_user }}/certbot/renewal-hooks/deploy/{{ item }}"
       owner: "{{ ansible_user }}"
-      mode: 0664
+      mode: "0664"
     loop:
     - api-certificate-secret.j2
     - api-server-with-certificates.j2
@@ -209,47 +224,47 @@
     - ingress-controller-with-certificates.j2
 
   - name: Read Certificate
-    slurp:
+    ansible.builtin.slurp:
       src: "/home/{{ ansible_user }}/certificates/fullchain.pem"
     register: server_cert
 
   - name: Read Key
-    slurp:
+    ansible.builtin.slurp:
       src: "/home/{{ ansible_user }}/certificates/privkey.pem"
     register: server_key
 
   - name: Ensure Ansible Date/Time Facts are set
-    setup:
+    ansible.builtin.setup:
       filter: "ansible_date_time*"
 
   - name: Set certificate secret names
-    set_fact:
+    ansible.builtin.set_fact:
       ocp4_workload_le_certificates_ingress_controller_certificate_secret_name: >-
         ingress-certs-{{ ansible_date_time.date }}
       ocp4_workload_le_certificates_api_certificate_secret_name: "api-certs-{{ ansible_date_time.date }}"
 
   - name: Create ingress controller certificate secret
-    k8s:
+    kubernetes.core.k8s:
       state: present
-      definition: "{{ lookup('template', './templates/ingress-controller-certificate-secret.j2' ) | from_yaml }}"
+      definition: "{{ lookup('template', './templates/ingress-controller-certificate-secret.j2') | from_yaml }}"
 
   - name: Update Ingress Controller for new certificate secret
-    k8s:
+    kubernetes.core.k8s:
       state: present
-      definition: "{{ lookup('template', './templates/ingress-controller-with-certificates.j2' ) | from_yaml }}"
+      definition: "{{ lookup('template', './templates/ingress-controller-with-certificates.j2') | from_yaml }}"
 
   - name: Install API Certificates
     when: ocp4_workload_le_certificates_install_api | bool
     block:
     - name: Create API certificate secret
-      k8s:
+      kubernetes.core.k8s:
         state: present
-        definition: "{{ lookup('template', './templates/api-certificate-secret.j2' ) | from_yaml }}"
+        definition: "{{ lookup('template', './templates/api-certificate-secret.j2') | from_yaml }}"
 
     - name: Update API Server to use new certificates
-      k8s:
+      kubernetes.core.k8s:
         state: present
-        definition: "{{ lookup('template', './templates/api-server-with-certificates.j2' ) | from_yaml }}"
+        definition: "{{ lookup('template', './templates/api-server-with-certificates.j2') | from_yaml }}"
 
     # It takes about 4 minutes per API Server to
     # restart with certificates (due to AWS
@@ -258,12 +273,12 @@
     # cluster operator enough time to progress.
     # Wait time may be extended if it's needed
     - name: Wait for some time for all APIservers to be back up (default 12 minutes)
-      pause:
+      ansible.builtin.pause:
         minutes: "{{ ocp4_workload_le_certificates_wait_after_cert_setup }}"
 
     - name: Find all Kube Configs
       become: true
-      find:
+      ansible.builtin.find:
         file_type: file
         hidden: true
         paths:
@@ -276,13 +291,13 @@
 
     - name: Fix Kube Configs
       become: true
-      replace:
+      ansible.builtin.replace:
         path: "{{ item.path }}"
         regexp: "^ +certificate-authority-data:.*"
-      loop: "{{r_config_files.files}}"
+      loop: "{{ r_config_files.files }}"
 
     - name: Make sure API Calls succeed
-      k8s_info:
+      kubernetes.core.k8s_info:
         api_version: config.openshift.io/v1
         kind: Ingress
         name: cluster
@@ -294,12 +309,12 @@
   rescue:
   - name: Fail if certificates are required
     when: ocp4_workload_le_certificates_failure_is_fatal | bool
-    fail:
+    ansible.builtin.fail:
       msg: >-
         Let's Encrypt certificate workload failed.
 
 # Leave this as the last task in the playbook.
-- name: workload tasks complete
-  debug:
-    msg: "Workload Tasks completed successfully."
+- name: Workload tasks complete
   when: not silent | bool
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."

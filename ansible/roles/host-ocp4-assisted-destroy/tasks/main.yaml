@@ -1,0 +1,76 @@
+---
+- name: Log in (obtain access token)
+  community.okd.openshift_auth:
+    username: "{{ sandbox_openshift_username }}"
+    password: "{{ sandbox_openshift_password }}"
+    host: "{{ sandbox_openshift_api_url }}"
+  register: k8s_auth_results
+  when: sandbox_openshift_username | default(false)
+
+- name: Destroy OCP using Assisted Installed
+  module_defaults:
+    group/k8s:
+      host: "{{ sandbox_openshift_api_url }}"
+      api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+      validate_certs: false
+
+  block:
+    - name: Create a job to cleanup Ceph
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'templates/cleanup-ceph.yaml.j2') }}"
+        wait: true
+        wait_timeout: 300
+
+    - name: Delete dns records
+      when: cluster_dns_server is defined
+      ansible.builtin.nsupdate:
+        server: >-
+          {{ cluster_dns_server
+          | ipaddr
+          | ternary(cluster_dns_server, lookup('dig', cluster_dns_server))
+          }}
+        zone: "{{ cluster_dns_zone }}"
+        record: "{{ item }}.{{ cluster_name}}"
+        type: A
+        ttl: 30
+        port: "{{ cluster_dns_port | d('53') }}"
+        key_name: "{{ ddns_key_name }}"
+        key_secret: "{{ ddns_key_secret }}"
+        state: absent
+      loop:
+        - "api"
+        - "*.apps"
+
+    - name: DNS entry ({{ _dns_state | default('present') }})
+      when: route53_aws_zone_id is defined
+      route53:
+        state: absent
+        aws_access_key_id: "{{ route53_aws_access_key_id }}"
+        aws_secret_access_key: "{{ route53_aws_secret_access_key }}"
+        hosted_zone_id: "{{ route53_aws_zone_id }}"
+        record: "{{ item }}.{{ cluster_name }}.{{ cluster_dns_zone }}"
+        zone: "{{ cluster_dns_zone  }}"
+        type: A
+      loop:
+        - "api"
+        - "*.apps"
+
+    - name: Get a list of clusters
+      rhpds.assisted_installer.list_clusters:
+        offline_token: "{{ ai_offline_token }}"
+        owner: true
+      register: listclusters
+
+    - name: Filter the created clusters
+      ansible.builtin.set_fact:
+        cluster_id: "{{ item.id }}"
+      when: item.name == cluster_name
+      loop: "{{ listclusters.result }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Remove Assisted Installer Cluster
+      rhpds.assisted_installer.delete_cluster:
+        cluster_id: "{{ cluster_id }}"
+        offline_token: "{{ ai_offline_token }}"
+      when: cluster_id |default(false)

@@ -1,0 +1,82 @@
+---
+- name: Init AWS account for ROSA
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa init
+
+- name: Get available ROSA regions
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa list regions --output json
+  register: r_rosa_regions
+
+- name: Filter regions that support ROSA with Hosted Control Planes
+  set_fact:
+    _rosa_hcp_regions: >-
+      {{ r_rosa_regions.stdout | from_json | json_query(query) }}
+  vars:
+    query: "[?supports_hypershift == `true`].id"
+
+- name: Get available ROSA versions
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa list versions --output json
+    {% if rosa_deploy_hcp | bool %}--hosted-cp{% endif %}
+  register: r_rosa_versions
+
+- name: Set default ROSA version
+  when:
+  - rosa_version == "default"
+  ansible.builtin.set_fact:
+    _rosa_version_to_install: ""
+    _rosa_ocp_cli_version: >-
+      {{ (r_rosa_versions.stdout | from_json | json_query(_query)) [0].raw_id }}
+  vars:
+    _query: "[? hosted_control_plane_default==`true` || default==`true` ]"
+
+- name: Set ROSA version to install specific version
+  when:
+  - rosa_version not in ("default", "latest", "latest-upgrade")
+  ansible.builtin.set_fact:
+    _rosa_version_to_install: "{{ rosa_version }}"
+    _rosa_ocp_cli_version: "{{ rosa_version }}"
+
+- name: Set ROSA version to latest available for {{ rosa_version_base }}
+  when: rosa_version == "latest"
+  vars:
+    _query: "[?starts_with(id, '{{ rosa_version_base }}')] | [0]"
+    _latest_version: "{{ r_rosa_versions.stdout | from_json | community.general.json_query(_query) }}"
+  ansible.builtin.set_fact:
+    _rosa_version_to_install: "{{ _latest_version.raw_id }}"
+    _rosa_ocp_cli_version: "{{ _latest_version.raw_id }}"
+
+- name: Set ROSA version to latest upgradable version available for {{ rosa_version_base }}
+  when: rosa_version == "latest-upgrade"
+  vars:
+    _query: "[?starts_with(id, '{{ rosa_version_base }}') && available_upgrades != `null`] | [0]"
+    _latest_upgrade_version: "{{ r_rosa_versions.stdout | from_json | community.general.json_query(_query) }}"
+  block:
+  - name: Fail if no upgradable version was found for {{ rosa_version_base }}
+    when: _latest_upgrade_version | default("") == ""
+    fail:
+      msg: "No upgradable version found for {{ rosa_version_base }}"
+
+  - name: Set upgradable version facts
+    ansible.builtin.set_fact:
+      _rosa_version_to_install: "{{ _latest_upgrade_version.raw_id }}"
+      _rosa_ocp_cli_version: "{{ _latest_upgrade_version.raw_id }}"
+      _rosa_version_next: "{{ _latest_upgrade_version.available_upgrades[0] }}"
+
+  rescue:
+  - name: Fallback to latest ROSA version available for {{ rosa_version_base }}
+    vars:
+      _query: "[?starts_with(id, '{{ rosa_version_base }}')] | [0]"
+      _latest_version: "{{ r_rosa_versions.stdout | from_json | community.general.json_query(_query) }}"
+    ansible.builtin.set_fact:
+      _rosa_version_to_install: "{{ _latest_version.raw_id }}"
+      _rosa_ocp_cli_version: "{{ _latest_version.raw_id }}"
+
+- name: Print ROSA version to install
+  ansible.builtin.debug:
+    msg: "{{ item }}"
+  loop:
+  - "ROSA Version to be installed: {{ _rosa_version_to_install }}"
+  - "ROSA Version available to be upgraded to: {{ _rosa_version_next | default('not set') }}"
+  - "OCP CLI to be installed: {{ _rosa_ocp_cli_version}}"

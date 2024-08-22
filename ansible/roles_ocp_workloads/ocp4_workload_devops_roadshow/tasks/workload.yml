@@ -1,0 +1,179 @@
+---
+- name: Get Ingress from Cluster
+  k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+    namespace: openshift-ingress
+  register: ingress
+
+- name: Get sub_domain from ingress
+  set_fact:
+    sub_domain: "{{ ingress | json_query('resources[0].spec.domain')}}"
+
+- name: Create cluster-admins group
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: user.openshift.io/v1
+      kind: Group
+      metadata:
+        name: cluster-admins
+      users:
+        - admin
+        - opentlc-mgr
+
+- name: Create openshift-gitops-operator namespace
+  kubernetes.core.k8s:
+    name: openshift-gitops-operator
+    api_version: v1
+    kind: Namespace
+    state: present
+
+- name: Create Operator Group
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      api_version: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: gitops
+        namespace: openshift-gitops-operator
+      spec:
+        upgradeStrategy: Default
+
+- name: deploy-gitops-operator
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'gitops-operator/' + item) | from_yaml }}"
+  with_items:
+    - application-controller-rolebinding.yaml
+    - controller-managedby-rbac-view.yaml
+    - controller-managedby-rbac-admin.yaml
+    - controller-managedby-rbac-controller.yaml
+    - server-managedby-rbac.yaml
+    - subscription.yaml
+
+- name: Wait until the openshift-gitops namespace is created
+  kubernetes.core.k8s_info:
+    kind: Namespace
+    wait: true
+    name: openshift-gitops
+    wait_sleep: 10
+    wait_timeout: 360
+
+- name: Wait for deployments
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    wait: true
+    name: "{{ item }}"
+    namespace: openshift-gitops
+    wait_sleep: 5
+    wait_timeout: 120
+  with_items:
+    - cluster
+    - openshift-gitops-server
+    - openshift-gitops-repo-server
+    - openshift-gitops-redis
+
+# Test that oc is working and if not wait until it does (600s total, 10 minutes)
+- name: Wait for OpenShift API to be up and working
+  command: "oc status"
+  retries: 20
+  delay: 30
+  register: result
+  until: result.rc == 0
+
+- name: Check that all deployments are up and running
+  command: "oc rollout status deployment {{ item }} -n openshift-gitops"
+  with_items:
+    - cluster
+    - openshift-gitops-redis
+    - openshift-gitops-repo-server
+    - openshift-gitops-server
+  retries: 20
+  delay: 20
+
+- name: Give application-controller cluster-admin permissions
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'gitops-operator/application-controller-rolebinding.yaml') | from_yaml }}"
+
+- name: Deploy gitops instance plugin
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'gitops-instance/setenv-cmp-plugin-cm.yaml') | from_yaml }}"
+
+- name: Update openshift-gitops-instance
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'argocd-cr.yaml.j2') }}"
+
+- name: Patch out sso if its still there
+  k8s:
+    definition:
+      apiVersion: argoproj.io/v1beta1
+      kind: ArgoCD
+      metadata:
+        name: openshift-gitops
+        namespace: openshift-gitops
+      spec:
+        sso: null
+  ignore_errors: true
+
+- name: Sleep for 10 seconds
+  wait_for:
+    timeout: 10
+
+- name: Check that all deployments are up and running
+  command: "oc rollout status deployment {{ item }} -n openshift-gitops"
+  with_items:
+    - cluster
+    - openshift-gitops-redis
+    - openshift-gitops-repo-server
+    - openshift-gitops-server
+  retries: 3
+  delay: 5
+  until: result is not failed
+
+- name: Deploy appprojects
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'appprojects/' + item) | from_yaml }}"
+  with_items:
+    - cluster-config.yaml
+    - users.yaml
+
+- name: Deploy infra applications
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'applications/' + item) | from_yaml }}"
+  with_items:
+    - app-of-app.yaml
+
+# Todo: Check health of apps
+- name: Wait 30 seconds for deployment
+  wait_for:
+    timeout: 30
+
+- name: Deploy users ApplicationSet
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'user-appset.yaml.j2') }}"
+
+- name: Output user information for workshop
+  agnosticd_user_info:
+    user: "user{{ n }}"
+    data:
+      user: "user{{ n }}"
+      password: "{{ ocp4_workload_authentication_htpasswd_user_password }}"
+      lab_guide_link: "https://openshiftdemos.github.io/argo-rollouts-workshop/argo-rollouts-workshop/main/index.html?USERNUM={{ n }}"
+  loop: "{{ range(1, num_users | int + 1) | list }}"
+  loop_control:
+    loop_var: n
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

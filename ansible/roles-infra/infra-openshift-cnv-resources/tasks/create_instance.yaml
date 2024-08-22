@@ -1,0 +1,168 @@
+---
+- name: Empty variable _instance_
+  ansible.builtin.set_fact:
+    _instance_interfaces: []
+    _instance_networks: []
+    _instance_volumes:
+      - dataVolume:
+          name: "INSTANCENAME-{{guid}}"
+        name: "INSTANCENAME-{{guid}}"
+    _instance_disks:
+      - disk:
+          bus: "{{ _instance.disk_type | default('virtio') }}"
+        name: "INSTANCENAME-{{guid}}"
+
+- name: Set the instances interfaces
+  ansible.builtin.set_fact:
+    _instance_interfaces: >-
+      {{
+        _instance_interfaces + [{
+          'name': _network,
+          'macAddress': _instance.fixed_macs[_network] | default('2c:c2:60' | random_mac),
+          'bridge': {},
+          'model': 'e1000e',
+          'pciAddress': '0000:00:0' + (_network_idx + 3) | string + '.0'
+        }
+        if _network != 'default'
+        else {
+          'name': 'default',
+          'model': 'e1000e',
+          'pciAddress': '0000:00:0' + (_network_idx + 3) | string + '.0',
+          'masquerade': {}
+        }]
+      }}
+    _instance_networks: >-
+      {{ _instance_networks + [
+          {
+              'name': _network,
+              'multus': {'networkName': _network + guid}
+          }
+          if _network != 'default'
+          else {
+              'name': 'default',
+              'pod': {}
+          }
+      ] }}
+  loop: "{{ _instance.networks | default(['default']) | list }}"
+  loop_control:
+    loop_var: _network
+    index_var: _network_idx
+
+- name: Set the instances disks
+  ansible.builtin.set_fact:
+    _instance_disks: "{{ _instance_disks | from_yaml + [
+    {
+        'name': _disk.metadata.name,
+        'disk': {'bus': _instance.disk_type | default('virtio')}
+    }
+    ] }}"
+    _instance_volumes: "{{ _instance_volumes | from_yaml + [
+        {
+            'name': _disk.metadata.name,
+            'dataVolume': {'name': _disk.metadata.name}
+        }
+    ] }}"
+  loop: "{{ _instance.disks | default([]) | list }}"
+  loop_control:
+    loop_var: _disk
+
+
+- name: Set cloud_config
+  ansible.builtin.set_fact:
+    _cloud_config: |-
+        #cloud-config
+        ssh_authorized_keys:
+        - {{ lookup('file', ssh_provision_pubkey_path ) }}
+        {{_instance.userdata|default('')|replace('#cloud-config','')|default('')}}
+
+- name: Set cloud init disk if needed
+  set_fact:
+    _instance_volumes: "{{ _instance_volumes | from_yaml + [
+        {
+            'name': 'cloudinitdisk',
+            'cloudInitNoCloud': {
+                'userDataBase64': _cloud_config | b64encode,
+                'networkDataBase64': _instance.networkdata | default('network: 2') | b64encode
+            }
+        }
+    ] }}"
+    _instance_disks: "{{ _instance_disks | from_yaml + [
+        {
+            'disk': {'bus': 'virtio'},
+            'name': 'cloudinitdisk'
+        }
+    ] }}"
+
+
+- name: Create instance(s) "{{ _instance.name }}"
+  vars:
+    _instance_name: "{{ _instance.name }}{{ _index+1 if _instance.count|d(1)|int > 1 }}"
+    _datavolume:
+      - metadata:
+          name: "{{ _instance_name }}-{{ guid }}"
+        spec:
+          source:
+            pvc:
+              namespace: "cnv-images"
+              name: "{{ _instance.image }}"
+          pvc:
+            accessModes:
+              - ReadWriteMany
+            volumeMode: Block
+            resources:
+              requests:
+                storage: "{{ _instance.image_size }}"
+    _spec: |
+      domain:
+        firmware:
+          uuid: "{{ 99999999 | random | to_uuid }}"
+        cpu:
+          cores: {{ _instance.cores }}
+          model: host-passthrough
+        machine:
+          type: "{{ _instance.machine_type | default('pc-q35-rhel9.2.0') }}"
+        memory:
+          guest: "{{ _instance.memory }}"
+          memory:
+            hugepages:
+              pageSize: "1Gi"
+        resources:
+          overcommitGuestOverhead: true
+          requests:
+            memory: "{{ ((_instance.memory |  regex_replace('[^0-9]') | int) / 2)|int|string + (_instance.memory |  regex_replace('[0-9]')) }}"
+            #memory: "{{ _instance.memory }}"
+        devices:
+          disks: {{ _instance_disks | replace('INSTANCENAME', _instance_name) }}
+          interfaces: {{ _instance_interfaces }}
+      networks: {{ _instance_networks }}
+      volumes: {{ _instance_volumes | replace('INSTANCENAME', _instance_name) }}
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: VirtualMachine
+      metadata:
+        name: "{{ _instance_name }}"
+        namespace: "{{ openshift_cnv_namespace }}"
+        annotations: >-
+          {{ cloud_tags_final
+          | combine(_instance.metadata|default({})) | combine(_instance.tags|default({}) | ec2_tags_to_dict) }}
+      spec:
+        dataVolumeTemplates: >-
+         {{ _datavolume + (_instance.disks | default([]) | to_json | replace('INSTANCENAME',_instance_name) | from_json)  }}
+        running: true
+        template:
+          metadata:
+            labels:
+              vm.cnv.io/name: "{{ _instance_name }}"
+          spec: "{{ _spec | from_yaml }}"
+  loop: "{{ range(1, _instance.count|default(1)|int+1) | list }}"
+  loop_control:
+    index_var: _index
+  register: r_openshift_cnv_instance
+  until: r_openshift_cnv_instance is success
+  retries: "{{ openshift_cnv_retries }}"
+  delay: "{{ openshift_cnv_delay }}"
+
+- ansible.builtin.set_fact:
+    r_openshift_cnv_instances: "{{ r_openshift_cnv_instances + [item] }}"
+  loop: "{{ r_openshift_cnv_instance.results | list }}"

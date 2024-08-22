@@ -9,12 +9,16 @@
     fail_msg: ocp4_pull_secret variable must be defined
     success_msg: ocp4_pull_secret variable is defined
 
-- name: Ensure ansible module requirements are installed
-  ansible.builtin.pip:
-    name: kubernetes, passlib
+- name: Fail if tower-license-manifest var is empty
+  ansible.builtin.assert:
+    that:
+      - controller_manifest.url is defined
+      - controller_manifest.url | default("") | length > 0
+    fail_msg: controller_manifest.url variable must be defined
+    success_msg: controller_manifest.url variable is defined
 
 - name: Find an extra disk for libvirt folder
-  set_fact:
+  ansible.builtin.set_fact:
     _disks: "{{ _disks|default([]) + [ item ] }}"
     _diskname: "{{ '/dev/' + item.key }}"
   when:
@@ -43,6 +47,12 @@
   when:
     - _diskname is defined
 
+- name: Create /var/lib/libvirt directory if it does not exist
+  ansible.builtin.file:
+    path: /var/lib/libvirt
+    state: directory
+    mode: '0755'
+
 - name: Mount up device in /var/lib/libvirt
   ansible.posix.mount:
     path: /var/lib/libvirt
@@ -56,14 +66,6 @@
   ansible.builtin.shell:
     cmd: restorecon /var/lib/libvirt
 
-#- name: Ensure kcli copr repo is enabled
-#  community.general.copr:
-#    state: enabled
-#    host: copr.fedorainfracloud.org
-#    chroot: epel-8-x86_64
-#    name: karmab/kcli
-
-# group all dnf installs in the same task to save time
 - name: Ensure lab dependencies are installed
   ansible.builtin.dnf:
     name:
@@ -76,12 +78,48 @@
       - podman
       - httpd-tools
       - haproxy
+      - pip
     state: present
+
+- name: Ensure required Python modules are installed
+  ansible.builtin.pip:
+    name: kubernetes, passlib, pyopenssl, cherrypy, firewall
 
 - name: Ensure kcli rpm is installed
   ansible.builtin.dnf:
     name: "{{ kcli_rpm }}"
     disable_gpg_check: true
+
+#- name: Add the RHEL9 Beta repo for QEMU SR-IOV support
+#  ansible.builtin.shell:
+#    cmd: >
+#      grep -Pzo '\[rhel-9-for-x86_64-appstream-rpms\]\n(?:.|\n)*?(?=\n\[|$)' /etc/yum.repos.d/redhat.repo
+#      | sed "s|content/dist|content/beta|g"
+#      | sed "s|name = .*|name = Red Hat Enterprise Linux 9 for x86_64 - AppStream Beta (RPMs)|g"
+#      | sed "s|appstream-rpms|appstream-beta-rpms|g" | tr -d '\0'
+#      | sudo tee /etc/yum.repos.d/rhel9-appstream-beta.repo
+
+- name: Add CentOS Stream 9 repository to upgrade QEMU KVM
+  ansible.builtin.yum_repository:
+    name: centos-stream-9-appstream
+    description: CentOS Stream 9 AppStream
+    baseurl: https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/
+    gpgcheck: false
+    enabled: true
+
+- name: Upgrade QEMU from BETA for SR-IOV support
+  ansible.builtin.dnf:
+    name:
+      - qemu-kvm
+    state: latest
+    update_only: true
+
+- name: Remove the CentOS Stream 9 repo
+  ansible.builtin.yum_repository:
+    name: centos-stream-9-appstream
+    enabled: false
+    state: absent
+    gpgcheck: false
 
 - name: Ensure libvirtd service is enabled and running
   ansible.builtin.systemd:
@@ -91,19 +129,23 @@
     name: libvirtd
 
 - name: Ensure default image pool is present
-  ansible.builtin.shell:
+  ansible.builtin.command:
     cmd: kcli create pool -p /var/lib/libvirt/images default
 
 - name: Ensure default network is present
-  ansible.builtin.shell:
+  ansible.builtin.command:
     cmd: kcli create network -c 192.168.122.0/24 default
 
 - name: Ensure lab network is present
-  ansible.builtin.shell:
-    cmd: "kcli create network -c {{ lab_network_cidr }} --nodhcp --domain {{ lab_network_domain }} 5gdeploymentlab"
+  ansible.builtin.command:
+    cmd: "kcli create network -c {{ lab_network_cidr }} -P dhcp=false -P dns=false --domain {{ lab_network_domain }} 5gdeploymentlab"
+
+- name: Ensure sriov-network is present
+  ansible.builtin.command:
+    cmd: "kcli create network -c {{ lab_sriov_cidr }} -P dhcp=false -P dns=false --domain {{ lab_sriov_domain }} -i sriov-network"
 
 - name: Ensure oc/kubectl tooling is present
-  ansible.builtin.shell:
+  ansible.builtin.command:
     cmd: kcli download {{ item }} -P version=stable -P tag='{{ ocp4_major_release }}'
   with_items:
     - oc
@@ -131,6 +173,8 @@
     dest: "{{ item.destination }}"
     mode: "{{ item.mode }}"
   # yamllint disable rule:line-length
+  retries: 5
+  delay: 10
   with_items:
     - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/dnsmasq.conf", destination: "/opt/dnsmasq/dnsmasq.conf", mode: "0644"}
     - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/upstream-resolv.conf", destination: "/opt/dnsmasq/upstream-resolv.conf", mode: "0644"}
@@ -152,16 +196,27 @@
     path: /opt/dnsmasq/hosts.leases
     state: touch
     mode: "0644"
+    setype: "dnsmasq_lease_t"
 
 - name: Ensure DNSMasq lease file has the proper SELinux context
   community.general.sefcontext:
-    target: "/opt/dnsmasq/hosts.leases"
+    target: '/opt/dnsmasq/(.*)?\.leases'
     setype: dnsmasq_lease_t
     state: present
 
+- name: Ensure DNSMasq config files has the proper SELinux context
+  community.general.sefcontext:
+    target: "{{ item }}"
+    setype: dnsmasq_etc_t
+    state: present
+  with_items:
+    - '/opt/dnsmasq/include.d(/.*)?'
+    - '/opt/dnsmasq/(.*)?\.conf'
+    - '/opt/dnsmasq'
+
 - name: Ensure DNSMasq file applies the proper SELinux context
-  ansible.builtin.shell:
-    cmd: restorecon /opt/dnsmasq/hosts.leases
+  ansible.builtin.command:
+    cmd: restorecon -rv /opt/dnsmasq/
 
 - name: Ensure DNSMasq service is enabled and running
   ansible.builtin.systemd:
@@ -220,17 +275,9 @@
   async: 900
   register: download_rhcos
 
-- name: Ensure sushy-tools script exists
-  ansible.builtin.get_url:
-    # yamllint disable rule:line-length
-    url: "https://gist.githubusercontent.com/mvazquezc/0acb9e716c329abb9a184f1bcceed591/raw/21de9c32bcaf53ef40f379231ab1a4c1fdfefcf7/deploy-sushy-tools.sh"
-    # yamllint enable rule:line-length
-    dest: "/tmp/deploy-sushy-tools.sh"
-    mode: "0755"
-
-- name: Ensure sushy-tools are installed
-  ansible.builtin.shell:
-    cmd: /tmp/deploy-sushy-tools.sh
+- name: Ensure ksushy is installed
+  ansible.builtin.command:
+    cmd: kcli create sushy-service --ssl --port 9000
   async: 120
   poll: 0
   register: sushy_async
@@ -252,6 +299,8 @@
     dest: "{{ item.destination }}"
     mode: "{{ item.mode }}"
   # yamllint disable rule:line-length
+  retries: 5
+  delay: 10
   with_items:
     - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/registry-key.pem", destination: "/opt/registry/certs/registry-key.pem", mode: "0644"}
     - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/registry-cert.pem", destination: "/opt/registry/certs/registry-cert.pem", mode: "0644"}
@@ -282,7 +331,7 @@
     remote_src: true
 
 - name: Ensure trusted certs are updated
-  ansible.builtin.shell:
+  ansible.builtin.command:
     cmd: update-ca-trust
 
 #- name: Ensure firewalld is disabled
@@ -291,6 +340,40 @@
 #    masked: true
 #    enabled: false
 #    name: firewalld
+
+- name: Permit Lab traffic in public and libvirt zones for services
+  ansible.posix.firewalld:
+    zone: "{{ item[0] }}"
+    service: "{{ item[1] }}"
+    permanent: true
+    state: enabled
+  with_nested:
+    - [ 'public', 'libvirt' ]
+    - [ 'https', 'http', 'dns', 'libvirt', 'git' ]
+  register: firewalld_service
+  ignore_errors: true
+
+- name: Permit Lab traffic in public and libvirt zones for haproxy, webcache, registry, ksushy, git
+  ansible.posix.firewalld:
+    zone: "{{ item[0] }}"
+    port: "{{ item[1] }}"
+    permanent: true
+    state: enabled
+  with_nested:
+    - [ 'public', 'libvirt' ]
+    - [ '6443/tcp', '8080/tcp', '8443/tcp', '9000/tcp', '3000/tcp', '2222/tcp' ]
+  register: firewalld_port
+  ignore_errors: true
+
+- name: Ensure firewalld service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: false
+    enabled: true
+    name: firewalld
+  when: firewalld_service.changed or
+      firewalld_port.changed
+  ignore_errors: true
 
 - name: Wait for registry port {{ lab_registry_host.split(":")[1] }} to become open on the host
   ansible.builtin.wait_for:
@@ -322,7 +405,8 @@
     # yamllint enable rule:line-length
     dest: "/etc/systemd/system/podman-gitea.service"
     mode: "0644"
-
+  retries: 5
+  delay: 10
 
 - name: Ensure git server service is enabled and running
   ansible.builtin.systemd:
@@ -342,14 +426,14 @@
   until: result.rc == 0 or "user already exists" in result.stdout
   failed_when: result.rc != 0 and "user already exists" not in result.stdout
 
-- name: Ensure github repo is copied to gitea
+- name: Ensure github repos are copied to gitea
   ansible.builtin.uri:
     url: http://infra.5g-deployment.lab:3000/api/v1/repos/migrate
     user: student
     password: student
     method: POST
     # yamllint disable rule:line-length
-    body: '{"service":"2","clone_addr":"https://github.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab.git","uid":1,"repo_name":"5g-ran-deployments-on-ocp-lab"}'
+    body: '{"service":"2","clone_addr":"{{ item.repo_url }}","uid":1,"repo_name":"{{ item.repo_name }}"}'
     # yamllint enable rule:line-length
     body_format: json
     status_code: 201
@@ -359,51 +443,49 @@
   retries: 5
   delay: 10
   failed_when: result.status != 201 and "The repository with the same name already exists" not in result.json.message
+  # yamllint disable rule:line-length
+  with_items:
+    - {repo_url: "https://github.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab.git", repo_name: "5g-ran-deployments-on-ocp-lab"}
+    - {repo_url: "https://github.com/{{ repo_user }}/5g-ran-lab-aap-integration-tools.git", repo_name: "aap-integration-tools"}
+  # yamllint enable rule:line-length
 
 - name: Ensure lab VMs exist
   ansible.builtin.shell:
     # yamllint disable rule:line-length
-    cmd: "kcli create vm -P start=False -P uefi_legacy=true -P plan=hub -P memory={{ item.memory }} -P numcpus={{ item.cpus }} -P disks=[{{ item.disk }},{{ item.disk }}] -P nets=['{\"name\": \"5gdeploymentlab\", \"mac\": \"{{ item.mac }}\"}'] -P uuid={{ item.uuid }} -P name={{ item.name }}"
+    cmd: "kcli create vm -P start=False -P uefi_legacy=true -P plan=hub -P memory={{ item.memory }} -P numcpus={{ item.cpus }} -P disks=[{{ item.disk }},{{ item.disk }}] -P nets=['{\"name\": \"5gdeploymentlab\", \"mac\": \"{{ item.mac}}\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"0\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"1\"}'] -P uuid={{ item.uuid }} -P name={{ item.name }}"
     # yamllint enable rule:line-length
   register: result
   failed_when: result.rc != 0 and "not created because VM" not in result.stderr
   # yamllint disable rule:line-length
   with_items:
-    - {name: "hub-master0", cpus: "{{ lab_hub_vm_cpus }}", disk: "{{ lab_hub_vm_disk }}", memory: "{{ lab_hub_vm_memory }}", mac: "aa:aa:aa:aa:01:01", uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0101"}
-    - {name: "hub-master1", cpus: "{{ lab_hub_vm_cpus }}", disk: "{{ lab_hub_vm_disk }}", memory: "{{ lab_hub_vm_memory }}", mac: "aa:aa:aa:aa:01:02", uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0102"}
-    - {name: "hub-master2", cpus: "{{ lab_hub_vm_cpus }}", disk: "{{ lab_hub_vm_disk }}", memory: "{{ lab_hub_vm_memory }}", mac: "aa:aa:aa:aa:01:03", uuid: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0103"}
     - {name: "sno1", cpus: "{{ lab_sno_vm_cpus }}", disk: "{{ lab_sno_vm_disk }}", memory: "{{ lab_sno_vm_memory }}", mac: "aa:aa:aa:aa:02:01", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0201"}
     - {name: "sno2", cpus: "{{ lab_sno_vm_cpus }}", disk: "{{ lab_sno_vm_disk }}", memory: "{{ lab_sno_vm_memory }}", mac: "aa:aa:aa:aa:03:01", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0301"}
   # yamllint enable rule:line-length
 
-- name: Ensure kcli-baremetal-plan-repo is cloned
-  ansible.builtin.git:
-    repo: 'https://github.com/karmab/kcli-openshift4-baremetal.git'
-    dest: /root/kcli-openshift4-baremetal/
-    version: "{{ kcli_baremetal_plan_revision }}"
-
 - name: Ensure pull secret is copied to the bastion host
   ansible.builtin.copy:
     content: "{{ ocp4_pull_secret }}"
-    dest: "/root/kcli-openshift4-baremetal/openshift_pull.json"
+    dest: "/root/openshift_pull.json"
     mode: '0644'
 
 - name: Ensure plan file exists
   ansible.builtin.get_url:
     # yamllint disable rule:line-length
     url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hub-cluster/hub.yml"
-    dest: "/root/kcli-openshift4-baremetal/hub.yml"
-    mode: "0644"
     # yamllint enable rule:line-length
+    dest: "/root/hub.yml"
+    mode: "0644"
+  retries: 5
+  delay: 10
 
 - name: Setup admin password
-  set_fact:
+  ansible.builtin.set_fact:
     strong_admin_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
     strong_dev_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
 
 - name: Set password to hub admin user
   ansible.builtin.replace:
-    path: "/root/kcli-openshift4-baremetal/hub.yml"
+    path: "/root/hub.yml"
     regexp: '{{ item.regexp }}'
     replace: "'{{ item.password }}'"
   with_items:
@@ -428,7 +510,7 @@
   community.crypto.openssh_keypair:
     path: /root/.ssh/id_rsa
 
-- name: Async check sushy-tools are installed
+- name: Async check sushy tools are installed
   ansible.builtin.async_status:
     jid: "{{ sushy_async.ansible_job_id }}"
   register: job_result
@@ -439,12 +521,13 @@
 - name: Ensure sushy tools are running
   ansible.builtin.systemd:
     state: restarted
+    daemon_reload: true
     enabled: true
-    name: sushy-tools
+    name: ksushy
 
 - name: Ensure sushy is listening for redfish connections
   ansible.builtin.uri:
-    url: https://infra.5g-deployment.lab:9000/redfish/v1/Systems/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0101
+    url: https://infra.5g-deployment.lab:9000/redfish/v1/Systems/local/sno1
     method: GET
     status_code: 200
     validate_certs: false
@@ -458,7 +541,7 @@
   register: job_result
   until: job_result.finished
   retries: 60
-  delay: 10
+  delay: 1
 
 # Leave this as the last task in the playbook.
 - name: pre_workload tasks complete

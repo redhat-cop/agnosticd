@@ -1,0 +1,190 @@
+---
+- name: Step 00xxxxx post software
+  hosts: localhost
+  gather_facts: false
+  become: true
+  tags:
+    - step005
+
+  tasks:
+
+    - name: "Post-Software tasks Started"
+      ansible.builtin.debug:
+        msg: "Post-Software tasks Started"
+
+- name: Update CentOS boxen
+  hosts: bastions,mysqls
+  gather_facts: false
+  become: true
+  tasks:
+
+    - name: Install Mysql Deps
+      ansible.builtin.package:
+        name:
+          - python3-devel
+          - mysql-devel
+          - pkgconfig
+          - python3-pip
+          - gcc
+          - wget
+        state: present
+
+    - name: Put MicroSoft Arc setup script on boxes as root
+      ansible.builtin.copy:
+        src: install_linux_azcmagent.sh
+        dest: /root/install_linux_azcmagent.sh
+        mode: '0500'
+        owner: root
+
+    - name: Put MicroSoft Arc secrets and stuff on the box as root
+      ansible.builtin.template:
+        src: deploy_arc.sh.j2
+        dest: /root/deploy_arc.sh
+        mode: '0500'
+        owner: root
+
+    - name: set facts about ansible python interpeter
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3
+
+    - name: pip install mysql client
+      ansible.builtin.pip:
+        executable: /bin/pip3
+        name: mysqlclient
+
+    - name: SELinux let httpd access network
+      ansible.builtin.command: |
+        setsebool -P httpd_can_network_connect_db=1
+
+- name: Setup CentOS Mysql as sqlserver
+  hosts: mysqls
+  gather_facts: false
+  become: true
+  tasks:
+
+    - name: Update network facts after reboot
+      setup:
+        gather_subset:
+        - 'network'
+        - 'virtual'
+
+    - name: set facts about ansible python interpeter
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3
+
+    - name: Include mysql install tasks
+      ansible.builtin.include_tasks: AWS_MySQL_RHLAB.yml
+
+- name: Setup CentOS Bastion as webserver
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+
+    - name: Update network facts after reboot
+      setup:
+        gather_subset:
+        - 'network'
+        - 'virtual'
+
+    - name: set facts about ansible python interpeter
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3
+
+    - name: Put ansible playbook to install Arc on mysqls on bastion
+      ansible.builtin.template:
+        src: deploy_arc.yaml.j2
+        dest: /root/deploy_arc.yaml
+        variable_start_string: "[%"
+        variable_end_string: "%]"
+        mode: '0500'
+        owner: root
+
+    - name: Put ansible playbook to convert2rhel mysqls on bastion
+      ansible.builtin.copy:
+        src: convert_to_rhel.yaml
+        dest: /root/convert_to_rhel.yaml
+        mode: '0500'
+        owner: root
+
+    - name: Setup Bastion as Webserver
+      ansible.builtin.include_tasks: AWS_Apache_RHLAB.yml
+
+- name: Update packages
+  hosts: bastions,mysqls
+  gather_facts: false
+  become: true
+  tasks:
+
+    - name: Update Packages
+      ansible.builtin.package:
+        name: "*"
+        state: latest
+
+- name: Reboot hosts
+  hosts: bastions,mysqls
+  gather_facts: false
+  become: true
+  tasks:
+
+    - name: Reboot CentOS bastion after update
+      reboot:
+        connect_timeout: 300
+        msg: "RHEL updates installing. Rebooting now."
+        pre_reboot_delay: 60
+        post_reboot_delay: 10
+
+- name: Output user_info
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - step005
+
+  tasks:
+
+    - name: Do very annoying normalization of domain name
+      ansible.builtin.set_fact:
+        agnosticd_domain_name: >-
+         {% if cloud_provider == 'osp' -%}
+           .{{ osp_cluster_dns_zone }}
+         {%- elif cloud_provider == 'ec2' -%}
+           {{ subdomain_base_suffix }}
+         {%- endif %}
+
+    - name: Set ssh user_info
+      agnosticd_user_info:
+        data:
+          web_app_url: "{{ groups['bastions'][0] | regex_replace('\\..*$') }}.{{ guid }}{{ agnosticd_domain_name }}"
+          web_host_ssh_command: "ssh {{ ansible_service_account_user_name }}@{{ groups['bastions'][0] | regex_replace('\\..*$') }}.{{ guid }}{{ agnosticd_domain_name }}"
+          web_host_ssh_password: "{{ ansible_service_account_user_password }}"
+          database_host_ssh_command: "ssh {{ ansible_service_account_user_name }}@{{ groups['mysqls'][0] | regex_replace('\\..*$') }}.{{ guid }}{{ agnosticd_domain_name }}"
+          database_host_ssh_password: "{{ ansible_service_account_user_password }}"
+
+    - name: Deploy Showroom on shared cluster
+      when: showroom_deploy_shared_cluster_enable | default(false) | bool
+      include_role:
+        name: ocp4_workload_showroom
+
+    - name: Deploy Bookbag
+      when: bookbag_git_repo is defined
+      include_role:
+        name: bookbag
+      vars:
+        ACTION: create
+
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+
+    - name: "Post-Software checks completed successfully"
+      ansible.builtin.debug:
+        msg: "Post-Software checks completed successfully"
+
+...

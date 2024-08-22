@@ -4,12 +4,17 @@
   set_fact:
     _certbot_dir: "{{ _certbot_remote_dir }}/certbot"
 
+- name: Get home directory for {{ _certbot_user }} user
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ _certbot_user }}"
+
 - name: Check on AWS credentials
   when: _certbot_dns_provider is match('route53')
   block:
     - name: Verify if AWS Credentials exist on the host
       stat:
-        path: "/home/{{ _certbot_user }}/.aws/credentials"
+        path: "{{ ansible_facts.getent_passwd[_certbot_user][4] + '/.aws/credentials' }}"
       register: aws_credentials_result
 
     - name: Fail if AWS Credentials are not on the host
@@ -22,7 +27,7 @@
   block:
     - name: Verify if Azure Credentials exist on the host
       stat:
-        path: "/home/{{ _certbot_user }}/.azure.ini"
+        path: "{{ ansible_facts.getent_passwd[_certbot_user][4] + '/.azure.ini' }}"
       register: azure_credentials_result
 
     - name: Fail if Azure Credentials are not on the host
@@ -35,7 +40,7 @@
   block:
     - name: Verify if GCP Credentials exist on the host
       stat:
-        path: "/home/{{ _certbot_user }}/.gcp/osServiceAccount.json"
+        path: "{{ ansible_facts.getent_passwd[_certbot_user][4] + '/.gcp/osServiceAccount.json' }}"
       register: gcp_credentials_result
 
     - name: Fail if GCP Credentials are not on the host
@@ -49,7 +54,7 @@
     - name: Verify credential are present on host
       when: _certbot_dns_provider is match('rfc2136')
       stat:
-        path: /home/{{ _certbot_user }}/.rfc2136.ini
+        path: "{{ ansible_facts.getent_passwd[_certbot_user][4] }}/.rfc2136.ini"
       register: ddns_credentials_result
 
     - name: Fail if DDNS credentials are missing
@@ -73,6 +78,16 @@
   # We expect Python3 and Python3-pip to be installed
   # They should be on the bastion that this role is running
 
+  - name: Set python to 3.9 when using GCP
+    when: cloud_provider == 'gcp'
+    set_fact:
+      certbot_python: "/bin/python3.9"
+
+  - name: Set python version when not using GCP
+    when: cloud_provider != 'gcp'
+    set_fact:
+      certbot_python: "/usr/bin/python3"
+
   # The requirements_certbot.txt file has the Python modules
   # For certbot, certbot-dns-route53 and certbot-dns-rfc2136
   - name: Copy requirements_certbot_gcp.txt to target for certbot virtualenv
@@ -87,6 +102,15 @@
       src: requirements_certbot.txt
       dest: /tmp/requirements_certbot.txt
 
+  - name: Upgrade pip
+    become: True
+    become_user: "{{ _certbot_user }}"
+    pip:
+      name: pip
+      state: latest
+      virtualenv: "{{ _certbot_virtualenv }}"
+      virtualenv_command: "{{ certbot_python }} -m venv"
+
   # Run as _certbot_user in order to set up the correct permissions
   # Running without will create links to /root/.local/... which won't be readable
   - name: Create Virtualenv Certbot
@@ -95,7 +119,7 @@
     pip:
       requirements: /tmp/requirements_certbot.txt
       virtualenv: "{{ _certbot_virtualenv }}"
-      virtualenv_command: /usr/bin/python3 -m venv
+      virtualenv_command: "{{ certbot_python }} -m venv"
 
   - name: Copy certbot script to virtualenv
     template:
@@ -140,11 +164,26 @@
     - "{{ _certbot_dir }}/logs"
     - "{{ _certbot_dir }}/renewal-hooks"
     - "{{ _certbot_dir }}/renewal-hooks/deploy"
-
+     
   - name: Request Certificates from Let's Encrypt (force or no cache)
     when:
     - _certbot_force_issue|bool or not _certbot_setup_complete|bool
     block:
+    - name: Download Let's Encrypt  account file 
+      get_url:
+        url: "{{ certbot_account_url }}"
+        dest: "{{ _certbot_dir }}/account.tar"
+        url_username: "{{ certbot_account_download_user | default(omit) }}"
+        url_password: "{{ certbot_account_download_password | default(omit) }}"
+        force_basic_auth: true
+      when: certbot_account_url is defined
+
+    - name: Extract Let's Encrypt account file
+      unarchive:
+        copy: false
+        src: "{{ _certbot_dir }}/account.tar"
+        dest: "{{ _certbot_dir }}"
+      when: certbot_account_url is defined
     # Get Intermediary CA Certificate.
     # This is also used in the SSO configuration!
     - name: Get Let's Encrypt Intermediary CA Certificate
@@ -192,6 +231,18 @@
       - name: Remove archive from server
         file:
           name: "/tmp/certbot.tgz"
+          state: absent
+
+      - name: Clean Let's Encrypt account files
+        when: certbot_account_url is defined
+        block:
+          - name: Remove account file from server
+            file:
+              name: "{{ _certbot_dir }}/account.tar"
+              state: absent
+      - name: Remove Let's Encrypt account directory from server
+        file:
+          name: "{{ _certbot_dir }}/accounts"
           state: absent
 
 - name: Install the certificates into {{ _certbot_install_dir }}

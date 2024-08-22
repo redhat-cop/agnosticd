@@ -1,0 +1,58 @@
+---
+# tasks file for gitea_vm_setup
+- name: Install Gitea using the l3d.git.gitea role
+  include_role:
+    name: l3d.git.gitea
+    public: true  # defaults and vars variables are available to following tasks
+
+- name: Allow Nginx to listen on Gitea's secure port
+  community.general.seport:
+    ports: "{{ gitea_vm_https_port }}"
+    proto: tcp
+    setype: http_port_t
+    state: present
+  when: gitea_vm_https_port is defined
+
+- name: copy nginx config for Gitea (assuming previous nginx install)
+  ansible.builtin.template:
+    src: nginx_gitea.conf.j2
+    dest: /etc/nginx/conf.d/gitea.conf
+  notify: nginx_reload
+  when: gitea_vm_https_port is defined
+
+- name: Use gitea cli to create user
+  ansible.builtin.command: >
+    /usr/local/bin/gitea -c {{ gitea_configuration_path }}/gitea.ini admin user create
+    --username "{{ item.name }}"
+    --password "{{ item.password }}"
+    --email "{{ item.email }}"
+    --must-change-password=false
+  become_user: "{{ gitea_user }}"
+  register: gitearesult
+  failed_when:
+    - '"successfully created" not in gitearesult.stdout'
+    - '"user already exists" not in gitearesult.stderr'
+  changed_when:
+    - '"successfully created" in gitearesult.stdout'
+  loop: "{{ gitea_vm_users }}"
+
+- name: Wait for Gitea to come up
+  ansible.builtin.wait_for:
+    host: "{{ gitea_http_domain }}"
+    port: "{{ gitea_http_port }}"
+    state: started
+
+- name: Import Git projects to gitea student user
+  ansible.builtin.uri:
+    url: "{{ gitea_protocol }}://{{ gitea_http_domain }}:{{ gitea_http_port }}/api/v1/repos/migrate"
+    method: POST
+    body_format: json
+    body: {"clone_addr": "{{ item.url }}", "repo_name": "{{ item.name }}"}
+    status_code: [201, 409]  # Created or Conflict
+    headers:
+      Content-Type: "application/json"
+    user: "{{ gitea_vm_users[0]['name'] }}"
+    password: "{{ gitea_vm_users[0]['password'] }}"
+    force_basic_auth: yes
+    validate_certs: no
+  loop: "{{ gitea_vm_repos }}"  # defined in env_vars

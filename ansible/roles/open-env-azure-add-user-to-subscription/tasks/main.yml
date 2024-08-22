@@ -1,11 +1,20 @@
 ---
 - name: Check if email is Red Hat associate
-  fail:
-    msg: User is not a Red Hat associate
+  set_fact:
+    internal_user: True
+  when:
+    - '"@redhat.com" in requester_email'
+    - agnosticd_open_environment | default(false) | bool
+
+- name: Check if email is not a Red Hat associate
+  set_fact:
+    internal_user: False
   when:
     - '"@redhat.com" not in requester_email'
 
 - name: Checking if user is in Active Directory
+  when:
+    - internal_user | default(false) | bool
   azure.azcollection.azure_rm_aduser_info:
     auth_source: env
     user_principal_name: "{{ requester_email }}"
@@ -51,16 +60,18 @@
 
     - name: Tag the assigned Azure subscription with the users email and guid
       command: >
-        az tag create --resource-id {{ subscription_fqid }} --tags GUID={{ guid }} EMAIL={{ requester_email }}
+        az tag create --resource-id {{ subscription_fqid }} --tags GUID={{ guid }} EMAIL={{ requester_email }} cost-center={{ cost_center }}
 
-    - name: Get Owner Role Definition
+    - name: Get Role Definition to use for subscription access
       azure.azcollection.azure_rm_roledefinition_info:
         auth_source: env
         scope: "{{ subscription_fqid }}"
-        role_name: Owner
+        role_name: "{{ azure_owner_role_name }}"
       register: role_definition
 
     - name: Set user as Owner for the subscription
+      when:
+        - internal_user | default(false) | bool
       azure.azcollection.azure_rm_roleassignment:
         auth_source: env
         scope: "{{ subscription_fqid }}"
@@ -78,7 +89,7 @@
         auth_source: env
         subscription_id: "{{ subscription_id }}"
         name: "openenv-{{ guid }}"
-        location: eastus
+        location: "{{ azure_region }}"
         state: present
         tags:
           guid: "{{ guid }}"
@@ -102,139 +113,78 @@
           -p {{ management_subscription.subscriptions.fqid }}/resourceGroups/{{ azure_dns_resource_group }}/providers/Microsoft.Network/dnszones/{{ azure_root_dns_zone }}
           --subscription {{ subscription_id }}
 
-    #- name: Get resource group info
-    #  azure.azcollection.azure_rm_resourcegroup_info:
-    #    auth_source: cli
-    #    name: "openenv-{{ guid }}"
-    #    tenant: "{{ azure_tenant }}"
-    #    subscription_id: "{{ subscription_id }}"
-    #  register: azrg
-
-    #- debug:
-    #    msg: "{{ azrg }}"
-
-    - name: See if application already exists
-      azure.azcollection.azure_rm_adapplication_info:
-        auth_source: env
-        identifier_uri: "api://openenv-{{ guid }}"
-        tenant: "{{ azure_tenant }}"
-        subscription_id: "{{ subscription_id }}"
-      ignore_errors: true
-      register: azappcheck
-
     - name: Create the Application and SP
-      when: azappcheck.applications|length==0
       command: >-
         az ad sp create-for-rbac
         --name "api://openenv-{{ guid }}"
-        --role Owner
+        --role "{{ azure_owner_role_name }}"
         --scopes "{{ subscription_fqid }}"
       register: azappcreate
-      #--scopes "{{ azrg.resourcegroups[0].id }}"
+      retries: 10
+      delay: 10
+      until: azappcreate is succeeded
+
+    - name: Get application info
+      azure.azcollection.azure_rm_adapplication_info:
+        auth_source: cli
+        tenant: "{{ azure_tenant }}"
+        app_id: "{{ azappcreate.stdout | from_json | json_query('appId') }}"
+        subscription_id: "{{ subscription_id }}"
+      register: azapp
+      retries: 30
+      delay: 10
+      until:
+        - azapp.applications | length > 0
 
     - name: Get password
       when: azappcreate.changed
       set_fact: azpass="{{ azappcreate.stdout | from_json | json_query('password') }}"
 
-    - name: Wait 60 seconds for Azure to create application
-      when: azappcreate.changed
-      ansible.builtin.wait_for:
-        timeout: 60
+    - name: Log out of Azure CLI
+      command: >
+        az logout
 
-    - name: Get application info
+- name: Create ARO SP
+  when: ( install_aro | default(false) | bool )
+  block:
+    - name: Log into Azure CLI
+      no_log: True
+      command: >
+        az login --service-principal -u {{ azure_service_principal }}
+        -p {{ azure_password }} --tenant {{ azure_tenant }}
+
+    - name: Create the Service Principal for ARO
+      ansible.builtin.command: >-
+        az ad sp create-for-rbac
+        --name "api://openenv-aro-{{ guid }}"
+        --role "{{ azure_owner_role_name }}"
+        --scopes "{{ subscription_fqid }}"
+      register: azaroappcreate
+      retries: 10
+      delay: 10
+      until: azaroappcreate is succeeded
+
+    - name: Get ARO app info
       azure.azcollection.azure_rm_adapplication_info:
-        auth_source: env
-        identifier_uri: "api://openenv-{{ guid }}"
+        auth_source: cli
         tenant: "{{ azure_tenant }}"
-        subscription_id: "{{ subscription_id }}"
-      register: azapp
+        app_id: "{{ azaroappcreate.stdout | from_json | json_query('appId') }}"
+        subscription_id: "{{ azure_subscription_id }}"
+      register: azaroapp
+      retries: 30
+      delay: 10
+      until:
+        - azaroapp.applications | length > 0
 
-    #- name: Add API Application.ReadWrite.All permissions to SP
-    #  when: azappcheck.applications|length==0
-    #  command: >-
-    #    az ad app permission add
-    #    --id "{{ azapp.applications[0].app_id }}"
-    #    --api 00000003-0000-0000-c000-000000000000
-    #    --api-permissions bdfbf15f-ee85-4955-8675-146e8e5296b5=Scope
-    #  register: azpermsupdate
+    - name: Get ARO app SP info
+      azure.azcollection.azure_rm_adserviceprincipal_info:
+        auth_source: cli
+        app_id: "{{ azaroapp.applications[0].app_id }}"
+        tenant: "{{ azure_tenant }}"
+      register: azaroappsp
 
-    #- name: Wait 60 seconds for Azure to apply permission
-    #  when: azpermsupdate.changed
-    #  ansible.builtin.wait_for:
-    #    timeout: 60
-
-    #- name: Authorize admin consent
-    #  when: azpermsupdate.changed
-    #  command: >-
-    #    az ad app permission admin-consent
-    #    --id "{{ azapp.applications[0].app_id }}"
-
-    - name: Get SP info
-      command: >-
-        az ad sp show --id "api://openenv-{{ guid }}"
-      register: azappinfo
-
-    #- name: Build payload for role assignment
-    #  set_fact:
-    #    payload:
-    #      {
-    #        '@odata.type': '#microsoft.graph.unifiedRoleAssignment',
-    #        'principalId': "{{ azappinfo.stdout | from_json | json_query('objectId') }}",
-    #        'roleDefinitionId': '8e2e22ca-bde6-4977-bc67-7f189cc47557',
-    #        'directoryScopeId': '/'
-    #      }
-
-    #- name: Assign Application Administrator role to SP
-    #  command: >-
-    #    az rest -m post
-    #    --headers Content-type=application/json
-    #    -u https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments
-    #    -b "{{ payload }}"
-
-    #- name: See if ARO SP already exists
-    #  azure.azcollection.azure_rm_adapplication_info:
-    #    auth_source: env
-    #    identifier_uri: "api://openenv-aro-{{ guid }}"
-    #    tenant: "{{ azure_tenant }}"
-    #    subscription_id: "{{ subscription_id }}"
-    #  ignore_errors: true
-    #  register: azaroappcheck
-
-    #- name: Create the Service Principal for ARO
-    #  when: azaroappcheck.applications|length==0
-    #  command: >-
-    #    az ad sp create-for-rbac
-    #    --name "api://openenv-aro-{{ guid }}"
-    #    --role Contributor
-    #    --scopes "{{ subscription_fqid }}"
-    #  register: azaroappcreate
-    #  #--scopes "{{ azrg.resourcegroups[0].id }}"
-
-    #- name: Save ARO SP password
-    #  when: azaroappcreate.changed
-    #  set_fact: az_aro_pass="{{ azaroappcreate.stdout | from_json | json_query('password') }}"
-
-    #- name: Get ARO SP info
-    #  command: >-
-    #    az ad sp show --id "api://openenv-aro-{{ guid }}"
-    #  register: azaroappinfo
-
-    #- name: Build payload for role assignment
-    #  set_fact:
-    #    payload:
-    #      {
-    #        '@odata.type': '#microsoft.graph.unifiedRoleAssignment',
-    #        'principalId': "{{ azaroappinfo.stdout | from_json | json_query('objectId') }}",
-    #        'roleDefinitionId': '8e2e22ca-bde6-4977-bc67-7f189cc47557',
-    #        'directoryScopeId': '/'
-    #      }
-
-    #- name: Assign Application Administrator role to ARO SP
-    #  command: >-
-    #    az rest -m post
-    #    --headers Content-type=application/json
-    #    -u https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments
-    #    -b "{{ payload }}"
+    - name: Save ARO SP password
+      ansible.builtin.set_fact: az_aro_pass="{{ azaroappcreate.stdout | from_json | json_query('password') }}"
 
     - name: Log out of Azure CLI
       command: >

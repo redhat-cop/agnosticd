@@ -1,0 +1,64 @@
+---
+- name: Search for all running pods
+  kubernetes.core.k8s_info:
+    kind: VirtualMachine
+    namespace: "{{ openshift_cnv_namespace }}"
+  register: r_openshift_cnv_instances
+  
+    
+- name: Debug OpenShift CNV Instances fact
+  ansible.builtin.debug:
+    var: r_openshift_cnv_instances
+    verbosity: 2
+
+# Find the bastion
+- name: Find the bastion in this batch of hosts
+  loop: "{{ r_openshift_cnv_instances.resources | list }}"
+  ansible.builtin.set_fact:
+    local_bastion: "{{ item.metadata.name }}"
+  when:
+    - '"bastions" in item.metadata.annotations.AnsibleGroup|default("")'
+  ignore_errors: true
+
+- name: Expose bastion externally
+  kubernetes.core.k8s:
+    host: "{{ sandbox_openshift_api_url }}"
+    api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+    validate_certs: false
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: "{{ local_bastion }}-ssh"
+        namespace: "{{ openshift_cnv_namespace }}"
+      spec:
+        ports:
+          - port: 22
+            protocol: TCP
+            targetPort: 22
+        selector:
+          vm.cnv.io/name: "{{ local_bastion }}"
+        sessionAffinity: None
+        type: NodePort
+  register: r_expose_bastion
+  when: local_bastion|default(False)
+  until: r_expose_bastion is success
+  retries: "{{ openshift_cnv_retries }}"
+  delay: "{{ openshift_cnv_delay }}"
+
+- name: Create inventory (add_host)
+  loop: "{{ r_openshift_cnv_instances.resources | list }}"
+  ansible.builtin.add_host:
+    name: "{{ item.metadata.name }}"
+    shortname: "{{ item.metadata.name }}"
+    ansible_user: "{{ remote_user }}"
+    ansible_ssh_host: "{{ item.metadata.name }}"
+    ssh_port: "{{ r_expose_bastion.result.spec.ports.0.nodePort|default(omit) }}"
+    private_ip_address: "{{ item.metadata.name }}"
+    public_ip_address: "{{ openshift_cnv_ssh_address }}"
+    groups: "{{ item.metadata.annotations.AnsibleGroup | default(omit) }}"
+    bastion: "{{ local_bastion | default('') }}"
+    bastion_ssh_port: "{{ r_expose_bastion.result.spec.ports.0.nodePort|default(omit) }}"
+    # Specify if the node is isolated, so won't connect to it
+    isolated: "{{ item.metadata.annotations.isolated | default(false) }}"
+  when: item.metadata.annotations.managed | default(true) | bool

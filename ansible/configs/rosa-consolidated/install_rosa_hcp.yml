@@ -1,0 +1,148 @@
+---
+- name: Print regions supporting HCP Rosa
+  ansible.builtin.debug:
+    msg: "{{ _rosa_hcp_regions }}"
+
+- name: Check if requested region is supported
+  when: not aws_region in _rosa_hcp_regions
+  ansible.builtin.fail:
+    msg: "Requested region '{{ aws_region }}' is not supported by ROSA for Hosted Control Planes."
+
+- name: Clone ROSA HCP terraform files
+  ansible.builtin.git:
+    accept_hostkey: true
+    repo: "{{ rosa_terraform_repo }}"
+    dest: "~{{ ansible_user }}/terraform-vpc"
+    version: "{{ rosa_terraform_repo_branch }}"
+
+- name: Run terraform init
+  ansible.builtin.command:
+    cmd: /usr/local/bin/terraform init
+    chdir: "~{{ ansible_user }}/terraform-vpc"
+
+- name: Run terraform plan
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/terraform plan
+        -out rosa.tfplan
+        -var region={{ aws_region }}
+        -var cluster_name=rosa-{{ guid }}
+    chdir: "~{{ ansible_user }}/terraform-vpc"
+
+- name: Run terraform apply
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/terraform apply rosa.tfplan
+    chdir: "~{{ ansible_user }}/terraform-vpc"
+
+- name: Save Terraform directory
+  ansible.builtin.archive:
+    path: "~{{ ansible_user }}/terraform-vpc"
+    dest: "~{{ ansible_user }}/terraform-vpc.tar.gz"
+    format: gz
+
+- name: Transfer terraform directory archive and save in output dir
+  ansible.builtin.fetch:
+    src: "~{{ ansible_user }}/terraform-vpc.tar.gz"
+    dest: "{{ output_dir }}/"
+    flat: true
+
+- name: Get created subnets
+  ansible.builtin.command:
+    cmd: >-
+      /usr/local/bin/terraform output -raw cluster-subnets-string
+    chdir: "~{{ ansible_user }}/terraform-vpc"
+  register: r_subnets
+
+- name: Save created subnets in a fact
+  ansible.builtin.set_fact:
+    rosa_subnets: "{{ r_subnets.stdout }}"
+
+- name: Create ROSA HCP account roles
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa create account-roles
+      --hosted-cp
+      --region {{ aws_region }}
+      --force-policy-creation
+      --mode auto
+      --yes
+
+- name: Create ROSA HCP OIDC config
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa create oidc-config
+      --region {{ aws_region }}
+      --mode=auto
+      --yes
+      --output json
+  register: r_oidc_config
+
+- name: Save OIDC ID in a fact
+  ansible.builtin.set_fact:
+    rosa_oidc_id: "{{ (r_oidc_config.stdout | from_json).id }}"
+
+- name: Print subnets and OICD ID
+  ansible.builtin.debug:
+    msg: "Subnets: {{ rosa_subnets }}, OIDC ID: {{ rosa_oidc_id }}"
+
+- name: Create ROSA HCP operator roles
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa create operator-roles
+      --hosted-cp \
+      --mode auto \
+      --yes \
+      --region {{ aws_region }}
+      --prefix rosa-{{ guid }} \
+      --oidc-config-id {{ rosa_oidc_id }} \
+      --installer-role-arn arn:aws:iam::{{ hostvars.localhost.sandbox_account_id }}:role/ManagedOpenShift-HCP-ROSA-Installer-Role
+
+- name: Create ROSA HCP Cluster
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa create cluster
+      --cluster-name=rosa-{{ guid }}
+      --billing-account {{ aws_billing_account_id }}
+      --sts
+      --mode=auto
+      --yes
+      --hosted-cp
+      --region {{ aws_region }}
+      --operator-roles-prefix rosa-{{ guid }}
+      --oidc-config-id {{ rosa_oidc_id }}
+      --subnet-ids={{ rosa_subnets }}
+      {% if _rosa_version_to_install | default("") | length > 0 %}--version {{ _rosa_version_to_install }}{% endif %}
+      {% if rosa_compute_machine_type is defined %}--compute-machine-type {{ rosa_compute_machine_type }}{% endif %}
+      {% if rosa_compute_worker_disk_size is defined %}--worker-disk-size {{ rosa_compute_worker_disk_size }}{% endif %}
+      {% if rosa_compute_replicas is defined %}--replicas {{ rosa_compute_replicas | int }}{% endif %}
+  register: r_rosa_create_status
+  until: r_rosa_create_status.rc == 0
+  retries: 3
+  delay: 10
+
+- name: Wait for ROSA HCP installer completion
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa describe cluster
+    --cluster {{ rosa_cluster_name }}
+    --output json
+  register: r_rosa_installer_status
+  until:
+  - (r_rosa_installer_status.stdout | from_json).status is defined
+  - (r_rosa_installer_status.stdout | from_json).status.state is defined
+  - (r_rosa_installer_status.stdout | from_json).status.state == "ready"
+  retries: 120
+  delay: 60
+
+# HCP install finishes well before all the cluster operators have
+# rolled out. Need to wait for the console to be available before
+# continuing
+- name: Wait for ROSA HCP console URL to be available
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa describe cluster
+    --cluster {{ rosa_cluster_name }}
+    --output json
+  register: r_rosa_installer_status
+  until:
+  - (r_rosa_installer_status.stdout | from_json).api is defined
+  - (r_rosa_installer_status.stdout | from_json).api.url is defined
+  - (r_rosa_installer_status.stdout | from_json).console is defined
+  - (r_rosa_installer_status.stdout | from_json).console.url is defined
+  retries: 60
+  delay: 60
