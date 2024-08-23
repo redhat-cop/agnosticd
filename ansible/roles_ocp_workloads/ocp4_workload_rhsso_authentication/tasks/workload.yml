@@ -73,12 +73,26 @@
     ocp4_workload_rhsso_authentication_openshift_client_secret: "{{ r_realm_credentials.resources[0].data.CLIENT_SECRET | b64decode }}"
 
 - name: Create openshift auth resources
+  when: ocp4_workload_rhsso_authentication_env_type != 'rosa-consolidated'
   kubernetes.core.k8s:
     state: present
     definition: "{{ lookup('template', item) | from_yaml }}"
   loop:
   - openshift-openid-client-secret.yml.j2
   - openshift-oauth.yml.j2
+
+- name: Create openshift identity provider (rosa)
+  when: ocp4_workload_rhsso_authentication_env_type == 'rosa-consolidated'
+  shell: |
+    rosa create idp --cluster rosa-{{ guid }} \
+    --type openid \
+    --name rhsso \
+    --client-id idp-4-ocp \
+    --client-secret {{ ocp4_workload_rhsso_authentication_openshift_client_secret }} \
+    --issuer-url https://{{ ocp4_workload_rhsso_authentication_rhsso_host }}/auth/realms/openshift \
+    --email-claims email \
+    --name-claims name \
+    --username-claims preferred_username
 
 - name: Create admin user
   when: ocp4_workload_rhsso_authentication_admin_create | bool
@@ -102,9 +116,11 @@
     state: present
     definition: "{{ lookup('template', 'rhsso-user-openshift.yml.j2') }}"
   vars:
-    username: user{{ item }}
+    username: "{{ ocp4_workload_rhsso_authentication_user_name_base }}{{ n + 1 }}"
     password: "{{ ocp4_workload_rhsso_authentication_user_password }}"
-  loop: "{{ range(1, (ocp4_workload_rhsso_authentication_user_count | int) + 1, 1) | list }}"
+  loop: "{{ range(0, ocp4_workload_rhsso_authentication_user_count | int) | list }}"
+  loop_control:
+    loop_var: n
 
 - name: Retrieve RHSSO admin credentials
   kubernetes.core.k8s_info:
@@ -155,7 +171,25 @@
         `{{ ocp4_workload_rhsso_authentication_user_name_base ~ ocp4_workload_rhsso_authentication_user_count }}`
         created with password `{{ ocp4_workload_rhsso_authentication_user_password }}`
 
+- name: Save common user information
+  when: not ocp4_workload_rhsso_authentication_admin_create | bool
+  agnosticd_user_info:
+    data: >-
+      {{
+        {
+          "rhsso_admin_console": ocp4_workload_rhsso_authentication_rhsso_host,
+          "rhsso_admin_user": r_rhsso_credentials.resources[0].data.ADMIN_USERNAME | b64decode,
+          "rhsso_admin_password": r_rhsso_credentials.resources[0].data.ADMIN_PASSWORD | b64decode,
+          "openshift_api_server_url": ocp4_workload_rhsso_authentication_rhsso_openshift_api_url,
+          "openshift_cluster_console_url": ocp4_workload_rhsso_authentication_rhsso_openshift_console_url,
+          "openshift_cluster_num_users": ocp4_workload_rhsso_authentication_user_count | int,
+          "openshift_cluster_user_base": ocp4_workload_rhsso_authentication_user_name_base,
+          "openshift_cluster_user_count": ocp4_workload_rhsso_authentication_user_count | int,
+        }
+      }}
+
 - name: Save common user and cluster admin information
+  when: ocp4_workload_rhsso_authentication_admin_create | bool
   agnosticd_user_info:
     data: >-
       {{
