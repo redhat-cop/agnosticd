@@ -1,8 +1,23 @@
 ---
+- name: check if the username is valid
+  ansible.builtin.fail:
+    msg: "Invalid ocp4_workload_shared_cluster_username: '{{ ocp4_workload_shared_cluster_username }}'"
+  when: >-
+    ocp4_workload_shared_cluster_username | length == 0
+    or ocp4_workload_shared_cluster_username | regex_search('[@.]') is not none
+
+- name: set ocp4_workload_shared_cluster_password
+  ansible.builtin.set_fact:
+    ocp4_workload_shared_cluster_password: >-
+      {{
+      ocp4_workload_shared_cluster_password
+      | ternary(ocp4_workload_shared_cluster_password, lookup('password', '/dev/null length=8 chars=ascii_letters'))
+      }}
+
 - name: create user {{ ocp4_workload_shared_cluster_username }}
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', 'keycloak_user.yaml.j2') }}"
+    definition: "{{ lookup('template', 'users/keycloak_user.yaml.j2') }}"
 
 - name: add user to groups {{ ocp4_workload_shared_cluster_username }}
   when: ocp4_workload_shared_cluster_user_groups | length > 0
@@ -14,26 +29,61 @@
   when: ocp4_workload_shared_cluster_create_quota | bool
   kubernetes.core.k8s:
     state: present
-    definition: "{{ lookup('template', 'cluster_resource_quota.yaml.j2') }}"
+    definition: "{{ lookup('template', 'users/cluster_resource_quota.yaml.j2') }}"
 
-# - name: Get console route
-#   k8s_info:
-#     api_version: route.openshift.io/v1
-#     kind: Route
-#     namespace: openshift-console
-#     name: console
-#   register: r_console_url
+- name: save agnosticd user data
+  agnosticd_user_info:
+    data:
+      # yamllint disable rule:line-length
+      ocp4_shared_username: "{{ ocp4_workload_shared_cluster_username }}"
+      ocp4_shared_password: "{{ ocp4_workload_shared_cluster_password }}"
 
-# - name: Get API server URL
-#   k8s_info:
-#     api_version: config.openshift.io/v1
-#     kind: Infrastructure
-#     name: cluster
-#   register: r_api_url
+- name: get devspaces route
+  kubernetes.core.k8s_info:
+    kind: Route
+    name: devspaces
+    namespace: "{{ ocp4_workload_shared_cluster_devspaces_namespace }}"
+  register: r_devspaces_route
 
-# - name: save agnosticd user info
-#   agnosticd_user_info:
-#     data:
-#       ocp4_workload_shared_cluster_api_url: "{{ r_api_url.resources[0].status.apiServerURL }}"
-#       ocp4_workload_shared_cluster_console_url: https://{{ r_console_url.resources[0].spec.host }}
-#       ocp4_workload_shared_cluster_username: "{{ ocp4_workload_shared_cluster_username }}"
+- name: set _ocp4_workload_shared_cluster_devspaces_url
+  ansible.builtin.set_fact:
+    _ocp4_workload_shared_cluster_devspaces_url: "https://{{ r_devspaces_route.resources[0].spec.host }}"
+
+- name: create devworkspace
+  when: ocp4_workload_shared_cluster_devworkspace | bool
+  vars:
+    # yamllint disable rule:line-length
+    _devworkspace_name: "{{ ocp4_workload_shared_cluster_username }}-{{ ocp4_workload_shared_cluster_devworkspace_name }}"
+    _devworkspace_namespace: "{{ ocp4_workload_shared_cluster_username }}-{{ ocp4_workload_shared_cluster_devworkspace_namespace }}"
+    _devspaces_devfile: "{{ _ocp4_workload_shared_cluster_devspaces_url }}/plugin-registry/v3/plugins/che-incubator/che-code/latest/devfile.yaml"
+  block:
+    - name: check {{ _devspaces_devfile }}
+      ansible.builtin.uri:
+        url: "{{ _devspaces_devfile }}"
+      register: this
+      until: this.status == 200
+      retries: 10
+      delay: 5
+    - name: create devworkspace
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', item) | from_yaml }}"
+      loop:
+        - devspaces/namespace.yml.j2
+        - devspaces/devworkspace.yml.j2
+    - name: check devworkspace is running
+      kubernetes.core.k8s_info:
+        api_version: workspace.devfile.io/v1alpha2
+        kind: DevWorkspace
+        name: "{{ _devworkspace_name }}"
+        namespace: "{{ _devworkspace_namespace }}"
+      register: r_devworkspace
+      failed_when: r_devworkspace.resources[0].status.phase | default('') != 'Running'
+      until: r_devworkspace is successful
+      retries: 30
+      delay: 10
+    - name: save agnosticd user data
+      agnosticd_user_info:
+        data:
+          # yamllint disable rule:line-length
+          ocp4_shared_devworkspace_url: "{{ _ocp4_workload_shared_cluster_devspaces_url }}/dashboard/#/ide/{{ _devworkspace_namespace }}/{{ _devworkspace_name }}"
