@@ -169,7 +169,7 @@ metadata:
 spec:
   channel: stable
   name: metallb-operator
-  source: redhat-operators 
+  source: redhat-operators
   sourceNamespace: openshift-marketplace
 EOF
 
@@ -209,9 +209,9 @@ metadata:
   name: openshift-terminal
 EOF
 
-until oc get DevWorkspace; do sleep 30; done
-
 sleep 30
+
+until oc get DevWorkspace -n openshift-terminal; do sleep 30; done
 
 cat << EOF | oc apply -f -
 ---
