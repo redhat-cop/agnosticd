@@ -199,7 +199,7 @@ spec:
   name: web-terminal
   source: redhat-operators
   sourceNamespace: openshift-marketplace
-  startingCSV: web-terminal.v0.10.0
+  startingCSV: web-terminal.v1.10.0
 EOF
 
 cat <<EOF | oc apply -f -
