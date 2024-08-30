@@ -1,0 +1,51 @@
+---
+- block:
+  - name: Wait until API Certificate is ready
+    when: not api_cert_ready | default(false) | bool
+    kubernetes.core.k8s_info:
+      api_version: cert-manager.io/v1
+      kind: Certificate
+      name: cert-manager-api-cert
+      namespace: openshift-api
+      wait: true
+      wait_sleep: 5
+      wait_timeout: 800
+      wait_condition:
+        type: "Ready"
+        status: "True"
+    ignore_errors: true
+    register: r_certificate_api
+
+  - name: Mark cert ready
+    when: not r_certificate_api is failed
+    ansible.builtin.set_fact:
+      api_cert_ready: true
+
+  rescue:
+  - name: Restart cert-manager on failure
+    kubernetes.core.k8s:
+      api_version: v1
+      kind: Pod
+      state: absent
+      label_selectors:
+      - app.kubernetes.io/instance=cert-manager
+      - app.kubernetes.io/component=controller
+      namespace: cert-manager
+
+  - ansible.builtin.set_fact:
+      api_cert_retry_counter: "{{ api_cert_retry_counter | int + 1 }}"
+
+  - name: Report fail on api certificate failure
+    when:
+    - (api_cert_retry_counter | int > api_cert_max_retries | int)
+    - r_certificate_api is failed
+    block:
+    - name: Print error message if requesting certificates failed
+      when: ocp4_workload_cert_manager_ignore_errors | bool
+      ansible.builtin.debug:
+        msg: "Requesting certificate for API servers failed after {{ api_cert_max_retries }} retries."
+
+    - name: Fail if requesting certificates failed
+      when: not ocp4_workload_cert_manager_ignore_errors | bool
+      ansible.builtin.fail:
+        msg: "Requesting certificate for API servers failed after {{ api_cert_max_retries }} retries."
