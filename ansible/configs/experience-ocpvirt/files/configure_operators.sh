@@ -195,11 +195,11 @@ metadata:
   namespace: openshift-operators
 spec:
   channel: fast
-  installPlanApproval: Automatic
+  installPlanApproval: Manual
   name: web-terminal
   source: redhat-operators
   sourceNamespace: openshift-marketplace
-  startingCSV: web-terminal.v1.10.0-0.1720435222.p
+  startingCSV: web-terminal.v1.10.0
 EOF
 
 cat <<EOF | oc apply -f -
