@@ -212,6 +212,8 @@ EOF
 
 sleep 30
 
+sh ./devworkspace_image_update.sh
+
 # https://access.redhat.com/solutions/7084768
 # $ oc edit csv devworkspace-operator.v0.30.0 -n openshift-operators
 and replace all references of
