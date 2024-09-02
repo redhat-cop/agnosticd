@@ -214,14 +214,14 @@ sleep 30
 
 
 #apply image change in csv
-oc get csv/devworkspace-operator.v0.30.0 -n openshift-operators -o yaml > devops.yaml
+oc get csv/devworkspace-operator.v0.30.0 -n openshift-operators -o yaml > devops.yaml 2>/dev/null
 sed -i "s|registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:fde6314359436241171f6361f9a1e23c60bdf2d421c0c5740734d1dcf5f01ac2|registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:514e9e03f1d96046ff819798e54aa5672621c15805d61fb6137283f83f57a1e3|g" devops.yaml
-oc apply -f devops.yaml -n openshift-operators 
+oc apply -f devops.yaml -n openshift-operators 2>/dev/null
 
 #apply image change in deployment
-oc get deployment/devworkspace-webhook-server -n openshift-operators -o yaml > devops.yaml
+oc get deployment/devworkspace-webhook-server -n openshift-operators -o yaml > devops.yaml 2>/dev/null
 sed -i "s|registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:fde6314359436241171f6361f9a1e23c60bdf2d421c0c5740734d1dcf5f01ac2|registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:514e9e03f1d96046ff819798e54aa5672621c15805d61fb6137283f83f57a1e3|g" devops.yaml
-oc apply -f devops.yaml -n openshift-operators
+oc apply -f devops.yaml -n openshift-operators 2>/dev/null
 
 # https://access.redhat.com/solutions/7084768
 # $ oc edit csv devworkspace-operator.v0.30.0 -n openshift-operators
