@@ -70,43 +70,49 @@
           {{ r_hcp_cli_download.resources[0] | to_json | from_json
           | json_query("spec.links[?contains(href,'/linux/amd64')].href") | first }}
 
-#    - name: Add A dns record - masters
-#      when: route53_aws_zone_id is defined
-#      amazon.aws.route53:
-#        state: present
-#        aws_access_key_id: "{{ route53_aws_access_key_id }}"
-#        aws_secret_access_key: "{{ route53_aws_secret_access_key }}"
-#        hosted_zone_id: "{{ route53_aws_zone_id }}"
-#        record: "api.{{ cluster_name}}.{{ cluster_dns_zone }}"
-#        zone: "{{ cluster_dns_zone  }}"
-#        value: "{{ full_svc_masters.resources[0].status.loadBalancer.ingress[0].ip }}"
-#        type: A
-#      register: r_route53_add_record
-#      until: r_route53_add_record is success
-#      retries: 10
-#      delay: 30
-#
-#    - name: Add A dns record - workers
-#      when: route53_aws_zone_id is defined
-#      amazon.aws.route53:
-#        state: present
-#        aws_access_key_id: "{{ route53_aws_access_key_id }}"
-#        aws_secret_access_key: "{{ route53_aws_secret_access_key }}"
-#        hosted_zone_id: "{{ route53_aws_zone_id }}"
-#        record: "*.apps.{{ cluster_name}}.{{ cluster_dns_zone }}"
-#        zone: "{{ cluster_dns_zone  }}"
-#        value: "{{ full_svc_workers.resources[0].status.loadBalancer.ingress[0].ip }}"
-#        type: A
-#      register: r_route53_add_record
-#      until: r_route53_add_record is success
-#      retries: 10
-#      delay: 30
-#
+    - name: Download HCP CLI
+      ansible.builtin.get_url:
+        url: "{{ _ocp4_workload_rhacm_hcp_cli_url }}"
+        validate_certs: false
+        dest: /tmp/hcp.tar.gz
+        mode: "0660"
+      register: r_hcp_cli
+      until: r_hcp_cli is success
+      retries: 10
+      delay: 10
+
+    - name: Install HCP CLI on bastion
+      become: true
+      ansible.builtin.unarchive:
+        src: /tmp/hcp.tar.gz
+        remote_src: true
+        dest: /usr/bin
+        mode: "0775"
+        owner: root
+        group: root
+      args:
+        creates: /usr/bin/hcp
+
+    - name: Remove downloaded file
+      ansible.builtin.file:
+        state: absent
+        path: /tmp/hcp.tar.gz
+
+    - name: Setup HCP CLI bash completion
+      become: true
+      ansible.builtin.shell: "/usr/bin/hcp completion bash >/etc/bash_completion.d/hcp"
+      args:
+        creates: /etc/bash_completion.d/hcp
 
     - name: Create pull secret file for installation
       ansible.builtin.copy:
-        dest: "{{ output_dir }}/pull-secret.txt"
+        dest: "/home/{{ ansible_user }}/pull-secret.txt"
         content: "{{ ocp4_pull_secret }}"
+
+    # TODO: search alternatives
+    - name: Login to host cluster
+      ansible.bultin.command: >-
+        oc login --token={{ sandbox_openshift_api_key }} --server={{ sandbox_openshift_api_url }}
 
     - name: Create a hosted cluster using hcp cli
       ansible.builtin.command: >-
@@ -114,10 +120,11 @@
         --name "{{ cluster_name }}"
         --release-image quay.io/openshift-release-dev/ocp-release:{{ hcp_cluster_version }}-x86_64
         --node-pool-replicas {{ worker_instance_count }}
-        --pull-secret "{{ output_dir }}/pull-secret.txt"
+        --pull-secret "/home/{{ ansible_user }}/pull-secret.txt"
         --memory "{{ hcp_workers_memory }}"
         --cores {{ hcp_workers_cores }}
         --qos-class Guaranteed
+        --base-domain "{{ cluster_dns_zone }}"
 
     - name: Delete pull secret file for installation
       ansible.builtin.file:
@@ -141,9 +148,63 @@
         - r_hosted_cluster.resources[0].status.kubeconfig.name is defined
         - r_hosted_cluster.resources[0].status.kubeconfig.name | length > 0
 
+    - name: Command add anotation to apiserver svc to share IP
+      ansible.builtin.command: >-
+        oc -n clusters-{{ guid }} annotate service
+        kube-apiserver metallb.universe.tf/allow-shared-ip={{ guid }}-apps
+
     - name: Generate kubeconfig
       ansible.builtin.command: >-
         hcp create kubeconfig --name "{{ cluster_name }}" > /tmp/kubeconfig
+
+    - name: Get nodeport for http
+      ansible.builtin.command: >-
+        oc --kubeconfig /tmp/kubeconfig
+        get services -n openshift-ingress router-nodeport-default
+        -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}'
+      register: nodeport_http
+
+    - name: Get nodeport for http
+      ansible.builtin.command: >-
+        oc --kubeconfig /tmp/kubeconfig
+        get services -n openshift-ingress router-nodeport-default
+        -o jsonpath='{.spec.ports[?(@.name=="https")].nodePort}'
+      register: nodeport_https
+
+    - name: Add the service (type LoadBalancer) for the apps
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'templates/workers_svc.yaml') }}"
+        wait: true
+        wait_timeout: 300
+      vars:
+        http_nodeport: "{{ nodeport_http.stdout }}"
+        https_nodeport: "{{ nodeport_https.stdout }}"
+
+    - name: Wait for the LoadBalancer value - workers
+      register: full_svc_workers
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        name: "{{ guid }}-apps"
+        namespace: "clusters-{{ guid }}"
+      until: full_svc_workers.resources[0].status.loadBalancer.ingress[0].ip | default('') != ''
+      retries: 10
+      delay: 2
+
+    - name: Add A dns record - apps
+      amazon.aws.route53:
+        state: present
+        aws_access_key_id: "{{ route53_aws_access_key_id }}"
+        aws_secret_access_key: "{{ route53_aws_secret_access_key }}"
+        hosted_zone_id: "{{ route53_aws_zone_id }}"
+        record: "*.apps.{{ cluster_name}}.{{ cluster_dns_zone }}"
+        zone: "{{ cluster_dns_zone  }}"
+        value: "{{ full_svc_workers.resources[0].status.loadBalancer.ingress[0].ip }}"
+        type: A
+      register: r_route53_add_record
+      until: r_route53_add_record is success
+      retries: 10
+      delay: 30
 
     - name: Make sure .kube directory exists for {{ ansible_user }}
       ansible.builtin.file:
