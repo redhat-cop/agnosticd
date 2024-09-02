@@ -212,7 +212,16 @@ EOF
 
 sleep 30
 
-sh ./files/devworkspace_image_update.sh
+
+#apply image change in csv
+oc get csv/devworkspace-operator.v0.30.0 -n openshift-operators -o yaml > devops.yaml
+sed -i "s|registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:fde6314359436241171f6361f9a1e23c60bdf2d421c0c5740734d1dcf5f01ac2|registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:514e9e03f1d96046ff819798e54aa5672621c15805d61fb6137283f83f57a1e3|g" devops.yaml
+oc apply -f devops.yaml -n openshift-operators 
+
+#apply image change in deployment
+oc get deployment/devworkspace-webhook-server -n openshift-operators -o yaml > devops.yaml
+sed -i "s|registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:fde6314359436241171f6361f9a1e23c60bdf2d421c0c5740734d1dcf5f01ac2|registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:514e9e03f1d96046ff819798e54aa5672621c15805d61fb6137283f83f57a1e3|g" devops.yaml
+oc apply -f devops.yaml -n openshift-operators
 
 # https://access.redhat.com/solutions/7084768
 # $ oc edit csv devworkspace-operator.v0.30.0 -n openshift-operators
@@ -231,7 +240,6 @@ and replace all references of
 # devworkspace-controller-manager-54f7dd576b-2xx8k  2/2    Running   0         117s
 # devworkspace-webhook-server-579f68466f-c7vv2      2/2    Running   0         115s
 # devworkspace-webhook-server-579f68466f-fb8th      2/2    Running   0         95s
-
 
 
 until oc get DevWorkspace -n openshift-terminal; do sleep 30; done
