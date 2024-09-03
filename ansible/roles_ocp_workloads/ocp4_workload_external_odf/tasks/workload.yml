@@ -3,42 +3,111 @@
   environment:
     KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
   block:
-    - name: Set up ODF operator
+  - name: Set up ODF operator
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', item) | from_yaml }}"
+    loop:
+    - odf-ns.yaml
+    - odf-og.yaml
+    - odf-sub.yaml.j2
+
+  - name: Wait for the CRD storagecluster to become available
+    kubernetes.core.k8s_info:
+      api_version: apiextensions.k8s.io/v1
+      kind: CustomResourceDefinition
+      name: storageclusters.ocs.openshift.io
+    register: r_crd_storageclusters
+    retries: 200
+    delay: 10
+    until: r_crd_storageclusters.resources | list | length == 1
+
+  - name: Set up StorageCluster
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', item) | from_yaml }}"
+    register: r_storagecluster
+    until: r_storagecluster is success
+    retries: 30
+    delay: 30
+    loop:
+    - secret.yaml.j2
+    - storageclass.yaml.j2
+    - storagecluster.yaml.j2
+
+  - name: Wait for StorageCluster to be available
+    kubernetes.core.k8s_info:
+      api_version: ocs.openshift.io/v1
+      kind: StorageCluster
+      name: ocs-external-storagecluster
+      namespace: openshift-storage
+    register: r_storage_cluster
+    retries: 30
+    delay: 10
+    ignore_errors: true
+    until:
+    - r_storage_cluster.resources is defined
+    - r_storage_cluster.resources | length > 0
+    - r_storage_cluster.resources[0].status is defined
+    - r_storage_cluster.resources[0].status.phase is defined
+    - r_storage_cluster.resources[0].status.phase == "Ready"
+
+  - name: Delete secrets if Storage Cluster status is not successful
+    when: not r_storage_cluster.resources[0].status.phase == "Ready"
+    block:
+    - name: Delete secrets
       kubernetes.core.k8s:
-        state: present
-        definition: "{{ lookup('template',  item ) | from_yaml }}"
+        state: absent
+        api_version: v1
+        kind: Secret
+        name: "{{ item }}"
+        namespace: openshift-storage
       loop:
-        - odf-ns.yaml
-        - odf-og.yaml
-        - odf-sub.yaml.j2
+      - rook-csi-rbd-node
+      - rook-csi-rbd-provisioner
 
-    - name: Set up StorageCluster
-      kubernetes.core.k8s:
-        state: present
-        definition: "{{ lookup('template',  item) | from_yaml }}"
-      register: r_storagecluster
-      until: r_storagecluster is success
-      retries: 30
-      delay: 30
-      loop:
-        - secret.yaml.j2
-        - storageclass.yaml.j2
-        - storagecluster.yaml.j2
-    - name: Create PVC for image registry
-      kubernetes.core.k8s:
-        state: present
-        definition: "{{ lookup('template',  'pvc-imageregistry.yaml') | from_yaml }}"
-      register: r_pvc
-      until: r_pvc is success
-      retries: 30
-      delay: 30
+    - name: Wait for StorageCluster to be available - again
+      kubernetes.core.k8s_info:
+        api_version: ocs.openshift.io/v1
+        kind: StorageCluster
+        name: ocs-external-storagecluster
+        namespace: openshift-storage
+      register: r_storage_cluster
+      retries: "{{ ocp4_workload_external_odf_storage_cluster_deploy_retries | int }}"
+      delay: 10
+      until: r_storage_cluster.resources[0].status.phase == "Ready"
 
-    - name: Configure registry
-      ansible.builtin.shell: >
-        oc patch configs.imageregistry.operator.openshift.io cluster --type merge --patch
-        '{"spec":{"rolloutStrategy":"Recreate","replicas":1,"storage":{"pvc":{"claim":"pvc-image-registry"}},
-        "managementState": "Managed"}}'
+  - name: Create PVC for image registry
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'pvc-imageregistry.yaml') | from_yaml }}"
+    register: r_pvc
+    until: r_pvc is success
+    retries: 30
+    delay: 30
 
-    - name: Enable ODF UI plugin
-      ansible.builtin.shell: >
-        oc patch console.operator cluster -n openshift-storage --type json -p '[{"op": "add", "path": "/spec/plugins", "value": ["odf-console"]}]'
+  - name: Configure registry
+    kubernetes.core.k8s:
+      state: patched
+      api_version: imageregistry.operator.openshift.io/v1
+      kind: Config
+      name: cluster
+      definition:
+        spec:
+          replicas: 1
+          rolloutStrategy: Recreate
+          storage:
+            managementState: Managed
+            pvc:
+              claim: pvc-image-registry
+
+  - name: Enable ODF console plugin
+    kubernetes.core.k8s:
+      state: patched
+      api_version: operator.openshift.io/v1
+      kind: Console
+      name: cluster
+      definition:
+        spec:
+          plugins:
+          - odf-console
