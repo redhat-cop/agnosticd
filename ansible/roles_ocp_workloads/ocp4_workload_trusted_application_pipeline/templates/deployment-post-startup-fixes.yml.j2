@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: default
+  name: post-startup-fixes
+spec:
+  selector:
+    matchLabels:
+      app: post-startup-fixes
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: post-startup-fixes
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: container
+        image: registry.redhat.io/openshift4/ose-tools-rhel9@sha256:8037187950e7374a9c9bec4996033c9b24ce374920ef29047d4f63b4c20f3e6b
+        command:
+        - /bin/bash
+        args:
+        - '-ec'
+        - >-
+          while true; do
+            oc get deployment tekton-triggers-core-interceptors -n openshift-pipelines --no-headers > /dev/null 2>&1;
+            if [[ $? != 0 ]]; then
+              sleep 5;
+              continue;
+            fi
+
+            echo "Found tekton-triggers-core-interceptors deployment";
+            READY=$(oc get deployment tekton-triggers-core-interceptors -n openshift-pipelines --no-headers | awk '{ print $2}');
+            echo READY: $READY;
+            if [[ "${READY}" != "1/1" ]]; then
+              sleep 5;
+              continue;
+            fi
+
+            oc get deployment admission-control -n stackrox --no-headers > /dev/null  2>&1;
+            if [[ $? != 0 ]]; then
+              sleep 5;
+              continue;
+            fi
+
+            echo "Found admission control deployment";
+            READY=$(oc get deployment admission-control -n stackrox --no-headers | awk '{ print $2}');
+            echo READY: $READY;
+            if [[ "${READY}" != "3/3" ]]; then
+              sleep 5;
+              continue;
+            fi
+
+            oc get daemonset collector -n stackrox --no-headers > /dev/null  2>&1;
+            if [[ $? != 0 ]]; then
+              sleep 5;
+              continue;
+            fi
+
+            echo "Found collector daemonset";
+            DESIRED=$(oc get daemonset collector -n stackrox --no-headers | awk '{ print $2}');
+            READY=$(oc get daemonset collector -n stackrox --no-headers | awk '{ print $4}');
+            echo DESIRED: $DESIRED READY: $READY;
+
+            if [[ "${DESIRED}" != "${READY}" ]]; then
+              sleep 5;
+              continue;
+            fi
+
+            oc get deployment sensor -n stackrox --no-headers > /dev/null  2>&1;
+            if [[ $? != 0 ]]; then
+              sleep 5;
+              continue;
+            fi
+
+            echo "Found sensor deployment";
+            READY=$(oc get deployment sensor -n stackrox --no-headers | awk '{ print $2}');
+            echo READY: $READY;
+            if [[ "${READY}" != "1/1" ]]; then
+              sleep 5;
+              continue;
+            fi
+
+            oc get deployment central -n stackrox --no-headers > /dev/null  2>&1;
+            if [[ $? != 0 ]]; then
+              sleep 5;
+              continue;
+            fi
+
+            echo "Found central deployment";
+            READY=$(oc get deployment central -n stackrox --no-headers | awk '{ print $2}');
+            echo READY: $READY;
+            if [[ "${READY}" != "1/1" ]]; then
+              sleep 5;
+              continue;
+            fi
+
+            oc delete pod -l app=tekton-triggers-core-interceptors -n openshift-pipelines --ignore-not-found=true;
+            oc delete secret admission-control-tls -n stackrox --ignore-not-found=true;
+            oc delete secret collector-tls -n stackrox --ignore-not-found=true;
+            oc delete secret sensor-tls -n stackrox --ignore-not-found=true;
+            break;
+          done
+
+          INIT_BUNDLES=$(curl -k -u admin:{{ ocp4_workload_trusted_application_pipeline_common_password }} {{ ocp4_workload_trusted_application_pipeline_central_host }}/v1/cluster-init/init-bundles);
+
+          INIT_BUNDLES_LENGTH=$(echo $INIT_BUNDLES | jq '.items | length');
+
+          INIT_BUNDLE_NAME=prod-{{ lookup('password', '/dev/null chars=ascii_lowercase,digits length=8') }}
+
+          if [[ "${INIT_BUNDLES_LENGTH}" == "1" ]]; then
+            INIT_BUNDLE_ID=$(echo $INIT_BUNDLES | jq -r '.items[0].id');
+            CLUSTER_ID=$(echo $INIT_BUNDLES | jq -r '.items[0].impactedClusters[0].id');
+            curl -u admin:{{ ocp4_workload_trusted_application_pipeline_common_password }} -kv -X PATCH {{ ocp4_workload_trusted_application_pipeline_central_host }}/v1/cluster-init/init-bundles/revoke --data '{"ids": ["'"$INIT_BUNDLE_ID"'"], "confirmImpactedClustersIds": ["'"$CLUSTER_ID"'"]}';
+          fi
+
+          curl -u admin:{{ ocp4_workload_trusted_application_pipeline_common_password }} -k -X POST {{ ocp4_workload_trusted_application_pipeline_central_host }}/v1/cluster-init/init-bundles --data '{"name": "'"$INIT_BUNDLE_NAME"'"}' -o bundle-output.json;
+          cat bundle-output.json | jq -r '.kubectlBundle' | base64 --decode > bundle.yaml;
+          oc apply -f bundle.yaml -n stackrox;
+          oc delete pod -l app=admission-control -n stackrox --ignore-not-found=true;
+          oc delete pod -l app=collector -n stackrox --ignore-not-found=true;
+          oc delete pod -l app=sensor -n stackrox --ignore-not-found=true;
+
+          trap : TERM INT; sleep infinity & wait;
+      serviceAccount: default
+  strategy:
+    type: Recreate
