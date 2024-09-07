@@ -35,47 +35,6 @@ spec:
               continue;
             fi
 
-            oc get deployment admission-control -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --no-headers > /dev/null 2>&1;
-            if [[ $? != 0 ]]; then
-              sleep 5;
-              continue;
-            fi
-
-            echo "Found admission control deployment";
-            oc rollout status deployment admission-control -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} | grep 'successfully rolled out' > /dev/null 2>&1;
-            if [[ $? != 0 ]]; then
-              sleep 5;
-              continue;
-            fi
-
-            oc get daemonset collector -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --no-headers > /dev/null 2>&1;
-            if [[ $? != 0 ]]; then
-              sleep 5;
-              continue;
-            fi
-
-            echo "Found collector daemonset";
-            DESIRED=$(oc get daemonset collector -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --no-headers | awk '{print $2}');
-            READY=$(oc get daemonset collector -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --no-headers | awk '{print $4}');
-            echo DESIRED: $DESIRED READY: $READY;
-            if [[ "${DESIRED}" != "${READY}" ]]; then
-              sleep 5;
-              continue;
-            fi
-
-            oc get deployment sensor -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --no-headers > /dev/null 2>&1;
-            if [[ $? != 0 ]]; then
-              sleep 5;
-              continue;
-            fi
-
-            echo "Found sensor deployment";
-            oc rollout status deployment sensor -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} | grep 'successfully rolled out' > /dev/null 2>&1;
-            if [[ $? != 0 ]]; then
-              sleep 5;
-              continue;
-            fi
-
             STATUS_CODE=$(curl -sk -o /dev/null -w "%{http_code}" {{ ocp4_workload_trusted_application_pipeline_central_host }}/v1/ping);
             echo Central Status Code: $STATUS_CODE;
             if [[ "${STATUS_CODE}" != "200" ]]; then
@@ -84,17 +43,23 @@ spec:
             fi
 
             oc delete pod -l app=tekton-triggers-core-interceptors -n {{ ocp4_workload_trusted_application_pipeline_pipelines_namespace }} --ignore-not-found=true;
-            oc delete secret admission-control-tls -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
-            oc delete secret collector-tls -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
-            oc delete secret sensor-tls -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
             break;
           done
 
+          oc delete securedcluster stackrox-secured-cluster-services -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
+          while true; do
+            RESPONSE=$(oc get securedcluster stackrox-secured-cluster-services -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true);
+            if [[ ! -z "${RESPONSE}" ]]; then
+              sleep 5;
+              continue;
+            else
+              break;
+            fi
+          done
+
           INIT_BUNDLES=$(curl -k -u admin:{{ ocp4_workload_trusted_application_pipeline_common_password }} {{ ocp4_workload_trusted_application_pipeline_central_host }}/v1/cluster-init/init-bundles);
-
           INIT_BUNDLES_LENGTH=$(echo $INIT_BUNDLES | jq '.items | length');
-
-          INIT_BUNDLE_NAME=prod-{{ lookup('password', '/dev/null chars=ascii_lowercase,digits length=8') }};
+          INIT_BUNDLE_NAME=prod-{{ lookup('password', d '/dev/null chars=ascii_lowercase,digits length=8') }};
 
           if [[ "${INIT_BUNDLES_LENGTH}" == "1" ]]; then
             INIT_BUNDLE_ID=$(echo $INIT_BUNDLES | jq -r '.items[0].id');
@@ -105,11 +70,17 @@ spec:
           curl -u admin:{{ ocp4_workload_trusted_application_pipeline_common_password }} -k -X POST {{ ocp4_workload_trusted_application_pipeline_central_host }}/v1/cluster-init/init-bundles --data '{"name": "'"$INIT_BUNDLE_NAME"'"}' -o bundle-output.json;
           cat bundle-output.json | jq -r '.kubectlBundle' | base64 --decode > bundle.yaml;
           oc apply -f bundle.yaml -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }};
-          oc delete pod -l app=admission-control -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
-          oc delete pod -l app=collector -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
-          oc delete pod -l app=sensor -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
+
+          oc apply -f /configs/secured-cluster.yml -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }}
 
           trap : TERM INT; sleep infinity & wait;
+        volumeMounts:
+        - name: secured-cluster-config-vol
+          mountPath: /configs
       serviceAccount: default
+      volumes:
+      - name: secured-cluster-config-vol
+        configMap:
+          name: secure-cluster-config
   strategy:
     type: Recreate
