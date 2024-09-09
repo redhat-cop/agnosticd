@@ -1,39 +1,69 @@
 ---
+- name: Create rosa metal machinepool block
+  when: _loop_index == 0 or _rosa_machinepool_create_failed | default(false) == true
+  block:
+    - name: Create ROSA Metal Machinepool
+      ansible.builtin.command: >-
+        {{ op4_workload_rosa_machinepool_binary_path }}/rosa create machinepool
+        --name={{ op4_workload_rosa_machinepool_name }}
+        --cluster={{ ocp4_workload_rosa_machinepool_cluster_name }}
+        --instance-type={{ _metal_node_type }}
+        {% if op4_workload_rosa_machinepool_disk_size is defined %}--disk-size={{ op4_workload_rosa_machinepool_disk_size }}{% endif %}
+        {% if op4_workload_rosa_machinepool_replicas is defined %}--replicas={{ op4_workload_rosa_machinepool_replicas | int }}{% endif %}
+        {% if op4_workload_rosa_machinepool_labels is defined %}--labels={{ op4_workload_rosa_machinepool_labels }}{% endif %}
+        {% if op4_workload_rosa_machinepool_taints is defined %}--taints={{ op4_workload_rosa_machinepool_taints }}{% endif %}
+        {% if op4_workload_rosa_machinepool_enable_autoscaling | bool %}
+        --enable-autoscaling
+        {% if op4_workload_rosa_machinepool_enable_autoscaling_min_replicas is defined %}
+        --min-replicas={{ op4_workload_rosa_machinepool_enable_autoscaling_min_replicas | int }}
+        {% endif %}
+        {% if op4_workload_rosa_machinepool_enable_autoscaling_max_replicas is defined %}
+        --max-replicas={{ op4_workload_rosa_machinepool_enable_autoscaling_max_replicas | int }}
+        {% endif %}
+        {% endif %}
+      register: _r_machinepool
+      until: _r_machinepool.rc == 0
+      retries: 5
+      delay: 10
 
-- name: Create ROSA Metal Machinepool
-  ansible.builtin.command: >-
-    {{ op4_workload_rosa_machinepool_binary_path }}/rosa create machinepool
-    --name={{ op4_workload_rosa_machinepool_name }}
-    --cluster={{ ocp4_workload_rosa_machinepool_cluster_name }}
-    --instance-type={{ ocp4_workload_rosa_machinepool_instance_type }}
-    {% if op4_workload_rosa_machinepool_disk_size is defined %}--disk-size={{ op4_workload_rosa_machinepool_disk_size }}{% endif %}
-    {% if op4_workload_rosa_machinepool_replicas is defined %}--replicas={{ op4_workload_rosa_machinepool_replicas | int }}{% endif %}
-    {% if op4_workload_rosa_machinepool_labels is defined %}--labels={{ op4_workload_rosa_machinepool_labels }}{% endif %}
-    {% if op4_workload_rosa_machinepool_taints is defined %}--taints={{ op4_workload_rosa_machinepool_taints }}{% endif %}
-    {% if op4_workload_rosa_machinepool_enable_autoscaling | bool %}
-    --enable-autoscaling
-    {% if op4_workload_rosa_machinepool_enable_autoscaling_min_replicas is defined %}
-    --min-replicas={{ op4_workload_rosa_machinepool_enable_autoscaling_min_replicas | int }}
-    {% endif %}
-    {% if op4_workload_rosa_machinepool_enable_autoscaling_max_replicas is defined %}
-    --max-replicas={{ op4_workload_rosa_machinepool_enable_autoscaling_max_replicas | int }}
-    {% endif %}
-    {% endif %}
-  register: _r_machinepool_status
-  until: _r_machinepool_status.rc == 0
-  retries: 5
-  delay: 10
+    - name: Wait for Machine status
+      kubernetes.core.k8s_info:
+        api_version: machine.openshift.io/v1beta1
+        kind: Machine
+        label_selectors:
+          - "machine.openshift.io/instance-type={{ _metal_node_type  }}"
+      register: _r_metal_type
+      until:
+        - _r_metal_type.resources is defined 
+        - _r_metal_type.resources | length > 0
+        - _r_metal_type.resources.0.status.providerStatus.instanceState == "running"
+      delay: 30
+      retries: 15
 
+    - name: Wait for Nodes to be available
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        label_selectors:
+          - "node.kubernetes.io/instance-type={{ _metal_node_type }}"
+      register: _r_metal_nodes
+      when: _r_metal_type.resources.0.status.providerStatus.instanceState == "running"
+      until: _r_metal_nodes.resources | length >=  op4_workload_rosa_machinepool_replicas | int
+      delay: 30
+      retries: 50
 
-- name: Wait for Machinepool Nodes to be available
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Node
-    label_selectors:
-      - "node.kubernetes.io/instance-type={{ ocp4_workload_rosa_machinepool_instance_type }}"
-  register: r_metal_nodes
-  until: r_metal_nodes.resources | length >=  op4_workload_rosa_machinepool_replicas | int
-  delay: 30
-  retries: 50
+  rescue:
+    - name: Set metal node creation failed
+      ansible.builtin.set_fact:
+        _rosa_machinepool_create_failed: true
 
-
+    - name: Delete ROSA Metal Machinepool
+      ansible.builtin.command: >-
+        {{ op4_workload_rosa_machinepool_binary_path }}/rosa create machinepool
+        --cluster={{ ocp4_workload_rosa_machinepool_cluster_name }}
+        --machinepool {{ op4_workload_rosa_machinepool_name }}
+        --yes
+      register: _r_delete_machinepool
+      until: _r_delete_machinepool.rc == 0
+      retries: 5
+      delay: 10
