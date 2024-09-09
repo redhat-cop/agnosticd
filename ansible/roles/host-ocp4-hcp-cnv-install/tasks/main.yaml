@@ -55,7 +55,7 @@
   block:
     - name: Add the certificate definition for OAuth service
       kubernetes.core.k8s:
-        definition: "{{ lookup('ansible.builtin.template', 'templates/certificate.yaml') }}"
+        definition: "{{ lookup('ansible.builtin.template', 'certificate.yaml') }}"
         wait: true
         wait_timeout: 300
       vars:
@@ -76,7 +76,7 @@
 
     - name: Add the pull secret
       kubernetes.core.k8s:
-        definition: "{{ lookup('ansible.builtin.template', 'templates/pullsecret.yaml') }}"
+        definition: "{{ lookup('ansible.builtin.template', 'pullsecret.yaml') }}"
         wait: true
         wait_timeout: 300
       vars:
@@ -84,13 +84,13 @@
 
     - name: Set variable for kubeconfig
       set_fact:
-        kubeconfig_base64: "{{ lookup('ansible.builtin.template', 'templates/kubeconfig.yaml') | ansible.builtin.b64encode }}"
+        kubeconfig_base64: "{{ lookup('ansible.builtin.template', 'kubeconfig.yaml') | ansible.builtin.b64encode }}"
       vars:
         sandbox_openshift_api_url_name: "{{ sandbox_openshift_api_url.replace('https://','').replace('.','_') }}"
 
     - name: Create the kubeconfig secret
       kubernetes.core.k8s:
-        definition: "{{ lookup('ansible.builtin.template', 'templates/kubeconfigsecret.yaml') }}"
+        definition: "{{ lookup('ansible.builtin.template', 'kubeconfigsecret.yaml') }}"
         wait: true
         wait_timeout: 300
       vars:
@@ -101,7 +101,7 @@
 
     - name: Create the HostedCluster
       kubernetes.core.k8s:
-        definition: "{{ lookup('ansible.builtin.template', 'templates/hostedcluster.yaml') }}"
+        definition: "{{ lookup('ansible.builtin.template', 'hostedcluster.yaml') }}"
         wait: true
         wait_timeout: 300
       vars:
@@ -109,7 +109,7 @@
 
     - name: Create the NodePool
       kubernetes.core.k8s:
-        definition: "{{ lookup('ansible.builtin.template', 'templates/nodepool.yaml') }}"
+        definition: "{{ lookup('ansible.builtin.template', 'nodepool.yaml') }}"
         wait: true
         wait_timeout: 300
       vars:
@@ -137,44 +137,60 @@
         namespace: "{{ hcp_ocp_namespace }}"
       register: kubeadmin_secret_result
 
-    #- name: Get the OpenShift secret
-    #  kubernetes.core.k8s_info:
-    #    api_version: v1
-    #    kind: Secret
-    #    name: hcp-{{ guid }}-kubeadmin-password
-    #    namespace: "{{ hcp_ocp_namespace }}"
-    #  register: password_secret_result
+    - name: Get the OpenShift secret
+      when: hcp_authentication | default('') != 'htpasswd'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: hcp-{{ guid }}-kubeadmin-password
+        namespace: "{{ hcp_ocp_namespace }}"
+      register: password_secret_result
 
-    - name: Decode the secrets
+    - name: Decode the kubeconfig secret
       set_fact:
         kubeconfig_decoded: "{{ kubeadmin_secret_result.resources[0].data.kubeconfig | b64decode }}"
-        #kubeadmin_password: "{{ password_secret_result.resources[0].data.password | b64decode }}"
+
+    - name: Decode the kubeadmin password secret
+      when: hcp_authentication | default('') != 'htpasswd'
+      set_fact:
+        kubeadmin_password: "{{ password_secret_result.resources[0].data.password | b64decode }}"
 
     - name: Generate /tmp/kubeconfig
       copy:
         dest: /tmp/kubeconfig
         content: "{{ kubeconfig_decoded }}"
 
-    - name: Get nodeport for http
-      ansible.builtin.command: >-
-        oc --kubeconfig /tmp/kubeconfig
-        get services -n openshift-ingress router-nodeport-default
-        -o jsonpath='{.spec.ports[?(@.name=="http")].nodePort}'
-      register: nodeport_http
-      retries: 10
-      delay: 30
-      until: nodeport_http.rc == 0
+- name: Get information about the router-nodeport-default service
+  kubernetes.core.k8s_info:
+    kubeconfig: /tmp/kubeconfig
+    api_version: v1
+    kind: Service
+    namespace: openshift-ingress
+    name: router-nodeport-default
+  register: service_info
+  retries: 10
+  delay: 30
+  until: service_info.resources[0].spec.ports is defined and service_info.resources[0].spec.ports | length > 0
 
-    - name: Get nodeport for https
-      ansible.builtin.command: >-
-        oc --kubeconfig /tmp/kubeconfig
-        get services -n openshift-ingress router-nodeport-default
-        -o jsonpath='{.spec.ports[?(@.name=="https")].nodePort}'
-      register: nodeport_https
+- name: Extract nodeport for http
+  set_fact:
+    nodeport_http: "{{ service_info.resources[0].spec.ports | selectattr('name', 'equalto', 'http') | map(attribute='nodePort') | first }}"
 
+- name: Extract nodeport for https
+  set_fact:
+    nodeport_https: "{{ service_info.resources[0].spec.ports | selectattr('name', 'equalto', 'https') | map(attribute='nodePort') | first }}"
+
+- name: Post-Install tasks
+  module_defaults:
+    group/k8s:
+      host: "{{ sandbox_openshift_api_url }}"
+      api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+      validate_certs: false
+
+  block:
     - name: Add the service (type LoadBalancer) for the apps
       kubernetes.core.k8s:
-        definition: "{{ lookup('ansible.builtin.template', 'templates/workers_svc.yaml') }}"
+        definition: "{{ lookup('ansible.builtin.template', 'workers_svc.yaml') }}"
         wait: true
         wait_timeout: 300
       vars:
@@ -280,7 +296,7 @@
   environment:
     K8S_AUTH_KUBECONFIG: /home/{{ ansible_user }}/.kube/config
   kubernetes.core.k8s:
-    definition: "{{ lookup('ansible.builtin.template', 'templates/clusterrolebinding.yaml') }}"
+    definition: "{{ lookup('ansible.builtin.template', 'clusterrolebinding.yaml') }}"
     wait: true
     wait_timeout: 300
 
