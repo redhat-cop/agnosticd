@@ -199,7 +199,6 @@ spec:
   name: web-terminal
   source: redhat-operators
   sourceNamespace: openshift-marketplace
-  startingCSV: web-terminal.v1.10.0-0.1720435222.p
 EOF
 
 cat <<EOF | oc apply -f -
@@ -211,26 +210,6 @@ metadata:
 EOF
 
 sleep 30
-
-# https://access.redhat.com/solutions/7084768
-# $ oc edit csv devworkspace-operator.v0.30.0 -n openshift-operators
-and replace all references of
-# registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:fde6314359436241171f6361f9a1e23c60bdf2d421c0c5740734d1dcf5f01ac2
-# to
-# registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:514e9e03f1d96046ff819798e54aa5672621c15805d61fb6137283f83f57a1e3
-#
-# and
-#
-#
-# a oc edit deployment devworkspace-webhook-server -n openshift-operators
-# Eventually, the devworkspace-controller-manager and devworkspace-webhook-server pods will use the updated image:
-# $ oc get pods -n openshift-operators
-# NAME                                             READY   STATUS   RESTARTS   AGE
-# devworkspace-controller-manager-54f7dd576b-2xx8k  2/2    Running   0         117s
-# devworkspace-webhook-server-579f68466f-c7vv2      2/2    Running   0         115s
-# devworkspace-webhook-server-579f68466f-fb8th      2/2    Running   0         95s
-
-
 
 until oc get DevWorkspace -n openshift-terminal; do sleep 30; done
 
