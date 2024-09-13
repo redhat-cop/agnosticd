@@ -65,14 +65,14 @@ master_instance_count: 1
 worker_instance_type: m6a.4xlarge
 worker_instance_count: 1
 bastion_instance_type: t2.small
-bastion_instance_image: RHEL84GOLD-latest
+bastion_instance_image: RHEL93GOLD-latest
 aws_region: ${AGD_AWS_REGION}
 agnosticd_aws_capacity_reservation_enabled: false
 
 # -------------------------------------------------------------------
 # OpenShift installer
 # -------------------------------------------------------------------
-ocp4_installer_version: "4.13"
+ocp4_installer_version: "4.14"
 ocp4_installer_root_url: https://mirror.openshift.com/pub/openshift-v4/clients
 
 # -------------------------------------------------------------------

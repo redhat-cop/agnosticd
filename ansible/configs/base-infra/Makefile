@@ -5,7 +5,9 @@ SANDBOX=1
 # Adjust GUID to taste e.g. make deploy GUID=foo-01
 
 GUID=aap2-0$(SANDBOX)
-OUTPUT_DIR=/tmp/output_dir/$(GUID)-$(CLOUD_PROVIDER)
+OUTPUT_HOME=/tmp/output_dir
+OUTPUT_DIR=$(OUTPUT_HOME)/$(GUID)-$(CLOUD_PROVIDER)
+BACKUP_HOME=~/tmp/
 
 # TODO: ~/tmp seems to fail, related to accessing tha ssh file at least in aws's ping during post_infra
 # ~/tmp persists through reboots which can be useful
@@ -110,6 +112,12 @@ showroom-install: ## Install showroom
 		-i $(OUTPUT_DIR)/inventory_post_software.yaml \
 		-e @$(OUTPUT_DIR)/user-data.yaml \
 		-e role=showroom
+	
+backup-output: ## Backup the output dir
+	cp -r $(OUTPUT_HOME) $(BACKUP_HOME)
+
+restore-output: ## Backup the output dir
+	cp -r $(BACKUP_HOME)/output_dir /tmp/
 
 relog: ## Zero out the ANSIBLE_LOG_PATH log file
 	rm $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log
