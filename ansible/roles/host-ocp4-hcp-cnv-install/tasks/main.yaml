@@ -1,0 +1,294 @@
+---
+- name: Set Ansible Python interpreter to k8s virtualenv
+  ansible.builtin.set_fact:
+    ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+
+- name: Set URLs for OpenShift GA releases (specific version)
+  when: (ocp4_installer_version | string).split('.') | length >= 3
+  ansible.builtin.set_fact:
+    ocp4_client_url: >-
+      {{ '{0}/ocp/{1}/openshift-client-linux-{1}.tar.gz'.format(
+        ocp4_installer_root_url | default("https://mirror.openshift.com/pub/openshift-v4/clients"),
+        ocp4_installer_version
+      ) }}
+
+- name: Set URLs for OpenShift GA releases (latest stable)
+  when: (ocp4_installer_version | string).split('.') | length == 2
+  set_fact:
+    ocp4_client_url: >-
+      {{ '{0}/ocp/stable-{1}/openshift-client-linux.tar.gz'.format(
+        ocp4_installer_root_url | default("https://mirror.openshift.com/pub/openshift-v4/clients"),
+        ocp4_installer_version
+      ) }}
+
+- name: Get the OpenShift CLI
+  become: true
+  ansible.builtin.unarchive:
+    src: "{{ ocp4_client_url }}"
+    remote_src: true
+    dest: /usr/bin
+    mode: 0775
+    owner: root
+    group: root
+  register: r_client
+  until: r_client is success
+  retries: 10
+  delay: 30
+
+- name: Log in (obtain access token)
+  community.okd.openshift_auth:
+    username: "{{ sandbox_openshift_username }}"
+    password: "{{ sandbox_openshift_password }}"
+    host: "{{ sandbox_openshift_api_url }}"
+  register: k8s_auth_results
+  when: sandbox_openshift_username | default(false) | bool
+
+- name: Install OCP using HCP
+  module_defaults:
+    group/k8s:
+      host: "{{ sandbox_openshift_api_url }}"
+      api_key: "{{ k8s_auth_results.k8s_auth.api_key | default(sandbox_openshift_api_key) }}"
+      validate_certs: false
+
+  block:
+    - name: Add the certificate definition for OAuth service
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'certificate.yaml') }}"
+        wait: true
+        wait_timeout: 300
+      vars:
+        namespace: "{{ hcp_ocp_namespace }}"
+
+    - name: Wait until Oauth Certificate is ready
+      kubernetes.core.k8s_info:
+        api_version: cert-manager.io/v1
+        kind: Certificate
+        name: oauth-{{ guid }}
+        namespace: "{{ hcp_ocp_namespace }}"
+        wait: true
+        wait_sleep: 5
+        wait_timeout: 800
+        wait_condition:
+          type: "Ready"
+          status: "True"
+
+    - name: Add the pull secret
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'pullsecret.yaml') }}"
+        wait: true
+        wait_timeout: 300
+      vars:
+        namespace: "{{ hcp_ocp_namespace }}"
+
+    - name: Set variable for kubeconfig
+      set_fact:
+        kubeconfig_base64: "{{ lookup('ansible.builtin.template', 'kubeconfig.yaml') | ansible.builtin.b64encode }}"
+      vars:
+        sandbox_openshift_api_url_name: "{{ sandbox_openshift_api_url.replace('https://','').replace('.','_') }}"
+
+    - name: Create the kubeconfig secret
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'kubeconfigsecret.yaml') }}"
+        wait: true
+        wait_timeout: 300
+      vars:
+        namespace: "{{ hcp_ocp_namespace }}"
+
+    - name: Create htpasswd secret for admin and userX
+      include_tasks: setup_htpasswd_authentication.yml
+
+    - name: Create the HostedCluster
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'hostedcluster.yaml') }}"
+        wait: true
+        wait_timeout: 300
+      vars:
+        namespace: "{{ hcp_ocp_namespace }}"
+
+    - name: Create the NodePool
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'nodepool.yaml') }}"
+        wait: true
+        wait_timeout: 300
+      vars:
+        namespace: "{{ hcp_ocp_namespace }}"
+
+    - name: Get HostedCluster
+      kubernetes.core.k8s_info:
+        api_version: hypershift.openshift.io/v1beta1
+        kind: HostedCluster
+        name: "hcp-{{ guid }}"
+        namespace: "{{ hcp_ocp_namespace }}"
+      register: r_hosted_cluster
+      retries: 120
+      delay: 10
+      until:
+        - r_hosted_cluster.resources[0].status.kubeconfig is defined
+        - r_hosted_cluster.resources[0].status.kubeconfig.name is defined
+        - r_hosted_cluster.resources[0].status.kubeconfig.name | length > 0
+
+    - name: Get the OpenShift admin kubeconfig secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: hcp-{{ guid }}-admin-kubeconfig
+        namespace: "{{ hcp_ocp_namespace }}"
+      register: kubeadmin_secret_result
+
+    - name: Get the OpenShift secret
+      when: hcp_authentication | default('') != 'htpasswd'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: hcp-{{ guid }}-kubeadmin-password
+        namespace: "{{ hcp_ocp_namespace }}"
+      register: password_secret_result
+
+    - name: Decode the kubeconfig secret
+      set_fact:
+        kubeconfig_decoded: "{{ kubeadmin_secret_result.resources[0].data.kubeconfig | b64decode }}"
+
+    - name: Decode the kubeadmin password secret
+      when: hcp_authentication | default('') != 'htpasswd'
+      set_fact:
+        kubeadmin_password: "{{ password_secret_result.resources[0].data.password | b64decode }}"
+
+    - name: Generate /tmp/kubeconfig
+      copy:
+        dest: /tmp/kubeconfig
+        content: "{{ kubeconfig_decoded }}"
+
+- name: Get information about the router-nodeport-default service
+  kubernetes.core.k8s_info:
+    kubeconfig: /tmp/kubeconfig
+    api_version: v1
+    kind: Service
+    namespace: openshift-ingress
+    name: router-nodeport-default
+  register: service_info
+  retries: 10
+  delay: 30
+  until:
+    - service_info.resources[0].spec.ports is defined
+    - service_info.resources[0].spec.ports | length > 0
+
+- name: Extract nodeport for http
+  set_fact:
+    nodeport_http: "{{ service_info.resources[0].spec.ports | selectattr('name', 'equalto', 'http') | map(attribute='nodePort') | first }}"
+
+- name: Extract nodeport for https
+  set_fact:
+    nodeport_https: "{{ service_info.resources[0].spec.ports | selectattr('name', 'equalto', 'https') | map(attribute='nodePort') | first }}"
+
+- name: Post-Install tasks
+  module_defaults:
+    group/k8s:
+      host: "{{ sandbox_openshift_api_url }}"
+      api_key: "{{ k8s_auth_results.k8s_auth.api_key | default(sandbox_openshift_api_key) }}"
+      validate_certs: false
+
+  block:
+    - name: Add the service (type LoadBalancer) for the apps
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'workers_svc.yaml') }}"
+        wait: true
+        wait_timeout: 300
+      vars:
+        namespace: "{{ hcp_ocp_namespace }}"
+
+    - name: Wait for the LoadBalancer value - workers
+      register: svc_apps
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        name: "svc-{{ guid }}-apps"
+        namespace: "{{ hcp_ocp_namespace }}"
+      until: svc_apps.resources[0].status.loadBalancer.ingress[0].ip | default('') != ''
+      retries: 10
+      delay: 2
+
+    - name: Add A dns record - apps
+      amazon.aws.route53:
+        state: present
+        aws_access_key_id: "{{ route53_aws_access_key_id }}"
+        aws_secret_access_key: "{{ route53_aws_secret_access_key }}"
+        hosted_zone_id: "{{ route53_aws_zone_id }}"
+        record: "*.apps.hcp-{{ guid }}.{{ cluster_dns_zone }}"
+        zone: "{{ cluster_dns_zone  }}"
+        value: "{{ svc_apps.resources[0].status.loadBalancer.ingress[0].ip }}"
+        type: A
+      register: r_route53_add_record
+      until: r_route53_add_record is success
+      retries: 10
+      delay: 30
+
+    - name: Make sure .kube directory exists for {{ ansible_user }}
+      ansible.builtin.file:
+        state: directory
+        path: /home/{{ ansible_user }}/.kube
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0700"
+
+    - name: Make sure .kube directory exists for root
+      become: true
+      ansible.builtin.file:
+        state: directory
+        path: /root/.kube
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Copy cluster kubeconfig to /home/{{ ansible_user }}/.kube/config
+      ansible.builtin.copy:
+        remote_src: true
+        src: "/tmp/kubeconfig"
+        dest: "/home/{{ ansible_user }}/.kube/config"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: "0600"
+
+    - name: Copy cluster kubeconfig to /root/.kube/config
+      become: true
+      ansible.builtin.copy:
+        remote_src: true
+        src: /tmp/kubeconfig
+        dest: /root/.kube/config
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Set up Student User
+      when: install_student_user | bool
+      block:
+        - name: Make sure .kube directory exists in /home/{{ student_name }}
+          become: true
+          ansible.builtin.file:
+            state: directory
+            path: "/home/{{ student_name }}/.kube"
+            owner: "{{ student_name }}"
+            group: users
+            mode: "0700"
+
+        - name: Copy /tmp/kubeconfig to /home/{{ student_name }}/.kube
+          become: true
+          ansible.builtin.copy:
+            src: /tmp/kubeconfig
+            dest: /home/{{ student_name }}/.kube/config
+            remote_src: true
+            owner: "{{ student_name }}"
+            group: users
+            mode: 0600
+
+    - name: Create OpenShift Bash completion file
+      become: true
+      ansible.builtin.shell: oc completion bash >/etc/bash_completion.d/openshift
+
+- name: Assign cluster-admin role to admin user
+  environment:
+    K8S_AUTH_KUBECONFIG: /home/{{ ansible_user }}/.kube/config
+  kubernetes.core.k8s:
+    definition: "{{ lookup('ansible.builtin.template', 'clusterrolebinding.yaml') }}"
+
+- name: Gather and Print cluster info
+  ansible.builtin.import_tasks: print_cluster_info.yml
