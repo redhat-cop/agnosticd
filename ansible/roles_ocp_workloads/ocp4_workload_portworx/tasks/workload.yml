@@ -1,70 +1,167 @@
 ---
-- name: Create namespace - {{ ocp4_workload_portworx_namespace }}
-  kubernetes.core.k8s:
-    name: "{{ ocp4_workload_portworx_namespace }}"
-    api_version: v1
-    kind: Namespace
-    state: present
-  register: result
-  until: result is not failed
-  retries: 10
-  delay: 6
+- name: Find all EC2 instances with "worker" in their Name tag
+  amazon.aws.ec2_instance_info:
+    filters:
+      "tag:Name": "*worker*"
+    region: "{{ aws_region }}"
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+  register: r_ec2_info
 
-- name: Create operatorgroup
-  kubernetes.core.k8s:
-    state: present
-    template: portworx_operatorgroup.j2
-  register: result
-  until: result is not failed
-  retries: 10
-  delay: 6
+- name: Extract VPC ID from the first worker instance
+  ansible.builtin.set_fact:
+    vpc_id: "{{ r_ec2_info.instances[0].vpc_id }}"
 
-- name: Install operator
-  kubernetes.core.k8s:
-    template: portworx_subscription.j2
-    namespace: "{{ ocp4_workload_portworx_namespace }}"
-    state: present
-  register: result
-  until: result is not failed
-  retries: 10
-  delay: 6
-
-- name: Wait for operator to install
-  kubernetes.core.k8s_info:
-    api_version: operators.coreos.com/v1alpha1
-    kind: Subscription
-    name: "{{ ocp4_workload_portworx_sub_name }}"
-    namespace: "{{ ocp4_workload_portworx_namespace }}"
-  register: r_portworx_operator_info
-  until:
-    r_portworx_operator_info.resources[0].status.state is defined and
-    r_portworx_operator_info.resources[0].status.state == 'AtLatestKnown'
-  retries: 50
-  delay: 6
-
-- name: Create StorageCluster
-  kubernetes.core.k8s:
-    template: portworx_storagecluster.j2
-    namespace: "{{ ocp4_workload_portworx_namespace }}"
-    state: present
-  register: result
-  until: result is not failed
-  retries: 10
-  delay: 6
-
-- name: Wait for StorageCluser to enter Running phase
-  kubernetes.core.k8s_info:
-    api_version: core.libopenstorage.org/v1
-    kind: StorageCluster
-    name: "{{ ocp4_workload_portworx_storagecluster_name }}"
-    namespace: "{{ ocp4_workload_portworx_namespace }}"
-  register: r_portworx_storagecluster_info
-  until:
-    r_portworx_storagecluster_info.resources[0].status.phase is defined and
-    r_portworx_storagecluster_info.resources[0].status.phase == 'Running'
-  retries: 150
-  delay: 6
-
-- name: workload Tasks Complete
+- name: Debug VPC ID
   ansible.builtin.debug:
-    msg: workload Tasks Complete
+    msg: "VPC ID: {{ vpc_id }}"
+
+- name: Extract security group info with "node" in the group name
+  ansible.builtin.set_fact:
+    node_sg_info: >-
+      {{ r_ec2_info.instances | map(attribute='security_groups') |
+         flatten | selectattr('group_name', 'search', 'node') | unique | list }}
+
+- name: Extract security group IDs from node_sg_info
+  ansible.builtin.set_fact:
+    node_sg_id: "{{ node_sg_info | map(attribute='group_id') | list }}"
+
+- name: Extract security group names from node_sg_info
+  ansible.builtin.set_fact:
+    node_sg_name: "{{ node_sg_info | map(attribute='group_name') | map('trim') | list }}"
+
+- name: Debug Node SG Name
+  ansible.builtin.debug:
+    msg: "Node Security Group: {{ node_sg_name }}"
+
+- name: Add aws security group rules
+  amazon.aws.ec2_group:
+    name: "{{ node_sg_name[0] }}"
+    description: "Edited by AgnosticD ocp4_workload_portworx"
+    purge_rules: false
+    state: present
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    region: "{{ aws_region }}"
+    vpc_id: "{{ vpc_id }}"
+    rules:
+    # https://docs.portworx.com/portworx-enterprise/3.0/install-portworx/prerequisites
+    # NFS: 111,2049,20048
+    - proto: tcp
+      ports: 111
+      rule_desc: "{{ ocp4_workload_portworx_namespace }}"
+      group_id: "{{ node_sg_id }}"
+    - proto: tcp
+      ports: 2049
+      rule_desc: "{{ ocp4_workload_portworx_namespace }}"
+      group_id: "{{ node_sg_id }}"
+    - proto: tcp
+      ports: 20048
+      rule_desc: "{{ ocp4_workload_portworx_namespace }}"
+      group_id: "{{ node_sg_id }}"
+    # Portworx: TCP ports at 17001-17020, UDP port at 17002
+    - proto: tcp
+      ports: 17001 - 17020
+      rule_desc: "{{ ocp4_workload_portworx_namespace }}"
+      group_id: "{{ node_sg_id }}"
+    - proto: udp
+      ports: 17002
+      rule_desc: "{{ ocp4_workload_portworx_namespace }}"
+      group_id: "{{ node_sg_id }}"
+    # Portworx Telemetry: 9024, 9029, 12001, and 12002
+    - proto: tcp
+      ports: 9024
+      rule_desc: "{{ ocp4_workload_portworx_namespace }}"
+      group_id: "{{ node_sg_id }}"
+    - proto: tcp
+      ports: 9029
+      rule_desc: "{{ ocp4_workload_portworx_namespace }}"
+      group_id: "{{ node_sg_id }}"
+    - proto: tcp
+      ports: 12001-12002
+      rule_desc: "{{ ocp4_workload_portworx_namespace }}"
+      group_id: "{{ node_sg_id }}"
+
+- name: Find all existing IAM roles
+  amazon.aws.iam_role_info:
+    region: "{{ aws_region }}"
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+  register: r_aws_iam_roles
+
+- name: Extract role names
+  ansible.builtin.set_fact:
+    r_aws_iam_role_names: "{{ r_aws_iam_roles.iam_roles | map(attribute='role_name') | list }}"
+
+- name: Set fact for iam worker role
+  ansible.builtin.set_fact:
+    _ocp4_workload_portworx_iam_worker_role: >-
+      {{ r_aws_iam_role_names | regex_search('cluster-[a-z0-9]*-[a-z0-9]*-worker-role') }}
+
+- name: Debug iam worker role
+  ansible.builtin.debug:
+    msg: "IAM worker role: {{ _ocp4_workload_portworx_iam_worker_role }}"
+
+- name: Attach IAM policy to role
+  amazon.aws.iam_policy:
+    region: "{{ aws_region }}"
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    iam_type: role
+    iam_name: "{{ _ocp4_workload_portworx_iam_worker_role }}"
+    policy_name: "{{ ocp4_workload_portworx_policy_name }}"
+    policy_json: "{{ lookup('template', 'aws_policy.json.j2') | from_json }}"
+    state: present
+
+- name: Install Portworx operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: "{{ ocp4_workload_portworx_sub_name }}"
+    install_operator_namespace: "{{ ocp4_workload_portworx_namespace }}"
+    install_operator_manage_namespaces:
+    - "{{ ocp4_workload_portworx_namespace }}"
+    install_operator_channel: "{{ ocp4_workload_portworx_channel }}"
+    install_operator_catalog: "{{ ocp4_workload_portworx_source }}"
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_portworx_installplan | default(true) }}"
+    install_operator_csv_nameprefix: portworx-operator
+    install_operator_starting_csv: "{{ ocp4_workload_portworx_csv }}"
+    install_operator_catalogsource_setup: false
+
+- name: Deploy StorageCluster
+  when: ocp4_workload_portworx_deploy_storagecluster | bool
+  block:
+  - name: Create StorageCluster
+    kubernetes.core.k8s:
+      template: portworx_storagecluster.yaml.j2
+      namespace: "{{ ocp4_workload_portworx_namespace }}"
+      state: present
+    register: result
+    until: result is not failed
+    retries: 10
+    delay: 6
+
+  - name: Wait for StorageCluser to enter Running phase
+    kubernetes.core.k8s_info:
+      api_version: core.libopenstorage.org/v1
+      kind: StorageCluster
+      name: "{{ ocp4_workload_portworx_storagecluster_name }}"
+      namespace: "{{ ocp4_workload_portworx_namespace }}"
+    register: r_portworx_storagecluster_info
+    until:
+    - r_portworx_storagecluster_info.resources[0].status.phase is defined
+    - r_portworx_storagecluster_info.resources[0].status.phase == "Running"
+    retries: 150
+    delay: 6
+
+  - name: Enable Portworx console plugin
+    kubernetes.core.k8s:
+      state: patched
+      kind: Console
+      api_version: operator.openshift.io/v1
+      name: cluster
+      definition:
+        spec:
+          plugins:
+          - portworx
