@@ -183,6 +183,18 @@
         key: "{{ hostvars.localhost.ssh_provision_pubkey_content
           | default(hostvars.localhost.env_authorized_key_content_pub) }}"
 
+- name: Pre-software asset inject
+  hosts: all:!bastions
+  become: true
+  tasks:
+    - name: Inject assets
+      when:
+        - pre_software_asset_injector | default(false) | bool
+        - asset_injector_assets is defined
+        - asset_injector_assets | length > 0
+      include_role:
+        name: asset_injector
+
 - name: Setup Satellite systems
   hosts: satellites
   become: true
@@ -207,6 +219,42 @@
       register: satellite_change_hostname
       failed_when: '"Success!" not in satellite_change_hostname.stdout'
 
+    - name: Configure Satellite for Ansible
+      block:
+        - name: Install rhel-system-roles
+          command: >-
+            foreman-maintain packages install rhel-system-roles
+          register: satellite_update_system_roles
+          failed_when: '"Success!" not in satellite_update_system_roles.stdout'
+
+        - name: Update satellite with LetsEncrypt cert and enable registration and template modules
+          shell: >-
+            satellite-installer --scenario satellite
+            --foreman-proxy-plugin-remote-execution-script-ssh-identity-dir "/root/.ssh/"
+            --foreman-proxy-plugin-remote-execution-script-ssh-identity-file "{{ guid }}key.pem"
+            --enable-foreman-proxy-plugin-ansible
+            --foreman-proxy-registration true
+            --foreman-proxy-templates true
+          register: satellite_update_ansible
+          failed_when: '"Success!" not in satellite_update_ansible.stdout'
+
+        - name: Grant foreman-proxy access to ssh-key dir
+          ansible.posix.acl:
+            path: /root/.ssh/
+            default: true
+            entity: foreman-proxy
+            etype: user
+            permissions: rwx
+            state: present
+
+        - name: motd
+          copy:
+            dest: /etc/motd
+            content: |
+              #########################################
+              ## Login with Password {{ zt_satellite_user_password }} ##
+              #########################################
+
     - name: print satellite user.info
       agnosticd_user_info:
         msg: |
@@ -220,19 +268,6 @@
           zt_satellite_url: "https://{{ zt_satellite_external_fqdn }}"
           zt_satellite_user_name: "{{ zt_satellite_user_name }}"
           zt_satellite_user_password: "{{ zt_satellite_user_password }}"
-
-- name: Pre-software asset inject
-  hosts: all:!bastions
-  become: true
-  tasks:
-    - name: Inject assets
-      when:
-        - pre_software_asset_injector | default(false) | bool
-        - asset_injector_assets is defined
-        - asset_injector_assets | length > 0
-      include_role:
-        name: asset_injector
-
 
 - name: PreSoftware flight-check
   hosts: localhost
