@@ -79,6 +79,7 @@
       - httpd-tools
       - haproxy
       - pip
+      - firewalld
     state: present
 
 - name: Ensure required Python modules are installed
@@ -90,36 +91,27 @@
     name: "{{ kcli_rpm }}"
     disable_gpg_check: true
 
-#- name: Add the RHEL9 Beta repo for QEMU SR-IOV support
-#  ansible.builtin.shell:
-#    cmd: >
-#      grep -Pzo '\[rhel-9-for-x86_64-appstream-rpms\]\n(?:.|\n)*?(?=\n\[|$)' /etc/yum.repos.d/redhat.repo
-#      | sed "s|content/dist|content/beta|g"
-#      | sed "s|name = .*|name = Red Hat Enterprise Linux 9 for x86_64 - AppStream Beta (RPMs)|g"
-#      | sed "s|appstream-rpms|appstream-beta-rpms|g" | tr -d '\0'
-#      | sudo tee /etc/yum.repos.d/rhel9-appstream-beta.repo
-
-- name: Add CentOS Stream 9 repository to upgrade QEMU KVM
-  ansible.builtin.yum_repository:
-    name: centos-stream-9-appstream
-    description: CentOS Stream 9 AppStream
-    baseurl: https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/
-    gpgcheck: false
-    enabled: true
-
-- name: Upgrade QEMU from BETA for SR-IOV support
-  ansible.builtin.dnf:
-    name:
-      - qemu-kvm
-    state: latest
-    update_only: true
-
-- name: Remove the CentOS Stream 9 repo
-  ansible.builtin.yum_repository:
-    name: centos-stream-9-appstream
-    enabled: false
-    state: absent
-    gpgcheck: false
+#- name: Add CentOS Stream 9 repository to upgrade QEMU KVM
+#  ansible.builtin.yum_repository:
+#    name: centos-stream-9-appstream
+#    description: CentOS Stream 9 AppStream
+#    baseurl: https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/
+#    gpgcheck: false
+#    enabled: true
+#
+#- name: Upgrade QEMU from BETA for SR-IOV support
+#  ansible.builtin.dnf:
+#    name:
+#      - qemu-kvm
+#    state: latest
+#    update_only: true
+#
+#- name: Remove the CentOS Stream 9 repo
+#  ansible.builtin.yum_repository:
+#    name: centos-stream-9-appstream
+#    enabled: false
+#    state: absent
+#    gpgcheck: false
 
 - name: Ensure libvirtd service is enabled and running
   ansible.builtin.systemd:
@@ -146,10 +138,10 @@
 
 - name: Ensure oc/kubectl tooling is present
   ansible.builtin.command:
-    cmd: kcli download {{ item }} -P version=stable -P tag='{{ ocp4_major_release }}'
+    cmd: "kcli download {{ item.binary }} -P version={{ item.version }} -P tag='{{ ocp4_major_release }}'"
   with_items:
-    - oc
-    - kubectl
+    - {binary: "oc", version: "stable"}
+    - {binary: "kubectl", version: "latest"}
 
 - name: Ensure oc/kubectl are in the PATH
   ansible.builtin.copy:
@@ -334,12 +326,12 @@
   ansible.builtin.command:
     cmd: update-ca-trust
 
-#- name: Ensure firewalld is disabled
-#  ansible.builtin.systemd:
-#    state: stopped
-#    masked: true
-#    enabled: false
-#    name: firewalld
+- name: Ensure firewalld is enabled
+  ansible.builtin.systemd:
+    state: started
+    masked: false
+    enabled: true
+    name: firewalld
 
 - name: Permit Lab traffic in public and libvirt zones for services
   ansible.posix.firewalld:
@@ -349,7 +341,7 @@
     state: enabled
   with_nested:
     - [ 'public', 'libvirt' ]
-    - [ 'https', 'http', 'dns', 'libvirt', 'git' ]
+    - [ 'https', 'http', 'dns', 'libvirt', 'git', 'dhcp' ]
   register: firewalld_service
   ignore_errors: true
 
@@ -515,7 +507,7 @@
     jid: "{{ sushy_async.ansible_job_id }}"
   register: job_result
   until: job_result.finished
-  retries: 6
+  retries: 10
   delay: 5
 
 - name: Ensure sushy tools are running
@@ -533,15 +525,46 @@
     validate_certs: false
 
 - name: Async check download live and rootfs images
-  ansible.builtin.async_status:
-    jid: "{{ async_result_item.ansible_job_id }}"
-  loop: "{{ download_rhcos.results }}"
-  loop_control:
-    loop_var: "async_result_item"
-  register: job_result
-  until: job_result.finished
-  retries: 60
-  delay: 1
+  block:
+    - name: Checking the async jobs
+      ansible.builtin.async_status:
+        jid: "{{ async_result_item.ansible_job_id }}"
+      loop: "{{ download_rhcos.results }}"
+      loop_control:
+        loop_var: "async_result_item"
+      register: job_result
+      until: job_result.finished
+      retries: 60
+      delay: 10
+  rescue:
+    - name: Check status of {{ rhcos_live_image }}
+      ansible.builtin.stat:
+        path: "/opt/webcache/data/{{ rhcos_live_image }}"
+      register: rhcos_live_image_file
+    - name: "{{ rhcos_live_image }} was not downloaded. Re-downloading again..."
+      ansible.builtin.get_url:
+        url: "{{ rhcos_live_image_url }}"
+        dest: "/opt/webcache/data/"
+        mode: "0644"
+      register: download_live_result
+      until: not download_live_result.failed
+      retries: 3
+      delay: 10
+      when: not rhcos_live_image_file.stat.exists
+    - name: Check status of {{ rhcos_rootfs_image }}
+      ansible.builtin.stat:
+        path: "/opt/webcache/data/{{ rhcos_rootfs_image }}"
+      register: rhcos_rootfs_image_file
+    - name: "{{ rhcos_rootfs_image }} was not downloaded. Re-downloading again..."
+      ansible.builtin.get_url:
+        url: "{{ rhcos_rootfs_image_url }}"
+        dest: "/opt/webcache/data/"
+        mode: "0644"
+      register: download_rootfs_result
+      until: not download_rootfs_result.failed
+      retries: 3
+      delay: 10
+      when: not rhcos_rootfs_image_file.stat.exists
 
 # Leave this as the last task in the playbook.
 - name: pre_workload tasks complete
