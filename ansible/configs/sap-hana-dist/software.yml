@@ -1,0 +1,226 @@
+---
+- name: Step 00xxxxx software
+  hosts: localhost
+  gather_facts: False
+  become: false
+  tasks:
+    - debug:
+        msg: "Software tasks Started"
+
+- name: Configure /etc/hosts for openshift_cnv
+  hosts: all
+  become: True
+  gather_facts: True
+  tasks:
+    - name: Configure /etc/hosts
+      when: cloud_provider == "openshift_cnv"
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        block: |
+         192.168.47.10 bastion-{{ guid }}.example.com bastion-{{ guid }}
+         192.168.47.11 tower-{{ guid }}.example.com tower-{{ guid }}
+         192.168.47.28 hana-{{ guid }}1.example.com hana-{{ guid }}1
+         192.168.47.135 hana-{{ guid }}2.example.com hana-{{ guid }}2
+         192.168.47.150 s4hana-{{ guid }}.example.com s4hana-{{ guid }}
+
+- name: Ensure NFS Server is installed, SAP Software Device Mounted and Ansible Installed
+  hosts: bastions
+  become: True
+  gather_facts: True
+  tasks:
+
+    - name: Ensure NFS directory exists
+      file:
+        path: "/nfs"
+        state: directory
+
+    - name: Mount up device by UUID
+      mount:
+        path: /nfs
+        src: "/dev/{{ sap_software_device }}"
+        fstype: xfs
+        state: present
+
+    - name: 'Ensure required packages are installed'
+      package:
+        name: nfs-utils
+        state: installed
+
+    - name: "Ensure export file contains the directory to be shared"
+      lineinfile:
+        path: /etc/exports
+        state: present
+        regexp: "^/nfs"
+        line: "/nfs *(insecure,rw,no_root_squash,no_wdelay,sync)"
+
+    - name: 'Ensure nfs-server is restarted and running'
+      service:
+        name: nfs-server
+        state: restarted
+        enabled: yes
+                
+    - name: Ensure additional packages are installed
+      yum:
+        name:
+          - ansible
+          - java-1.8.0-openjdk
+          - rhel-system-roles-sap
+        state: latest
+          
+    - name: Ensure /nfs directory is owned by '{{ remote_user }}'
+      file:
+        path: /nfs
+        state: directory
+        owner: "{{ remote_user }}"
+
+    - name: Ensure SAP software is not present for external (non Red Hatters) requesters
+      file:
+        state: absent
+        path: "{{ item }}"
+      loop:
+        - '/nfs/HANA_installation/'
+        - '/nfs/S4HANA_installation/'
+        - '/nfs/SAPCAR/'
+        - '/nfs/SAPHOSTAGENT/'
+      when: not rh_internal
+
+- name: Ensure NFS share is mounted in HANA and S/4HANA Hosts
+  hosts: hanas:s4hanas
+  become: True
+  gather_facts: True
+  tasks:
+
+    - name: Ensure additional packages are installed
+      yum:
+        name:
+          - rpcbind
+          - nfs-utils
+        state: latest
+
+    - name: Ensure Software directory exists
+      file:
+        path: "/software"
+        state: directory
+
+    - name: Ensure NFS share is mounted
+      mount:
+        path: "/software"
+        src: "{{ bastion_hostname }}:/nfs"
+        fstype: nfs4
+        opts: "rw,bg,hard,_netdev"
+        state: mounted
+
+- name: Add short and fqdn resolution for every host
+  hosts: hanas:s4hanas
+  become: true
+  gather_facts: true
+  tasks:
+
+    - name: Add HANA and S4HANA hosts info to /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        state: present
+        line: "{{ hostvars[item].ansible_default_ipv4.address }}    {{ hostvars[item].ansible_hostname }}.example.com    {{ hostvars[item].ansible_hostname }}"
+      when:
+        - cloud_provider is match("osp")
+      with_items:
+        - "{{ groups['hanas'] }}"
+        - "{{ groups['s4hanas'] }}"
+      ignore_errors: true  
+      
+##Below tasks has been added because Sap E2E CI failing when running the tower job sap-repositories,
+##as per the article in Red Hat we need to move two files in /tmp dir
+
+- name: Redgistering Insights-client and moving files
+  hosts: hanas:s4hanas
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Registering the client with Red Hat insight
+      command: insights-client --register
+      ignore_errors: true
+      
+    - name: Move newest.egg file to /tmp directory
+      command: mv /var/lib/insights/newest.egg  /tmp
+      ignore_errors: true      
+      
+    - name: Move newest.egg.asc file to /tmp directory
+      command: mv /var/lib/insights/newest.egg.asc  /tmp  
+      ignore_errors: true      
+ 
+- name: Deploy Ansible Tower
+  hosts: towers
+  gather_facts: False
+  become: yes
+  tasks:
+    # This is a bit hacky but we are facing some issues with Ansible, RHEL8 and python for some
+    # modules and this workaround solved this particular issue
+#    - name: Debug offline token
+#      debug:
+#         var: offline_token
+
+#    - name: Debug sap-e2e-offline token
+#      debug:
+#         var: sap-e2e-offline-token
+
+    - name: Ensure Python3 package is installed and alternatives for python updated
+      shell: >
+         yum install -y python3 && alternatives --set python /usr/bin/python3
+
+#    - name: Ensure EPEL GPG is installed
+#      rpm_key:
+#        state: present
+#        key: "{{ ansible_tower_epel_gpg_download_url }}"
+
+    - name: Add RPM package key RPM-GPG-KEY-EPEL-8
+      rpm_key:
+        key: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-8
+        
+    - name: "install epel-release"
+      dnf:
+        name: "{{ ansible_tower_epel_download_url }}"
+        state: present
+        disable_gpg_check: "{{ ansible_tower_epel_disable_gpg_check | default('no') }}"
+        
+
+    - name: install certbot
+      yum:
+        name: "certbot"
+      when: cloud_provider == "openshift_cnv"
+
+    - name: Generate certificate using certbot
+      command: certbot certonly  --standalone -d tower-{{ guid }}.{{ guid }}.{{ sandbox_openshift_apps_domain }} -m rhpds-admins@redhat.com --agree-tos -n --cert-path /etc/tower/tower.cert --key-path /etc/tower/tower.key
+      when: cloud_provider == "openshift_cnv"
+
+    - name: Ensure additional packages are installed
+      yum:
+        name:
+          - ansible
+        state: present
+        exclude:
+          - ansible-6.3.0-2.el8.1.noarch
+          - ansible-7.2.0-1.el8.noarch
+          - ansible-8.3.0-1.el8.noarch
+          - ansible-9.2.0-1.el8.noarch
+
+    - name: Install Ansible Tower
+      include_role:
+        name: infra-ansible/roles/ansible/tower/config-ansible-tower
+
+    - name: Install ansible for module psutil
+      pip:
+        name: ansible
+        virtualenv: /var/lib/awx/venv/ansible
+
+
+- name: Software flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Software checks completed successfully"
+
