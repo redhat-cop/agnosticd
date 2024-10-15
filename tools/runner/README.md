@@ -69,7 +69,6 @@ ocp4_workload_openshift_gitops_catalog_snapshot_image: quay.io/gpte-devops-autom
 ocp4_workload_openshift_gitops_catalog_snapshot_image_tag: v4.13_2023_06_26
 
 ocp4_workload_openshift_gitops_setup_cluster_admin: true
-ocp4_workload_openshift_gitops_update_resources: true
 ocp4_workload_openshift_gitops_update_route_tls: true
 
 ocp4_workload_openshift_gitops_rbac_update: true
