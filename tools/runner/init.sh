@@ -161,9 +161,11 @@ repo_method: satellite
 update_packages: true
 set_repositories_satellite_ha: true
 set_repositories_force_register: true
-set_repositories_satellite_url: labsat-ha.opentlc.com
-set_repositories_satellite_org: Red_Hat_GPTE_Labs
+set_repositories_satellite_url: demosat-ha.infra.demo.redhat.com
+set_repositories_satellite_hostname: demosat-ha.infra.demo.redhat.com
+set_repositories_satellite_org: Red_Hat_RHDP_Labs
 # set_repositories_satellite_activationkey: [redacted]
+# ansible localhost -m debug -a "var=satellite_activationkey" --extra-vars="@${AGV_HOME}/includes/secrets/demosat-rhel-8-and-9-latest.yaml" --ask-vault-pass
 
 # Employee subscription (needs testing)
 # rhel_subscription_user: user@example.com
