@@ -30,15 +30,42 @@ env_type: rosa-consolidated
 # Other vars
 # -------------------------------------------------------------------
 aws_region: ${AGD_AWS_REGION}
-agnosticd_aws_capacity_reservation_enabled: false
+agnosticd_aws_capacity_reservation_enable: false
 
 rosa_version: latest
+rosa_version_base: "openshift-v4.16"
+rosa_deploy_hcp: true
+rosa_compute_machine_type: m6a.2xlarge
+rosa_compute_replicas: 2
 rosa_setup_cluster_admin_login: true
 
 bastion_instance_type: t2.small
-bastion_instance_image: RHEL92GOLD-latest
+bastion_instance_image: RHEL93GOLD-latest
 
 install_student_user: false
+
+agnosticd_preserve_user_data: true
+
+# -------------------------------------------------------------------
+# Workloads
+# -------------------------------------------------------------------
+infra_workloads:
+- ocp4_workload_authentication_rosa
+
+# -------------------------------------------------------------------
+# ocp4_workload_authentication_rosa
+# -------------------------------------------------------------------
+ocp4_workload_authentication_rosa_user_count: 10
+ocp4_workload_authentication_rosa_user_base: user
+ocp4_workload_authentication_rosa_user_password: openshift
+ocp4_workload_authentication_rosa_admin: false
+
+ocp4_workload_authentication_rosa_token: "{{ rosa_token }}"
+
+ocp4_workload_authentication_rosa_aws_access_key_id: "{{ aws_access_key_id | mandatory }}"
+ocp4_workload_authentication_rosa_aws_secret_access_key: "{{ aws_secret_access_key | mandatory }}"
+ocp4_workload_authentication_rosa_aws_region: "{{ aws_region | mandatory }}"
+
 EOF
 
 cat << EOF >${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp4-cluster.yml
@@ -56,23 +83,24 @@ output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
 cloud_provider: ec2
 env_type: ocp4-cluster
 software_to_deploy: openshift4
+agnosticd_preserve_user_data: true
 
 # -------------------------------------------------------------------
 # VM configuration
 # -------------------------------------------------------------------
 master_instance_type: m6a.4xlarge
 master_instance_count: 1
-worker_instance_type: m6a.4xlarge
+worker_instance_type: m6a.2xlarge
 worker_instance_count: 0
 bastion_instance_type: t2.small
 bastion_instance_image: RHEL93GOLD-latest
 aws_region: ${AGD_AWS_REGION}
-agnosticd_aws_capacity_reservation_enabled: false
+agnosticd_aws_capacity_reservation_enable: false
 
 # -------------------------------------------------------------------
 # OpenShift installer
 # -------------------------------------------------------------------
-ocp4_installer_version: "4.15"
+ocp4_installer_version: "4.16"
 ocp4_installer_root_url: https://mirror.openshift.com/pub/openshift-v4/clients
 
 # -------------------------------------------------------------------
@@ -115,6 +143,8 @@ output_dir: /runner/agnosticd/${AGD_EXECUTION_DIR}
 cloud_provider: none
 env_type: ocp-workloads
 
+agnosticd_preserve_user_data: true
+
 EOF
 
 if [ -f "${AGD_HOME}/$AGD_SECRETS_YAML" ]; then
@@ -131,9 +161,11 @@ repo_method: satellite
 update_packages: true
 set_repositories_satellite_ha: true
 set_repositories_force_register: true
-set_repositories_satellite_url: labsat-ha.opentlc.com
-set_repositories_satellite_org: Red_Hat_GPTE_Labs
+set_repositories_satellite_url: demosat-ha.infra.demo.redhat.com
+set_repositories_satellite_hostname: demosat-ha.infra.demo.redhat.com
+set_repositories_satellite_org: Red_Hat_RHDP_Labs
 # set_repositories_satellite_activationkey: [redacted]
+# ansible localhost -m debug -a "var=satellite_activationkey" --extra-vars="@${AGV_HOME}/includes/secrets/demosat-rhel-8-and-9-latest.yaml" --ask-vault-pass
 
 # Employee subscription (needs testing)
 # rhel_subscription_user: user@example.com
@@ -155,9 +187,10 @@ set_repositories_satellite_org: Red_Hat_GPTE_Labs
 #   }
 
 # -------------------------------------------------------------------
-# ROSA Token
+# ROSA
 # -------------------------------------------------------------------
 gpte_rosa_token: [redacted]
+aws_billing_account_id: [redacted]
 
 EOF
 fi

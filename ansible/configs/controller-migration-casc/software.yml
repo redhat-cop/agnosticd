@@ -1,0 +1,339 @@
+---
+- name: Step 00xxxxx software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - debug:
+        msg: "Software tasks Started"
+
+- name: dump all variables and deploy CA trust
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Dump all variables
+      local_action:
+        module: template
+        src: dumpall.j2
+        dest: /tmp/ansible_dump.all
+      run_once: true
+      when: dump_vars|default(false)|bool
+
+    - name: deploy Let's Encrypt CA trust
+      ansible.builtin.include_role:
+        name: letsencrypt_ca_trust
+
+- name: Install attendance application into Bastion
+  hosts: bastions[0]
+  gather_facts: false
+  become: true
+  tags:
+    - attendance
+
+  tasks:
+    - ansible.builtin.include_role:
+        name: workshop_attendance
+      vars:
+        ec2_name_prefix: "{{ inventory_hostname | regex_replace('\\..*$') }}.{{ guid }}"
+        workshop_type: "{{ env_type }}"
+        dns_type: "aws"
+        student_user: "{{ student_name }}"
+        student_total: "{{ num_users }}"
+        admin_password: "{{ tower_admin_password }}"
+        display_name: "Migration AWX/Tower to AAP using CaC"
+
+- name: Install Software on bastion and Ansible automation controller
+  # hosts: bastions[0]
+  hosts: automationcontroller
+  gather_facts: false
+  become: true
+
+  tasks:
+
+    - name: Do very annoying normalization of domain name
+      ansible.builtin.set_fact:
+        agnosticd_domain_name: >-
+          {% if cloud_provider == 'osp' -%}
+            {{ guid }}.{{ osp_cluster_dns_zone }}
+          {% elif cloud_provider == 'ec2' -%}
+            {{ guid }}{{ subdomain_base_suffix }}
+          {%- endif %}
+
+    # - name: Install and configure Gitea on VM
+    #   include_role:
+    #     name: gitea_vm_setup
+    #     apply:
+    #       tags: gitea
+    #   vars:
+    #     gitea_db_pasword: "{{ student_password }}"  # shouldn't matter for sqlite3
+    #   tags:
+    #     - gitea
+
+    # - name: Download Manifest for Controller
+    #   get_url:
+    #     url: "{{ controller_manifest.url }}"
+    #     dest: /tmp
+    #     username: "{{ controller_manifest.username | default(omit) }}"
+    #     password: "{{ controller_manifest.password | default(omit) }}"
+
+    - name: Install the SSH keys to the nodes (self)
+      ansible.builtin.shell: "cat ~/.ssh/*pub >> ~/.ssh/authorized_keys"
+
+    - name: Install Ansible Automation Platform with controller and/or private hub
+      include_role:
+        name: aap_deploy
+      vars:
+        controller_admin_password: "{{ tower_admin_password }}"
+      tags:
+        - aap_deploy
+        - aap_licence
+
+    - name: License autoctl nodes (config role)
+      include_role:
+        # role formerly known as  tower-license-injector_cfg
+        name: aap_controller_manifest_load
+      vars:
+        controller_admin_password: "{{ tower_admin_password }}"
+      tags:
+        - aap_licence
+
+    - name: call issue_cert role (config role)
+      include_role:
+        name: aap_controller_cert_issue
+      vars:
+        controller_admin_password: "{{ tower_admin_password }}"
+
+    - name: Set vscode password to tower_admin_password
+      set_fact:
+        vscode_user_password: "{{ tower_admin_password }}"
+        vscode_server_hostname: "{{ inventory_hostname | regex_replace('\\..*$') }}.{{ guid }}{{ subdomain_base_suffix }}"
+
+    - name: Install code-server
+      include_role:
+        name: vscode-server
+
+    # note that we remove YUM/RPM installed ansible before installing
+    # automationcontroller, now we install it back to avoid needing EPEL
+    - name: install ansible (avoiding EPEL)
+      dnf:
+        name: ansible
+        state: present
+        disablerepo: epel
+
+    - name: install AAP development tools when required
+      include_role:
+        name: aap_devel_tools
+      vars:
+        aap_devel_tools_users: ["{{ student_name }}"]
+        aap_devel_tools_ee_image: pah.{{ agnosticd_domain_name }}/ee-supported-rhel8:latest
+        aap_devel_tools_env_pass:  # e.g. can help in the context of AgnosticD
+          - GUID
+        aap_devel_tools_env_set:  # e.g. for controller automation
+          CONTROLLER_HOST: "https://{{ tower_instance_name }}1.{{ agnosticd_domain_name }}"
+          CONTROLLER_USERNAME: "{{ automationcontroller_admin_user | default('admin') }}"
+          CONTROLLER_PASSWORD: "{{ tower_admin_password }}"
+          CONTROLLER_VERIFY_SSL: true
+
+# - name: Install license and LE certs on autoctl nodes
+#   hosts: automationcontroller
+#   gather_facts: false
+#   become: true
+#
+#   tasks:
+#
+#     - name: License autoctl nodes (config role)
+#       include_role:
+#         # role formerly known as  tower-license-injector_cfg
+#         name: aap_controller_manifest_load
+#       run_once: true
+#
+#     - name: call issue_cert role (config role)
+#       include_role:
+#         name: aap_controller_cert_issue
+
+- name: install Let's Encrypt certificate on PAH
+  hosts: pah
+  gather_facts: false
+  become: true
+
+  tasks:
+
+    - name: call issue_cert role (config role)
+      include_role:
+        name: aap_pah_cert_issue
+
+- name: Install AWX on AWX nodes
+  hosts: awx
+  become: true
+  gather_facts: true
+  vars:
+    s3_state: present
+  tags:
+    - awx
+  tasks:
+
+    - name: deploy TLS Certificates for AWX
+      ansible.builtin.include_role:
+        name: ../../roles/issue_cert_awx
+      vars:
+        dns_name: "{{ inventory_hostname | regex_replace('\\..*$') }}.{{ guid }}{{ subdomain_base_suffix }}"
+
+    - name: "Copy ca_trust_file"
+      ansible.builtin.copy:
+        src: "{{ output_dir }}/awx-ca-cert.pem"
+        dest: "/etc/pki/ca-trust/source/anchors/awx-ca-cert.pem"
+
+    - name: "Copy AWX certificate and key files"
+      ansible.builtin.copy:
+        src: "{{ current_file }}"
+        dest: "/etc/nginx/"
+      loop:
+        - "{{ output_dir }}/awx-private.pem"
+        - "{{ output_dir }}/awx-private-key.pem"
+      loop_control:
+        loop_var: current_file
+
+    - name: "Import awx_pod role to install it all"
+      ansible.builtin.include_role:
+        # name: ../../roles/awx_pod
+        name: awx_pod
+        apply:
+          tags:
+            - awx
+      vars:
+        awx_admin_user: "{{ tower_admin_user | default('admin') }}"
+        awx_admin_password: "{{ tower_admin_password }}"
+        awx_podman_dir: /tmp/awx-lab
+        awx_host_port: 80
+        awx_host_ssl_port: 443
+        ssl_certificate: "{{ output_dir }}/awx-private.pem"
+        ssl_certificate_key: "{{ output_dir }}/awx-private-key.pem"
+        ca_trust_file: "{{ output_dir }}/awx-ca-cert.pem"
+        container_state: running
+        # container_state: absent
+        # container_run_as_user: ansible
+
+- name: Populate AWX Configuration
+  hosts: awx
+  # connection: local
+  gather_facts: false
+  tags:
+    - awx_populate
+  vars:
+    controller_configuration_projects_async_retries: 120
+    controller_configuration_projects_async_delay: 2
+    controller_username: "{{ tower_admin_user | default('admin') }}"
+    controller_password: "{{ tower_admin_password | default(hostvars[groups['awx'][0]].tower_admin_password) }}"
+    controller_hostname: "{{ inventory_hostname | regex_replace('\\..*$') }}.{{ guid }}{{ subdomain_base_suffix }}"
+    controller_validate_certs: False
+    controller_configuration_filetree_read_secure_logging: False
+    controller_configuration_async_dir: "/tmp/.ansible_async/"
+    # Controller Directory Path
+    filetree_controller_settings: &filetree_controller_path "/tmp/checkout/examples/awx/configs"
+    filetree_controller_organizations: *filetree_controller_path
+    filetree_controller_labels: *filetree_controller_path
+    filetree_controller_user_accounts: *filetree_controller_path
+    filetree_controller_teams: *filetree_controller_path
+    filetree_controller_credential_types: *filetree_controller_path
+    filetree_controller_credentials: *filetree_controller_path
+    filetree_controller_credential_input_sources: *filetree_controller_path
+    filetree_controller_notifications: *filetree_controller_path
+    filetree_controller_projects: *filetree_controller_path
+    filetree_controller_execution_environments: *filetree_controller_path
+    filetree_controller_applications: *filetree_controller_path
+    filetree_controller_inventories: *filetree_controller_path
+    filetree_controller_inventory_sources: *filetree_controller_path
+    filetree_controller_instance_groups: *filetree_controller_path
+    filetree_controller_hosts: *filetree_controller_path
+    filetree_controller_groups: *filetree_controller_path
+    filetree_controller_templates: *filetree_controller_path
+    filetree_controller_workflow_job_templates: *filetree_controller_path
+    filetree_controller_schedules: *filetree_controller_path
+    filetree_controller_roles: *filetree_controller_path
+    controller_user_accounts:
+      - username: "audit_user"
+        password: "audit_pass"
+        email: "audit@email.com"
+        first_name: "Auditor"
+        last_name: "User"
+        auditor: "True"
+        superuser: "False"
+        update_secrets: False
+
+  pre_tasks:
+    - name: "Remove the /tmp/checkout path"
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: /tmp/checkout
+        state: absent
+
+    - name: "Create the /tmp/checkout path"
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.file:
+        path: /tmp/checkout
+        state: directory
+
+    - name: "Clone the git repository with the base to be populated into the AWX instance"
+      run_once: true
+      delegate_to: localhost
+      ansible.builtin.git:
+        repo: 'https://github.com/automationiberia/migrate-awx-to-controller.git'
+        dest: /tmp/checkout
+        version: summit24
+
+    - name: "Setup authentication (block)"
+      no_log: "{{ controller_configuration_filetree_read_secure_logging | default('false') }}"
+      when: controller_oauthtoken is not defined
+      tags:
+        - always
+      block:
+        - name: "Get the Authentication Token for the future requests"
+          ansible.builtin.uri:
+            url: "https://{{ controller_hostname }}/api/v2/tokens/"
+            user: "{{ controller_username }}"
+            password: "{{ controller_password }}"
+            method: POST
+            force_basic_auth: true
+            validate_certs: "{{ controller_validate_certs }}"
+            status_code: 201
+          register: authtoken_res
+          until: authtoken_res.status == 201
+          retries: 60
+          delay: 10
+
+        - name: "Set the oauth token to be used since now"
+          ansible.builtin.set_fact:
+            controller_oauthtoken: "{{ authtoken_res.json.token }}"
+            controller_oauthtoken_url: "{{ authtoken_res.json.url }}"
+  roles:
+    - role: infra.controller_configuration.filetree_read
+      delegate_to: localhost
+      run_once: true
+    - role: infra.controller_configuration.dispatch
+      delegate_to: localhost
+      run_once: true
+
+  post_tasks:
+    - name: "Delete the Authentication Token used"
+      ansible.builtin.uri:
+        url: "https://{{ controller_hostname }}{{ controller_oauthtoken_url }}"
+        user: "{{ controller_username }}"
+        password: "{{ controller_password }}"
+        method: DELETE
+        force_basic_auth: true
+        validate_certs: "{{ controller_validate_certs }}"
+        status_code: 204
+      when: controller_oauthtoken_url is defined
+
+- name: Software flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Software checks completed successfully"

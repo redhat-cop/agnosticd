@@ -1,0 +1,88 @@
+kind: Job
+apiVersion: batch/v1
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: '1'
+  name: copy-models-to-minio
+  namespace: "{{ ocp4_workload_s3_model_copy_to_minio_project }}"
+spec:
+  manualSelector: false
+  backoffLimit: 4
+  completions: 1
+  template:
+    spec:
+      containers:
+        - name: copy-models
+          image: 'image-registry.openshift-image-registry.svc:5000/ic-shared-minio/s2i-generic-data-science-notebook:1.2'
+          command:
+            - /bin/bash
+          args:
+            - '-ec'
+            - |-
+              # Install AWS CLI
+              pip install awscli
+
+              # Install MinIO Client (mc)
+              curl -O https://dl.min.io/client/mc/release/linux-amd64/mc
+              chmod +x mc
+
+              # Set up AWS credentials
+              export AWS_ACCESS_KEY_ID=$(oc get secret aws-secret-for-s3-model -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 --decode)
+              export AWS_SECRET_ACCESS_KEY=$(oc get secret aws-secret-for-s3-model -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' | base64 --decode)
+              export MINIO_ACCESS_KEY_ID=$(oc get secret minio-keys -o jsonpath='{.data.minio_root_user}' | base64 --decode)
+              export MINIO_SECRET_ACCESS_KEY=$(oc get secret minio-keys -o jsonpath='{.data.minio_root_password}' | base64 --decode)
+              export MINIO_ROUTE=$(oc get route minio -n ic-shared-minio -o jsonpath='{.status.ingress[0].host}')
+
+              # Set MinIO alias with the new endpoint
+              ./mc alias set shared-minio "https://$MINIO_ROUTE" "$MINIO_ACCESS_KEY_ID" "$MINIO_SECRET_ACCESS_KEY"
+
+              # Define the list of folders from Ansible variable
+              folders=(
+              {% for folder in ocp4_workload_s3_model_copy_to_minio_s3_folders %}
+                  "{{ folder }}"
+              {% if not loop.last %} {% else %} {% endif %}
+              {% endfor %}
+              )
+
+              # Check if the bucket exists
+              if ! ./mc ls shared-minio/models >/dev/null 2>&1; then
+                  # Create bucket if it doesn't exist
+                  ./mc mb shared-minio/models
+                  echo "Bucket 'models' created."
+              else
+                  echo "Bucket 'models' already exists."
+              fi
+
+              mkdir local-models
+              
+              # Loop through the list of folders
+              for folder in "${folders[@]}"; do
+                echo "Copying folder: $folder"
+
+                # Copy from S3 to local
+                aws s3 cp s3://serve-model/$folder ./local-models/$folder --recursive --no-follow-symlinks
+
+                # Copy from local to MinIO
+                ./mc cp ./local-models/$folder shared-minio/models/ --recursive
+
+                # Clean up local folder
+                rm -rf ./local-models/$folder
+              done
+
+              # Clean up AWS secret
+              oc delete secret aws-secret-for-s3-model  
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      serviceAccountName: minio-manage
+      serviceAccount: minio-manage
+      securityContext: {}
+      schedulerName: default-scheduler
+  suspend: false
+  parallelism: 1
+  podReplacementPolicy: TerminatingOrFailed
+  completionMode: NonIndexed

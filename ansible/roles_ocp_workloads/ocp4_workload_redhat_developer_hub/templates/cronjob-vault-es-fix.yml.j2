@@ -1,0 +1,65 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: vault-external-secret-fix
+  namespace: default
+spec:
+  successfulJobsHistoryLimit: 3
+  concurrencyPolicy: Replace
+  schedule: "*/5 * * * *"
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          containers:
+          - name: vault-external-secret-fix
+            image: registry.redhat.io/openshift4/ose-tools-rhel9@sha256:8037187950e7374a9c9bec4996033c9b24ce374920ef29047d4f63b4c20f3e6b
+            command:
+              - /bin/bash
+            args:
+              - '-ec'
+              - >-
+                while true; do
+                  oc exec vault-0 -n vault -c vault -- /bin/bash -c "ls" > /dev/null 2>&1;
+                  if [[ $? == 0 ]]; then
+                    break;
+                  else
+                    sleep 5;
+                  fi
+                done
+
+                VAULT_SEALED=$(oc exec vault-0 -n vault -- /bin/bash -c "vault status -format=json" | jq -r '.sealed')
+
+                echo 'Vault sealed: ' $VAULT_SEALED
+
+                if [[ "${VAULT_SEALED}" == "true"  ]]; then
+                  echo 'Unsealing vault...'
+                  oc exec vault-0 -n vault -- /bin/bash -c "cat /vault/data/unseal.sh 2>/dev/null && sh /vault/data/unseal.sh || echo ''"
+                fi
+
+                SECRET_STORE_STATUS=$(oc get ClusterSecretStore vault-secret-store --no-headers | awk '{ print $3}')
+
+                echo 'Secret Store Status: ' $SECRET_STORE_STATUS
+
+                if [[ "${SECRET_STORE_STATUS}" != "Valid"  ]]; then
+                  echo 'Patching Secret Store...'
+                  oc patch clustersecretstore/vault-secret-store -p '{"spec":{"provider":{"vault":{"server":"http://vault.vault:8201"}}}}' --type merge
+                  oc patch clustersecretstore/vault-secret-store -p '{"spec":{"provider":{"vault":{"server":"http://vault.vault:8200"}}}}' --type merge
+                fi
+
+                oc get externalsecret --all-namespaces --no-headers > external-secrets.csv
+
+                while read p; do
+                  NAMESPACE=$(echo "$p" | awk '{ print $1 }');
+                  NAME=$(echo "$p" | awk '{ print $2 }');
+                  STATUS=$(echo "$p" | awk '{ print $5 }');
+                  if [[ "${STATUS}" != "SecretSynced"  ]]; then
+                    echo Deleting $NAME in namespace $NAMESPACE to trigger recreate...;
+                    oc delete externalsecret $NAME -n $NAMESPACE;
+                  fi;
+                done < external-secrets.csv
+
+                echo 'Job complete!'
+          restartPolicy: Never
+          serviceAccountName: default

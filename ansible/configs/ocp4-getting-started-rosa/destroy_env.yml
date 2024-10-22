@@ -1,0 +1,97 @@
+---
+- name: Destroy environment on AWS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_DEFAULT_REGION: "{{ aws_region_final | default(aws_region) }}"
+  tasks:
+  - name: Run infra-ec2-create-inventory role
+    ansible.builtin.include_role:
+      name: infra-ec2-create-inventory
+
+  - name: Create local ssh provision facts (key already exists)
+    when: ssh_provision_key_name is undefined
+    ansible.builtin.include_role:
+      name: create_ssh_provision_key
+
+  - name: SSH config setup
+    when:
+    - groups["bastions"] is defined
+    - groups["bastions"] | length > 0
+    ansible.builtin.include_role:
+      name: infra-common-ssh-config-generate
+
+- name: Set ssh extra args for all hosts, use ssh_config just created
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  tasks:
+  - name: Add -F option ansible_ssh_extra_args
+    ansible.builtin.set_fact:
+      ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|d() }} -F {{ hostvars['localhost'].ansible_ssh_config }}"
+
+- name: Start all EC2 instances if they are stopped
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_DEFAULT_REGION: "{{ aws_region_final | default(aws_region) }}"
+  tasks:
+  - ansible.builtin.include_tasks: ec2_instances_start.yaml
+
+- name: Destroy ROSA cluster(s)
+  hosts: localhost
+  gather_facts: false
+  become: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_DEFAULT_REGION: "{{ aws_region }}"
+  tasks:
+  - name: Set rosa binary location
+    ansible.builtin.set_fact:
+      rosa_binary_path: "/tmp"
+
+  - name: Install ROSA CLI if it doesn't exist
+    ansible.builtin.include_tasks: install_rosa_cli.yml
+
+  - name: Setup ROSA token
+    when: rosa_token == ""
+    ansible.builtin.set_fact:
+      rosa_token: "{{ gpte_rosa_token }}"
+
+  - name: Login to ROSA
+    ansible.builtin.command: >-
+      {{ rosa_binary_path }}/rosa login --token {{ rosa_token }}
+
+  - name: Get a list of ROSA clusters in the account
+    ansible.builtin.command: >-
+      {{ rosa_binary_path }}/rosa list clusters --output json
+    register: r_rosa_list
+
+  - name: Print number of clusters to uninstall
+    ansible.builtin.debug:
+      msg: "Found {{ r_rosa_list.stdout | from_json | length }} clusters to uninstall"
+
+  - name: Try to gracefully uninstall ROSA cluster
+    ansible.builtin.include_tasks: uninstall_rosa.yml
+    loop: "{{ r_rosa_list.stdout | from_json }}"
+
+  - name: Remove Bookbag
+    when:
+    - bookbag_git_repo is defined
+    include_role:
+      name: bookbag
+    vars:
+      ACTION: destroy
+
+- name: Import cloud provider specific destroy playbook
+  ansible.builtin.import_playbook: "../../cloud_providers/{{ cloud_provider }}_destroy_env.yml"

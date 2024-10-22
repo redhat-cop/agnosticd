@@ -38,7 +38,8 @@
   loop:
   - namespace-backstage.yml.j2
   - cluster-role-binding-default-sa-admin.yml.j2
-  - object-bucket-claim.yml.j2
+  - cronjob-vault-es-fix.yml.j2
+  - deployment-post-startup-fixes.yml.j2
 
 - name: Copy keycloak backstage secret
   ansible.builtin.shell: |
@@ -46,6 +47,19 @@
     ocp4_workload_trusted_application_pipeline_keycloak_namespace }} -o json | \
     jq 'del(.metadata["namespace","creationTimestamp","resourceVersion","selfLink","uid","ownerReferences"])' | \
     oc apply -n {{ ocp4_workload_trusted_application_pipeline_backstage_namespace }} -f -
+
+- name: Get default token
+  ansible.builtin.shell: >-
+    set -o pipefail && oc get secret -n default | grep default-token | awk '{print $1}'
+  register: r_default_token
+  ignore_errors: true
+
+# Change added for OCP 4.16 compatibility
+- name: Check default token
+  when: r_default_token is failed
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'secret-default-sa-token.yml') | from_yaml }}"
 
 - name: Get default token
   ansible.builtin.shell: >-
@@ -80,41 +94,10 @@
   ansible.builtin.set_fact:
     ocp4_workload_trusted_application_pipeline_quay_admin_token: "{{ r_quay_token.resources[0].data.token | b64decode }}"
 
-- name: Retrieve s3 bucket details
-  kubernetes.core.k8s_info:
-    api_version: objectbucket.io/v1alpha1
-    kind: ObjectBucketClaim
-    name: backstage-bucket-claim
-    namespace: backstage
-  register: r_bucket_claim
-  until:
-  - r_bucket_claim is defined
-  - r_bucket_claim.resources is defined
-  - r_bucket_claim.resources | length > 0
-
-- name: Retrieve bucket secret
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Secret
-    name: backstage-bucket-claim
-    namespace: "{{ ocp4_workload_trusted_application_pipeline_backstage_namespace }}"
-  register: r_bucket_secret
-  retries: 120
-  delay: 10
-  until:
-  - r_bucket_secret is defined
-  - r_bucket_secret.resources is defined
-  - r_bucket_secret.resources | length > 0
-
 - name: Extract S3 Details
   ansible.builtin.set_fact:
-    ocp4_workload_trusted_application_pipeline_s3_bucket_name: "{{ r_bucket_claim.resources[0].spec.bucketName }}"
-    ocp4_workload_trusted_application_pipeline_s3_bucket_region: "{{ aws_region }}"
     # yamllint disable-line rule:line-length
-    ocp4_workload_trusted_application_pipeline_s3_bucket_endpoint: "https://s3-openshift-storage.{{ ocp4_workload_trusted_application_pipeline_apps_domain }}"
-    ocp4_workload_trusted_application_pipeline_s3_bucket_aws_access_key_id: "{{ r_bucket_secret.resources[0].data.AWS_ACCESS_KEY_ID | b64decode}}"
-    # yamllint disable-line rule:line-length
-    ocp4_workload_trusted_application_pipeline_s3_bucket_aws_secret_access_key: "{{ r_bucket_secret.resources[0].data.AWS_SECRET_ACCESS_KEY | b64decode}}"
+    ocp4_workload_trusted_application_pipeline_minio_endpoint: "https://minio-{{ ocp4_workload_trusted_application_pipeline_minio_namespace }}.{{ ocp4_workload_trusted_application_pipeline_apps_domain }}"
 
 - name: Setup Backstage Repo
   include_tasks:
@@ -129,7 +112,7 @@
   kubernetes.core.k8s_exec:
     namespace: "{{ ocp4_workload_trusted_application_pipeline_vault_namespace }}"
     pod: vault-0
-    command: "vault kv put kv/secrets/janusidp/common_password password={{ common_password }}"
+    command: "vault kv put kv/secrets/janusidp/common_password password={{ ocp4_workload_trusted_application_pipeline_common_password }}"
 
 - name: Create console link
   kubernetes.core.k8s:

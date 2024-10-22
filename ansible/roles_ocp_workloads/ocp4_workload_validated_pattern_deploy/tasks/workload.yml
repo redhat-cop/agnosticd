@@ -1,0 +1,202 @@
+---
+#############################################################################
+# Set up OpenShift image registry
+#############################################################################
+
+- name: Get Ingress config
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: r_ingress
+
+- name: Set ocp4_workload_validated_pattern_apps_domain variable
+  ansible.builtin.set_fact:
+    ocp4_workload_validated_pattern_registry_hostname: "registry.{{ r_ingress.resources[0].spec.domain }}"
+
+- name: Expose the OpenShift internal registry
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: imageregistry.operator.openshift.io/v1
+      kind: Config
+      metadata:
+        name: cluster
+      spec:
+        defaultRoute: false
+        routes:
+        - name: registry
+          hostname: "{{ ocp4_workload_validated_pattern_registry_hostname }}"
+
+- name: Enable anonymous image pulls from the internal registry
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: image-puller
+      subjects:
+      - kind: Group
+        apiGroup: rbac.authorization.k8s.io
+        name: system:unauthenticated
+      - kind: Group
+        apiGroup: rbac.authorization.k8s.io
+        name: system:authenticated
+      roleRef:
+        kind: ClusterRole
+        apiGroup: rbac.authorization.k8s.io
+        name: system:image-puller
+
+- name: Enable image pushes to the internal registry
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: registry-admin
+      subjects:
+      - kind: Group
+        apiGroup: rbac.authorization.k8s.io
+        name: system:serviceaccounts
+      roleRef:
+        kind: ClusterRole
+        apiGroup: rbac.authorization.k8s.io
+        name: registry-admin
+
+#############################################################################
+# Validated pattern Repository Setup
+# Do all repository stuff as {{ ansible_user }}
+#############################################################################
+- name: Setup repositories
+  become: true
+  become_user: "{{ ansible_user }}"
+  block:
+  - name: Ensure previous ~/values-secret-{{ ocp4_workload_validated_pattern_deploy_selected_pattern.pattern_name }}.yaml is absent
+    ansible.builtin.file:
+      path: "~{{ ansible_user }}/values-secret-{{ ocp4_workload_validated_pattern_deploy_selected_pattern.pattern_name }}.yaml"
+      state: absent
+
+  - name: Ensure previous repo root dir is absent
+    ansible.builtin.file:
+      path: "{{ ocp4_workload_validated_pattern_deploy_repo_root_dir }}"
+      state: absent
+
+  - name: Clone the repository {{ ocp4_workload_validated_pattern_deploy_selected_pattern.display_name }}
+    ansible.builtin.git:
+      dest: "{{ ocp4_workload_validated_pattern_deploy_repo_root_dir }}"
+      repo: "{{ ocp4_workload_validated_pattern_deploy_selected_pattern.repo }}"
+      version: "{{ ocp4_workload_validated_pattern_deploy_selected_pattern.revision }}"
+      clone: true
+      recursive: false
+
+  - name: Set up values-secret.yaml file
+    ansible.builtin.template:
+      src: "values-secret-{{ ocp4_workload_validated_pattern_deploy_selected_pattern.pattern_name }}.yaml.j2"
+      dest: "~{{ ansible_user }}/values-secret-{{ ocp4_workload_validated_pattern_deploy_selected_pattern.pattern_name }}.yaml"
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+      mode: 0664
+    when: ocp4_workload_validated_pattern_deploy_selected_pattern.pattern_name != "operator-only"
+
+#############################################################################
+# Run Validated Pattern install (containerized)
+#############################################################################
+
+- name: Ensure podman is installed and latest
+  ansible.builtin.package:
+    name: podman
+    state: latest
+  become: true
+
+- name: Call Ansible setup playbook for Validated Pattern {{ ocp4_workload_validated_pattern_deploy_selected_pattern.pattern_name }}
+  environment:
+    KUBECONFIG: "/home/{{ ansible_user }}/cluster-{{ guid }}/auth/kubeconfig"
+  ansible.builtin.shell:
+    chdir: "{{ ocp4_workload_validated_pattern_deploy_repo_root_dir }}"
+    cmd: ./pattern.sh make install
+  when: ocp4_workload_validated_pattern_deploy_selected_pattern.pattern_name != "operator-only"
+
+- name: Call Ansible setup playbook for install Validated Pattern Operator only
+  environment:
+    EXTRA_HELM_OPTS: --set main.git.repoURL=null --set main.git.repoUpstreamURL=null
+    KUBECONFIG: "/home/{{ ansible_user }}/cluster-{{ guid }}/auth/kubeconfig"
+  ansible.builtin.shell:
+    chdir: "{{ ocp4_workload_validated_pattern_deploy_repo_root_dir }}"
+    cmd: ./pattern.sh make operator-deploy
+  when: ocp4_workload_validated_pattern_deploy_selected_pattern.pattern_name == "operator-only"
+
+
+#############################################################################
+# AgnosticD User Info
+#############################################################################
+- name: Print info if not VP operator only
+  when: ocp4_workload_validated_pattern_deploy_selected_pattern.pattern_name != "operator-only"
+  block:
+  - name: Print generic AgnosticD user info
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - ""
+    - "Validated Pattern configured: {{ ocp4_workload_validated_pattern_deploy_selected_pattern.display_name }}"
+    - "For more info about the pattern, check the docs: {{ ocp4_workload_validated_pattern_deploy_selected_pattern.doc_url }}"
+
+  - name: Create cluster-admin group for argocd (workaround)
+    kubernetes.core.k8s:
+      state: present
+      kubeconfig: "/home/{{ ansible_user }}/cluster-{{ guid }}/auth/kubeconfig"
+      definition:
+        metadata:
+          name: cluster-admins
+        kind: Group
+        users:
+        - "admin"
+
+  - name: Get gitea URL
+    kubernetes.core.k8s_info:
+      kubeconfig: "/home/{{ ansible_user }}/cluster-{{ guid }}/auth/kubeconfig"
+      kind: ConsoleLink
+      name: gitea-link
+    register: gitea_link
+
+  - name: Print gitea url
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - ""
+    - "You can access Gitea via the URL:"
+    - "{{ (gitea_link.resources | first).spec.href }}"
+
+  - name: Get gitea admin user/pw
+    kubernetes.core.k8s_info:
+      kubeconfig: "/home/{{ ansible_user }}/cluster-{{ guid }}/auth/kubeconfig"
+      kind: Secret
+      name: gitea-admin-secret
+      namespace: vp-gitea
+    register: gitea_admin
+
+  - name: Print gitea user/pw
+    agnosticd_user_info:
+      msg: "The gitea admin {{ item.key }} is {{ item.value | b64decode }}"
+    loop: "{{ secret_data | dict2items }}"
+    vars:
+      secret_data: "{{ (gitea_admin.resources | first).data }}"
+
+- name: Print info if VP operator only
+  when: ocp4_workload_validated_pattern_deploy_selected_pattern.pattern_name == "operator-only"
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Validated Patterns Operator has been installed."
+  - "You can install patterns from the cluster UI, additional info:"
+  - "https://validatedpatterns.io/learn/using-validated-pattern-operator/#create-pattern-instance_{context}"
+  - "https://validatedpatterns.io/patterns/"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: Workload tasks complete
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

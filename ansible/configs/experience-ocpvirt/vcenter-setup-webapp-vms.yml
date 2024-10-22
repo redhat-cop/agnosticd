@@ -1,9 +1,51 @@
 - name: Create folder and VMs
   block:
+  - name: Get vSphere login session
+    ansible.builtin.uri:
+      url: "https://{{ vcenter_hostname }}/rest/com/vmware/cis/session"
+      validate_certs: false
+      method: POST
+      headers:
+        Content-Type: "application/json"
+      body_format: json
+      force_basic_auth: true
+      url_username: "{{ vcenter_username }}"
+      url_password: "{{ vcenter_password }}"
+    register: r_login_response
+
+  - name: Get list of datastores
+    ansible.builtin.uri:
+      url: "https://{{ vcenter_hostname }}/rest/vcenter/datastore"
+      validate_certs: false
+      method: GET
+      headers:
+        Content-Type: "application/json"
+        vmware-api-session-id: "{{ r_login_response.json.value }}"
+    register: datastore_response
+
+  - name: Filter datastores starting with prefix 'workload_share'
+    ansible.builtin.set_fact:
+      filtered_datastores: "{{ datastore_response.json.value | json_query(query) }}"
+    vars:
+      query: "[?starts_with(name, 'workload_share')].{name: name, free_space: free_space}"
+
+  - name: Choose the least used datastore
+    ansible.builtin.set_fact:
+      vcenter_datastore: "{{ (filtered_datastores | sort(attribute='free_space') | last).name }}"
+
+  - name: Debug datastore
+    ansible.builtin.debug:
+      msg: "vcenter_datastore: {{ vcenter_datastore }}"
+
   - name: Create folder for the project
     community.vmware.vcenter_folder:
+      validate_certs: false
+      hostname: "{{ vcenter_hostname }}"
+      username: "{{ vcenter_username }}"
+      password: "{{ vcenter_password }}"
+      datacenter: "{{ vcenter_datacenter }}"
       folder_name: "{{ hostvars['localhost']['vcenter_folder'] }}"
-      parent_folder: "Workloads"
+      parent_folder: Workloads
       folder_type: vm
       state: present
     register: r_vcenter_folder
@@ -14,38 +56,36 @@
   - name: Create instance(s)
     register: r_vmc_instance
     community.vmware.vmware_guest:
-      state: poweredoff
-      folder: "/Workloads/{{ hostvars['localhost']['vcenter_folder'] }}"
-      template: "roadshow-tpl-{{ item.name }}"
-      name: "{{ item.name }}"
-      wait_for_ip_address: false
-      disk:
-      - datastore: "{{ vcenter_datastore }}"
-        size_gb: "{{ item.rootfs_size }}"
-        type: "thin"
-      networks:
-      - name: "segment-migrating-to-ocpvirt"
-    loop:
-    - name: haproxy
-      rootfs_size: 8
-    - name: winweb01
-      rootfs_size: 90
-    - name: winweb02
-      rootfs_size: 90
-    - name: database
-      rootfs_size: 16
-    until: r_vmc_instance is success
-    retries: 10
-    delay: 15
-  module_defaults:
-    community.vmware.vmware_guest:
-      hostname: "{{ roadshow_vcenter_hostname }}"
+      validate_certs: false
+      hostname: "{{ vcenter_hostname }}"
       username: "{{ vcenter_username }}"
       password: "{{ vcenter_password }}"
       datacenter: "{{ vcenter_datacenter }}"
       cluster: "{{ vcenter_cluster }}"
-    community.vmware.vcenter_folder:
-      hostname: "{{ roadshow_vcenter_hostname }}"
-      username: "{{ vcenter_username }}"
-      password: "{{ vcenter_password }}"
-      datacenter: "{{ vcenter_datacenter }}"
+      state: poweredoff
+      folder: "/Workloads/{{ hostvars['localhost']['vcenter_folder'] }}"
+      template: "{{ item.template }}"
+      name: "{{ item.name }}-{{ guid }}"
+      wait_for_ip_address: false
+      disk:
+      - datastore: "{{ vcenter_datastore }}"
+        size_gb: "{{ item.rootfs_size }}"
+        type: thin
+      networks:
+      - name: segment-migrating-to-ocpvirt
+    loop:
+    - name: haproxy
+      template: rhel9-tpl
+      rootfs_size: 5
+    - name: database
+      template: roadshow-tpl-database
+      rootfs_size: 7
+    - name: winweb01
+      template: roadshow-tpl-winweb01
+      rootfs_size: 21
+    - name: winweb02
+      template: roadshow-tpl-winweb02
+      rootfs_size: 21
+    until: r_vmc_instance is success
+    retries: 10
+    delay: 15

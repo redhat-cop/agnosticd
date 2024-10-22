@@ -1,11 +1,11 @@
 ---
 # Implement your Workload deployment tasks here
 - name: Setting up workload for user
-  debug:
+  ansible.builtin.debug:
     msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
 
 - name: Install OpenShift Virtualization Operator
-  include_role:
+  ansible.builtin.include_role:
     name: install_operator
   vars:
     install_operator_action: install
@@ -17,7 +17,7 @@
     install_operator_catalog: redhat-operators
     install_operator_automatic_install_plan_approval: "{{ ocp4_workload_kubevirt_automatic_install_plan_approval | default(true) }}"
     install_operator_starting_csv: "{{ ocp4_workload_kubevirt_starting_csv }}"
-    install_operator_catalogsource_setup: "{{ ocp4_workload_kubevirt_use_catalog_snapshot | default(false)}}"
+    install_operator_catalogsource_setup: "{{ ocp4_workload_kubevirt_use_catalog_snapshot | default(false) }}"
     install_operator_catalogsource_name: "{{ ocp4_workload_kubevirt_catalogsource_name | default('') }}"
     install_operator_catalogsource_namespace: openshift-cnv
     install_operator_catalogsource_image: "{{ ocp4_workload_kubevirt_catalog_snapshot_image | default('') }}"
@@ -47,11 +47,81 @@
     hyperconverged_query: >-
       [?type=='Available'].status[] | [0]
 
+# For deployments on CNV with external Ceph use PVCs for boot image snapshots
+# HyperConverged must have been created with .spec.featureGates.enableCommonBootImageImport: false
+# See template for that logic
+- name: Set boot sources to use PVCs
+  when: not ocp4_workload_kubevirt_boot_sources_shapshot | bool
+  block:
+  - name: Get all available storage classes
+    kubernetes.core.k8s_info:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+    register: r_storageclasses
+
+  - name: Abort if no storage classes found
+    when: r_storageclasses.resources | length == 0
+    ansible.builtin.fail:
+      msg: "No storage classes found. Can not continue."
+
+  - name: Find default storage class
+    ansible.builtin.set_fact:
+      _ocp4_workload_kubevirt_default_storage_class: "{{ default_sc[0] }}"
+    vars:
+      default_sc: "{{ r_storageclasses.resources | json_query(query) }}"
+      query: "[?metadata.annotations.\"storageclass.kubernetes.io/is-default-class\" == 'true'].metadata.name"
+
+  - name: Abort if no default storage class found
+    when: _ocp4_workload_kubevirt_default_storage_class | length == 0
+    ansible.builtin.fail:
+      msg: "No default storage class found. Can not continue."
+
+  - name: Print default storage class name
+    ansible.builtin.debug:
+      msg: "Default storage class: {{ _ocp4_workload_kubevirt_default_storage_class }}"
+
+  - name: Patch the storage profile matching the default storage class to use pvc instead of snapshot
+    kubernetes.core.k8s:
+      state: patched
+      api_version: cdi.kubevirt.io/v1beta1
+      kind: StorageProfile
+      name: "{{ _ocp4_workload_kubevirt_default_storage_class }}"
+      definition:
+        spec:
+          dataImportCronSourceFormat: pvc
+
+  - name: If we are using Hosted Control Planes, it is needed to set default accessMode, volumeMode and cloneStrategy
+    when: _ocp4_workload_kubevirt_default_storage_class == "kubevirt-csi-infra-default"
+    kubernetes.core.k8s:
+      state: patched
+      api_version: cdi.kubevirt.io/v1beta1
+      kind: StorageProfile
+      name: "{{ _ocp4_workload_kubevirt_default_storage_class }}"
+      definition:
+        spec:
+          claimPropertySets:
+          - accessModes:
+            - ReadWriteMany
+            volumeMode: Block
+          cloneStrategy: copy
+
+  - name: Finally patch HyperConverged to import boot sources now using PVCs
+    kubernetes.core.k8s:
+      state: patched
+      api_version: hco.kubevirt.io/v1beta1
+      kind: HyperConverged
+      name: kubevirt-hyperconverged
+      namespace: openshift-cnv
+      definition:
+        spec:
+          featureGates:
+            enableCommonBootImageImport: true
+
 - name: Install virtctl to bastion VM
   when: ocp4_workload_kubevirt_install_virtctl | bool
   block:
   - name: Get virtctl-clidownloads-kubevirt-hyperconverged ConsoleCLIDownload
-    k8s_info:
+    kubernetes.core.k8s_info:
       api_version: console.openshift.io/v1
       kind: ConsoleCLIDownload
       name: virtctl-clidownloads-kubevirt-hyperconverged
@@ -65,17 +135,17 @@
 
   - name: Get virtctl download URL from ConsoleCLIDownload
     when: r_virtctl_cli_download.resources | length > 0
-    set_fact:
+    ansible.builtin.set_fact:
       _ocp4_workload_kubevirt_virtctl_url: >-
         {{ r_virtctl_cli_download.resources[0] | to_json | from_json
         | json_query("spec.links[?contains(href,'linux')].href") | first }}
 
   - name: Download virtctl cli tool
-    get_url:
+    ansible.builtin.get_url:
       url: "{{ _ocp4_workload_kubevirt_virtctl_url }}"
       validate_certs: false
       dest: /tmp/virtctl.tar.gz
-      mode: 0660
+      mode: "0660"
     register: r_virtctl
     until: r_virtctl is success
     retries: 20
@@ -83,23 +153,23 @@
 
   - name: Install virtctl CLI on bastion
     become: true
-    unarchive:
+    ansible.builtin.unarchive:
       src: /tmp/virtctl.tar.gz
       remote_src: true
       dest: /usr/bin
-      mode: 0775
+      mode: "0775"
       owner: root
       group: root
     args:
       creates: /usr/bin/virtctl
 
   - name: Remove downloaded file
-    file:
+    ansible.builtin.file:
       state: absent
       path: /tmp/virtctl.tar.gz
 
 # Leave this as the last task in the playbook.
-- name: workload tasks complete
-  debug:
-    msg: "Workload Tasks completed successfully."
+- name: Workload tasks complete
   when: not silent|bool
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."

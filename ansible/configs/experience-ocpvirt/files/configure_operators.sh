@@ -29,7 +29,7 @@ EOF
 
 until oc get hyperconvergeds.hco.kubevirt.io; do sleep 60; done
 
-sleep 30
+sleep 60
 
 export VERSION=$(curl https://storage.googleapis.com/kubevirt-prow/release/kubevirt/kubevirt/stable.txt)
 wget -O /usr/bin/virtctl  https://github.com/kubevirt/kubevirt/releases/download/${VERSION}/virtctl-${VERSION}-linux-amd64
@@ -73,7 +73,7 @@ metadata:
   name: openshift-mtv
   namespace: openshift-mtv
 spec:
-  channel: release-v2.5
+  channel: release-v2.6
   installPlanApproval: Automatic
   name: mtv-operator
   source: redhat-operators
@@ -81,6 +81,8 @@ spec:
 EOF
 
 until oc get forkliftcontrollers.forklift.konveyor.io; do sleep 60; done
+sleep 60
+
 
 cat << EOF | oc apply -f -
 ---
@@ -90,8 +92,7 @@ metadata:
   name: forklift-controller
   namespace: openshift-mtv
 spec:
-  olm_managed: true
-  controller_max_vm_in_flight: 1
+  controller_max_vm_inflight: 1
 EOF
 
 cat << EOF | oc apply -f -
@@ -130,6 +131,8 @@ spec:
 EOF
 
 until oc get nmstates.nmstate.io; do sleep 60; done
+sleep 60
+
 
 cat << EOF | oc apply -f -
 ---
@@ -166,11 +169,13 @@ metadata:
 spec:
   channel: stable
   name: metallb-operator
-  source: redhat-operators 
+  source: redhat-operators
   sourceNamespace: openshift-marketplace
 EOF
 
 until oc get metallbs.metallb.io; do sleep 60; done
+sleep 60
+
 
 cat << EOF | oc apply -f -
 ---
@@ -204,9 +209,9 @@ metadata:
   name: openshift-terminal
 EOF
 
-until oc get DevWorkspace; do sleep 30; done
-
 sleep 30
+
+until oc get DevWorkspace -n openshift-terminal; do sleep 30; done
 
 cat << EOF | oc apply -f -
 ---
