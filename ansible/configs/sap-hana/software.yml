@@ -18,10 +18,12 @@
         path: /etc/hosts
         block: |
          192.168.47.10 bastion-{{ guid }}.example.com bastion-{{ guid }}
-         192.168.47.11 tower-{{ guid }}.example.com tower-{{ guid }}
+         192.168.47.11 tower-{{ guid }}.{{ guid }}.{{ sandbox_openshift_apps_domain }} tower-{{ guid }}.example.com tower-{{ guid }}
          192.168.47.28 hana-{{ guid }}1.example.com hana-{{ guid }}1
          192.168.47.135 hana-{{ guid }}2.example.com hana-{{ guid }}2
          192.168.47.150 s4hana-{{ guid }}.example.com s4hana-{{ guid }}
+# Note: The external DNS Name has to be here to accept the cert in 2.5 containerized install
+# only necessary on tower, but does not harm the other nodes.
 
 - name: Ensure NFS Server is installed, SAP Software Device Mounted and Ansible Installed
   hosts: bastions
@@ -113,6 +115,9 @@
         opts: "rw,bg,hard,_netdev"
         state: mounted
 
+## TODO: replace with SAP dowload instead in future release
+
+### The change of /etc/hosts has been done above, so next play should be redundant for openshift_cnv
 - name: Step 004 - Add short and fqdn resolution for every host
   hosts: hanas:s4hanas
   become: true
@@ -151,19 +156,63 @@
       ansible.builtin.command: mv /var/lib/insights/newest.egg.asc  /tmp
       ignore_errors: true
 
+- name: Step 004 - Prepare deployment of AAP
+  hosts: towers
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Add RPM package key RPM-GPG-KEY-EPEL-9
+      ansible.builtin.rpm_key:
+        key: 'https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}'
+      when: cloud_provider == "openshift_cnv"
+
+    - name: Install epel-release
+      ansible.builtin.dnf:
+        name: 'https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm'
+        state: present
+        disable_gpg_check: "{{ ansible_tower_epel_disable_gpg_check | default('no') }}"
+      when: cloud_provider == "openshift_cnv"
+
+    - name: Install certbot
+      ansible.builtin.dnf:
+        name: "certbot"
+      when: cloud_provider == "openshift_cnv"
+
+    - name: Ensure Directory for certificates exist
+      ansible.builtin.file:
+        path: "/home/cloud-user/aap-cert"
+        state: directory
+        mode: '0755'
+      when: cloud_provider == "openshift_cnv"
+
+    - name: Generate certificate using certbot # noqa: no-changed-when
+      ansible.builtin.command:
+        argv:
+          - certbot
+          - certonly
+          - --standalone
+          - -d
+          - tower-{{ guid }}.{{ guid }}.{{ sandbox_openshift_apps_domain }}
+          - -m
+          - rhpds-admins@redhat.com
+          - --agree-tos
+          - -n
+          - --cert-path
+          - /home/cloud-user/aap-cert/fullchain.pem
+          - --key-path
+          - /home/cloud-user/aap-cert/privkey.pem
+      when: cloud_provider == "openshift_cnv"
+
 - name: Step 004 - Deploy Ansible Tower
   # hosts: towers
   hosts: localhost
   gather_facts: false
   become: true
   tasks:
-    
-    # This is a bit hacky but we are facing some issues with Ansible, RHEL8 and python for some
-    # modules and this workaround solved this particular issue
+    # Should move into secret file
     - name: Create offline token
       ansible.builtin.set_fact:
         offline_token: "{{ rhsm_api_token_enc | decrypt(ocp4_ai_offline_token) }}"
-
     - name: Debug offline token
       ansible.builtin.debug:
         var: offline_token
@@ -172,15 +221,18 @@
     #  ansible.builtin.debug:
     #    var: sap-e2e-offline-token
 
-#    - name: Ensure Python3 package is installed and alternatives for python updated # noqa: no-changed-when command-instead-of-module
-#      ansible.builtin.shell: >
-#        yum install -y python3 && alternatives --set python /usr/bin/python3
-
+    # NOTE: Download role is only for "localhost"
     - name: Download AAP2
       ansible.builtin.include_role:
         name: "aap_download"
       tags:
         - step004
+
+    - name: Ensure aap_upacked directory exist
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/aap_unpacked"
+        state: directory
+        mode: '0755'
 
     - name: Unpack previously downloaded aap2.tar.gz in playbook_dir
       ansible.builtin.unarchive:
@@ -192,63 +244,41 @@
 
 #    - name: downloading tower manifest from OpenTLC
 #      get_url:
-#        url: "{{ tower_manifest.url }}"
+#        url: "{{ controller_manifest.url }}"
 #        dest: "{{ playbook_dir }}/aap_unpacked/manifest.zip "
 #        username: "{{ tower_manifest.username | default(omit) }}"
 #        password: "{{ tower_manifest.password | default(omit) }}"
 
     - name: Copy customized inventory template to aap_unpacked
       ansible.builtin.template:
-        src: '{{ playbook_dir }}/aap_inventory.j2'
+        src: aap_inventory.{{ cloud_provider }}.j2
         dest: '{{ playbook_dir }}/aap_unpacked/inventory'
         mode: '0644'
 
-    - name: print content of file aap_unpacked/inventory for debugging
-      ansible.builtin.command: "cat {{ playbook_dir }}/aap_unpacked/inventory"
-      register: reg_inventory
+    - name: Fetch directory aap-cert from host tower
+      delegate_to: "{{  groups['towers'].0 }}"
+      ansible.builtin.fetch:
+        src: "{{ item }}"
+        dest: '{{ playbook_dir }}/aap_unpacked/aap-cert/'
+        flat: true
+      loop:
+        - /home/cloud-user/aap-cert/fullchain.pem
+        - /home/cloud-user/aap-cert/privkey.pem
 
-    - name: print content of reg_inventory
+    - name: Print content of file aap_unpacked/inventory for debugging
+      ansible.builtin.command: "cat {{ playbook_dir }}/aap_unpacked/inventory"
+      changed_when: falseq
+      register: reg_inventory
+    - name: Print content of reg_inventory
       ansible.builtin.debug:
         var: reg_inventory.stdout_lines
 
 - name: Import Containerized Ansible playbook
   ansible.builtin.import_playbook: aap_unpacked/inventory/collections/ansible_collections/ansible/containerized_installer/playbooks/install.yml
-  vars: 
+  vars:
     ansible_inventory: '{{ playbook_dir }}/aap_unpacked/inventory'
+    ansible_inventory_file: '{{ playbook_dir }}/aap_unpacked/inventory'
     ansible_collections_path: '{{ playbook_dir }}/aap_unpacked/collections'
-
-    # - name: Add RPM package key RPM-GPG-KEY-EPEL-8
-    #   ansible.builtin.rpm_key:
-    #    key: 'https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}'
-
-    # - name: Install epel-release
-    #   ansible.builtin.dnf:
-    #     name: 'https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm'
-    #     state: present
-    #     disable_gpg_check: "{{ ansible_tower_epel_disable_gpg_check | default('no') }}"
-
-#    - name: Install certbot
-#      ansible.builtin.dnf:
-#        name: "certbot"
-#      when: cloud_provider == "openshift_cnv"
-
-#    - name: Generate certificate using certbot # noqa: no-changed-when
-#      ansible.builtin.command:
-#        argv:
-#          - certbot
-#          - certonly
-#          - --standalone
-#          - -d
-#          - tower-{{ guid }}.{{ guid }}.{{ sandbox_openshift_apps_domain }}
-#          - -m
-#          - rhpds-admins@redhat.com
-#          - --agree-tos
-#          - -n
-#          - --cert-path
-#          - /etc/tower/tower.cert
-#          - --key-path
-#          - /etc/tower/tower.key
-#      when: cloud_provider == "openshift_cnv"
 
 #   - name: Ensure additional packages are installed
 #      when: ansible_distribution_major_version | int == 8
