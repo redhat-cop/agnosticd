@@ -1,0 +1,158 @@
+---
+- name: Step 005 - Post software
+  hosts: bastions
+  become: false
+  gather_facts: false
+  environment:
+    KUBECONFIG: /home/{{ ansible_user }}/{{ cluster_name }}/auth/kubeconfig
+  tasks:
+  - name: Print post software
+    ansible.builtin.debug:
+      msg: "Post-Software Steps starting"
+
+  - name: Set Ansible Python interpreter to k8s virtualenv
+    ansible.builtin.set_fact:
+      ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+
+  - name: Setup cluster-admin service account
+    when: openshift_cluster_admin_service_account_enable | bool
+    ansible.builtin.include_role:
+      name: openshift_cluster_admin_service_account
+
+  - name: Remove AWS Credentials from bastion
+    when: cloud_provider == 'ec2'
+    ansible.builtin.file:
+      path: "/home/{{ ansible_user }}/.aws/credentials"
+      state: absent
+
+  - name: Remove Azure Credentials directory from bastion
+    when: cloud_provider == 'azure'
+    ansible.builtin.file:
+      path: "/home/{{ ansible_user }}/.azure"
+      state: absent
+
+  - name: Remove the openshift-installer GCP Credentials directory from bastion
+    when: cloud_provider == 'gcp'
+    ansible.builtin.file:
+      path: "/home/{{ ansible_user }}/.gcp"
+      state: absent
+
+  - name: Remove gcloud CLI Credentials directory from bastion
+    when: cloud_provider == 'gcp'
+    ansible.builtin.file:
+      path: "/home/{{ ansible_user }}/.config/gcloud"
+      state: absent
+
+- name: Step 005.2 - Deploy Workloads
+  ansible.builtin.import_playbook: workloads.yml
+
+- name: Step 005.3 - Deploy Workloads for Bastion
+  hosts: bastions
+  become: true
+  tasks:
+  - name: Set Anbibly Python Interpreter
+    ansible.builtin.set_fact:
+      ansible_python_interpreter: /usr/libexec/platform-python
+
+  - name: Deploy Software workloads
+    when: software_workloads_for_bastion | default("") | length > 0
+    ansible.builtin.include_role:
+      name: "{{ _software_bastion }}"
+    loop: "{{ software_workloads_for_bastion }}"
+    loop_control:
+      loop_var: _software_bastion
+
+- name: Step 005.4 Install Showroom to bastion
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+  - name: Deploy Showroom
+    when: showroom_deploy | default(false) | bool
+    ansible.builtin.include_role:
+      name: showroom
+    vars:
+      ansible_python_interpreter: /usr/libexec/platform-python
+
+- name: Step 005.5 Print Student Info
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Report Access Information
+    when:
+    - install_student_user | bool
+    - ocp4_cluster_show_access_user_info | bool
+    - cloud_provider != "openshift_cnv"
+    vars:
+      _bastion_inventory_name: "{{ groups['bastions'][0] }}"
+      _bastion_ssh_password: "{{ hostvars[bastion_hostname]['student_password'] }}"
+      _kubeadmin_password: "{{ hostvars[bastion_hostname]['kubeadmin_password']['content'] | b64decode }}"
+    block:
+    - name: Set Bastion Hostname (EC2)
+      when: cloud_provider == 'ec2'
+      ansible.builtin.set_fact:
+        _bastion_public_hostname: "{{ hostvars[_bastion_inventory_name].shortname }}.{{ guid }}{{ subdomain_base_suffix }}"
+
+    - name: Set Bastion Hostname (GCP)
+      when: cloud_provider == "azure" or cloud_provider == "gcp"
+      ansible.builtin.set_fact:
+        _bastion_public_hostname: "bastion.{{ guid }}.{{ ocp4_base_domain }}."
+
+    - name: Set Bastion Hostname (Other)
+      when: _bastion_public_hostname is not defined
+      ansible.builtin.set_fact:
+        _bastion_public_hostname: "{{ hostvars[_bastion_inventory_name].shortname }}.{{ guid }}.{{ ocp4_base_domain }}"
+
+    - name: Print GCP access user info
+      when:
+      - cloud_provider == "gcp"
+      - agnosticd_open_environment | default(false) | bool
+      ansible.builtin.include_role:
+        name: open-env-gcp-user-info
+
+    - name: Print access user info
+      agnosticd_user_info:
+        data:
+          bastion_public_hostname: "{{ _bastion_public_hostname }}"
+          bastion_ssh_password: "{{ _bastion_ssh_password }}"
+          bastion_ssh_user_name: "{{ student_name }}"
+        msg: |
+          You can access your bastion via SSH:
+          ssh {{ student_name }}@{{ _bastion_public_hostname }}
+
+          Make sure you use the username '{{ student_name }}' and the password '{{ _bastion_ssh_password }}' when prompted.
+
+  - name: Print access user info (CNV)
+    when:
+    - install_student_user | bool
+    - cloud_provider == "openshift_cnv"
+    agnosticd_user_info:
+      data:
+        bastion_ssh_port: "{{ hostvars[groups['bastions'][0]].bastion_ssh_port }}"
+      msg: |
+        You can access your bastion via SSH:
+        ssh {{ student_name }}@{{ openshift_cnv_ssh_address }} -p {{ hostvars[groups['bastions'][0]].bastion_ssh_port }}
+
+        Enter ssh password when prompted: {{ hostvars[groups['bastions'][0]]['student_password'] }}
+
+- name: Step 005.5 Clean up Google SDK
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Remove Google Cloud SDK
+    when: cloud_provider == "gcp"
+    ansible.builtin.file:
+      path: "{{ output_dir }}/google-cloud-sdk"
+      state: absent
+
+- name: Step 005.6 Tell CloudForms we are done
+  hosts: localhost
+  run_once: true
+  gather_facts: false
+  become: false
+  tasks:
+  - name: Print post software message
+    ansible.builtin.debug:
+      msg: "Post-Software checks completed successfully"
