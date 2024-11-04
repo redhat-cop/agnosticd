@@ -95,6 +95,13 @@ class ActionModule(ActionBase):
                     )
                 )
             )
+            ACTION = self._templar.template(
+                task_vars.get('ACTION',
+                    task_vars['hostvars'].get('localhost',{}).get('ACTION',
+                                                                  'provision'
+                    )
+                )
+            )
 
             # Attempt to make output_dir if not exists
             try:
@@ -103,7 +110,7 @@ class ActionModule(ActionBase):
                 pass
 
             if not user and msg != None:
-                fh = open(os.path.join(output_dir, 'user-info.yaml'), 'a')
+                fh = open(os.path.join(output_dir, f'{ACTION}-user-info.yaml'), 'a')
                 if isinstance(msg, list):
                     for m in msg:
                         fh.write('- ' + json.dumps(m) + "\n")
@@ -111,13 +118,13 @@ class ActionModule(ActionBase):
                     fh.write('- ' + json.dumps(msg) + "\n")
                 fh.close()
             if not user and body != None:
-                fh = open(os.path.join(output_dir, 'user-body.yaml'), 'a')
+                fh = open(os.path.join(output_dir, f'{ACTION}-user-body.yaml'), 'a')
                 fh.write('- ' + json.dumps(body) + "\n")
                 fh.close()
             if data or user:
                 user_data = None
                 try:
-                    fh = open(os.path.join(output_dir, 'user-data.yaml'), 'r')
+                    fh = open(os.path.join(output_dir, f'{ACTION}-user-data.yaml'), 'r')
                     user_data = yaml.safe_load(fh)
                     fh.close()
                 except FileNotFoundError:
@@ -149,7 +156,7 @@ class ActionModule(ActionBase):
                 else:
                     user_data.update(data)
 
-                fh = open(os.path.join(output_dir, 'user-data.yaml'), 'w')
+                fh = open(os.path.join(output_dir, f'{ACTION}-user-data.yaml'), 'w')
                 yaml.safe_dump(user_data, stream=fh, explicit_start=True)
                 fh.close()
             result['failed'] = False
