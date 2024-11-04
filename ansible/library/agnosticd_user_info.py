@@ -32,7 +32,7 @@ version_added: "2.9"
 
 description:
 - This module provides the capability of displaying user information in agnosticd processing while saving the output as a YAML in the output directory.
-- Files "user-info.yaml" stores a list of messages to deliver to the environment owner and "user-data.yaml" store structured data.
+- Files "{{ ACTION }}-user-info.yaml" stores a list of messages to deliver to the environment owner and "{{ ACTION }}-user-data.yaml" store structured data.
 - Messages and data can be stored for specific users to support multi-user environments.
 - The string "user.info: " is prepended to the displayed output for compatibility with the prior practice of using the debug module with this special prefix string.
 
