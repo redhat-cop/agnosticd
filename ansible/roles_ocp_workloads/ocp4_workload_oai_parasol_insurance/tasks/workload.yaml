@@ -1,0 +1,91 @@
+---
+# Patch ArgoCD for ApplicationSet rolling updates and InferenceService health check
+- name: Get ArgoCD CR if it exists
+  k8s_info:
+    api_version: argoproj.io/v1beta1
+    kind: ArgoCD
+    namespace: openshift-gitops
+    name: openshift-gitops
+  register: argocd_info
+  ignore_errors: true
+
+- name: If ArgoCD present, patch it for ApplicationSet rolling updates
+  command: >-
+    oc patch argocd/openshift-gitops -n openshift-gitops --type merge -p='{{ lookup('template', 'rolling_updates.json') | string }}'
+  when: argocd_info.resources | length > 0
+
+- name: Set default value for health_checks_exist
+  set_fact:
+    health_checks_exist: false
+
+- name: Check if resourceHealthChecks exists in the spec
+  set_fact:
+    health_checks_exist: "{{ argocd_info.resources[0].spec.resourceHealthChecks is defined }}"
+  when: argocd_info.resources | length > 0
+
+- name: Apply patch to append to resourceHealthChecks if it already exists
+  command: >-
+    oc patch argocd/openshift-gitops -n openshift-gitops --type='json'
+    -p='[{"op": "add", "path": "/spec/resourceHealthChecks/-", "value": {{ lookup('template', 'is_health_check.json') | string }} }]'
+  when: health_checks_exist and argocd_info.resources | length > 0
+
+- name: Apply patch to create resourceHealthChecks if it does not exist
+  command: >-
+    oc patch argocd/openshift-gitops -n openshift-gitops --type='merge'
+    -p='{"spec": {"resourceHealthChecks": [ {{ lookup('template', 'is_health_check.json') | string }} ]}}'
+  when: not health_checks_exist and argocd_info.resources | length > 0
+
+# Patch ArgoCD to allow OpenShift login through restarts
+- name: Patch ArgoCD to allow OpenShift login through restarts
+  when: argocd_info.resources | length > 0
+  ignore_errors: true
+  block:
+  - name: Get the OpenShift Gitops ArgoCD server route
+    kubernetes.core.k8s_info:
+      api_version: route.openshift.io/v1
+      kind: Route
+      name: openshift-gitops-server
+      namespace: openshift-gitops
+    register: r_openshift_gitops_server_route
+
+  - name: Patch the ArgoCD server host
+    command: >-
+      oc patch argocd/openshift-gitops -n openshift-gitops --type='merge'
+      -p '{"spec": {"server": {"host": "{{ r_openshift_gitops_server_route.resources[0].spec.host }}"}}}'
+
+# Restart the DevWorkspace controller that gets sometimes stuck and blocks ArgoCD
+- name: Get Pods in openshift-operators namespace
+  k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: openshift-operators
+  register: pod_info
+
+- name: Filter Pods that start with "devworkspace-controller-manager"
+  set_fact:
+    devworkspace_pods: "{{ pod_info.resources | selectattr('metadata.name', 'match', '^devworkspace-controller-manager') | list }}"
+
+- name: Restart the Pod
+  command: >-
+    oc delete pod {{ item.metadata.name }} -n openshift-operators
+  loop: "{{ devworkspace_pods }}"
+  when: devworkspace_pods | length > 0
+  ignore_errors: true
+
+# Clone the Lab repo and apply the ApplicationSet YAML file
+- name: Clone the Lab repo
+  git:
+    repo: "{{ ocp4_workload_oai_parasol_insurance_repo_url }}"
+    dest: "/tmp/ocp4_workload_oai_parasol_insurance_repo"
+    version: "{{ ocp4_workload_oai_parasol_insurance_branch }}"
+  register: git_clone
+
+- name: Apply the ApplicationSet YAML file
+  command: "oc apply -f /tmp/ocp4_workload_oai_parasol_insurance_repo/{{ ocp4_workload_oai_parasol_insurance_yaml_file_path }}"
+  when: git_clone.changed
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool
