@@ -46,14 +46,14 @@ from ansible.errors import AnsibleError
 from ansible.plugins.lookup import LookupBase
 
 class LookupModule(LookupBase): 
-    def run(self, terms, user=None, **kwargs):
+    def run(self, terms, action='provision', user=None, **kwargs):
         self.set_options(direct=kwargs)
         ret = []
 
         output_dir = self._templar.template('{{ output_dir | default(playbook_dir) | default(".") }}')
         user_data = {}
         try:
-            fh = open(os.path.join(output_dir, 'user-data.yaml'), 'r')
+            fh = open(os.path.join(output_dir, f'{action}-user-data.yaml'), 'r')
             user_data = yaml.safe_load(fh)
             fh.close()
         except FileNotFoundError:
