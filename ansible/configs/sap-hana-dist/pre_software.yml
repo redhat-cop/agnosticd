@@ -1,0 +1,149 @@
+# Cloudformation template or equivalent should tag all hosts with Project:{{ env_type }}-{{ guid }}
+
+- name: Configure all hosts with Repositories, Common Files and Set environment key
+  hosts:
+    - all:!windows
+  become: true
+  gather_facts: False
+  roles:
+    - { role: "set-repositories", when: 'repo_method is defined' }
+  tags:
+    - step004
+    - common_tasks
+
+- name: Lock RHEL release
+  hosts:
+    - bastions:towers
+  become: true
+  gather_facts: False
+  tasks:
+    - name: Lock RHEL release to one providing ansible-core
+      command: subscription-manager release --set={{ rhel_lock_release }}
+      register: lock_result
+      until: lock_result is succeeded
+      retries: 15
+      delay: 10
+
+- name: Lock RHEL release SAP
+  hosts:
+    - hanas:s4hanas
+  become: true
+  gather_facts: False
+  tasks:
+    - name: Lock RHEL release to one SAP certified
+      command: subscription-manager release --set={{ rhel_lock_release_sap }}
+      register: lock_result
+      until: lock_result is succeeded
+      retries: 15
+      delay: 10
+
+  tags:
+    - step004
+    - common_tasks
+
+- name: Install Common packages and Set environment key
+  hosts:
+    - all:!windows
+  become: true
+  gather_facts: False
+  roles:
+    - { role: "common", when: 'install_common' }
+    - { role: "set_env_authorized_key", when: 'set_env_authorized_key' }
+  tags:
+    - step004
+    - common_tasks
+
+- name: Configure firewalld
+  hosts: bastions
+  become: true
+  tasks:
+    - name: Install firewalld
+      ansible.builtin.yum:
+        name: firewalld
+        state: installed
+    - name: 'Ensure firewalld is running'
+      ansible.builtin.service:
+        name: firewalld
+        state: started
+        enabled: true
+
+    - ansible.posix.firewalld:
+        masquerade: true
+        state: enabled
+        permanent: true
+        immediate: true
+        zone: public
+
+    - name: permit nfs traffic
+      ansible.posix.firewalld:
+        service: nfs
+        permanent: true
+        immediate: true
+        state: enabled
+
+- name: Change default gw
+  hosts: hanas:s4hanas
+  become: true
+  tasks:
+    - name: Set 192.168.47.10 as default gw
+      command: "{{ item }}"
+      loop:
+        - ip r add 10.0.0.0/8 via 10.0.2.1
+        - ip r add default via 192.168.47.10 metric 1
+        - nmcli con modify "System eth0" ipv4.gateway 192.168.47.10 ipv4.route-metric 1
+        - nmcli con mod "Wired connection 1" ipv4.routes "10.0.0.0/8 10.0.2.1 0"
+
+- name: Configuring Bastion Hosts
+  hosts: bastions
+  become: true
+  roles:
+    -  { role: "bastion", when: 'install_bastion' }
+    - role: bastion-student-user
+      when: install_student_user | bool
+  tags:
+    - step004
+    - bastion_tasks
+
+- name: Copy SSH RSA to cloud-user
+  hosts: bastions
+  become: true
+  tasks:
+    - copy:
+        src: /root/.ssh/{{env_authorized_key}}.pem
+        dest: /home/cloud-user/.ssh/id_rsa
+        owner: cloud-user
+        group: cloud-user
+        mode: 0400
+        remote_src: yes
+      when: cloud_provider == "osp"
+  tags:
+    - step004
+    - bastion_tasks
+
+- name: Copy SSH RSA to ec2-user
+  hosts: bastions
+  become: true
+  tasks:
+    - copy:
+        src: /root/.ssh/{{env_authorized_key}}.pem
+        dest: /home/ec2-user/.ssh/id_rsa
+        owner: ec2-user
+        group: ec2-user
+        mode: 0400
+        remote_src: yes
+      when: cloud_provider == "ec2"
+  tags:
+    - step004
+    - bastion_tasks
+
+
+- name: PreSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - flight_check
+  tasks:
+    - debug:
+        msg: "Pre-Software checks completed successfully"

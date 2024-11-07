@@ -1,16 +1,16 @@
 ---
-- name: Step 00xxxxx software
-  hosts: localhost
-  gather_facts: False
-  become: false
-  tasks:
-    - debug:
-        msg: "Software tasks Started"
+# - name: Step 004 - Software Provisioning
+#   hosts: localhost
+#   gather_facts: false
+#   become: false
+#   tasks:
+#     - debug:
+#         msg: "Software tasks Started"
 
-- name: Configure /etc/hosts for openshift_cnv
+- name: Step 004 - Configure /etc/hosts for openshift_cnv
   hosts: all
-  become: True
-  gather_facts: True
+  become: true
+  gather_facts: true
   tasks:
     - name: Configure /etc/hosts
       when: cloud_provider == "openshift_cnv"
@@ -18,63 +18,68 @@
         path: /etc/hosts
         block: |
          192.168.47.10 bastion-{{ guid }}.example.com bastion-{{ guid }}
-         192.168.47.11 tower-{{ guid }}.example.com tower-{{ guid }}
+         192.168.47.11 tower-{{ guid }}.{{ guid }}.{{ sandbox_openshift_apps_domain }} tower-{{ guid }}.example.com tower-{{ guid }}
          192.168.47.28 hana-{{ guid }}1.example.com hana-{{ guid }}1
          192.168.47.135 hana-{{ guid }}2.example.com hana-{{ guid }}2
          192.168.47.150 s4hana-{{ guid }}.example.com s4hana-{{ guid }}
+         192.168.47.200 hana-vip.example.com hana-vip
+# Note: The external DNS Name has to be here to accept the cert in 2.5 containerized install
+# only necessary on tower, but does not harm the other nodes.
 
 - name: Ensure NFS Server is installed, SAP Software Device Mounted and Ansible Installed
   hosts: bastions
-  become: True
-  gather_facts: True
+  become: true
+  gather_facts: true
   tasks:
 
     - name: Ensure NFS directory exists
-      file:
+      ansible.builtin.file:
         path: "/nfs"
         state: directory
+        mode: "0755"
 
     - name: Mount up device by UUID
-      mount:
+      ansible.posix.mount:
         path: /nfs
         src: "/dev/{{ sap_software_device }}"
         fstype: xfs
         state: present
 
-    - name: 'Ensure required packages are installed'
-      package:
+    - name: Ensure required packages are installed
+      ansible.builtin.dnf:
         name: nfs-utils
         state: installed
 
-    - name: "Ensure export file contains the directory to be shared"
-      lineinfile:
+    - name: Ensure export file contains the directory to be shared
+      ansible.builtin.lineinfile:
         path: /etc/exports
         state: present
         regexp: "^/nfs"
         line: "/nfs *(insecure,rw,no_root_squash,no_wdelay,sync)"
 
-    - name: 'Ensure nfs-server is restarted and running'
-      service:
+    - name: Ensure nfs-server is restarted and running
+      ansible.builtin.service:
         name: nfs-server
         state: restarted
-        enabled: yes
-                
-    - name: Ensure additional packages are installed
-      yum:
-        name:
-          - ansible
-          - java-1.8.0-openjdk
-          - rhel-system-roles-sap
-        state: latest
-          
+        enabled: true
+
+#   - name: Ensure additional packages are installed
+#      ansible.builtin.dnf:
+#        name:
+#          - ansible
+#          - java-1.8.0-openjdk
+#          - rhel-system-roles-sap
+#        state: present
+
     - name: Ensure /nfs directory is owned by '{{ remote_user }}'
-      file:
+      ansible.builtin.file:
         path: /nfs
         state: directory
         owner: "{{ remote_user }}"
+        mode: "755"
 
     - name: Ensure SAP software is not present for external (non Red Hatters) requesters
-      file:
+      ansible.builtin.file:
         state: absent
         path: "{{ item }}"
       loop:
@@ -84,40 +89,44 @@
         - '/nfs/SAPHOSTAGENT/'
       when: not rh_internal
 
-- name: Ensure NFS share is mounted in HANA and S/4HANA Hosts
+- name: Step 004 - Ensure NFS share is mounted in HANA and S/4HANA Hosts
   hosts: hanas:s4hanas
-  become: True
-  gather_facts: True
+  become: true
+  gather_facts: true
   tasks:
 
-    - name: Ensure additional packages are installed
-      yum:
+    - name: Ensure NFS client packages are installed
+      ansible.builtin.dnf:
         name:
           - rpcbind
           - nfs-utils
-        state: latest
+        state: present
 
     - name: Ensure Software directory exists
-      file:
+      ansible.builtin.file:
         path: "/software"
         state: directory
+        mode: "0755"
 
     - name: Ensure NFS share is mounted
-      mount:
+      ansible.posix.mount:
         path: "/software"
         src: "{{ bastion_hostname }}:/nfs"
         fstype: nfs4
         opts: "rw,bg,hard,_netdev"
         state: mounted
 
-- name: Add short and fqdn resolution for every host
+## TODO: replace with SAP dowload instead in future release
+
+### The change of /etc/hosts has been done above, so next play should be redundant for openshift_cnv
+- name: Step 004 - Add short and fqdn resolution for every host
   hosts: hanas:s4hanas
   become: true
   gather_facts: true
   tasks:
 
-    - name: Add HANA and S4HANA hosts info to /etc/hosts
-      lineinfile:
+    - name: Add HANA and S4HANA hosts info to /etc/hosts # noqa: ignore-errors
+      ansible.builtin.lineinfile:
         path: /etc/hosts
         state: present
         line: "{{ hostvars[item].ansible_default_ipv4.address }}    {{ hostvars[item].ansible_hostname }}.example.com    {{ hostvars[item].ansible_hostname }}"
@@ -126,91 +135,228 @@
       with_items:
         - "{{ groups['hanas'] }}"
         - "{{ groups['s4hanas'] }}"
-      ignore_errors: true  
-      
-##Below tasks has been added because Sap E2E CI failing when running the tower job sap-repositories,
-##as per the article in Red Hat we need to move two files in /tmp dir
+      ignore_errors: true
 
-- name: Redgistering Insights-client and moving files
+## Below tasks has been added because Sap E2E CI failing when running the tower job sap-repositories,
+## as per the article in Red Hat we need to move two files in /tmp dir
+
+- name: Step 004 - Registering Insights-client and moving files
   hosts: hanas:s4hanas
   become: true
   gather_facts: true
   tasks:
-    - name: Registering the client with Red Hat insight
-      command: insights-client --register
+    - name: Registering the client with Red Hat insight # noqa: no-changed-when ignore-errors
+      ansible.builtin.command: insights-client --register
       ignore_errors: true
-      
-    - name: Move newest.egg file to /tmp directory
-      command: mv /var/lib/insights/newest.egg  /tmp
-      ignore_errors: true      
-      
-    - name: Move newest.egg.asc file to /tmp directory
-      command: mv /var/lib/insights/newest.egg.asc  /tmp  
-      ignore_errors: true      
- 
-- name: Deploy Ansible Tower
+
+    - name: Move newest.egg file to /tmp directory # noqa: no-changed-when ignore-errors
+      ansible.builtin.command: mv /var/lib/insights/newest.egg  /tmp
+      ignore_errors: true
+
+    - name: Move newest.egg.asc file to /tmp directory # noqa: no-changed-when ignore-errors
+      ansible.builtin.command: mv /var/lib/insights/newest.egg.asc  /tmp
+      ignore_errors: true
+
+- name: Step 004 - Prepare deployment of AAP
   hosts: towers
-  gather_facts: False
-  become: yes
+  gather_facts: false
+  become: true
   tasks:
-    # This is a bit hacky but we are facing some issues with Ansible, RHEL8 and python for some
-    # modules and this workaround solved this particular issue
-#    - name: Debug offline token
-#      debug:
-#         var: offline_token
+    - name: Add RPM package key RPM-GPG-KEY-EPEL-9
+      ansible.builtin.rpm_key:
+        key: 'https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-{{ ansible_distribution_major_version }}'
+      when: cloud_provider == "openshift_cnv"
 
-#    - name: Debug sap-e2e-offline token
-#      debug:
-#         var: sap-e2e-offline-token
-
-    - name: Ensure Python3 package is installed and alternatives for python updated
-      shell: >
-         yum install -y python3 && alternatives --set python /usr/bin/python3
-
-#    - name: Ensure EPEL GPG is installed
-#      rpm_key:
-#        state: present
-#        key: "{{ ansible_tower_epel_gpg_download_url }}"
-
-    - name: Add RPM package key RPM-GPG-KEY-EPEL-8
-      rpm_key:
-        key: https://dl.fedoraproject.org/pub/epel/RPM-GPG-KEY-EPEL-8
-        
-    - name: "install epel-release"
-      dnf:
-        name: "{{ ansible_tower_epel_download_url }}"
+    - name: Install epel-release
+      ansible.builtin.dnf:
+        name: 'https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm'
         state: present
         disable_gpg_check: "{{ ansible_tower_epel_disable_gpg_check | default('no') }}"
-        
-
-    - name: install certbot
-      yum:
-        name: "certbot"
       when: cloud_provider == "openshift_cnv"
 
-    - name: Generate certificate using certbot
-      command: certbot certonly  --standalone -d tower-{{ guid }}.{{ guid }}.{{ sandbox_openshift_apps_domain }} -m rhpds-admins@redhat.com --agree-tos -n --cert-path /etc/tower/tower.cert --key-path /etc/tower/tower.key
+    - name: Install certbot
+      ansible.builtin.dnf:
+        name: certbot
       when: cloud_provider == "openshift_cnv"
 
-    - name: Ensure additional packages are installed
-      yum:
-        name:
-          - ansible
+    - name: Install ansible-core
+      ansible.builtin.package:
+        name: ansible-core
         state: present
-        exclude:
-          - ansible-6.3.0-2.el8.1.noarch
-          - ansible-7.2.0-1.el8.noarch
-          - ansible-8.3.0-1.el8.noarch
-          - ansible-9.2.0-1.el8.noarch
 
-    - name: Install Ansible Tower
-      include_role:
-        name: infra-ansible/roles/ansible/tower/config-ansible-tower
+    - name: Ensure Directory for certificates exist
+      ansible.builtin.file:
+        path: "/home/cloud-user/aap_cert"
+        state: directory
+        owner: cloud-user
+        group: cloud-user
+        mode: '0755'
+      when: cloud_provider == "openshift_cnv"
 
-    - name: Install ansible for module psutil
-      pip:
-        name: ansible
-        virtualenv: /var/lib/awx/venv/ansible
+    - name: Generate certificate using certbot # noqa: no-changed-when
+      ansible.builtin.command:
+        argv:
+          - certbot
+          - certonly
+          - --standalone
+          - -d
+          - tower-{{ guid }}.{{ guid }}.{{ sandbox_openshift_apps_domain }}
+          - -m
+          - rhpds-admins@redhat.com
+          - --agree-tos
+          - -n
+          - --cert-path
+          - /home/cloud-user/aap_cert/fullchain.pem
+          - --key-path
+          - /home/cloud-user/aap_cert/privkey.pem
+      when: cloud_provider == "openshift_cnv"
+
+    - name: Copy certificate files to /home/cloud-user/aap_cert
+      ansible.builtin.copy:
+        src: '/etc/letsencrypt/live/tower-{{ guid }}.{{ guid }}.{{ sandbox_openshift_apps_domain }}/{{ item }}'
+        dest: '/home/cloud-user/aap_cert/{{ item }}'
+        owner: cloud-user
+        group: cloud-user
+        mode: '0644'
+        remote_src: true
+      when: cloud_provider == "openshift_cnv"
+      loop:
+        - fullchain.pem
+        - privkey.pem
+
+    # Should move into secret file
+    - name: Create offline token
+      ansible.builtin.set_fact:
+        offline_token: "{{ rhsm_api_token_enc | decrypt(ocp4_ai_offline_token) }}"
+    - name: Debug offline token
+      ansible.builtin.debug:
+        var: offline_token
+
+    # - name: Debug sap-e2e-offline token
+    #  ansible.builtin.debug:
+    #    var: sap-e2e-offline-token
+
+    - name: Copy ssh key to cloud-user
+      ansible.builtin.copy:
+        src: '{{ hostvars.localhost.ssh_provision_key_path }}'
+        dest: /home/cloud-user/.ssh/id_rsa
+        owner: cloud-user
+        group: cloud-user
+        mode: '0600'
+
+    - name: Ensure directory aap_postinstall exists
+      ansible.builtin.file:
+        path: /home/cloud-user/aap_postinstall
+        state: directory
+        owner: cloud-user
+        group: cloud-user
+        mode: '0755'
+
+    - name: Copy configuration templates to aap_postinstall
+      ansible.builtin.template:
+        src: "{{ item }}"
+        dest: "/home/cloud-user/aap_postinstall/{{ item | basename | regex_replace('\\.j2', '') }}"
+        owner: cloud-user
+        group: cloud-user
+        mode: '0644'
+      with_fileglob:
+        - templates/aap_postinstall/*
+      when: cloud_provider == "openshift_cnv"
+
+    # NOTE: Download role is only for "localhost"
+    - name: Download AAP2
+      ansible.builtin.include_role:
+        name: "aap_download"
+      tags:
+        - step004
+
+    - name: Ensure aap_unpacked directory exist
+      ansible.builtin.file:
+        path: "/home/cloud-user/aap_unpacked"
+        state: directory
+        mode: '0755'
+        owner: cloud-user
+        group: cloud-user
+
+    - name: Unpack previously downloaded aap2.tar.gz in playbook_dir
+      ansible.builtin.unarchive:
+        src: "{{ playbook_dir }}/aap.tar.gz"
+        dest: "/home/cloud-user/aap_unpacked/"
+        owner: cloud-user
+        group: cloud-user
+        extra_opts:
+          - --strip-components=1
+        # remote_src: true
+
+    - name: Create Random Controller Admin password
+      ansible.builtin.set_fact:
+        tower_password: "{{ lookup('password', '/dev/null length=12 chars=ascii_letters,digits') }}"
+
+    - name: Copy customized inventory template to aap_unpacked
+      ansible.builtin.template:
+        src: aap_inventory.{{ cloud_provider }}.j2
+        dest: '/home/cloud-user/aap_unpacked/inventory'
+        owner: cloud-user
+        group: cloud-user
+        mode: '0644'
+
+    - name: Downloading tower manifest # noqa ignore-errors
+      ansible.builtin.get_url:
+        url: "{{ controller_manifest | regex_search('url:\\s+(.*)', '\\1') | join }}"
+        dest: /home/cloud-user/aap_unpacked/manifest.zip
+        owner: cloud-user
+        group: cloud-user
+        mode: "0644"
+#        username: "{{ tower_manifest.username | default(omit) }}"
+#        password: "{{ tower_manifest.password | default(omit) }}"
+      ignore_errors: true
+
+    - name: Execute the ansible.containerized_installer.install playbook
+      ansible.builtin.shell: |
+        ansible-playbook -i inventory ansible.containerized_installer.install
+      become: true
+      become_user: cloud-user
+      changed_when: true
+      args:
+        chdir: /home/cloud-user/aap_unpacked/
+      register: r_aap_deploy
+      async: 10800 # Seconds for maximum runtime, set to 3 hours
+      poll: 0 # Seconds between polls, use 0 to continue with playbook
+      # retries: 3
+      # until: r_aap_deploy is succeeded
+
+    #  Installation runs in the background.
+    #  We use the inventory to deploy the initial controller content.
+    #  So we can continue with the playbooks and send out the email.
+    #  Depending on the AAP Installation, we may wait for the UI to be reachable
+    #  or make an info on the order page
+
+    # For Debugging ONLY (pupose == development)
+    - name: Copy postinstall_only.yml to collection
+      when: purpose == "development"
+      ansible.builtin.copy:
+        src: templates/postinstall_only.yml
+        dest: /home/cloud-user/aap_unpacked/collections/ansible_collections/ansible/containerized_installer/playbooks/postinstall_only.yml
+        owner: cloud-user
+        group: cloud-user
+        mode: '0644'
+
+    - name: Copy postinstall variable template to aap_unpacked
+      when: purpose == "development"
+      ansible.builtin.template:
+        src: postinstvar.j2
+        dest: /home/cloud-user/aap_unpacked/postinstvars
+        owner: cloud-user
+        group: cloud-user
+        mode: '0644'
+
+    - name: Check sync status
+      when: purpose != "development"
+      ansible.builtin.async_status:
+        jid: "{{ r_aap_deploy.ansible_job_id }}"
+      register: async_poll_results
+      until: async_poll_results.finished
+      retries: 30
 
 
 - name: Software flight-check
@@ -221,6 +367,6 @@
   tags:
     - post_flight_check
   tasks:
-    - debug:
+    - name: Software checks
+      ansible.builtin.debug:
         msg: "Software checks completed successfully"
-
