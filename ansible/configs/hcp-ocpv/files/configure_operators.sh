@@ -1,12 +1,12 @@
 #!/bin/sh -xe
-cat << EOF | oc apply -f -
+cat << EOF | oc --insecure-skip-tls-verify=true apply -f -
 apiVersion: v1
 kind: Namespace
 metadata:
   name: metallb-system
 EOF
 
-cat << EOF | oc apply -f -
+cat << EOF | oc --insecure-skip-tls-verify=true apply -f -
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
@@ -14,7 +14,7 @@ metadata:
   namespace: metallb-system
 EOF
 
-cat << EOF | oc apply -f -
+cat << EOF | oc --insecure-skip-tls-verify=true apply -f -
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
@@ -28,7 +28,7 @@ spec:
 EOF
 
 until oc get metallbs.metallb.io; do sleep 60; done
-cat << EOF | oc apply -f -
+cat << EOF | oc --insecure-skip-tls-verify=true apply -f -
 apiVersion: metallb.io/v1beta1
 kind: MetalLB
 metadata:
@@ -37,7 +37,7 @@ metadata:
 EOF
 sleep 60
 
-cat << EOF | oc apply -f -
+cat << EOF | oc --insecure-skip-tls-verify=true apply -f -
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
@@ -51,7 +51,7 @@ spec:
 EOF
 sleep 60
 
-cat << EOF | oc apply -f -
+cat << EOF | oc --insecure-skip-tls-verify=true apply -f -
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
@@ -64,7 +64,7 @@ spec:
     - br-ex
 EOF
 
-cat << EOF | oc apply -f -
+cat << EOF | oc --insecure-skip-tls-verify=true apply -f -
 apiVersion: operators.coreos.com/v1alpha1
 kind: Subscription
 metadata:
@@ -82,7 +82,7 @@ spec:
 EOF
 
 until oc get lvmclusters.lvm.topolvm.io; do sleep 60; done
-cat << EOF | oc apply -f -
+cat << EOF | oc --insecure-skip-tls-verify=true apply -f -
 apiVersion: lvm.topolvm.io/v1alpha1
 kind: LVMCluster
 metadata:
