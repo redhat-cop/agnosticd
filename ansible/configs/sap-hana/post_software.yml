@@ -1,146 +1,3 @@
-- name: Step 00xxxxx post software
-  hosts: support
-  gather_facts: False
-  become: yes
-  tasks:
-    - debug:
-        msg: "Post-Software tasks Started"
-
-#- name: Make Ansible Tower License file available
-#  hosts: localhost
-#  gather_facts: False
-#  become: false
-#  tasks:
-
-#    - name: Dump Ansible Tower License to a file
-#      copy:
-#        content: "{{ tower_license }}"
-#        dest: /tmp/license.json
-#      when: tower_instance_count > 0
-
-- name: Make Ansible Tower License file available
-  hosts: localhost
-  gather_facts: False
-  become: false
-  tasks:
-
-    - debug:
-        msg: "Post-Software tasks Started"
-
-    - name: downloading tower manifest from OpenTLC
-      get_url:
-        url: "{{ tower_manifest.url }}"
-        dest: "{{ ansible_tower.install.manifest_file }}"
-        username: "{{ tower_manifest.username | default(omit) }}"
-        password: "{{ tower_manifest.password | default(omit) }}"
-
-
-- name: Configure Ansible Tower
-  hosts: towers
-  gather_facts: False
-  become: yes
-  tasks:
-
-    - block:
-
-      - name: Ensure dependencies for tower-cli are installed
-        dnf:
-          name: python3-pip
-          state: latest
-
-      - name: Ensure tower-cli is installed
-        pip:
-          name: ansible-tower-cli
-          state: latest
-          executable: pip3
-
-      - name: Dump tower-cli config
-        copy:
-          content: "{{ tower_cli_config }}"
-          dest: /etc/tower/tower_cli.cfg
-
-      - name: Dump Ansible Tower Workflow Schema HA to a file
-        copy:
-          content: "{{ workflow_schema_ha }}"
-          dest: /tmp/schema_ha.yml
-
-      - name: Dump Ansible Tower Workflow Schema non-HA to a file
-        copy:
-          content: "{{ workflow_schema_non_ha }}"
-          dest: /tmp/schema_non_ha.yml
-
-      - name: Create symlink to support internal infra-ansible role includes
-        file:
-          src: infra-ansible/roles/ansible
-          dest: "{{ __agnosticd_roles_install_path }}/ansible"
-          state: link
-        delegate_to: localhost
-        become: false
-        run_once: true
-        vars:
-          __agnosticd_roles_install_path: >-
-            {%- if requirements_content is defined and requirements_content | length > 0 -%}
-            {{ playbook_dir }}/dynamic-roles
-            {%- else -%}
-            {{ ANSIBLE_REPO_PATH | default(playbook_dir) }}/roles
-            {%- endif -%}
-
-      - name: Ensure Tower License is configured
-        include_role:
-          name: infra-ansible/roles/ansible/tower/config-ansible-tower-subscription-manifest
-
-      - name: Ensure required Credentials are added to Tower
-        include_role:
-          name: infra-ansible/roles/ansible/tower/manage-credentials
-
-      - name: Ensure required inventories are added to Tower
-        include_role:
-          name: infra-ansible/roles/ansible/tower/manage-inventories
-
-      - name: Ensure required Projects are added to Tower
-        include_role:
-          name: infra-ansible/roles/ansible/tower/manage-projects
-
-      - name: Ensure required Job Templates are added to Tower
-        include_role:
-          name: infra-ansible/roles/ansible/tower/manage-job-templates
-
-      - name: Ensure required WorkFlow Templates are added to Tower
-        shell: "{{ item }}"
-        loop:
-          - /usr/local/bin/tower-cli workflow create --name="SAP HANA and S/4HANA E2E deployment"
-          - /usr/local/bin/tower-cli workflow create --name="SAP HANA and S/4HANA E2E deployment - HA Mode"
-
-      - name: Populate new WorkFlows with specified schemas
-        shell: "{{ item }}"
-        loop:
-          - /usr/local/bin/tower-cli workflow schema "SAP HANA and S/4HANA E2E deployment" @/tmp/schema_non_ha.yml
-          - /usr/local/bin/tower-cli workflow schema "SAP HANA and S/4HANA E2E deployment - HA Mode" @/tmp/schema_ha.yml
-
-      - name: Copy letsencrypt cert
-        copy:
-          src: "/etc/letsencrypt/live/tower-{{ guid }}.{{ guid }}.{{ sandbox_openshift_apps_domain }}/fullchain.pem"
-          dest: "/etc/tower/tower.cert"
-          remote_src: true
-        when: cloud_provider == "openshift_cnv"
-
-      - name: Copy letsencrypt key
-        copy:
-          src: "/etc/letsencrypt/live/tower-{{ guid }}.{{ guid }}.{{ sandbox_openshift_apps_domain }}/privkey.pem"
-          dest: "/etc/tower/tower.key"
-          remote_src: true
-        when: cloud_provider == "openshift_cnv"
-
-      - name: restart-tower
-        command: ansible-tower-service restart
-        become: true
-        when: cloud_provider == "openshift_cnv"
-
-#      when: 
-#       - tower_instance_count > 0
-#       - __run_aap_deployment
-
-
 - name: Print out information for the user to consume the lab
   hosts: localhost
   gather_facts: False
@@ -151,10 +8,16 @@
         - install_student_user | bool
         - cloud_provider != "openshift_cnv"
       block:
-      - name: Store bastion hostname as a fact
-        set_fact:
-          bastion_hostname: "{{groups['bastions'].0 }}"
-      - name: Report user info
+      - name: Store bastion and tower hostname as a fact
+        ansible.builtin.set_fact:
+          bastion_hostname: "{{ groups['bastions'].0 }}"
+          tower_hostname: "{{ groups['towers'].0 }}"
+
+      - name: Get tower admin password
+        ansible.builtin.set_fact:
+          tower_password: "{{ hostvars[tower_hostname]['tower_password'] | d('not_set') }}"
+
+      - name: Report user info # noqa syntax-check[unknown-module]
         agnosticd_user_info:
           msg: "{{ item }}"
         loop:
@@ -164,12 +27,19 @@
         - "Make sure you use the username '{{ student_name }}' and the password '{{ hostvars[bastion_hostname]['student_password'] }}' when prompted."
         - ""
         - "You can access your Tower:"
-        - "https://{{ tower_public_dns_chomped }}"
+        - "https://{{ tower_public_dns_chomped | d('not_deployed') }}"
         - "Make sure you are using the following credentials:"
         - ""
         - "Username: admin"
-        - "Password: {{ tower_password }}"
-
+        - "Password: {{ tower_password | d('not_deployed') }}"
+        - ""
+        - "Note: The controller installation runs in the background and may take additional 30Min"
+        - "To follow the installation log in to {{ tower_hostname }} and tail the installation log:"
+        - ""
+        - "ssh {{ student_name }}@{{ openshift_cnv_ssh_address }} -p {{ hostvars[groups['bastions'][0]].bastion_ssh_port }}"
+        - "sudo ssh {{ tower_hostname }}"
+        - "tail -f aap_unpacked/aap_install.log"
+        
     - name: Print Student Information
       when:
         - install_student_user | bool
@@ -178,6 +48,11 @@
       - name: Store bastion hostname as a fact
         set_fact:
           bastion_hostname: "{{groups['bastions'].0 }}"
+          tower_hostname: "{{ groups['towers'].0 }}"
+      - name: Get tower admin password
+        ansible.builtin.set_fact:
+          tower_password: "{{ hostvars[tower_hostname]['tower_password'] | d('not_set') }}"
+
       - name: Report user info
         agnosticd_user_info:
           msg: "{{ item }}"
@@ -188,12 +63,19 @@
         - "Make sure you use the username '{{ student_name }}' and the password '{{ hostvars[bastion_hostname]['student_password'] }}' when prompted."
         - ""
         - "You can access your Tower:"
-        - "https://{{ tower_public_dns_chomped }}"
+        - "https://{{ tower_public_dns_chomped | d('undefined') }}"
         - "Make sure you are using the following credentials:"
         - ""
         - "Username: admin"
-        - "Password: {{ tower_password }}"
-
+        - "Password: {{ tower_password| d('not_deployed') }}"
+        - ""
+        - "Note: The controller installation runs in the background and may take additional 30Min"
+        - "To follow the installation log in to {{ tower_hostname }} and tail the installation log:"
+        - ""
+        - "ssh {{ student_name }}@{{ openshift_cnv_ssh_address }} -p {{ hostvars[groups['bastions'][0]].bastion_ssh_port }}"
+        - "sudo ssh {{ tower_hostname }}"
+        - "tail -f aap_unpacked/aap_install.log"
+       
     - name: Set agnosticd user info data for tower
       when:
         - tower_instance_count > 0
@@ -202,7 +84,7 @@
         data:
           tower_url: "https://tower-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}"
           tower_username: "admin"
-          tower_password: "{{ tower_password }}"
+          tower_password: "{{ tower_password| d('not_deployed') }}"
 
     - name: Set agnosticd user info data for tower
       when:
@@ -212,9 +94,7 @@
         data:
           tower_url: "https://tower-{{ guid }}.{{ guid }}.{{ sandbox_openshift_apps_domain }}"
           tower_username: "admin"
-          tower_password: "{{ tower_password }}"
-
-
+          tower_password: "{{ tower_password | d('not_deployed') }}"
 
 - name: PostSoftware flight-check
   hosts: localhost
@@ -225,4 +105,4 @@
     - post_flight_check
   tasks:
     - debug:
-        msg: "Post-Software checks completed successfully"
+        msg: "Post-Software checks completed successfully - Stage {{ purpose | d('undefined') }}"

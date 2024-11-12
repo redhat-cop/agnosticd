@@ -1,143 +1,206 @@
 # Cloudformation template or equivalent should tag all hosts with Project:{{ env_type }}-{{ guid }}
 
-- name: Configure all hosts with Repositories, Common Files and Set environment key
+# copy login keys and ensures all systems are subscribed to proper repositories in Satellite
+# configure firewall and networking, install common_packages
+# configure modified routing on designated SAP servers
+
+- name: Step 003 - PreSoftware
   hosts:
     - all:!windows
   become: true
-  gather_facts: False
-  roles:
-    - { role: "set-repositories", when: 'repo_method is defined' }
-  tags:
-    - step004
-    - common_tasks
+  gather_facts: false
+  tasks:
+    - name: Configure Repositories
+      when: repo_method is defined
+      ansible.builtin.include_role:
+        name: "set-repositories"
+      tags:
+        - step004
+        - common_tasks
 
-- name: Lock RHEL release
+    - name: DEBUG - Configuration after repo setup
+      ansible.builtin.shell: |
+        echo "==================================="
+        cat /etc/redhat-release
+        dnf clean all
+        subscription-manager status
+        subscription-manager release --list
+        subscription-manager repos
+      changed_when: false
+      failed_when: false
+
+- name: Step 003 - Unlock RHEL release on non-SAP systems
   hosts:
     - bastions:towers
   become: true
-  gather_facts: False
+  gather_facts: false
   tasks:
-    - name: Lock RHEL release to one providing ansible-core
-      command: subscription-manager release --set={{ rhel_lock_release }}
+    - name: Get current RHEL release
+      ansible.builtin.setup:
+        gather_subset:
+          - distribution
+    - name: Print current RHEL release
+      ansible.builtin.debug:
+        msg: "This system is RHEL {{ ansible_distribution_major_version }}"
+    # - name: Print all evaluated playbook variables
+    #   ansible.builtin.debug:
+    #     var: hostvars[inventory_hostname]
+
+    - name: Unlock RHEL release # noqa: no-changed-when
+      ansible.builtin.command: subscription-manager release --set={{ ansible_distribution_major_version }}
       register: lock_result
       until: lock_result is succeeded
       retries: 15
       delay: 10
 
-- name: Lock RHEL release SAP
+    - name: Configure zstream repositories only
+      community.general.rhsm_repository:
+        name: "{{ rhel_repos_zstream }}"
+        purge: true
+
+- name: Step 003 - Lock RHEL release on SAP systems
   hosts:
     - hanas:s4hanas
   become: true
-  gather_facts: False
+  gather_facts: false
   tasks:
-    - name: Lock RHEL release to one SAP certified
-      command: subscription-manager release --set={{ rhel_lock_release_sap }}
+    - name: Get current RHEL release
+      ansible.builtin.setup:
+        gather_subset:
+          - distribution
+    - name: Print current RHEL release
+      ansible.builtin.debug:
+        msg: "This system is RHEL {{ ansible_distribution_version }}"
+
+    ## TODO: use system_role rhc instead
+    - name: Ensure RHEL release is locked to SAP certified # noqa: no-changed-when
+      # when: ansible_distribution_major_version | int < 9
+      ansible.builtin.command: subscription-manager release --set={{ rhel_lock_release_sap }}
       register: lock_result
       until: lock_result is succeeded
       retries: 15
       delay: 10
 
-  tags:
-    - step004
-    - common_tasks
+    # required because regular repositories are not synched in Satellite
+    - name: Configure e4s repositories only
+      community.general.rhsm_repository:
+        name: "{{ rhel_repos_e4s }}"
+        purge: true
 
-- name: Install Common packages and Set environment key
+- name: Step 003 - Install Common packages and Set environment key
   hosts:
     - all:!windows
   become: true
-  gather_facts: False
-  roles:
-    - { role: "common", when: 'install_common' }
-    - { role: "set_env_authorized_key", when: 'set_env_authorized_key' }
-  tags:
-    - step004
-    - common_tasks
+  gather_facts: false
 
-- name: Configure firewalld
+  tasks:
+    - name: DEBUG - Figure out current package/release versions
+      ansible.builtin.shell: |
+        subscription-manager release
+        subscription-manager release --list
+        dnf repolist
+      changed_when: false
+      failed_when: false
+
+    # update all packages  (update_packages: true - default)
+    # Install standard packages in common_packages_el9
+    # Installs common_extra_packages - defined in default_vars.yml
+    - name: Install common packages
+      when: install_common
+      ansible.builtin.include_role:
+        name: "common"
+
+    - name: Set Authorized Keys for default logins
+      when: set_env_authorized_key
+      ansible.builtin.include_role:
+        name: "set_env_authorized_key"
+
+- name: Step 003 - Configure firewalld on bastion host
   hosts: bastions
   become: true
   tasks:
     - name: Install firewalld
-      ansible.builtin.yum:
+      ansible.builtin.dnf:
         name: firewalld
         state: installed
-    - name: 'Ensure firewalld is running'
+
+    - name: Ensure firewalld is running
       ansible.builtin.service:
         name: firewalld
         state: started
         enabled: true
 
-    - ansible.posix.firewalld:
+    - name: Enable firewalld
+      ansible.posix.firewalld:
         masquerade: true
         state: enabled
         permanent: true
         immediate: true
         zone: public
 
-    - name: permit nfs traffic
+    - name: Permit nfs traffic
       ansible.posix.firewalld:
         service: nfs
         permanent: true
         immediate: true
         state: enabled
 
-- name: Change default gw
+    # required for downloading SAP Software
+    - name: Install python3-pip
+      ansible.builtin.package:
+        name: python3-pip
+        state: present
+
+- name: Step 003 - Change default gw on SAP servers
   hosts: hanas:s4hanas
   become: true
   tasks:
-    - name: Set 192.168.47.10 as default gw
-      command: "{{ item }}"
+    - name: Set 192.168.47.10 as default gw # noqa: no-changed-when
+      ansible.builtin.command: "{{ item }}"
       loop:
         - ip r add 10.0.0.0/8 via 10.0.2.1
         - ip r add default via 192.168.47.10 metric 1
         - nmcli con modify "System eth0" ipv4.gateway 192.168.47.10 ipv4.route-metric 1
         - nmcli con mod "Wired connection 1" ipv4.routes "10.0.0.0/8 10.0.2.1 0"
 
-- name: Configuring Bastion Hosts
-  hosts: bastions
-  become: true
-  roles:
-    -  { role: "bastion", when: 'install_bastion' }
-    - role: bastion-student-user
-      when: install_student_user | bool
-  tags:
-    - step004
-    - bastion_tasks
-
-- name: Copy SSH RSA to cloud-user
+- name: Step 003 - Configuring Bastion Hosts
   hosts: bastions
   become: true
   tasks:
-    - copy:
-        src: /root/.ssh/{{env_authorized_key}}.pem
+    - name: Install bastion host
+      when: 'install_bastion'
+      ansible.builtin.include_role:
+        name: bastion
+
+    - name: Install student user on bastion host
+      when: install_student_user | bool
+      ansible.builtin.include_role:
+        name: bastion-student-user
+
+    - name: Copy private keyfile to bastion host (OSP)
+      ansible.builtin.copy:
+        src: /root/.ssh/{{ env_authorized_key }}.pem
         dest: /home/cloud-user/.ssh/id_rsa
         owner: cloud-user
         group: cloud-user
-        mode: 0400
-        remote_src: yes
+        mode: '0400'
+        remote_src: true
       when: cloud_provider == "osp"
-  tags:
-    - step004
-    - bastion_tasks
 
-- name: Copy SSH RSA to ec2-user
-  hosts: bastions
-  become: true
-  tasks:
-    - copy:
-        src: /root/.ssh/{{env_authorized_key}}.pem
+    - name: Copy private keyfile to bastion host (AWS)
+      ansible.builtin.copy:
+        src: /root/.ssh/{{ env_authorized_key }}.pem
         dest: /home/ec2-user/.ssh/id_rsa
         owner: ec2-user
         group: ec2-user
-        mode: 0400
-        remote_src: yes
+        mode: '0400'
+        remote_src: true
       when: cloud_provider == "ec2"
   tags:
     - step004
     - bastion_tasks
 
-
-- name: PreSoftware flight-check
+- name: Step 003 - PreSoftware flight-check
   hosts: localhost
   connection: local
   gather_facts: false
@@ -145,5 +208,6 @@
   tags:
     - flight_check
   tasks:
-    - debug:
+    - name: Pre-flight-check results
+      ansible.builtin.debug:
         msg: "Pre-Software checks completed successfully"
