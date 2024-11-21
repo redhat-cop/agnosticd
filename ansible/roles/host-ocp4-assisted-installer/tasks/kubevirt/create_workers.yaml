@@ -1,4 +1,48 @@
 ---
+- name: Set default volumes/disks variables
+  ansible.builtin.set_fact:
+    _instance_volumes:
+      - dataVolume:
+          name: "{{ vmname }}"
+        name: rootdisk
+      - dataVolume:
+          name: "{{ vmname }}-installation-cdrom"
+        name: installation-cdrom
+      - dataVolume:
+          name: "{{ vmname }}-etcd"
+        name: etcd
+    _instance_disks:
+      - bootOrder: 1
+        disk:
+          bus: virtio
+        name: rootdisk
+      - bootOrder: 3
+        disk:
+          bus: virtio
+        name: etcd
+      - bootOrder: 2
+        cdrom:
+          bus: sata
+        name: installation-cdrom
+
+- name: Set the instances disks
+  ansible.builtin.set_fact:
+    _instance_disks: "{{ _instance_disks | from_yaml + [
+    {
+        'name': _disk.metadata.name,
+        'disk': {'bus': _instance.disk_type | default('virtio')}
+    }
+    ] }}"
+    _instance_volumes: "{{ _instance_volumes | from_yaml + [
+        {
+            'name': _disk.metadata.name,
+            'dataVolume': {'name': _disk.metadata.name}
+        }
+    ] }}"
+  loop: "{{ ai_workers_extra_disks | default([]) | list }}"
+  loop_control:
+    loop_var: _disk
+
 - name: Create Worker virtual machine
   kubevirt.core.kubevirt_vm:
     api_version: kubevirt.io/v1
@@ -7,7 +51,17 @@
     validate_certs: false
     name: "{{ vmname }}"
     namespace: "{{ namespace }}"
-    data_volume_templates:
+    data_volume_templates: "{{ _datavolume + (ai_workers_extra_disks | default([]) | to_json | replace('INSTANCENAME', vmname) | from_json ) }}"
+    running: true
+    wait: false
+    annotations:
+      vm.kubevirt.io/os: rhel8
+    labels:
+      kubevirt.io/domain: "{{ vmname }}"
+      role: worker
+    spec: "{{ _spec | from_yaml }}"
+  vars:
+    _datavolume:
       - metadata:
           name: "{{ vmname }}-installation-cdrom"
         spec:
@@ -18,7 +72,7 @@
           storage:
             resources:
               requests:
-                storage: 2Gi
+                storage: 1Gi
       - metadata:
           name: "{{ vmname }}"
         spec:
@@ -30,15 +84,20 @@
               requests:
                 storage: 100Gi
             storageClassName: "{{ storageclass }}"
-    running: true
-    wait: false
-    annotations:
-      vm.kubevirt.io/os: rhel8
-    labels:
-      kubevirt.io/domain: "{{ vmname }}"
-      role: worker
-    spec: "{{ _spec | from_yaml }}"
-  vars:
+
+      - metadata:
+          name: "{{ vmname }}-etcd"
+        spec:
+          preallocation: false
+          source:
+            blank: {}
+          storage:
+            resources:
+              requests:
+                storage: 30Gi
+            storageClassName: "{{ ai_local_storageclass }}"
+            volumeMode: Filesystem
+
     _spec: |
       domain:
         cpu:
@@ -47,20 +106,12 @@
           threads: 1
           model: host-passthrough
         devices:
-          disks:
-            - bootOrder: 1
-              disk:
-                bus: virtio
-              name: rootdisk
-            - bootOrder: 2
-              cdrom:
-                bus: sata
-              name: installation-cdrom
+          disks: {{ _instance_disks | replace('INSTANCENAME', vmname) }}
           interfaces:
             - masquerade: {}
               model: virtio
               name: default
-            - name: "{{ network_name }}"
+            - name: "{{ network }}"
               macAddress: "{{ ai_workers_macs2[_index|int-1] }}"
               bridge: {}
           networkInterfaceMultiqueue: true
@@ -85,13 +136,7 @@
           multus:
             networkName: "{{ network_name }}"
       terminationGracePeriodSeconds: 180
-      volumes:
-        - dataVolume:
-            name: "{{ vmname }}"
-          name: rootdisk
-        - dataVolume:
-            name: "{{ vmname }}-installation-cdrom"
-          name: installation-cdrom
+      volumes: {{ _instance_volumes | replace('INSTANCENAME', vmname) }}
 
 - name: Wait till VM is running
   kubernetes.core.k8s_info:
