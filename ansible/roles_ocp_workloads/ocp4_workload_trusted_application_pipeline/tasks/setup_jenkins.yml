@@ -1,0 +1,59 @@
+---
+- name: Copy pipeline files to host
+  ansible.builtin.copy:
+    src: files/{{ item }}
+    dest: /tmp/{{ item }}
+  loop:
+  - create-att-predicate.sh
+  - merge-sboms.py
+
+- name: Transfer pipeline files to container
+  shell: |
+    JENKINS_POD=$(oc get pod -l deployment=jenkins -n jenkins --no-headers | awk '{ print $1 }')
+    oc cp /tmp/{{ item }} {{ ocp4_workload_trusted_application_pipeline_jenkins_namespace }}/$JENKINS_POD:/scripts -c jenkins
+  loop:
+  - create-att-predicate.sh
+  - merge-sboms.py
+
+- name: Make scripts executable
+  shell: |
+    JENKINS_POD=$(oc get pod -l deployment=jenkins -n jenkins --no-headers | awk '{ print $1 }')
+    oc cp /tmp/{{ item }} {{ ocp4_workload_trusted_application_pipeline_jenkins_namespace }}/$JENKINS_POD:/scripts -c jenkins
+    oc exec $JENKINS_POD -n {{ ocp4_workload_trusted_application_pipeline_jenkins_namespace
+    }} -- chmod +x /scripts/create-att-predicate.sh
+  loop:
+  - create-att-predicate.sh
+  - merge-sboms.py
+
+- name: Create Jenkins Secrets
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', item) | from_yaml }}"
+    namespace: "{{ ocp4_workload_trusted_application_pipeline_jenkins_namespace }}"
+  loop:
+  - external-secret-trustification.yml
+  - external-secret-gitlab-webhook.yml
+  - external-secret-common-password.yml
+  - external-secret-stackrox-token.yml
+
+- name: Retrieve cosign signing secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: signing-secrets
+    namespace: "{{ ocp4_workload_trusted_application_pipeline_pipelines_namespace }}"
+  register: r_signing_secrets
+  retries: 120
+  delay: 10
+  until:
+  - r_signing_secrets is defined
+  - r_signing_secrets.resources is defined
+  - r_signing_secrets.resources | length > 0
+
+- name: Creating Cosign Signing Secret
+  shell: |
+    oc create secret generic signing-secrets -n {{
+    ocp4_workload_trusted_application_pipeline_jenkins_namespace }} \
+    --from-literal=cosign.key={{ r_signing_secrets.resources[0].data['cosign.key'] }} \
+    --from-literal=cosign.pub={{ r_signing_secrets.resources[0].data['cosign.pub'] }} \
+    --from-literal=cosign.password={{ r_signing_secrets.resources[0].data['cosign.password'] | b64decode }}
