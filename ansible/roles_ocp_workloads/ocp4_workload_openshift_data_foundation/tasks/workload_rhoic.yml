@@ -1,0 +1,157 @@
+---
+- name: Setting up workload
+  ansible.builtin.debug:
+    msg: "Setting up OpenShift Data Foundation"
+
+- name: Discovering worker nodes
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+    label_selectors:
+    - node-role.kubernetes.io/worker
+    - "!node-role.kubernetes.io/infra"
+  register: r_worker_nodes
+
+- name: Fail for less than 3 worker nodes
+  ansible.builtin.assert:
+    that: r_worker_nodes.resources | length > 2
+    success_msg: "More than 3 worker nodes. Continuing."
+    fail_msg: "Less than 3 worker nodes detected. Cannot install Ceph."
+
+- name: Set variables
+  ansible.builtin.set_fact:
+    _ocp4_workload_openshift_data_foundation_worker_nodes: "{{ r_worker_nodes | json_query('resources[*].metadata.name') }}"
+
+- name: Adding Ceph labels to worker nodes
+  kubernetes.core.k8s:
+    state: patched
+    api_version: v1
+    kind: Node
+    name: "{{ worker_node }}"
+    definition:
+      apiVersion: v1
+      kind: Node
+      name: "{{ worker_node }}"
+      metadata:
+        labels:
+          cluster.ocs.openshift.io/openshift-storage: ''
+  loop: "{{ _ocp4_workload_openshift_data_foundation_worker_nodes }}"
+  loop_control:
+    loop_var: worker_node
+    label: "{{ worker_node }}"
+
+- name: Create namespace openshift-storage
+  kubernetes.core.k8s:
+    state: present
+    api_version: v1
+    kind: Namespace
+    name: openshift-storage
+
+- name: Authorizing with IBM CLoud using Sandbox credentials
+  ansible.builtin.include_tasks: auth_sandbox.yml
+
+- name: Disable outbound-traffic-protection
+  ansible.builtin.uri:
+    url: "{{ ibm_cloud_api_container_network_v2_url }}/outbound-traffic-protection"
+    method: POST
+    status_code: 202
+    headers:
+      Authorization: Bearer {{ ibm_access_token }}
+    body_format: json
+    body:
+      cluster: "{{ rhoic_cluster_name }}"
+      operation: disable-outbound-protection
+
+- name: Set marketplace disableAllDefaultSources to true
+  kubernetes.core.k8s:
+    state: patched
+    api_version: config.openshift.io/v1
+    kind: OperatorHub
+    name: cluster
+    definition:
+      spec:
+        disableAllDefaultSources: true
+
+- name: Enable ODF Addon in RHOIC cluster
+  when: cloud_provider == "blah"
+  ansible.builtin.uri:
+    url: "{{ ibm_cloud_api_cluster_v1_url }}/{{ rhoic_cluster_name }}/addons"
+    method: PATCH
+    headers:
+      Authorization: Bearer {{ ibm_access_token }}
+    body_format: json
+    body: |
+      {"enable":true,"update":false,"addons":[{"name":"openshift-data-foundation","version":"","installOptionsTemplate":{},"options":"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: managed-addon-options-osc\n  namespace: kube-system\n  labels: null\n  annotations: null\ndata:\n  addSingleReplicaPool: \"false\"\n  autoDiscoverDevices: \"false\"\n  billingType: advanced\n  clusterEncryption: \"false\"\n  disableNoobaaLB: \"false\"\n  enableNFS: \"false\"\n  encryptionInTransit: \"false\"\n  hpcsBaseUrl: \u003cPlease provide the KMS Base (public) URL\u003e\n  hpcsEncryption: \"false\"\n  hpcsInstanceId: \u003cPlease provide the KMS Service instance ID\u003e\n  hpcsSecretName: \u003cPlease provide the KMS secret name\u003e\n  hpcsServiceName: \u003cPlease provide the KMS Service instance name\u003e\n  hpcsTokenUrl: \u003cPlease provide the KMS token URL\u003e\n  ignoreNoobaa: \"false\"\n  numOfOsd: \"1\"\n  ocsUpgrade: \"false\"\n  odfDeploy: \"true\"\n  osdDevicePaths: \u003cPlease provide IDs of the disks to be used for OSD pods if using\n    local disks or standard classic cluster\u003e\n  osdSize: 512Gi\n  osdStorageClassName: ibmc-vpc-block-metro-10iops-tier\n  prepareForDisasterRecovery: \"false\"\n  resourceProfile: balanced\n  taintNodes: \"false\"\n  useCephRBDAsDefaultStorageClass: \"true\"\n  workerNodes: all\n  workerPool: \"\"\n"}]}
+
+- name: Update default storage class
+  when: ocp4_workload_openshift_data_foundation_update_default_storage_class | bool
+  block:
+  - name: Wait for the StorageClasses to become available
+    kubernetes.core.k8s_info:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+      name: "{{ ocp4_workload_openshift_data_foundation_new_default_storage_class_name }}"
+    register: sc_crd
+    retries: 200
+    delay: 10
+    until: sc_crd.resources | list | length == 1
+
+  - name: Get all storage classes
+    kubernetes.core.k8s_info:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+    register: r_sc
+
+  - name: Remove default from previous default storage class
+    when: storage_class.metadata.annotations['storageclass.kubernetes.io/is-default-class'] is defined
+    kubernetes.core.k8s:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+      name: "{{ storage_class.metadata.name }}"
+      definition:
+        kind: StorageClass
+        apiVersion: v1
+        name: "{{ ocp4_workload_openshift_data_foundation_new_default_storage_class_name }}"
+        metadata:
+          annotations:
+            storageclass.kubernetes.io/is-default-class: "false"
+    loop: "{{ r_sc.resources }}"
+    loop_control:
+      loop_var: storage_class
+      label: "{{ storage_class.metadata.name }}"
+
+  - name: Set new default storage class
+    kubernetes.core.k8s:
+      api_version: v1
+      kind: StorageClass
+      name: "{{ ocp4_workload_openshift_data_foundation_new_default_storage_class_name }}"
+      definition:
+        kind: StorageClass
+        apiVersion: v1
+        name: "{{ ocp4_workload_openshift_data_foundation_new_default_storage_class_name }}"
+        metadata:
+          annotations:
+            storageclass.kubernetes.io/is-default-class: "true"
+
+- name: Set marketplace disableAllDefaultSources to false
+  kubernetes.core.k8s:
+    state: patched
+    api_version: config.openshift.io/v1
+    kind: OperatorHub
+    name: cluster
+    definition:
+      spec:
+        disableAllDefaultSources: false
+
+- name: Deploy Ceph toolbox
+  when: ocp4_workload_openshift_data_foundation_install_toolbox | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'toolbox.yaml.j2') }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: Workload tasks complete
+  when: not silent|bool
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
