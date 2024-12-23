@@ -33,7 +33,7 @@ aws_region: ${AGD_AWS_REGION}
 agnosticd_aws_capacity_reservation_enable: false
 
 rosa_version: latest
-rosa_version_base: "openshift-v4.16"
+rosa_version_base: "openshift-v4.17"
 rosa_deploy_hcp: true
 rosa_compute_machine_type: m6a.2xlarge
 rosa_compute_replicas: 2
@@ -100,7 +100,7 @@ agnosticd_aws_capacity_reservation_enable: false
 # -------------------------------------------------------------------
 # OpenShift installer
 # -------------------------------------------------------------------
-ocp4_installer_version: "4.16"
+ocp4_installer_version: "4.17"
 ocp4_installer_root_url: https://mirror.openshift.com/pub/openshift-v4/clients
 
 # -------------------------------------------------------------------
@@ -161,9 +161,11 @@ repo_method: satellite
 update_packages: true
 set_repositories_satellite_ha: true
 set_repositories_force_register: true
-set_repositories_satellite_url: labsat-ha.opentlc.com
-set_repositories_satellite_org: Red_Hat_GPTE_Labs
+set_repositories_satellite_url: demosat-ha.infra.demo.redhat.com
+set_repositories_satellite_hostname: demosat-ha.infra.demo.redhat.com
+set_repositories_satellite_org: Red_Hat_RHDP_Labs
 # set_repositories_satellite_activationkey: [redacted]
+# ansible localhost -m debug -a "var=satellite_activationkey" --extra-vars="@${AGV_HOME}/includes/secrets/demosat-rhel-8-and-9-latest.yaml" --ask-vault-pass
 
 # Employee subscription (needs testing)
 # rhel_subscription_user: user@example.com
