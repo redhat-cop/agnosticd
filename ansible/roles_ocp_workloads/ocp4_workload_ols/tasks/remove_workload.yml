@@ -1,6 +1,82 @@
 ---
 - name: Remove OLS Operator
   block:
-  - name: Remove Operator
-    when: ocp4_workload_ols_install_operator | bool
-    include_tasks: remove_ols_operator.yml
+  vars:
+    tenant_id: "{{ ocp4_workload_ols_azure_tenant_id }}"
+    client_id: "{{ ocp4_workload_ols_main_client_id }}"
+    client_secret: "{{ ocp4_workload_ols_main_client_secret }}"
+    guid: "{{ guid }}"
+
+  tasks:
+    - name: Install Microsoft package repository
+      dnf:
+        name: https://packages.microsoft.com/config/rhel/9.0/packages-microsoft-prod.rpm
+        state: present
+
+    - name: Install Azure CLI
+      dnf:
+        name: azure-cli
+        state: present
+
+    - name: Check Azure CLI version
+      command: az --version
+      register: az_version
+
+    - name: Display Azure CLI version
+      debug:
+        var: az_version.stdout
+
+    - name: Create a temporary script file
+      copy:
+        dest: /tmp/delete_app_sp.sh
+        content: |
+          #!/bin/bash
+
+          # Check if a parameter is passed
+          if [ -z "$1" ]; then
+              echo "Usage: $0 <value>"
+              exit 1
+          fi
+
+          # Assign the parameter to a variable
+          GUID=$1
+
+          # Use the parameter in the display name
+          CHILD_APP_DISPLAY_NAME="RHDP-lightspeed-$GUID"
+
+          TENANT_ID="{{ tenant_id }}"
+          CLIENT_ID="{{ client_id }}"
+          CLIENT_SECRET="{{ client_secret }}"
+
+          az login --service-principal --username "$CLIENT_ID" --password "$CLIENT_SECRET" --tenant "$TENANT_ID"
+
+          echo $CHILD_APP_DISPLAY_NAME
+
+          # Get app IDs and store them in app_ids.txt
+          az ad app list --display-name "$CHILD_APP_DISPLAY_NAME" | grep -i appid | cut -d'"' -f4 > app_ids.txt
+
+          # Loop through each appId and delete it
+          while read -r app_id; do
+            echo "Deleting app with ID: $app_id"
+            az ad app delete --id "$app_id"
+            sleep 5  # Delay 5 seconds before next deletion
+          done < app_ids.txt
+
+    - name: Make the script executable
+      file:
+        path: /tmp/delete_app_sp.sh
+        mode: '0755'
+
+    - name: Run the script to delete Azure App and Service Principal
+      command: /tmp/delete_app_sp.sh "{{ guid }}"
+      args:
+        chdir: /tmp  # Change to /tmp directory before running the script
+
+    - name: Clean up temporary script file
+      file:
+        path: /tmp/delete_app_sp.sh
+        state: absent
+
+    - name: Remove Operator
+      when: ocp4_workload_ols_install_operator | bool
+      include_tasks: remove_ols_operator.yml
