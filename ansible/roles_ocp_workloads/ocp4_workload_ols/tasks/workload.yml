@@ -1,4 +1,3 @@
----
 # Implement your Workload deployment tasks here
 - name: Setting up workload for user
   debug:
@@ -6,22 +5,185 @@
 
 - name: OLS Operator Installation
   block:
-  - name: Install OLS Operator
-    when: ocp4_workload_ols_install_operator | bool
-    include_tasks: install_ols_operator.yml
+    - name: Install OLS Operator
+      when: ocp4_workload_ols_install_operator | bool
+      include_tasks: install_ols_operator.yml
 
-  - name: Create secret
-    kubernetes.core.k8s:
-      definition: "{{ lookup('ansible.builtin.template', 'templates/create_secret.yml.j2') }}"
-      wait: true
-      wait_timeout: 300
+    - name: Azure AI Cognitive Services
+      when: ocp4_workload_ols_token | bool
+      block:
+        - name: Get Token for Master App
+          uri:
+            url: "https://login.microsoftonline.com/{{ ocp4_workload_ols_azure_tenant_id }}/oauth2/v2.0/token"
+            method: POST
+            headers:
+              Content-Type: "application/x-www-form-urlencoded"
+            # yamllint disable rule:line-length
+            body: "grant_type=client_credentials&client_id={{ ocp4_workload_ols_main_client_id }}&client_secret={{ ocp4_workload_ols_main_client_secret }}&scope=https://graph.microsoft.com/.default"
+            # yamllint enable rule:line-length
+            return_content: true
+            status_code: 200
+          register: master_token_response
 
-  - name: OLSConfig setup
-    kubernetes.core.k8s:
-      definition: "{{ lookup('ansible.builtin.template', 'templates/install_{{ ocp4_workload_ai_platform }}_olsconfig.j2') }}"
-      wait: true
-      wait_timeout: 300
-    when: ocp4_workload_ai_platform is defined
+        - name: Debug Master Token Response
+          debug:
+            var: master_token_response
+
+        - name: Set Main Access Token
+          set_fact:
+            master_access_token: "{{ master_token_response.json.access_token }}"
+
+        - name: Create Child App Registration
+          uri:
+            url: "https://graph.microsoft.com/v1.0/applications"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ master_access_token }}"
+              Content-Type: "application/json"
+            body:
+              displayName: "{{ ocp4_workload_ols_child_app_display_name }}-{{ guid }}"
+              passwordCredentials:
+                - displayName: "ChildAppRegistrationSecret"
+            body_format: json
+            return_content: true
+            status_code: 201  # Expect 201 Created
+          register: child_app_response
+
+        - name: Set Child App ID and Secret
+          set_fact:
+            _child_app_id: "{{ child_app_response.json.appId }}"
+            _child_client_secret: "{{ child_app_response.json.passwordCredentials[0].secretText }}"
+
+        # Introduce a 30-second delay before the next tasks
+        - name: Pause for 30 seconds
+          pause:
+            seconds: 30
+
+        - name: Create Service Principal for Child App
+          uri:
+            url: "https://graph.microsoft.com/v1.0/servicePrincipals"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ master_access_token }}"
+              Content-Type: "application/json"
+            body:
+              appId: "{{ _child_app_id | string }}"
+            body_format: json
+            return_content: true
+            status_code: 201  # Expect 201 Created
+          register: service_principal_response
+
+        # Introduce a 30-second delay before the next tasks
+        - name: Pause for 30 seconds
+          pause:
+            seconds: 30
+
+        - name: Set Child Service Principal Object ID
+          set_fact:
+            _child_service_principal_object_id: "{{ service_principal_response.json.id }}"
+
+        - name: Add Child App to Azure AD Group
+          uri:
+            url: "https://graph.microsoft.com/v1.0/groups/{{ ocp4_workload_ols_azure_group_id }}/members/$ref"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ master_access_token }}"
+              Content-Type: "application/json"
+            body:
+              "@odata.id": "https://graph.microsoft.com/v1.0/directoryObjects/{{ _child_service_principal_object_id }}"
+            body_format: json
+            return_content: true
+            status_code: [201, 204]  # Expect 201 Created or 204 No Content
+
+        # Introduce a 30-second delay before the next tasks
+        - name: Pause for 30 seconds
+          pause:
+            seconds: 30
+
+        - name: Get Token for Child App using REST API call
+          uri:
+            url: "https://login.microsoftonline.com/{{ ocp4_workload_ols_azure_tenant_id }}/oauth2/v2.0/token"
+            method: POST
+            headers:
+              Content-Type: "application/x-www-form-urlencoded"
+            body_format: form-urlencoded
+            body:
+              grant_type: client_credentials
+              client_id: "{{ _child_app_id }}"
+              client_secret: "{{ _child_client_secret }}"
+              scope: https://cognitiveservices.azure.com/.default
+          register: child_token_response
+
+        - name: Set Child Access Token
+          set_fact:
+            _child_access_token: "{{ child_token_response.json.access_token }}"
+
+        # Introduce a 30-second delay before the next tasks
+        - name: Pause for 30 seconds
+          pause:
+            seconds: 30
+
+        - name: Ask AI Service Using Child App
+          uri:
+            url: "https://llm-gpt4-lightspeed.openai.azure.com/openai/deployments/gpt-4/chat/completions?api-version=2023-06-01-preview"
+            method: POST
+            headers:
+              Content-Type: "application/json"
+              Authorization: "Bearer {{ _child_access_token }}"
+            body:
+              messages:
+                - role: system
+                  content: "You are a helpful assistant."
+                - role: user
+                  content: "What is the largest city in India?"
+              max_tokens: 100
+            body_format: json
+          register: ai_service_response
+
+        - name: Display AI Service Response
+          debug:
+            var: ai_service_response.stdout
+
+    # Create bearer token secret, Azure App SP Secret and
+    # OLSConfig setup based on token condition.
+    - name: Create secret (Bearer Token)
+      when: ocp4_workload_ols_token | bool
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'templates/create_secret_token.yml.j2') }}"
+        wait: true
+        wait_timeout: 300
+
+    - name: Create App Service Principal
+      when: ocp4_workload_ols_token | bool
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'templates/create_azure_api_token.yml.j2') }}"
+        wait: true
+        wait_timeout: 300
+
+    - name: OLSConfig setup (Bearer Token)
+      when:
+        ocp4_workload_ols_token | bool
+        and ocp4_workload_ai_platform is defined
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'templates/install_azure_app_sp_olsconfig.yml.j2') }}"
+        wait: true
+        wait_timeout: 300
+
+    - name: Create secret (API Key)
+      when: not ocp4_workload_ols_token | bool
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'templates/create_secret.yml.j2') }}"
+        wait: true
+        wait_timeout: 300
+
+    - name: OLSConfig setup (API Key)
+      when:
+        not ocp4_workload_ols_token | bool
+        and ocp4_workload_ai_platform is defined
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'templates/install_{{ ocp4_workload_ai_platform }}_olsconfig.yml.j2') }}"
+        wait: true
+        wait_timeout: 300
 
 - name: Create broken pod
   kubernetes.core.k8s:
@@ -31,4 +193,4 @@
 - name: workload tasks complete
   debug:
     msg: "Workload Tasks completed successfully."
-  when: not silent|bool
+  when: not silent | bool
