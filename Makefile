@@ -53,7 +53,22 @@ env: ## Confirm env setup
 	@printf "ENV VARS containing ANSIBLE: "
 	@-env | grep ANSIBLE || echo "None"
 
-ansible-execute: ## Execute ansible-playbook with PLAYBOOK of choice
+ansible-navigator-execute: ## Execute ansible-playbook with PLAYBOOK of choice
+	mkdir -p $(OUTPUT_DIR); \
+	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log; \
+		ansible-navigator run $(PLAYBOOK_DIR)/$(PLAYBOOK) \
+		-e @/vars/$(VARS_FILE) \
+		-e @/secrets/$(SECRETS_FILE) \
+		-e output_dir=$(OUTPUT_DIR) \
+		--mode stdout
+		# -e env_type=$(ENV_TYPE) \
+		# -e guid=$(GUID) \
+		$(USER_EXTRA_ARGS) $(EXTRA_ARGS)
+
+deploy: ## Deploy normally with package updates etc (can be slow)
+	$(MAKE) ansible-navigator-execute PLAYBOOK=main.yml 
+
+ansible-playbook-execute: ## Execute ansible-playbook with PLAYBOOK of choice
 	mkdir -p $(OUTPUT_DIR); \
 	export ANSIBLE_LOG_PATH=$(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log; \
 		ansible-playbook $(PLAYBOOK_DIR)/$(PLAYBOOK) \
@@ -64,17 +79,17 @@ ansible-execute: ## Execute ansible-playbook with PLAYBOOK of choice
 		-e guid=$(GUID) \
 		$(USER_EXTRA_ARGS) $(EXTRA_ARGS)
 
-deploy: ## Deploy normally with package updates etc (can be slow)
-	$(MAKE) ansible-execute PLAYBOOK=main.yml 
+deploy-play: ## Deploy normally with package updates etc (can be slow)
+	$(MAKE) ansible-playbook-execute PLAYBOOK=main.yml 
 
-deploy-fast: ## Deploy fast without package updates etc
-	$(MAKE) ansible-execute PLAYBOOK=main.yml EXTRA_ARGS="-e update_packages=false"	
+deploy-play-fast: ## Deploy fast without package updates etc
+	$(MAKE) ansible-playbook-execute PLAYBOOK=main.yml EXTRA_ARGS="-e update_packages=false"	
 
 role-runner: ## Deploy fast without package updates etc
-	$(MAKE) ansible-execute PLAYBOOK=role_runner.yml EXTRA_ARGS="-e role=$(ROLE)"	
+	$(MAKE) ansible-playbook-execute PLAYBOOK=role_runner.yml EXTRA_ARGS="-e role=$(ROLE)"	
 
 destroy: ## Destroy the config
-	$(MAKE) ansible-execute PLAYBOOK=destroy.yml
+	$(MAKE) ansible-playbook-execute PLAYBOOK=destroy.yml
 
 # user-data: ## Assumes an existing output_dir, outputs contenst of user-data.yaml
 # 	ansible-playbook rhdp.agnostic_utilities.agd_user_info.yml -e output_dir=$(OUTPUT_DIR) 
@@ -95,13 +110,13 @@ last-status: ## Output last status file
 	ls -l $(OUTPUT_DIR)/status.txt
 
 update-status: ## Update status file
-	$(MAKE) ansible-execute PLAYBOOK=lifecycle_entry_point.yml EXTRA_ARGS="-e ACTION=status"
+	$(MAKE) ansible-playbook-execute PLAYBOOK=lifecycle_entry_point.yml EXTRA_ARGS="-e ACTION=status"
 
 stop: ## Suspend, stop, instances
-	$(MAKE) ansible-execute PLAYBOOK=lifecycle_entry_point.yml EXTRA_ARGS="-e ACTION=stop"
+	$(MAKE) ansible-playbook-execute PLAYBOOK=lifecycle_entry_point.yml EXTRA_ARGS="-e ACTION=stop"
 
 start: ## Start stopped instances
-	$(MAKE) ansible-execute PLAYBOOK=lifecycle_entry_point.yml EXTRA_ARGS="-e ACTION=start"
+	$(MAKE) ansible-playbook-execute PLAYBOOK=lifecycle_entry_point.yml EXTRA_ARGS="-e ACTION=start"
 
 bounce: ## Bounce the deploy IE stop then start
 bounce: stop start
