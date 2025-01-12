@@ -20,6 +20,14 @@
         domain: "{{ r_ingress.resources[0].status.domain }}"
         apiUrl: "{{ r_infra.resources[0].status.apiServerURL }}"
 
+- name: >
+    Add all existing agnosticd_user_info.data to
+    _ocp4_workload_gitops_bootstrap_deployer_values
+  when: ocp4_workload_gitops_bootstrap_userdata_in_helm_values | default(true) | bool
+  ansible.builtin.set_fact:
+    _ocp4_workload_gitops_bootstrap_deployer_values: |
+      {{ _ocp4_workload_gitops_bootstrap_deployer_values | combine( { "agnosticd_user_data": lookup('agnosticd_user_data', '*') }) }}
+
 - name: print _ocp4_workload_gitops_bootstrap_deployer_values
   ansible.builtin.debug:
     msg: "{{ _ocp4_workload_gitops_bootstrap_deployer_values | to_yaml }}"
@@ -51,6 +59,13 @@
   ansible.builtin.pause:
     seconds: 60
 
+- name: Debug all applications with our label in any namespace
+  when: ocp4_workload_gitops_bootstrap_application_wait | bool
+  vars:
+    query: "[*].{App: metadata.name, Health: status.health.status, Sync: status.sync.status}"
+  ansible.builtin.debug:
+    msg: "{{ _all_apps.resources | json_query(query)}}"
+
 - name: Validate all applications with our label in any namespace are healthy and synced
   when: ocp4_workload_gitops_bootstrap_application_wait | bool
   kubernetes.core.k8s_info:
@@ -68,7 +83,11 @@
   - _all_apps.resources | json_query('length([?status.health.status==`Healthy`]) == length(@)')
   - _all_apps.resources | json_query('length([?status.sync.status==`Synced`]) == length(@)')
 
-- name: retrieve configmaps with the demo.redhat.com/userinfo label
+#######
+####### Begin processing GitOps output
+#######
+
+- name: Retrieve configmaps with the demo.redhat.com/userinfo label
   kubernetes.core.k8s_info:
     api_version: v1
     kind: ConfigMap
@@ -76,8 +95,55 @@
     - "demo.redhat.com/userinfo"
   register: cm_userinfo
 
-- name: save configmap userinfo in agnosticd_user_info
+# # Sample multi-user configmap
+# # "data.users_json:" is what this workload looks for to import multi-user data
+#
+# apiVersion: v1
+# data:
+#   users_json: '{"users": {"user1": { "kiali_url": "https://kiali-istio-system.apps.rosa-9gp6n.6jcc.p1.openshiftapps.com",
+#     "sample_first_key": "sample_first_value" },"user2": { "kiali_url": "https://kiali-istio-system.apps.rosa-9gp6n.6jcc.p1.openshiftapps.com",
+#     "sample_first_key": "sample_first_value" }}}'
+#   sample_global_value: "global_values"
+#   sample_global_yaml: |
+#     sample_global_yaml:
+#       sample_yaml_key: sample_yaml_value
+# kind: ConfigMap
+# metadata:
+#   labels:
+#     app.kubernetes.io/instance: uplift
+#     demo.redhat.com/userinfo: ""
+#   name: userinfo-users-json
+#   namespace: istio-system
+#
+
+- name: Add to agnosticd_user_info all data from configmaps except configmap.data.users_json data
   agnosticd_user_info:
     data: >-
-      {{ item.data | from_yaml }}
+      {{ item | dict2items | selectattr('key', 'ne', 'users_json') | items2dict }}
+  loop: "{{ cm_userinfo.resources | map(attribute='data') }}"
+
+- name: Prepare data_user_json to add to agnosticd_user_info
+  ansible.builtin.debug:
+    msg: "Prepare data_user_json to add to agnosticd_user_info"
+
+- name: Merge list of all users_json data from all configmaps that have data.users_json
+  set_fact:
+    data_users_json: "{{ data_users_json | default([]) | combine(item.data.users_json | from_json, recursive=True) }}"
   loop: "{{ cm_userinfo.resources }}"
+  when: item.data.users_json is defined
+
+- name: Debug merged data_users_json data
+  ansible.builtin.debug:
+    msg: "{{ data_users_json }}"
+
+- name: Add to agnosticd_user_info all configmap.data.users_json configmap data
+  agnosticd_user_info:
+    user: "{{ item.key }}"
+    data:
+      "{{ item.value }}"
+  loop: "{{ data_users_json.users | dict2items }}"
+  when: data_users_json is defined
+
+- name: Debug user_data
+  ansible.builtin.debug:
+    msg: "{{ lookup('agnosticd_user_data', '*') }}"
