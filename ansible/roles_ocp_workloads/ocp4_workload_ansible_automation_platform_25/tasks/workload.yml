@@ -33,10 +33,19 @@
         install_operator_catalogsource_image: "{{ ocp4_workload_ansible_automation_platform_catalog_snapshot_image }}"
         install_operator_catalogsource_image_tag: "{{ ocp4_workload_ansible_automation_platform_catalog_snapshot_image_tag }}"
 
+    - name: Create AAP admin secret
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'admin_secret.j2') }}"
+
+    - name: Create Ansilbe Automation Platform
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'aap.j2') }}"
+
 
 - name: Wait until all AAP2 Operators are running
   block:
-
     - name: Wait until the Automation Controller Manager operator is running
       kubernetes.core.k8s_info:
         api_version: v1
@@ -79,18 +88,47 @@
       retries: 30
       delay: 10
 
-    - name: Create Operator group, secret and Install operator
-      kubernetes.core.k8s:
-        state: present
-        definition: "{{ lookup('template', __definition) }}"
-      loop:
-        - admin_secret.j2
-      loop_control:
-        loop_var: __definition
+    - name: Retrieve created route
+      kubernetes.core.k8s_info:
+        api_version: "route.openshift.io/v1"
+        kind: Route
+        name: "{{ ocp4_workload_ansible_automation_platform_app_name }}"
+        namespace: "{{ ocp4_workload_ansible_automation_platform_project }}"
+      register: r_route
+      until: r_route.resources[0].spec.host is defined
+      retries: 30
+      delay: 45
 
-    - name: Include AAP 2.x configuration tasks
-      ansible.builtin.include_tasks:
-        file: aap/aap-{{ ocp4_workload_ansible_automation_platform_version }}.yml
+    - name: Get automation_controller route hostname
+      ansible.builtin.set_fact:
+        automation_controller_hostname: "{{ r_route.resources[0].spec.host }}"
+
+    - name: Wait for automation_controller to be running
+      ansible.builtin.uri:
+        url: http://{{ automation_controller_hostname }}/api/controller/v2/ping/
+        status_code: 200
+      register: r_result
+      until: r_result.json.version is defined
+      retries: 60
+      delay: 45
+
+
+- name: Inject AAP Manifest
+  when: ocp4_workload_ansible_automation_platform_inject_manifest | bool
+  ansible.builtin.include_tasks:
+    file: inject_manifest.yml
+
+# Make sure to inject the manifest before creating the rolebinding;
+# otherwise, Ansible Automation Platform will fail during the manifest
+# upload process from the console.
+- name: Create Rolebinding for Rulebook Activations for OpenShift events
+  when:
+    - ocp4_workload_ansible_automation_platform_inject_manifest | bool
+    - ocp4_workload_ansible_automation_platform_create_eda_rolebinding | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'eda_cluster_rolebinding.j2') }}"
+
 
 - name: Display Version and credentials
   when: not silent | bool
@@ -116,14 +154,7 @@
       aap_controller_admin_user: "{{ ocp4_workload_ansible_automation_platform_admin_username | default('admin') }}"
       aap_controller_admin_password: "{{ ocp4_workload_ansible_automation_platform_admin_password }}"
 
-- name: Set facts for Access information
-  ansible.builtin.set_fact:
-    aap_controller_web_url: "https://{{ automation_controller_hostname }}"
-    aap_controller_admin_user: "{{ ocp4_workload_ansible_automation_platform_admin_username | default('admin') }}"
-    aap_controller_admin_password: "{{ ocp4_workload_ansible_automation_platform_admin_password }}"
-
 # Leave this as the last task in the playbook.
-
 - name: workload tasks complete
   when: not silent | bool
   ansible.builtin.debug:
