@@ -2,7 +2,7 @@
 
 This folder contains scripts to deploy an OpenShift cluster with AgnosticD from your local machine.
 
-Once the cluster is deployed, you can use the same scripts to deploy any of the [roles_ocp_workloads](../../ansible/roles/roles_ocp_workloads) on that cluster.
+Once the cluster is deployed, you can use the same scripts to deploy any of the [roles_ocp_workloads](../../ansible/roles_ocp_workloads) on that cluster.
 
 ## Podman
 
@@ -26,7 +26,7 @@ It may be convenient to add this to your `.bashrc` or `.zshrc` file.
 
 ## AWS Credentials
 
-As the scripts will deploy an OpenShift cluster on AWS, have your credentials and sanbox number ready.
+As the scripts will deploy an OpenShift cluster on AWS, have your credentials and sandbox number ready.
 
 ## Usage
 
