@@ -3,6 +3,11 @@ set -ue
 
 cd /tmp
 
+# IBM Cloud cli
+
+curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+ibmcloud plugin install cloud-object-storage
+
 # OC
 
 version=stable
@@ -22,12 +27,11 @@ unzip bw.zip
 install -t /usr/bin bw
 rm bw bw.zip
 
-
 # AWS CLI
 
 aws_version=2.4.23
 curl -s -L "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${aws_version}.zip" \
-    -o "awscliv2.zip"
+  -o "awscliv2.zip"
 unzip awscliv2.zip
 ./aws/install
 
