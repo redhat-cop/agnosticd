@@ -33,12 +33,12 @@
 - Make sure no pods are stuck in crash loops.  The Kafka producers and consumers will sometimes fail to connect to a broker; scaling them down and back up should fix it.
 - Preload the following browser tabs in order to play through the demo:
   - the `workflows.ipynb` notebook from Jupyterhub,
-  - The ODH operator page from the installed operators tab in the Openshift console, 
-  - The `rhte-demo-notebooks` directory from jupyterhub home, 
-  - either `rendered/feature-engineering.ipynb` or the version in `rhte-demo-notebooks` (if the latter, run all cells before the demo), 
+  - The ODH operator page from the installed operators tab in the Openshift console,
+  - The `rhte-demo-notebooks` directory from jupyterhub home,
+  - either `rendered/feature-engineering.ipynb` or the version in `rhte-demo-notebooks` (if the latter, run all cells before the demo),
   - either `rendered/model.ipynb` or the version in `rhte-demo-notebooks` (if the latter, run all cells before the demo),
-  - The `pipeline` build config from the OpenShift console (you'll click in to the environment here), 
-  - The `pipeline` build from the OpenShift console (you'll click in to the log), 
+  - The `pipeline` build config from the OpenShift console (you'll click in to the environment here),
+  - The `pipeline` build from the OpenShift console (you'll click in to the log),
   - The deployment configs from the OpenShift console (show that `pipeline` is scaled out),
-  - The `services.ipynb` notebook, 
+  - The `services.ipynb` notebook,
   - Prometheus with `ln(sum(pipeline_predictions_total) by (app, value))` in the query window (extra credit:  add another graph with `sum(kafka_log_log_size)` to show how many messages are on Kafka topics)

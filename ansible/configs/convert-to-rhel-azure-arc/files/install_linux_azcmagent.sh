@@ -32,7 +32,7 @@ arm64=0
 noproxy=0
 
 # Complex command that involve pipes will have return value of '0' only if all parts execute successfully
-set -o pipefail 
+set -o pipefail
 
 function log_failure() {
 
@@ -44,7 +44,7 @@ function log_failure() {
   if [ -n "${desired_version}" ]; then
     operation="upgrading"
   fi
-  
+
   message=${2:0:500}
   logBody="{\"subscriptionId\":\"${subscriptionId}\",\"resourceGroup\":\"${resourceGroup}\",\"tenantId\":\"${tenantId}\",\"location\":\"${location}\",\"correlationId\":\"${correlationId}\",\"authType\":\"${authType}\",\"operation\":\"${operation}\",\"namespace\":\"${provider}\",\"osType\":\"linux\",\"messageType\":\"$1\",\"message\":\"${message}\"}"
 
@@ -115,7 +115,7 @@ function verify_downloadfile {
 	fi
     fi
 }
-	     
+
 # For Ubuntu, system updates could sometimes occupy apt. We loop and wait until it's no longer busy
 function verify_apt_not_busy {
     for i in {1..30}
@@ -132,7 +132,7 @@ function verify_apt_not_busy {
     done
     exit_failure 145 "$0: file /var/lib/dpkg/lock-frontend or /var/lib/apt/lists/lock is still busy after 5 minutes. Please make sure no other apt/dpkg updates is still running, and retry again."
 }
-           
+
 function use_dnf_or_yum {
     yum="yum"
     if command -v dnf &> /dev/null; then
@@ -177,13 +177,13 @@ function download_file {
         sudo rm -f "$2"
     fi
 
-    if [ ${use_curl} -eq 1 ]; then  
+    if [ ${use_curl} -eq 1 ]; then
         if [ -n "${proxy}" ]; then
             sudo curl --proxy ${proxy} "$1" -o "$2"
         else
             sudo curl "$1" -o "$2"
         fi
-    elif [ ${use_wget} -eq 1 ]; then  
+    elif [ ${use_wget} -eq 1 ]; then
         if [ -n "${proxy}" ]; then
             sudo wget -e use_proxy=yes -e http_proxy=${proxy} "$1" -O "$2"
         else
@@ -307,7 +307,7 @@ distro_minor_version=$(echo "${distro_version}" | cut -f2 -d".")
 case "${distro}" in
     *edHat* | *ed\ Hat*)
         if [ ${arm64} -eq 1 ]; then
-            exit_failure 133 "$0: ARM64 for RHEL is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"            
+            exit_failure 133 "$0: ARM64 for RHEL is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"
         fi
         if [ "${distro_major_version}" -eq 7 ]; then
             echo "Configuring for Redhat 7..."
@@ -334,7 +334,7 @@ case "${distro}" in
     *entOS*)
         # Doc says to use RHEL for CentOS: https://docs.microsoft.com/en-us/windows-server/administration/linux-package-repository-for-microsoft-software
         if [ ${arm64} -eq 1 ]; then
-            exit_failure 133 "$0: ARM64 for CentOS is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"            
+            exit_failure 133 "$0: ARM64 for CentOS is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"
         fi
         if [ "${distro_major_version}" -eq 7 ]; then
             echo "Configuring for CentOS 7..."
@@ -360,7 +360,7 @@ case "${distro}" in
 
     *racle*)
         if [ ${arm64} -eq 1 ]; then
-            exit_failure 133 "$0: ARM64 for Oracle Linux is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"            
+            exit_failure 133 "$0: ARM64 for Oracle Linux is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"
         fi
         if [ "${distro_major_version}" -eq 7 ]; then
             echo "Configuring for Oracle 7..."
@@ -383,7 +383,7 @@ case "${distro}" in
 
     *SLES*)
         if [ ${arm64} -eq 1 ]; then
-            exit_failure 133 "$0: ARM64 for SLES is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"            
+            exit_failure 133 "$0: ARM64 for SLES is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"
         fi
         zypper=1
         if [ "${distro_major_version}" -eq 12 ]; then
@@ -406,7 +406,7 @@ case "${distro}" in
 
     *mazon\ Linux*)
         if [ ${arm64} -eq 1 ]; then
-            exit_failure 133 "$0: ARM64 for Amazon Linux is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"            
+            exit_failure 133 "$0: ARM64 for Amazon Linux is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"
         fi
         if [ "${distro_major_version}" -eq 2 ]; then
             echo "Configuring for Amazon Linux 2 ..."
@@ -430,7 +430,7 @@ case "${distro}" in
 
     *ebian*)
         if [ ${arm64} -eq 1 ]; then
-            exit_failure 133 "$0: ARM64 for Debian is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"            
+            exit_failure 133 "$0: ARM64 for Debian is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"
         fi
 	apt=1
         if [ "${distro_major_version}" -eq 10 ]; then
@@ -450,7 +450,7 @@ case "${distro}" in
         fi
         if [ -n "${proxy}" ]; then
             sudo -E https_proxy=${proxy} DEBIAN_FRONTEND=noninteractive apt update
-            sudo -E https_proxy=${proxy} DEBIAN_FRONTEND=noninteractive apt install -y gnupg            
+            sudo -E https_proxy=${proxy} DEBIAN_FRONTEND=noninteractive apt install -y gnupg
             if [ ${install_curl} -eq 1 ]; then
                 sudo -E https_proxy=${proxy} DEBIAN_FRONTEND=noninteractive apt install -y curl
             fi
@@ -461,7 +461,7 @@ case "${distro}" in
                 sudo -E DEBIAN_FRONTEND=noninteractive apt install -y curl
             fi
         fi
-        ;;        
+        ;;
 
     *buntu*)
 	apt=1
@@ -492,7 +492,7 @@ case "${distro}" in
                 sudo -E DEBIAN_FRONTEND=noninteractive apt install -y curl
             fi
         fi
-        ;;        
+        ;;
 
     *ariner*)
         if [ "${distro_major_version}" -eq 1 ]; then
@@ -514,7 +514,7 @@ case "${distro}" in
 
     *ocky*)
         if [ ${arm64} -eq 1 ]; then
-            exit_failure 133 "$0: ARM64 for Rocky Linux is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"            
+            exit_failure 133 "$0: ARM64 for Rocky Linux is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"
         fi
         if [ "${distro_major_version}" -eq 8 ]; then
             echo "Configuring for Rocky Linux 8..."
@@ -537,7 +537,7 @@ case "${distro}" in
 
     *lma*)
         if [ ${arm64} -eq 1 ]; then
-            exit_failure 133 "$0: ARM64 for Alma Linux is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"            
+            exit_failure 133 "$0: ARM64 for Alma Linux is currently not supported. For supported OSs, see https://learn.microsoft.com/en-us/azure/azure-arc/servers/prerequisites#supported-operating-systems"
         fi
         if [ "${distro_major_version}" -eq 9 ]; then
             echo "Configuring for Alma Linux 9..."
@@ -576,7 +576,7 @@ Azure Connected Machine Agent is designed for use outside Azure.
 This virtual machine should only be used for testing purposes.
 See https://aka.ms/azcmagent-testwarning for more details.
 "
-    else        
+    else
         exit_failure 141 "$0: cannot install Azure Connected Machine agent on an Azure Virtual Machine.
 Azure Connected Machine Agent is designed for use outside Azure.
 To connect an Azure VM for TESTING PURPOSES ONLY, see https://aka.ms/azcmagent-testwarning for more details."
@@ -656,7 +656,7 @@ if [ $apt -eq 1 ]; then
     fi
 elif [ $zypper -eq 1 ]; then
     # SLES
-    
+
     install_cmd="zypper"
     if [ -n "${altdownloadfile}" ]; then
 	sudo -E zypper install -y "${tempdir}/azcmagent.rpm"
@@ -692,7 +692,7 @@ elif [ $zypper -eq 1 ]; then
     fi
 else
     # RHEL or CentOS
-    
+
     install_cmd="${yum}"
     if [ -n "${altdownloadfile}" ]; then
         if [ $localinstall -eq 0 ]; then
@@ -749,4 +749,3 @@ elif [ "${noproxy}" -eq 1 ]; then
 fi
 
 exit_success "Latest version of azcmagent is installed."
-

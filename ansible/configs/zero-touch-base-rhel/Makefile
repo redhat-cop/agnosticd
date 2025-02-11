@@ -30,13 +30,13 @@ USER_EXTRA_ARGS=
 # Adjust to taste
 
 : ## TIP! make supports tab completion with *modern* shells e.g. zsh etc
-: ## e.g. make depl<TAB> == make deploy 
-: ## 
+: ## e.g. make depl<TAB> == make deploy
+: ##
 
 .SILENT: setup my-env ssh-target
 
 help: ## Show this help - technically unnecessary as `make` alone will do
-	@egrep -h '\s##\s' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", ($$2=="" ? "" : $$1 ),  $$2}' 
+	@egrep -h '\s##\s' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", ($$2=="" ? "" : $$1 ),  $$2}'
 
 # Thanks to victoria.dev for the above syntax
 # https://victoria.dev/blog/how-to-create-a-self-documenting-makefile/
@@ -63,22 +63,22 @@ ansible-execute: ## Execute ansible-playbook with PLAYBOOK of choice
 		$(USER_EXTRA_ARGS) $(EXTRA_ARGS)
 
 deploy: ## Deploy normally with package updates etc (can be slow)
-	$(MAKE) ansible-execute PLAYBOOK=main.yml 
+	$(MAKE) ansible-execute PLAYBOOK=main.yml
 
 deploy-fast: ## Deploy fast without package updates etc
-	$(MAKE) ansible-execute PLAYBOOK=main.yml EXTRA_ARGS="-e update_packages=false"	
+	$(MAKE) ansible-execute PLAYBOOK=main.yml EXTRA_ARGS="-e update_packages=false"
 
 destroy: ## Destroy the config
 	$(MAKE) ansible-execute PLAYBOOK=destroy.yml
 
 user-data: ## Assumes an existing output_dir, outputs contenst of user-data.yaml
-	ansible-playbook rhdp.agnostic_utilities.agd_user_info.yml -e output_dir=$(OUTPUT_DIR) 
-	
-ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hostname` 
+	ansible-playbook rhdp.agnostic_utilities.agd_user_info.yml -e output_dir=$(OUTPUT_DIR)
+
+ssh-target: ## ssh to your bastion by default or use `make ssh-target target=hostname`
 	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf $(TARGET)
 
 
-ssh: ## ssh to your bastion by default or use `make ssh target=hostname` 
+ssh: ## ssh to your bastion by default or use `make ssh target=hostname`
 	ssh -F $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID)_ssh_conf showroom@$(TARGET)
 
 last-status: ## Output last status file
@@ -99,4 +99,3 @@ bounce: stop start
 
 relog: ## Zero out the ANSIBLE_LOG_PATH log file
 	rm $(OUTPUT_DIR)/$(ENV_TYPE)_$(GUID).log
-

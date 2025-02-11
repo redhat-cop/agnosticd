@@ -4,7 +4,7 @@ A simple deplyoment creating a bastion host and two worker nodes. It can't get s
 
 ### Environment variables
 
-Deployment is controlled by two configuration files: 
+Deployment is controlled by two configuration files:
 
 * env_vars.yml
 * sample_vars.yml
@@ -15,13 +15,13 @@ Start by creating a copy of `sample_vars.yml` and rename it (e.g. `my_sample_var
 
 #### Secrets
 
-Some deployments need **secrets** e.g. your AWS credentials or API tokens. 
+Some deployments need **secrets** e.g. your AWS credentials or API tokens.
 
 DO NOT add these to git !
 
 Instead create a file called e.g. `./ansible/my_secret_vars.yml` and store all secrets etc. there. This file can also be reused for other deplyoments.
 
-NOTE:  
+NOTE:
 
 Both `my_sample_vars.yml` `my_secret.vars.yml` are in the `.gitignore` configuration which SHOULD protect you from adding them to git!
 

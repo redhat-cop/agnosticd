@@ -1,7 +1,7 @@
-#!/bin/bash 
+#!/bin/bash
 
 prometheus_server=$PROM_SERVER
-i=0 
+i=0
 r_dir=/tmp/results
 
 rm -rf $r_dir/*.json
@@ -24,7 +24,7 @@ EOF
 }
 
 while true
-do 
+do
 
   out_file=$r_dir/job-$i.json
   rm -f $out_file
@@ -34,11 +34,11 @@ do
 
   send_metrics $i
   i=$((i+1))
- 
+
 done
 
 # for i in {1..{{ $test_runs | default(30) }}}
-# do 
+# do
 #   out_file=$r_dir/job-$i.json
 #   rm -f $out_file
 

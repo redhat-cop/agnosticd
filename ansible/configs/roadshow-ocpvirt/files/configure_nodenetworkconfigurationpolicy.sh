@@ -73,4 +73,3 @@ spec:
           port:
             - name: enp3s0
 EOF
-

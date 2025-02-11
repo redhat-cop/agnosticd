@@ -17,4 +17,3 @@ chmod u+x /usr/local/bin/openstackbmc-wrap.bash
 
 systemctl enable openstackbmc.service
 systemctl start openstackbmc.service
-

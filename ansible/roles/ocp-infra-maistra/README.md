@@ -2,7 +2,7 @@ Ansible Role: Maistra and OpenShift Service Mesh (Istio, Kiali and Jaeger)
 [![Build Status](https://travis-ci.org/siamaksade/ansible-openshift-maistra.svg?branch=master)](https://travis-ci.org/siamaksade/ansible-openshift-maistra)
 =========
 
-Ansible Role for deploying [Maistra](http://maistra.io/) and OpenShift Service Mesh on OpenShift which deploys the 
+Ansible Role for deploying [Maistra](http://maistra.io/) and OpenShift Service Mesh on OpenShift which deploys the
 following components:
 
 * Istio

@@ -34,4 +34,3 @@ Author Information
 ------------------
 
 Eric Lavarde, as part of the AgnosticD framework, hosted by Red Hat CoP
-

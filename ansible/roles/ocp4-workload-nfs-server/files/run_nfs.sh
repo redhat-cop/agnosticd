@@ -46,7 +46,7 @@ function start()
             chgrp $gid $NFSROOT/$i
         fi
     done
-  
+
     # start rpcbind if it is not started yet
     /usr/sbin/rpcinfo 127.0.0.1 > /dev/null; s=$?
     if [ $s -ne 0 ]; then

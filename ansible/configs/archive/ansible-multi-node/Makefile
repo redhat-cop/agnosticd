@@ -18,4 +18,3 @@ destroy:
 		-e @configs/ansible-multi-node/sample_vars/multitier_app_with_tower.yml \
 		-e@~/secrets/openstack-$(OSP_CLUSTER)-secret.yml \
 		-e guid=multi-$(GUID)
-

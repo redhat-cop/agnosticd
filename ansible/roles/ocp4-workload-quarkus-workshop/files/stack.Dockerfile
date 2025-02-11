@@ -9,7 +9,7 @@ ENV MANDREL_VERSION=23.1.2.0-Final
 ENV MVN_VERSION=3.9.6
 ENV GRAALVM_HOME="/usr/local/mandrel-java21-${MANDREL_VERSION}"
 ENV PATH="/usr/local/maven/apache-maven-${MVN_VERSION}/bin:${PATH}"
-ENV JAVA_HOME="/usr/lib/jvm/java-21-openjdk" 
+ENV JAVA_HOME="/usr/lib/jvm/java-21-openjdk"
 ENV RHBQ_VERSION=3.8.3.redhat-00003
 ENV QUARKUS_CLI_VERSION=3.10.0
 ENV JBANG_DIR="/usr/local/jbang"
@@ -27,7 +27,7 @@ RUN mkdir -p /usr/local/quarkus-cli/lib && mkdir /usr/local/quarkus-cli/bin
 RUN wget -O /tmp/quarkus-cli.tgz https://github.com/quarkusio/quarkus/releases/download/${QUARKUS_CLI_VERSION}/quarkus-cli-${QUARKUS_CLI_VERSION}.tar.gz && tar -xzf /tmp/quarkus-cli.tgz -C /tmp
 RUN cp /tmp/quarkus-cli-${QUARKUS_CLI_VERSION}/bin/quarkus /usr/local/quarkus-cli/bin && cp /tmp/quarkus-cli-${QUARKUS_CLI_VERSION}/lib/quarkus-cli-${QUARKUS_CLI_VERSION}-runner.jar /usr/local/quarkus-cli/lib
 RUN chmod +x /usr/local/quarkus-cli/bin/quarkus && cd /usr/local/bin && ln -s ../quarkus-cli/bin/quarkus quarkus
-RUN mkdir -p ${JBANG_DIR} && curl -Ls https://sh.jbang.dev | bash -s - app setup 
+RUN mkdir -p ${JBANG_DIR} && curl -Ls https://sh.jbang.dev | bash -s - app setup
 RUN ln -s ${JBANG_DIR}/bin/jbang /usr/local/bin/jbang
 
 USER user

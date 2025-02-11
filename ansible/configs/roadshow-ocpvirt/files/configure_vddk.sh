@@ -27,7 +27,7 @@ spec:
   source:
     type: Dockerfile
     dockerfile: |
-      FROM registry.access.redhat.com/ubi8/ubi-minimal 
+      FROM registry.access.redhat.com/ubi8/ubi-minimal
       RUN curl -L -O www.opentlc.com/download/ocp4_baremetal/VMware-vix-disklib-7.0.3-20134304.x86_64.tar.gz
       RUN tar -xzf VMware-vix-disklib-7.0.3-20134304.x86_64.tar.gz
       RUN mkdir -p /opt

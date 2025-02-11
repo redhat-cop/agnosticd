@@ -13,7 +13,7 @@ Requirements
 * OpenShift 4.12 cluster installed
 * Ansible 2.9 or higher
 ```
-sudo pip3 install openshift pyyaml kubernetes jmespath 
+sudo pip3 install openshift pyyaml kubernetes jmespath
 ansible-galaxy collection install kubernetes.core community.general
 ```
 
@@ -122,4 +122,3 @@ Author Information
 ------------------
 
 An optional section for the role authors to include contact information, or a website (HTML is not allowed).
-

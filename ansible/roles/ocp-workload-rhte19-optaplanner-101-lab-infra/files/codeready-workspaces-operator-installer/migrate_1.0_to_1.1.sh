@@ -1,4 +1,4 @@
-#!/bin/bash 
+#!/bin/bash
 BASE_DIR=$(cd "$(dirname "$0")"; pwd)
 CRFILE=${BASE_DIR}/custom-resource.yaml
 
@@ -48,7 +48,7 @@ fi
 # check `oc status` for an error
 status="$(oc status 2>&1)"
 if [[ $status == *"Error"* ]]; then
-	echo "$status" 
+	echo "$status"
 	echo "
 [ERROR] You must log in to your cluster to use this script. For example,
 
@@ -78,7 +78,7 @@ sed -i "/ \+\(oAuthClientName\|oAuthSecret\): .\+/d" ${CRFILE}
 sed -i "/auth:/a \      oAuthClientName: 'openshift-identity-provider-h2fh'\\n \     oAuthSecret: '${SECRET}'" ${CRFILE}
 
 echo "
-Successfully patched ${CRFILE} 
+Successfully patched ${CRFILE}
 
 You can now run deploy.sh with arguments that suit your installation.
 "

@@ -27,7 +27,7 @@ Role Variables
 |*_certbot_dns_provider*|No|route53|DNS Provider for use with wildcard certificates.
 |*_certbot_le_email*|Yes|rhpds-admins@redhat.com|E-mail address to register with Let's Encrypt
 |*_certbot_additional_args*|No |"" |Additional arguments for Certbot
-|*_certbot_remote_dir*|Yes| "/root"| The directory on the remote host in which to store Certbot files 
+|*_certbot_remote_dir*|Yes| "/root"| The directory on the remote host in which to store Certbot files
 |*_certbot_install_dir*|Yes| "/root/certificates"| The directory on the remote host in which to install the requested certificates into
 |*_certbot_cache_archive_file*|Yes| "/tmp/certbot.tar.gz"| Local (to the host ansible is running on) cache of certificates. Prevents re-requesting certificates for later runs of the playbook when the domains haven't changed. certbot.tar.gz will contain the entire `{{_cerbot_remote_dir}}/certbot` directory so that it can be restored for future runs on new machines with the same domain names.
 |*_certbot_production*|Yes|False|Use the Production Let's Encrypt Server. Leave to False for testing runs to prevent issues with the Let's Encrypt rate limits

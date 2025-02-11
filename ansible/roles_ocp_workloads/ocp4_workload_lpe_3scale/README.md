@@ -107,7 +107,7 @@ $ ocp4_workload_lpe_3scale_smtp_passwd=<change me>
 $ ocp4_workload_lpe_3scale_smtp_domain=redhat.com
 
 # Admin Email user and domain:
-    
+
 $ ocp4_workload_lpe_3scale_admin_email_user=<change me>            # e.g 3scaleadmin
 $ ocp4_workload_lpe_3scale_admin_email_domain=<change me>          # e.g redhat.com
 
@@ -148,7 +148,7 @@ $  ansible-playbook ${VERBOSITY} -i ${TARGET_HOST}, ./ansible/configs/ocp-worklo
 
 === Remove Provisioned Artifacts
 
-Run the remove workload with *ACTION=remove* in order to remove all of the projects created as part of this workload. 
+Run the remove workload with *ACTION=remove* in order to remove all of the projects created as part of this workload.
 
 . Execute:
 +
@@ -171,6 +171,3 @@ $ ansible-playbook ${VERBOSITY} -i ${TARGET_HOST}, ./ansible/configs/ocp-workloa
 ----
 
 All the projects created as part of this workload will be removed.
-
-
-

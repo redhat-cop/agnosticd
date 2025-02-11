@@ -47,4 +47,3 @@ Author Information
 ------------------
 
 Vince Power (vpower@redhat.com)
-

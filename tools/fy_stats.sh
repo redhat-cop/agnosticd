@@ -74,7 +74,7 @@ echo "  new configs in FY21: new_configs_fy21.txt"
 git ls-tree -d --name-only ${FY19_first_commit} > ${output_dir}/before_configs.txt
 git ls-tree -d --name-only ${FY19_last_commit} |grep -vf ${output_dir}/before_configs.txt > ${output_dir}/new_configs_fy19.txt
 git ls-tree -d ${FY20_last_commit} |grep -vf ${output_dir}/before_configs.txt |grep -vf ${output_dir}/new_configs_fy19.txt > ${output_dir}/new_configs_fy20.txt
-git ls-tree -d ${FY21_last_commit} |grep -vf ${output_dir}/before_configs.txt |grep -vf ${output_dir}/new_configs_fy19.txt |grep -vf ${output_dir}/new_configs_fy20.txt > ${output_dir}/new_configs_fy21.txt 
+git ls-tree -d ${FY21_last_commit} |grep -vf ${output_dir}/before_configs.txt |grep -vf ${output_dir}/new_configs_fy19.txt |grep -vf ${output_dir}/new_configs_fy20.txt > ${output_dir}/new_configs_fy21.txt
 
 
 echo
@@ -85,7 +85,7 @@ git shortlog -s -n $FY20_first_commit | awk '{print $2,$3,$4}' > ${output_dir}/c
 git shortlog -s -n $FY21_first_commit | awk '{print $2,$3,$4}' > ${output_dir}/contributors_before_fy21.txt
 git shortlog -s -n $FY19_first_commit..$FY19_last_commit | awk '{print $2,$3,$4}' |grep -vf ${output_dir}/contributors_before_fy19.txt> ${output_dir}/new_contributors_fy19.txt
 git shortlog -s -n $FY20_first_commit..$FY20_last_commit | awk '{print $2,$3,$4}' |grep -vf ${output_dir}/contributors_before_fy20.txt> ${output_dir}/new_contributors_fy20.txt
-git shortlog -s -n $FY21_first_commit..$FY21_last_commit | awk '{print $2,$3,$4}' |grep -vf ${output_dir}/contributors_before_fy20.txt|grep -vf ${output_dir}/new_contributors_fy20.txt > ${output_dir}/new_contributors_fy21.txt 
+git shortlog -s -n $FY21_first_commit..$FY21_last_commit | awk '{print $2,$3,$4}' |grep -vf ${output_dir}/contributors_before_fy20.txt|grep -vf ${output_dir}/new_contributors_fy20.txt > ${output_dir}/new_contributors_fy21.txt
 
 echo "Total contributors: $(git shortlog -s -n |wc -l)"
 echo "FY19 new contributors: $(cat ${output_dir}/new_contributors_fy19.txt|wc -l)"

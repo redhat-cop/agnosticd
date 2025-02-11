@@ -70,7 +70,7 @@ spec:
       featureFlags:
         - EnableCSI
       defaultPlugins:
-        - csi 
+        - csi
         - openshift
         - aws
         - kubevirt
@@ -92,5 +92,3 @@ spec:
 EOF
 
 oc label volumesnapshotclass ocs-storagecluster-rbdplugin-snapclass velero.io/csi-volumesnapshot-class=true
-
-

@@ -44,7 +44,7 @@ deploy-utility:
 		-e@~/secrets/openstack-$(OSP_CLUSTER)-secret.yml \
  		-e@~/secrets/ansible-advanced-satellite-secret.yml \
 		-e guid=multi-utility-$(GUID)
-		
+
 
 destroy-utility:
 	ansible-playbook destroy.yml \

@@ -288,7 +288,7 @@ selections:
     - rsyslog_remote_loghost
     - auditd_audispd_syslog_plugin_activated
     - auditd_audispd_configure_remote_server
-    - auditd_audispd_encrypt_sent_records    
+    - auditd_audispd_encrypt_sent_records
 
     ### FMT_MOF_EXT.1 / AC-8(a)
     ### Set Logon Warning Banner

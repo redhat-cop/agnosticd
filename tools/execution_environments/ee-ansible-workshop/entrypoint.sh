@@ -71,7 +71,7 @@ function is_dir_writable() {
 
 function ensure_current_uid_in_passwd() {
   log_debug "is current uid ${CUR_UID} in /etc/passwd?"
-  
+
   if ! getent passwd "${CUR_USERNAME}" &> /dev/null ; then
     if [ -w "/etc/passwd" ]; then
       log_debug "appending missing uid ${CUR_UID} into /etc/passwd"
@@ -82,7 +82,7 @@ function ensure_current_uid_in_passwd() {
     fi
   else
     log_debug "current uid is already in /etc/passwd"
-  fi  
+  fi
 }
 
 function ensure_writeable_homedir() {

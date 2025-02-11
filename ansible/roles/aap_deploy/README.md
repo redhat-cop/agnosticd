@@ -12,12 +12,12 @@ Currently does **not** add signed certs.
 Currently Ansible Automation controller is **pre-release software**, therefore:
 - Role may include _hacky_ fixes to the installers `setup` process
 - The user will have to supply their own `deploy_automationcontroller_installer_url`
-- Initial deploys are for a cluster (tweak ) 
+- Initial deploys are for a cluster (tweak )
 
 You will need, for a clustered install of `automationcontroller`
 - 3 or more RHEL 8 hosts in an ansible group `automationcontroller`
 - 1 RHEL host in the group `automationcontroller_database`
-    
+
 > NOTE the config `ansible-multi-nodes` contains a fully working `sample_vars` file.
 It can be deployed via:
 
@@ -30,7 +30,7 @@ ansible-playbook main.yml \
   -e guid=1234
 ```
 
-1. A sample vars files defining instances in the group 
+1. A sample vars files defining instances in the group
 * `automationcontroller`
 * `automationcontroller_database`
 2. Cloud secrets - get from your cluster admin
@@ -73,11 +73,11 @@ You will need to update the first 2 vars, typically supplied via `-e` or `-e @se
 # Supply first 2 vars
 
 deploy_automationcontroller_installer_url: "" # e.g. http://example.com/ansible-automation-platform-setup-bundle-latest.tar.gz"
-deploy_automationcontroller_manifest_path: "~/secrets/automationcontroller_manifest.zip" # 
+deploy_automationcontroller_manifest_path: "~/secrets/automationcontroller_manifest.zip" #
 
 # All vars from here set to safe defaults
-deploy_automationcontroller_admin_user: 
-deploy_automationcontroller_admin_password: 
+deploy_automationcontroller_admin_user:
+deploy_automationcontroller_admin_password:
 
 deploy_automationcontroller_pip_packages:
 
@@ -119,7 +119,7 @@ Example Playbook
 ```
 
 > NOTE `hosts` reflects the deployment host and not usually a automationcontroller node.
-Some work to the `templates/automationcontroller_inventory.j2` is *currently* required to allow an all-in-one deployment. 
+Some work to the `templates/automationcontroller_inventory.j2` is *currently* required to allow an all-in-one deployment.
 
 License
 -------
@@ -129,5 +129,5 @@ BSD
 Author Information
 ------------------
 
-Original author: Tony Kay (tok) tok@redhat.com 
+Original author: Tony Kay (tok) tok@redhat.com
 Much work borrowed from IPvSean https://github.com/IPvSean
