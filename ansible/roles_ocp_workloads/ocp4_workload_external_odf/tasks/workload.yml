@@ -1,161 +1,135 @@
 ---
-- name: Install Operator and configure external Ceph
-  block:
-  - name: Set up ODF operator
-    kubernetes.core.k8s:
-      state: present
-      definition: "{{ lookup('template', item) | from_yaml }}"
-    loop:
-    - odf-ns.yaml
-    - odf-og.yaml
-    - odf-sub.yaml.j2
+- name: Set up ODF operator namespace and operator group
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', item) | from_yaml }}"
+  loop:
+  - odf-ns.yaml
+  - odf-og.yaml
 
-  - name: Wait for the CRD storagecluster to become available
-    kubernetes.core.k8s_info:
-      api_version: apiextensions.k8s.io/v1
-      kind: CustomResourceDefinition
-      name: storageclusters.ocs.openshift.io
-    register: r_crd_storageclusters
-    retries: 200
-    delay: 10
-    until: r_crd_storageclusters.resources | default([]) | list | length == 1
+- name: Set up ODF operator subscription
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'odf-sub.yaml.j2') | from_yaml }}"
 
-  - name: Set up StorageCluster
-    kubernetes.core.k8s:
-      state: present
-      definition: "{{ lookup('template', item) | from_yaml }}"
-    register: r_storagecluster
-    until: r_storagecluster is success
-    retries: 30
-    delay: 30
-    loop:
-    - secret.yaml.j2
-    - storagecluster.yaml.j2
-    - storageclass.yaml.j2
-    - storageclass-immediate.yaml.j2
+- name: Wait for the CRD storagecluster to become available
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: storageclusters.ocs.openshift.io
+  register: r_crd_storageclusters
+  retries: 200
+  delay: 10
+  until: r_crd_storageclusters.resources | default([]) | list | length == 1
 
-  - name: Wait for StorageCluster to be available
-    kubernetes.core.k8s_info:
-      api_version: ocs.openshift.io/v1
-      kind: StorageCluster
-      name: ocs-external-storagecluster
-      namespace: openshift-storage
-    register: r_storage_cluster
-    retries: 30
-    delay: 10
-    ignore_errors: true
-    until:
-    - r_storage_cluster.resources is defined
-    - r_storage_cluster.resources | length > 0
-    - r_storage_cluster.resources[0].status is defined
-    - r_storage_cluster.resources[0].status.phase is defined
-    - r_storage_cluster.resources[0].status.phase == "Ready"
+- name: Set up StorageCluster
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) | from_yaml }}"
+  register: r_storagecluster
+  until: r_storagecluster is success
+  retries: 30
+  delay: 30
+  loop:
+  - secret.yaml.j2
+  - storagecluster.yaml.j2
+  - storageclass.yaml.j2
+  - storageclass-immediate.yaml.j2
 
-  - name: Delete secrets if Storage Cluster status is not successful
-    when: not r_storage_cluster.resources[0].status.phase == "Ready"
-    block:
-    - name: Delete secrets
-      kubernetes.core.k8s:
-        state: absent
-        api_version: v1
-        kind: Secret
-        name: "{{ item }}"
-        namespace: openshift-storage
-      loop:
-      - rook-csi-rbd-node
-      - rook-csi-rbd-provisioner
+- name: Wait for StorageCluster to be available
+  kubernetes.core.k8s_info:
+    api_version: ocs.openshift.io/v1
+    kind: StorageCluster
+    name: ocs-external-storagecluster
+    namespace: openshift-storage
+    wait: true
+    wait_sleep: 10
+    wait_timeout: "{{ ocp4_workload_external_odf_ceph_storage_system_deploy_timeout }}"
+    wait_condition:
+      reason: ReconcileCompleted
+      status: "True"
+      type: Available
+  register: r_storage_cluster
 
-    - name: Wait for StorageCluster to be available - again
-      kubernetes.core.k8s_info:
-        api_version: ocs.openshift.io/v1
-        kind: StorageCluster
-        name: ocs-external-storagecluster
-        namespace: openshift-storage
-      register: r_storage_cluster
-      retries: "{{ ocp4_workload_external_odf_storage_cluster_deploy_retries | int }}"
-      delay: 10
-      until: r_storage_cluster.resources[0].status.phase == "Ready"
+- name: Create PVC for image registry
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'pvc-imageregistry.yaml') | from_yaml }}"
+  register: r_pvc
+  until: r_pvc is success
+  retries: 30
+  delay: 30
 
-  - name: Create PVC for image registry
-    kubernetes.core.k8s:
-      state: present
-      definition: "{{ lookup('template', 'pvc-imageregistry.yaml') | from_yaml }}"
-    register: r_pvc
-    until: r_pvc is success
-    retries: 30
-    delay: 30
-
-  - name: Configure registry
-    kubernetes.core.k8s:
-      state: patched
-      api_version: imageregistry.operator.openshift.io/v1
-      kind: Config
-      name: cluster
-      definition:
-        spec:
+- name: Configure registry
+  kubernetes.core.k8s:
+    state: patched
+    api_version: imageregistry.operator.openshift.io/v1
+    kind: Config
+    name: cluster
+    definition:
+      spec:
+        managementState: Managed
+        replicas: 1
+        rolloutStrategy: Recreate
+        storage:
           managementState: Managed
-          replicas: 1
-          rolloutStrategy: Recreate
-          storage:
-            managementState: Managed
-            pvc:
-              claim: pvc-image-registry
+          pvc:
+            claim: pvc-image-registry
 
-  - name: Enable ODF console plugin
-    kubernetes.core.k8s:
-      state: patched
-      api_version: operator.openshift.io/v1
-      kind: Console
-      name: cluster
-      definition:
-        spec:
-          plugins:
-          - odf-console
+- name: Enable ODF console plugin
+  kubernetes.core.k8s:
+    state: patched
+    api_version: operator.openshift.io/v1
+    kind: Console
+    name: cluster
+    definition:
+      spec:
+        plugins:
+        - odf-console
 
-  - name: Check if BackingStore is ready
-    kubernetes.core.k8s_info:
-      api_version: noobaa.io/v1alpha1
-      kind: BackingStore
-      name: noobaa-default-backing-store
-      namespace: openshift-storage
-    register: r_backingstore
-    retries: 60
-    delay: 10
-    until:
-    - r_backingstore.resources is defined
-    - r_backingstore.resources | length | int > 0
-    - r_backingstore.resources[0].status is defined
-    - r_backingstore.resources[0].status.phase is defined
-    - r_backingstore.resources[0].status.phase == 'Ready'
+- name: Wait until BackingStore is available
+  kubernetes.core.k8s_info:
+    api_version: noobaa.io/v1alpha1
+    kind: BackingStore
+    name: noobaa-default-backing-store
+    namespace: openshift-storage
+    wait: true
+    wait_sleep: 10
+    wait_timeout: "{{ ocp4_workload_external_odf_noobaa_deploy_timeout }}"
+    wait_condition:
+      reason: "Backing store mode: OPTIMAL"
+      status: "True"
+      type: Available
+  register: r_backingstore
 
-  - name: Change numVolumes of pvPool BackingStore
-    kubernetes.core.k8s:
-      state: patched
-      api_version: noobaa.io/v1alpha1
-      kind: BackingStore
-      name: noobaa-default-backing-store
-      namespace: openshift-storage
-      definition:
-        spec:
-          pvPool:
-            numVolumes: "{{ ocp4_workload_external_odf_backingstore_pv_volumes }}"
+- name: Change BackingStore numVolumes in pvPool
+  kubernetes.core.k8s:
+    state: patched
+    api_version: noobaa.io/v1alpha1
+    kind: BackingStore
+    name: noobaa-default-backing-store
+    namespace: openshift-storage
+    definition:
+      spec:
+        pvPool:
+          numVolumes: "{{ ocp4_workload_external_odf_backingstore_pv_volumes }}"
 
-  - name: Change default BackingStore resources
-    when: ocp4_workload_external_odf_backingstore_custom_resources | default(false)
-    kubernetes.core.k8s:
-      state: patched
-      api_version: noobaa.io/v1alpha1
-      kind: BackingStore
-      name: noobaa-default-backing-store
-      namespace: openshift-storage
-      definition:
-        spec:
-          pvPool:
-            resources:
-              limits:
-                cpu: "{{ ocp4_workload_external_odf_backingstore_cpu_limits }}"
-                memory: "{{ ocp4_workload_external_odf_backingstore_memory_limits }}"
-              requests:
-                cpu: "{{ ocp4_workload_external_odf_backingstore_cpu_requests }}"
-                memory: "{{ ocp4_workload_external_odf_backingstore_memory_requests }}"
-                storage: "{{ ocp4_workload_external_odf_backingstore_storage_requests }}"
+- name: Change default BackingStore resources
+  when: ocp4_workload_external_odf_backingstore_custom_resources | default(false) | bool
+  kubernetes.core.k8s:
+    state: patched
+    api_version: noobaa.io/v1alpha1
+    kind: BackingStore
+    name: noobaa-default-backing-store
+    namespace: openshift-storage
+    definition:
+      spec:
+        pvPool:
+          resources:
+            limits:
+              cpu: "{{ ocp4_workload_external_odf_backingstore_cpu_limits }}"
+              memory: "{{ ocp4_workload_external_odf_backingstore_memory_limits }}"
+            requests:
+              cpu: "{{ ocp4_workload_external_odf_backingstore_cpu_requests }}"
+              memory: "{{ ocp4_workload_external_odf_backingstore_memory_requests }}"
+              storage: "{{ ocp4_workload_external_odf_backingstore_storage_requests }}"
