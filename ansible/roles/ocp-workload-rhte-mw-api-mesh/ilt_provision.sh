@@ -95,4 +95,3 @@ cd $PATH_TO_AAD_ROOT
 ensurePreReqs
 login
 executeLoop
-

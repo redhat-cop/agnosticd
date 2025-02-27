@@ -92,4 +92,3 @@ function executeAnsible() {
 ensurePreReqs
 login
 executeLoop
-

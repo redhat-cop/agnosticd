@@ -72,7 +72,7 @@ spec:
       featureFlags:
       - EnableCSI
       defaultPlugins:
-      - csi 
+      - csi
       - openshift
       - aws
       - kubevirt

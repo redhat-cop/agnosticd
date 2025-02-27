@@ -37,7 +37,7 @@ metadata:
   namespace: openshift-cnv
 spec:
 EOF
-oc create -f openshift-cnv-operator.yaml 
+oc create -f openshift-cnv-operator.yaml
 
 cat << EOF | oc apply -f -
 apiVersion: project.openshift.io/v1
@@ -79,4 +79,3 @@ metadata:
 spec:
   olm_managed: true
 EOF
-

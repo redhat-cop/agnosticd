@@ -29,4 +29,3 @@ items:
       name: rhods-operator
       source: addon-managed-odh-catalog
       sourceNamespace: openshift-marketplace
-

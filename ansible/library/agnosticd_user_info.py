@@ -17,12 +17,12 @@
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 
 ANSIBLE_METADATA = {
-    'metadata_version': '1.1',
-    'status': ['preview'],
-    'supported_by': 'community'
+    "metadata_version": "1.1",
+    "status": ["preview"],
+    "supported_by": "community",
 }
 
-DOCUMENTATION = '''
+DOCUMENTATION = """
 ---
 module: agnosticd_user_info
 
@@ -55,9 +55,9 @@ options:
 
 author:
 - Johnathan Kupferer
-'''
+"""
 
-RETURN = '''
+RETURN = """
 msg:
   description: 'The message or body, prepended by "user.info" or "user.body"'
   type: str
@@ -66,6 +66,6 @@ error:
   description: Error message on failure
   type: str
   returned: failed
-'''
+"""
 
 # Module is implemented as an action plugin

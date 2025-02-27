@@ -7,4 +7,3 @@ Checks if required packages are installed, if proper directories exist and if re
 ```
 remote_user: ec2-user (default)
 ```
-

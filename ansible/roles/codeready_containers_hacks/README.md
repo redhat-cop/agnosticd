@@ -8,21 +8,21 @@ CodeReady Containers brings a minimal, preconfigured OpenShift 4.1 or newer clus
 Requirements
 ------------
 
-*  Ansible 
-*  Fedora or RHEL 
+*  Ansible
+*  Fedora or RHEL
 * IF using RHEL make sure it is registered
-* OpenShift CodeReady WorkSpaces  pull secret 
+* OpenShift CodeReady WorkSpaces  pull secret
   * https://cloud.redhat.com/openshift/install/crc/installer-provisioned
 
-**GET SHA** 
+**GET SHA**
 ```
 $ curl -OL https://mirror.openshift.com/pub/openshift-v4/clients/crc/1.8.0/sha256sum.txt
 $ cat sha256sum.txt | grep crc-linux-amd64.tar.xz | awk '{print $1}'
 ```
 
-Inspriation 
+Inspriation
 --------------
-[Accessing CodeReady Containers on a Remote Server](https://www.openshift.com/blog/accessing-codeready-containers-on-a-remote-server/) by Jason Dobies  
+[Accessing CodeReady Containers on a Remote Server](https://www.openshift.com/blog/accessing-codeready-containers-on-a-remote-server/) by Jason Dobies
 [Overview: running crc on a remote server](https://gist.github.com/tmckayus/8e843f90c44ac841d0673434c7de0c6a) by [Trevor McKay](https://gist.github.com/tmckayus)
 
 Features
@@ -56,15 +56,15 @@ Dependencies
 
 **On RHEL 8.x**
 * Register system
-* Follow system requirements from the code ready containers documentation 
+* Follow system requirements from the code ready containers documentation
 
 **On Fedora**
-* Follow system requirements from the code ready containers documentation 
+* Follow system requirements from the code ready containers documentation
 * enable and start sshd
 
 Example Playbook
 ----------------
-To run playbook as sudo add the `-K` flag 
+To run playbook as sudo add the `-K` flag
 Including an example of how to use your role (for instance, with variables passed in as parameters) is always nice for users too:
 ```
 - hosts: servers
@@ -76,7 +76,7 @@ Including an example of how to use your role (for instance, with variables passe
       changeme
     codeready_containers_hacks_use_all_in_one_haproxy: true
     codeready_containers_hacks_haproxy_ip: ""
-    codeready_containers_hacks_use_all_in_one_dnsmasq: true 
+    codeready_containers_hacks_use_all_in_one_dnsmasq: true
     codeready_containers_hacks_log_level: info
     codeready_containers_hacks_ocp4_release: latest
     codeready_containers_hacks_ocp4_version: 4.4.3
@@ -125,7 +125,7 @@ ansible-playbook  -i inventory deploy-crc.yml --tags get_codeready_info
 
 **Delete deployment**
 ```
-ansible-playbook  -i inventory deploy-crc.yml --extra-vars "codeready_containers_hacks_delete_crc_deployment=true" -K 
+ansible-playbook  -i inventory deploy-crc.yml --extra-vars "codeready_containers_hacks_delete_crc_deployment=true" -K
 ```
 
 Debug info
@@ -139,11 +139,11 @@ To-Do
 * develop against MacOS
 * test against RHEL 7
 * develop for windows
-* test using external dns and haproxy 
+* test using external dns and haproxy
 * develop against other OS's
-* add cpu and memory custom sizing options 
+* add cpu and memory custom sizing options
 * delete deployment
-  
+
 License
 -------
 

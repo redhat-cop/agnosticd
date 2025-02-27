@@ -10,8 +10,8 @@ x=5
 ns_prefix="hello-openshift-"
 
 for i in $(seq 1 $x); do
-        echo -e "${GREEN}Probing app in namespace ""$ns_prefix""$i""${NC}"	
+        echo -e "${GREEN}Probing app in namespace ""$ns_prefix""$i""${NC}"
 	route=$(oc get route hello-openshift -n "$ns_prefix""$i" -o go-template='{{ .spec.host }}{{ println }}')
 	curl http://${route}
 done
- 
+

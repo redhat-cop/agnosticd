@@ -1,6 +1,7 @@
 # (c) 2021 Johnathan Kupferer
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
-from __future__ import (absolute_import, division, print_function)
+from __future__ import absolute_import, division, print_function
+
 __metaclass__ = type
 
 DOCUMENTATION = """
@@ -29,25 +30,28 @@ EXAMPLES = """
       3664
   debug:
     msg: "{{ lookup('unvault_string', message) }}"
-"""     
+"""
 
 RETURN = """
   _raw:
     description:
       - list of strings to unvault
     type: list
-    elements: raw   
+    elements: raw
 """
 
 from ansible.plugins.lookup import LookupBase
 
-class LookupModule(LookupBase): 
+
+class LookupModule(LookupBase):
     def run(self, terms, variables=None, **kwargs):
         self.set_options(direct=kwargs)
         ret = []
         for term in terms:
-            if term.startswith('$ANSIBLE_VAULT;'):
-                ret.append(self._loader._vault.decrypt(term.encode('utf-8')).decode('utf-8'))
+            if term.startswith("$ANSIBLE_VAULT;"):
+                ret.append(
+                    self._loader._vault.decrypt(term.encode("utf-8")).decode("utf-8")
+                )
             else:
                 ret.append(term)
         return ret

@@ -1,7 +1,8 @@
 # (c) 2022 Guillaume Core (fridim)
 
 # python 3 headers, required if submitting to Ansible
-from __future__ import (absolute_import, division, print_function)
+from __future__ import absolute_import, division, print_function
+
 __metaclass__ = type
 
 import packet
@@ -52,6 +53,7 @@ DOCUMENTATION = """
 
 display = Display()
 
+
 class LookupModule(LookupBase):
     """
     Lookup module to interact with the Equinix Metal API
@@ -63,23 +65,25 @@ class LookupModule(LookupBase):
         # this will already take into account env vars and ini config
         self.set_options(var_options=variables, direct=kwargs)
 
-        token = self.get_option('api_token')
+        token = self.get_option("api_token")
         if not token:
-            if 'equinix_metal_api_token' in variables:
-                token = variables['equinix_metal_api_token']
-                display.v("equinix_api: use variable variable equinix_metal_api_token as the token")
+            if "equinix_metal_api_token" in variables:
+                token = variables["equinix_metal_api_token"]
+                display.v(
+                    "equinix_api: use variable variable equinix_metal_api_token as the token"
+                )
             else:
                 raise AnsibleLookupError("API token must be provided")
 
-        verb = self.get_option('verb')
+        verb = self.get_option("verb")
         if not verb:
-            verb = 'GET'
+            verb = "GET"
 
-        params = self.get_option('params')
+        params = self.get_option("params")
         if not params:
             params = {}
 
-        retries = self.get_option('retries')
+        retries = self.get_option("retries")
         if not retries:
             retries = 5
 
@@ -93,8 +97,8 @@ class LookupModule(LookupBase):
                     try:
                         manager = packet.Manager(auth_token=token)
                         resp = manager.call_api(term, type=verb, params=params)
-                        if 'capacity' in resp:
-                            ret.append(resp['capacity'])
+                        if "capacity" in resp:
+                            ret.append(resp["capacity"])
                         else:
                             raise AnsibleLookupError(
                                 "equinix_api: Bad response from Equinix Metal API, 'capacity' expected in response."
@@ -104,7 +108,9 @@ class LookupModule(LookupBase):
                     except packet.Error as packet_error:
                         display.display(repr(packet_error))
                         retries = retries - 1
-                        display.display("equinix_api lookup: %d retries left" %(retries))
+                        display.display(
+                            "equinix_api lookup: %d retries left" % (retries)
+                        )
                         if retries > 0:
                             delay = delay * 2
                             sleep(delay)

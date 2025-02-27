@@ -1,4 +1,4 @@
-#!/bin/bash 
+#!/bin/bash
 
 # default images & versions - these CANNOT be overridden
 # see commandline flags below for what can be overridden for offline & custom registry scenarios
@@ -9,11 +9,11 @@ DEFAULT_PVC_JOBS_IMAGE_PATH_TAG="ubi8-minimal:8.0-127"
 DEFAULT_SERVER_IMAGE_NAME="server-rhel8"
 DEFAULT_OPERATOR_IMAGE_NAME="server-operator-rhel8"
 # set this to 1 to support having a null CRW_PREFIX (see --no-crw-prefix flag)
-NO_CRW_PREFIX=0 
+NO_CRW_PREFIX=0
 
 # default images & versions - these CAN be overriden
 # see commandline flags below for what can be overridden for offline & custom registry scenarios
-DEFAULT_OPENSHIFT_PROJECT="workspaces" 
+DEFAULT_OPENSHIFT_PROJECT="workspaces"
 
 DEFAULT_RH_REGISTRY="registry.redhat.io"  # could use another registry, like registry.access.redhat.com
 DEFAULT_CRW_REGISTRY="${DEFAULT_RH_REGISTRY}" # could use another registry, like quay.io
@@ -166,7 +166,7 @@ export RH_REGISTRY=${RH_REGISTRY:-${DEFAULT_RH_REGISTRY}}
 export CRW_REGISTRY=${CRW_REGISTRY:-${DEFAULT_CRW_REGISTRY}}
 if [[ ${NO_CRW_PREFIX} -eq 1 ]]; then
   export CRW_PREFIX=""
-else 
+else
   export CRW_PREFIX=${CRW_PREFIX:-${DEFAULT_CRW_PREFIX}}
 fi
 

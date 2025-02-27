@@ -98,4 +98,3 @@ ensurePreReqs
 login
 initializeOpenshift
 executeLoop
-

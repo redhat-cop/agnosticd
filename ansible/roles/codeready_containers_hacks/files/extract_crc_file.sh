@@ -1,9 +1,9 @@
-#!/bin/bash 
+#!/bin/bash
 set -xe
 cd /tmp/
 
-if [ -d crc-linux-*-amd64/ ]; then 
-  rm -rf crc-linux-*-amd64/ 
+if [ -d crc-linux-*-amd64/ ]; then
+  rm -rf crc-linux-*-amd64/
 fi
 
 

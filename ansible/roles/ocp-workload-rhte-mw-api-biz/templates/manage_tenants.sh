@@ -27,7 +27,7 @@ function createAndActivateTenants() {
 
     for i in $(seq ${startTenant} ${endTenant}) ; do
 
-	   
+
 		tenantId=user$i;
 
 		echo "Now starting deployment for user :" $tenantId;
@@ -39,7 +39,7 @@ function createAndActivateTenants() {
 
 		# Create project for user sso (ephemeral)
 
-		    oc adm new-project $tenantId-sso --admin=$tenantId  --description=$tenantId 
+		    oc adm new-project $tenantId-sso --admin=$tenantId  --description=$tenantId
 
 		sleep 5s;
 
@@ -56,7 +56,7 @@ function createAndActivateTenants() {
 		# Create project for Syndesis
 
 
-		    oc adm new-project $tenantId-fuse-ignite --admin=$tenantId  --description=$tenantId 
+		    oc adm new-project $tenantId-fuse-ignite --admin=$tenantId  --description=$tenantId
 
 		sleep 5s;
 
@@ -73,7 +73,7 @@ function createAndActivateTenants() {
 
 		# Create NodeJS client project
 
-		    oc adm new-project $tenantId-client --admin=$tenantId  --description=$tenantId 
+		    oc adm new-project $tenantId-client --admin=$tenantId  --description=$tenantId
 		sleep 5s;
 
 		# Create Gateway Routes
@@ -85,8 +85,8 @@ function createAndActivateTenants() {
 
 		# Provision new routes for Quoting app
 
-		oc create route edge quote-stage --service="stage-apicast" --hostname=$tenantId-quote-stage.apps.{{subdomain_base}} 
-		oc create route edge quote-prod --service="prod-apicast" --hostname=$tenantId-quote-prod.apps.{{subdomain_base}}  
+		oc create route edge quote-stage --service="stage-apicast" --hostname=$tenantId-quote-stage.apps.{{subdomain_base}}
+		oc create route edge quote-prod --service="prod-apicast" --hostname=$tenantId-quote-prod.apps.{{subdomain_base}}
 
 		# Resume deployment of apicast gateways
 
@@ -134,7 +134,7 @@ function deleteTenants() {
 }
 
 prep
-if [ "x$create_tenants" == "xtrue"  ]; then 
+if [ "x$create_tenants" == "xtrue"  ]; then
     createAndActivateTenants
 else
     deleteTenants

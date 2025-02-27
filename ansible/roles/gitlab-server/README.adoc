@@ -8,7 +8,7 @@ This role installs and configure gitlab. Also setup & configure firewalld and it
 Requirements
 ------------
 
-* Repository or subscription must be pre-configure to install dependencies packages 
+* Repository or subscription must be pre-configure to install dependencies packages
 
 Role Variables
 --------------
@@ -18,7 +18,7 @@ Role Variables
 Example Playbook
 ----------------
 
-How to use the role in playbook 
+How to use the role in playbook
 
 ```
 [user@node ~]$ cat sample_vars.yml
@@ -44,4 +44,3 @@ GPLv3
 Author Information
 ------------------
 Mitesh The Mouse <mitsharm@redhat.com>
-

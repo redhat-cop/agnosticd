@@ -22,5 +22,3 @@ oc create namespace openshift-cnv
 oc create configmap custom-ca \
      --from-file=ca-bundle.crt=chain1.pem \
      -n openshift-cnv
-
-
