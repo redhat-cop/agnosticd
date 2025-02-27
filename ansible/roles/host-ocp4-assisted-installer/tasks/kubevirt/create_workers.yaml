@@ -1,4 +1,83 @@
 ---
+- name: Set default interfaces/networks variables
+  ansible.builtin.set_fact:
+    _instance_interfaces:
+      - masquerade: {}
+        model: virtio
+        name: default
+      - name: "{{ network }}"
+        macAddress: "{{ ai_workers_macs2[_index|int-1] }}"
+        bridge: {}
+    _instance_networks:
+      - name: default
+        pod:
+          vmNetworkCIDR: "{{ pod_network }}"
+      - name: "{{ network }}"
+        multus:
+          networkName: "{{ network_name }}"
+
+- name: Add attach workers networks if defined
+  vars:
+    _network_name: "{{ _network.split('/')[1] if '/' in _network else _network + guid }}"
+    _network_multusname: "{{ _network if '/' in _network else _network + guid }}"
+  when: ai_attach_workers_networks | default([]) | length > 0
+  ansible.builtin.set_fact:
+    _instance_interfaces: >-
+      {{
+        _instance_interfaces + [{
+          'name': _network_name,
+          'bridge': {},
+          'model': 'virtio',
+          'macAddress': ai_attach_workers_macs[_network][_index|int-1]
+        } ]
+      }}
+    _instance_networks: >-
+      {{ _instance_networks + [
+          {
+              'name': _network_name,
+              'multus': {'networkName': _network_multusname}
+          }] }}
+  loop: "{{ ai_attach_workers_networks }}"
+  loop_control:
+    loop_var: _network
+
+- name: Set default volumes/disks variables
+  ansible.builtin.set_fact:
+    _instance_volumes:
+      - dataVolume:
+          name: "{{ vmname }}"
+        name: rootdisk
+      - dataVolume:
+          name: "{{ vmname }}-installation-cdrom"
+        name: installation-cdrom
+    _instance_disks:
+      - bootOrder: 1
+        disk:
+          bus: virtio
+        name: rootdisk
+      - bootOrder: 2
+        cdrom:
+          bus: sata
+        name: installation-cdrom
+
+- name: Set the instances disks
+  ansible.builtin.set_fact:
+    _instance_disks: "{{ _instance_disks | from_yaml + [
+    {
+        'name': _disk.metadata.name,
+        'disk': {'bus': _instance.disk_type | default('virtio')}
+    }
+    ] }}"
+    _instance_volumes: "{{ _instance_volumes | from_yaml + [
+        {
+            'name': _disk.metadata.name,
+            'dataVolume': {'name': _disk.metadata.name}
+        }
+    ] }}"
+  loop: "{{ ai_workers_extra_disks | default([]) | list }}"
+  loop_control:
+    loop_var: _disk
+
 - name: Create Worker virtual machine
   kubevirt.core.kubevirt_vm:
     api_version: kubevirt.io/v1
@@ -7,7 +86,17 @@
     validate_certs: false
     name: "{{ vmname }}"
     namespace: "{{ namespace }}"
-    data_volume_templates:
+    data_volume_templates: "{{ _datavolume + (ai_workers_extra_disks | default([]) | to_json | replace('INSTANCENAME', vmname) | from_json ) }}"
+    running: true
+    wait: false
+    annotations:
+      vm.kubevirt.io/os: rhel8
+    labels:
+      kubevirt.io/domain: "{{ vmname }}"
+      role: worker
+    spec: "{{ _spec | from_yaml }}"
+  vars:
+    _datavolume:
       - metadata:
           name: "{{ vmname }}-installation-cdrom"
         spec:
@@ -18,7 +107,7 @@
           storage:
             resources:
               requests:
-                storage: 2Gi
+                storage: 1Gi
       - metadata:
           name: "{{ vmname }}"
         spec:
@@ -30,15 +119,6 @@
               requests:
                 storage: 100Gi
             storageClassName: "{{ storageclass }}"
-    running: true
-    wait: false
-    annotations:
-      vm.kubevirt.io/os: rhel8
-    labels:
-      kubevirt.io/domain: "{{ vmname }}"
-      role: worker
-    spec: "{{ _spec | from_yaml }}"
-  vars:
     _spec: |
       domain:
         cpu:
@@ -47,22 +127,8 @@
           threads: 1
           model: host-passthrough
         devices:
-          disks:
-            - bootOrder: 1
-              disk:
-                bus: virtio
-              name: rootdisk
-            - bootOrder: 2
-              cdrom:
-                bus: sata
-              name: installation-cdrom
-          interfaces:
-            - masquerade: {}
-              model: virtio
-              name: default
-            - name: "{{ network_name }}"
-              macAddress: "{{ ai_workers_macs2[_index|int-1] }}"
-              bridge: {}
+          disks: {{ _instance_disks | replace('INSTANCENAME', vmname) }}
+          interfaces: {{ _instance_interfaces }}
           networkInterfaceMultiqueue: true
         machine:
           type: pc-q35-rhel8.6.0
@@ -77,21 +143,9 @@
         initialDelaySeconds: 120
         periodSeconds: 5
       evictionStrategy: LiveMigrate
-      networks:
-        - name: default
-          pod:
-            vmNetworkCIDR: "{{ pod_network }}"
-        - name: "{{ network_name }}"
-          multus:
-            networkName: "{{ network_name }}"
+      networks: {{ _instance_networks }}
       terminationGracePeriodSeconds: 180
-      volumes:
-        - dataVolume:
-            name: "{{ vmname }}"
-          name: rootdisk
-        - dataVolume:
-            name: "{{ vmname }}-installation-cdrom"
-          name: installation-cdrom
+      volumes: {{ _instance_volumes | replace('INSTANCENAME', vmname) }}
 
 - name: Wait till VM is running
   kubernetes.core.k8s_info:
