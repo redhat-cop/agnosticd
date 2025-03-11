@@ -1,0 +1,98 @@
+---
+# vim: set ft=ansible
+
+# Implement your Workload deployment tasks here
+
+- name: create the variable template file
+  template:
+    src: files/workshop-settings.j2
+    dest: /tmp/workshop-settings.sh
+
+- name: copy the openshift template to the remote host
+  copy:
+    src: files/hosted-workshop-production.json
+    dest: /tmp/hosted-workshop-production.json
+
+- name: create lab-ossm project
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: lab-ossm
+
+- name: check if homeroom was already deployed
+  k8s_info:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    name: lab-ossm
+    namespace: lab-ossm-spawner
+  register: lab_ossm_deployment
+
+- name: Get the cluster subdomain
+  k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: cluster_subdomain
+
+- name: check for the oauthclient if we're about to deploy the labguide
+  k8s_info:
+    api_version: oauth.openshift.io/v1
+    kind: OAuthClient
+    name: lab-ossm-console
+  register: oauth_client
+
+- name: ensure the oauthclient is not present from an earlier run if we're about to deploy labguide
+  k8s:
+    state: absent
+    definition:
+      apiVersion: oauth.openshift.io/v1
+      kind: OAuthClient
+      name: lab-ossm-console
+  when:
+    - oauth_client.resources | length | int > 0
+    - lab_ossm_deployment.resources | length | int < 1
+
+- name: deploy the labguide with the params file
+  shell: |
+    oc new-app -n lab-ossm /tmp/hosted-workshop-production.json \
+    --param CLUSTER_SUBDOMAIN="{{ cluster_subdomain.resources[0].spec.domain }}" \
+    --param WORKSHOP_NAME="lab-ossm" \
+    --param WORKSHOP_IMAGE="quay.io/thoraxe/lab-ossm:{{ workshop_environment }}" \
+    --param SPAWNER_NAMESPACE="lab-ossm" \
+    --param WORKSHOP_ENVVARS="`cat /tmp/workshop-settings.sh`" --param OC_VERSION="4.3"
+  when: lab_ossm_deployment.resources | length | int < 1
+
+- name: grab the homeroom route for output
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: lab-ossm-spawner
+    namespace: lab-ossm
+  register: lab_ossm_route
+
+- name: output the homeroom route
+  agnosticd_user_info:
+    msg: "Homeroom URL: https://{{ lab_ossm_route.resources[0].spec.host }}"
+
+- name: output homeroom route for users
+  when:
+    - install_idm | default('') == 'htpasswd'
+  loop: "{{ range(0, 1 + user_count | default(200) | int) | list }}"
+  loop_control:
+    loop_var: n
+  agnosticd_user_info:
+    user: "{{ t_user }}"
+    msg: |
+      Username: {{ t_user }}
+      Homeroom URL: https://{{ lab_ossm_route.resources[0].spec.host }}
+  vars:
+    t_user: "{{ user_base_name | default('user') ~ n }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

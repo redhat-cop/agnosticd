@@ -1,0 +1,143 @@
+= SSH keys and access =
+
+This section describes how SSH keys are managed in agnosticd.
+
+== Scope ==
+
+Here is the list of agnosticd cloud providers that follow this workflow:
+
+* ec2
+* azure
+
+Long-term, we want all cloud providers to comply.
+
+== Workflow ==
+
+. PRE-INFRA cloud-agnostic role `create_ssh_provision_key` generates a per-environment, for infra, local SSH key
+** output file: private and public key in `output_dir`
+** output facts:
+*** `ssh_provision_key_name`        ex: `ssh_provision_{{ guid }}`
+*** `ssh_provision_key_path`        ex: `/tmp/output_dir/ssh_provision_{{ guid }}`
+*** `ssh_provision_pubkey_path`     ex: `/tmp/output_dir/ssh_provision_{{ guid }}.pub`
+*** `ssh_provision_pubkey_content`
+** Role is idempotent and can be used to only set the facts
+. INFRA role `infra-{{ cloud_provider }}-ssh-key` to create the keypair in the cloud provider
+. INFRA in the cloud providers, use the key previously created to provision the infra
+. POST-INFRA generate ssh configuration using the variable `ssh_provision_key_path`, done by the role link:https://github.com/redhat-cop/agnosticd/blob/development/ansible/roles-infra/infra-common-ssh-config-generate[infra-common-ssh-config-generate]
+. POST-INFRA cloud-agnosticd post-infra role to update the authorized_keys on all hosts
+** Input var:  `ssh_authorized_keys`: list of content pub keys and key options. That's where we set the content of the *public* keys for additional access (admins, backdoor key, ...).
++
+[source,yaml]
+.example `ssh_authorized_keys` (preferred)
+----
+ssh_authorized_keys:
+  - key: ssh-rsa ...
+  - key: ssh-rsa ...
+    key_options: no-port-forwarding,from="10.0.0.1"
+  - key: https://github.com/fridim.keys
+----
+*** `all_ssh_authorized_keys` list is also supported (backward-compatible)
++
+[source,yaml]
+.example `all_ssh_authorized_keys`  (legacy only)
+----
+all_ssh_authorized_keys:
+  - ssh-rsa ...
+  - ssh-rsa ...
+  - https://github.com/fridim.keys
+----
+. DESTROY role `infra-{{ cloud_provider }}-ssh-key` to delete the keypair in the cloud provider
+
+=== Lifecycle and destroy ===
+
+The private key and SSH config are stored in `output_dir`.
+In order to access the instances after provision you need access to `output_dir`.
+If you're developping from your laptop, that should be transparent since `output_dir` will be persistent across calls of `ansible-playbook`.
+
+On the other hand, when you're provisioning from Tower or Controller (or from RHPDS), you need `output_dir` to be persistent across jobs and that is done by the 2 following roles:
+
+* link:../ansible/roles/agnosticd_save_output_dir[`agnosticd_save_output_dir`] Save `output_dir` and push it to S3
+* link:../ansible/roles/agnosticd_restore_output_dir[`agnosticd_restore_output_dir`] Restore `output_dir` from S3
+
+Make sure the secrets and variables are set so those roles are executed:
+[source,yaml]
+----
+# PROD bucket
+# Archive object to create in S3 storage.
+agnosticd_save_output_dir_archive: "{{ guid }}_{{ uuid }}.tar.gz"
+# If you want to protect the archive with a password:
+# it can be useful if the S3 bucket is shared between multiple users.
+# agnosticd_save_output_dir_archive_password: ...
+
+# S3 storage bucket access information, should be provided by a secret.
+agnosticd_save_output_dir_s3_bucket: agnosticd-output-dir
+agnosticd_save_output_dir_s3_region: us-east-1
+agnosticd_save_output_dir_s3_access_key_id: "..."
+agnosticd_save_output_dir_s3_secret_access_key: "..."
+----
+
+
+== Bring your own provision key (optional) ==
+
+NOTE: Most of the time you don't need to bring your own key as it is generated automatically.
+
+In some cases the SSH key generation described above is not working well (e.g., the key pair can be lost if not stored at persistent storage and destroy job will fail).
+It is possible to specify an existing SSH key which will be used for the environment provisioning and destroy by setting the following variables:
+
+* `ssh_provision_key_path`
+* `ssh_provision_key_name`
+* `ssh_provision_pubkey_content` (optional)
++
+[source,yaml]
+.example setting `ssh_provision_*` variables
+----
+ssh_provision_key_name: "my_private_ssh_key.pem"
+ssh_provision_key_path: "/home/account/.ssh/{{ ssh_provision_key_name }}"
+ssh_provision_pubkey_content: ssh-rsa AAAAB3NzaC1 ...rest of the key... JjQ==
+----
+
+== Roles ==
+
+* link:../ansible/roles-infra/create_ssh_provision_key[`create_ssh_provision_key`]
++
+Generate locally a private SSH key in `output_dir` and set the facts for later use. The resulting public key is used to provision the instances. The role is idempotent and can be run multiple times.
+* `infra-{{ cloud_provider }}-ssh-key`
++
+Create the key resource in the cloud provider so it can be attached to instances. For example link:../ansible/roles-infra/infra-ec2-ssh-key[`infra-ec2-ssh-key`].
+* link:../ansible/roles-infra/infra-common-ssh-config-generate[`infra-common-ssh-config-generate`]
++
+Generate the SSH configuration in `output_dir`
+* link:../ansible/roles/ssh_authorized_keys[`ssh_authorized_keys`]
++
+Populate `authorized_keys` files on the instances for additional access.
+* link:../ansible/roles/locate_env_authorized_key[`locate_env_authorized_key`]
++
+Compatibility role to facilitate migration from deprecated roles. See link:../ansible/roles/locate_env_authorized_key/readme.adoc[readme].
+
+=== Deprecated roles and variables ===
+
+Roles:
+[cols="1,1"]
+|=====================
+| DEPRECATED
+| Use instead
+
+| `infra-local-create-ssh_key`
+| `create_ssh_provision_key`
+
+| `set_env_authorized_key`
+| `bastion-lite`
+|=====================
+
+Variables:
+[cols="1,1"]
+|=====================
+| DEPRECATED
+| Use instead
+
+| `env_authorized_key`
+| `ssh_provision_key_name` or `hostvars.localhost.ssh_provision_key_name`
+
+| `"{{ output_dir }}/{{ env_authorized_key }}"`
+| `ssh_provision_key_path` or `hostvars.localhost.ssh_provision_key_path`
+|=====================

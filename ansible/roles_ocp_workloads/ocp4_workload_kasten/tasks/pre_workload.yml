@@ -1,0 +1,123 @@
+---
+
+- name: Gather aws security group info
+  amazon.aws.ec2_group_info:
+    filters:
+      "tag:Name": "BastionSG"
+    region: "{{ aws_region }}"
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+  register: sg_info
+
+- name: Add ingress rules for ports 9000 and 9090 for minio
+  amazon.aws.ec2_group:
+    name: "{{ sg_info.security_groups[0].group_name }}"
+    state: present
+    description: "Edited by Ansible installer"
+    purge_rules: false
+    aws_access_key: "{{ aws_access_key_id }}"
+    aws_secret_key: "{{ aws_secret_access_key }}"
+    region: "{{ aws_region }}"
+    rules:
+      - proto: tcp
+        ports:
+          - 9000
+        cidr_ip: 0.0.0.0/0
+      - proto: tcp
+        ports:
+          - 9090
+        cidr_ip: 0.0.0.0/0
+
+- name: Install minio server from remote repo
+  ansible.builtin.dnf:
+    name: "{{ ocp4_workload_kasten_minio_rpm_url }}"
+    state: present
+    disable_gpg_check: true
+  become: true
+
+- name: Create minio directory
+  file:
+    path: "/home/{{ ansible_user }}/minio"
+    state: directory
+
+# For testing
+# Begin:
+- name: Check if MinIO is running
+  shell: "pgrep -x minio"
+  register: minio_process
+  ignore_errors: true
+
+- name: Stop MinIO if it's running
+  shell: "pkill -f 'minio server'"
+  when: minio_process.rc == 0
+# END
+
+- name: Start minio
+  shell: "nohup /usr/local/bin/minio server /home/{{ ansible_user }}/minio --console-address :9090 >/dev/null 2>&1 &"
+
+- name: Download minio-client
+  get_url:
+    url: "{{ ocp4_workload_kasten_minio_client_url }}"
+    dest: /usr/local/bin/mc
+  become: true
+
+- name: Make mc executable
+  file:
+    path: /usr/local/bin/mc
+    mode: '0755'
+  become: true
+
+- name: set mc alias
+  shell: /usr/local/bin/mc alias set myminio http://127.0.0.1:9000 minioadmin minioadmin
+  become: true
+
+- name: setup minio bucket
+  shell: "/usr/local/bin/mc mb --region={{ aws_region }} myminio/kasten-bucket"
+  become: true
+  ignore_errors: true
+
+- name: create minio access key and secret
+  shell: "/usr/local/bin/mc admin user add myminio minioaccess miniosecret"
+  become: true
+  ignore_errors: true
+
+- name: attach minio policy
+  shell: "/usr/local/bin/mc admin policy attach myminio readwrite --user minioaccess"
+  become: true
+  ignore_errors: true
+
+#Download and install helm
+
+- name: Download helm tar
+  get_url:
+    url: "{{ ocp4_workload_kasten_helm_url }}"
+    dest: /home/{{ ansible_user }}/helm.tar.gz
+  become: true
+
+- name: Decompress helm gz into /usr/local/bin manually
+  command:
+    cmd: tar -xzvf /home/{{ ansible_user }}/helm.tar.gz -C /usr/local/bin --strip-components=1 linux-amd64/helm
+  become: true
+
+# Leave these as the last tasks in the playbook
+# ---------------------------------------------
+
+# For deployment onto a dedicated cluster (as part of the
+# cluster deployment) set workload_shared_deployment to False
+# This is the default so it does not have to be set explicitely
+- name: pre_workload tasks complete
+  debug:
+    msg: "Pre-Workload tasks completed successfully."
+  when:
+    - not silent|bool
+    - not workload_shared_deployment|default(False)
+
+# For RHPDS deployment (onto a shared cluster) set
+# workload_shared_deployment to True
+# (in the deploy script or AgnosticV configuration)
+- name: pre_workload tasks complete
+  debug:
+    msg: "Pre-Software checks completed successfully"
+  when:
+    - not silent|bool
+    - workload_shared_deployment|default(False)

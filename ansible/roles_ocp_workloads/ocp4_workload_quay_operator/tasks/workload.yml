@@ -1,0 +1,183 @@
+---
+- name: Setting up workload for user {{ ocp_username }}
+  ansible.builtin.debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+# Quay needs OpenShift Container Storage (Noobaa in particular)
+# Check that the correct storage class exists on the cluster
+- name: Retrieve Bucket Class
+  kubernetes.core.k8s_info:
+    api_version: noobaa.io/v1alpha1
+    kind: BucketClass
+    namespace: openshift-storage
+  register: r_bucket_class
+
+- name: Assert that there is a Bucket Storage Class
+  ansible.builtin.assert:
+    that:
+    - r_bucket_class.resources | length == 1
+    fail_msg: Quay must be installed on a cluster with OpenShift Container Storage configured - and a Bucket Class deployed.
+
+- name: Install Quay Operator
+  when: ocp4_workload_quay_operator_install_operator | bool
+  block:
+  - name: Install Quay Operator
+    ansible.builtin.include_role:
+      name: install_operator
+    vars:
+      install_operator_action: install
+      install_operator_name: quay-operator
+      install_operator_namespace: "{{ ocp4_workload_quay_operator_namespace }}"
+      install_operator_channel: "{{ ocp4_workload_quay_operator_channel }}"
+      install_operator_catalog: redhat-operators
+      install_operator_packagemanifest_name: "quay-operator"
+      install_operator_automatic_install_plan_approval: "{{ ocp4_workload_quay_operator_automatic_install_plan_approval }}"
+      install_operator_csv_nameprefix: "quay-operator"
+      install_operator_starting_csv: "{{ ocp4_workload_quay_operator_starting_csv }}"
+      install_operator_catalogsource_setup: "{{ ocp4_workload_quay_operator_use_catalog_snapshot }}"
+      install_operator_catalogsource_name: "{{ ocp4_workload_quay_operator_catalogsource_name }}"
+      install_operator_catalogsource_namespace: "{{ ocp4_workload_quay_operator_catalogsource_namespace }}"
+      install_operator_catalogsource_image: "{{ ocp4_workload_quay_operator_catalog_snapshot_image | default('') }}"
+      install_operator_catalogsource_image_tag: "{{ ocp4_workload_quay_operator_catalog_snapshot_image_tag }}"
+
+- name: Install QuayRegistry
+  when: ocp4_workload_quay_operator_registry_install | bool
+  block:
+
+  - name: Determine Cluster Base Domain for Quay Route
+    kubernetes.core.k8s_info:
+      api_version: config.openshift.io/v1
+      kind: Ingress
+      name: cluster
+    register: r_ingress_config
+    failed_when: r_ingress_config.resources | length < 1
+
+  - name: Use Provided Quay route hostname
+    when: ocp4_workload_quay_operator_registry_route | default("") | length > 0
+    ansible.builtin.set_fact:
+      _ocp4_workload_quay_operator_registry_route: "{{ ocp4_workload_quay_operator_registry_route }}"
+
+  - name: Otherwise use quay-{{guid}}.basedomain for the Quay route hostname
+    when: ocp4_workload_quay_operator_registry_route | default("") | length == 0
+    ansible.builtin.set_fact:
+      _ocp4_workload_quay_operator_registry_route: "quay-{{ guid }}.{{ r_ingress_config.resources[0].spec.domain }}"
+
+  - name: Create Quay Registry Resources
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+    loop:
+    - quay_namespace.yaml.j2
+    - config_bundle_secret.yaml.j2
+    - quay_registry.yaml.j2
+
+  - name: Wait for Quay Registry to be available
+    kubernetes.core.k8s_info:
+      api_version: quay.redhat.com/v1
+      kind: QuayRegistry
+      name: "{{ ocp4_workload_quay_operator_registry_name }}"
+      namespace: "{{ ocp4_workload_quay_operator_registry_namespace }}"
+    register: r_quay_registry
+    until:
+    - r_quay_registry.resources[0].status.currentVersion is defined
+    - r_quay_registry.resources[0].status.currentVersion | length > 0
+    retries: 120
+    delay: 10
+
+  - name: Configure QuayAdmin User
+    when: ocp4_workload_quay_operator_registry_configure_admin | bool
+    block:
+    - name: Wait for Quay API to be available
+      ansible.builtin.uri:
+        url: "{{ r_quay_registry.resources[0].status.registryEndpoint }}/api/v1/discovery"
+        method: GET
+        validate_certs: false
+      register: r_quayapi
+      until: r_quayapi.status == 200 or r_quayapi.status == 403
+      retries: 120
+      delay: 10
+
+    - name: Set provided admin password
+      when: ocp4_workload_quay_operator_registry_admin_password | default("") | length > 0
+      ansible.builtin.set_fact:
+        _ocp4_workload_quay_operator_registry_admin_password: >-
+          {{ ocp4_workload_quay_operator_registry_admin_password }}
+
+    - name: Generate quayadmin password
+      when: ocp4_workload_quay_operator_registry_admin_password | default("") | length == 0
+      ansible.builtin.set_fact:
+        _ocp4_workload_quay_operator_registry_admin_password: >-
+          {{ lookup('password', '/dev/null length={{
+            ocp4_workload_quay_operator_registry_admin_password_length | default(20)
+            }} chars=ascii_letters,digits') }}
+
+    - name: Create QuayAdmin user
+      ansible.builtin.uri:
+        url: "{{ r_quay_registry.resources[0].status.registryEndpoint }}/api/v1/user/initialize"
+        method: POST
+        body:
+          username: "{{ ocp4_workload_quay_operator_registry_admin_user }}"
+          password: "{{ _ocp4_workload_quay_operator_registry_admin_password }}"
+          email: "quayadmin@demo.redhat.com"
+          access_token: "true"
+        body_format: json
+        validate_certs: false
+        status_code: 200
+      register: r_quayadmin
+
+    - name: Save access_token
+      when: r_quayadmin.status == 200
+      ansible.builtin.set_fact:
+        _ocp4_workload_quay_operator_registry_admin_token: "{{ r_quayadmin.json.access_token }}"
+
+    - name: Create quay admin token secret
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'quay-admin-token-secret.yml.j2') | from_yaml }}"
+
+  - name: Save user data for Quay console URL
+    agnosticd_user_info:
+      msg: "Red Hat Quay is available at {{ r_quay_registry.resources[0].status.registryEndpoint }}"
+      data:
+        quay_console_url: "{{ r_quay_registry.resources[0].status.registryEndpoint }}"
+
+  - name: Save user data for Quay admin user
+    when: ocp4_workload_quay_operator_registry_configure_admin | bool
+    agnosticd_user_info:
+      msg: >-
+        "A Quay Super User '{{ ocp4_workload_quay_operator_registry_admin_user }}' has been created."
+        "The super user password is {{ _ocp4_workload_quay_operator_registry_admin_password }}".
+        "The token for the super user is {{ _ocp4_workload_quay_operator_registry_admin_token }}".
+      data:
+        quay_admin_username: "{{ ocp4_workload_quay_operator_registry_admin_user }}"
+        quay_admin_password: "{{ _ocp4_workload_quay_operator_registry_admin_password }}"
+        quay_admin_token: "{{ _ocp4_workload_quay_operator_registry_admin_token }}"
+
+  # Only for old versions of Quay. Newer versions don't have a config editor anymore
+  - name: Get and save Quay config editor credentials secret
+    when: r_quay_registry.resources[0].status.configEditorCredentialsSecret | default("") | length > 0
+    block:
+    - name: Get Quay config editor credentials secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: "{{ r_quay_registry.resources[0].status.configEditorCredentialsSecret }}"
+        namespace: "{{ ocp4_workload_quay_operator_registry_namespace }}"
+      register: r_config_editor_secret
+
+    - name: Save user data for Quay config editor
+      agnosticd_user_info:
+        msg: >-
+          "Red Hat Quay Config is available at {{ r_quay_registry.resources[0].status.configEditorEndpoint }}."
+          "- Config User: quayconfig."
+          "- Config Password: {{ r_config_editor_secret.resources[0].data.password | b64decode }}."
+        data:
+          quay_config_url: "{{ r_quay_registry.resources[0].status.configEditorEndpoint }}"
+          quay_config_username: "quayconfig"
+          quay_config_password: "{{ r_config_editor_secret.resources[0].data.password | b64decode }}"
+
+# Leave this as the last task in the playbook.
+- name: Workload tasks complete
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

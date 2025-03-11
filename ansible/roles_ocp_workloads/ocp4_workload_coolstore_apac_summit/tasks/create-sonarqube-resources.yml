@@ -1,0 +1,93 @@
+- name: Create k8s namespaces
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - cicd/namespace-sonarqube.yaml.j2
+
+- name: Create sonarqube deployment
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - cicd/sonarqube-persistent-deploy.yaml.j2
+
+- name: Get deployment
+  k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    namespace: "{{ ocp4_workload_coolstore_apac_summit_sonarqube_namespace }}"
+  register: r_deployment
+  until:
+  - r_deployment.resources is defined
+  - r_deployment.resources | length > 0
+  - r_deployment.resources[0].status is defined
+  - r_deployment.resources[0].status.readyReplicas is defined
+  - r_deployment.resources[0].status.readyReplicas > 0
+  delay: 5
+  retries: 12
+
+- name: Get sonarqube route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: "{{ ocp4_workload_coolstore_apac_summit_sonarqube_namespace }}"
+    name: sonarqube
+  register: r_route
+
+- name: Set sonarqube host url
+  set_fact:
+    _ocp4_workload_coolstore_apac_summit_sonarqube_host_url: https://{{ r_route.resources[0].spec.host }}
+
+- name: Change admin password
+  uri:
+    url: "{{ _ocp4_workload_coolstore_apac_summit_sonarqube_host_url }}/api/users/change_password?login=admin&password={{ common_password }}&previousPassword=admin" # yamllint disable-line rule:line-length
+    user: admin
+    password: admin
+    method: POST
+    body_format: json
+    headers:
+      Content-Type: application/json
+    force_basic_auth: true
+    validate_certs: false
+    status_code: 204
+  register: result
+  until: result is not failed
+  retries: 60
+  delay: 5
+
+- name: Create project
+  uri:
+    url: "{{ _ocp4_workload_coolstore_apac_summit_sonarqube_host_url }}/api/projects/create?name=web-ui&project=web-ui"
+    user: admin
+    password: "{{ common_password }}"
+    method: POST
+    body_format: json
+    headers:
+      Content-Type: application/json
+    force_basic_auth: true
+    validate_certs: false
+  register: result
+
+- name: Create project token
+  uri:
+    url: "{{ _ocp4_workload_coolstore_apac_summit_sonarqube_host_url }}/api/user_tokens/generate?name=web_ui_token&type=PROJECT_ANALYSIS_TOKEN&projectKey=web-ui" # yamllint disable-line rule:line-length
+    user: admin
+    password: "{{ common_password }}"
+    method: POST
+    headers:
+      Content-Type: application/json
+    force_basic_auth: true
+    validate_certs: false
+  register: r_uri
+
+- name: Set sonarqube host url
+  set_fact:
+    _ocp4_workload_coolstore_apac_summit_sonarqube_project_token: "{{ r_uri.json.token }}"
+
+- name: Create sonarqube web-ui secret
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+  loop:
+  - cicd/sonarqube-project-secret.yaml.j2

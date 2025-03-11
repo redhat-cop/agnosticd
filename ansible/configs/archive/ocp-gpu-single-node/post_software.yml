@@ -1,0 +1,94 @@
+# ---
+- name: GPU installation and configuration
+  hosts: bastions
+  become: true
+  gather_facts: false
+  tags:
+    - step005.1
+    - gpu_install_config
+  tasks:
+    - name: pre-pull relevant images
+      command: docker pull {{ item }}
+      with_items:
+        - "{{ cache_images }}"
+
+    - name: clone the psap repository onto the bastion
+      git:
+        repo: 'https://github.com/thoraxe/openshift-psap.git'
+        dest: '/root/openshift-psap'
+        version: 'ocp-311-0.7'
+        force: yes
+        update: yes
+
+    - name: install the nvidia driver using the playbook
+      command: '/bin/ansible-playbook -i /etc/ansible/hosts -e hosts_to_apply="masters" -e cuda_driver_repo_base_url="http://admin.na.shared.opentlc.com/repos/nvidia/" -e cuda_driver_repo_suffix="cuda/" /root/openshift-psap/playbooks/nvidia-driver-install.yaml'
+
+    - name: install the nvidia runtime hook using the playbook
+      command: '/bin/ansible-playbook -i /etc/ansible/hosts -e hosts_to_apply="masters" -e nvidia_container_hook_repo_base_url="http://admin.na.shared.opentlc.com/repos/nvidia/" -e libnvidia_container_suffix="libnvidia-container" -e libnvidia_container_repo_gpgcheck="false" -e nvidia_container_runtime_suffix="nvidia-container-runtime" -e nvidia_container_runtime_repo_gpgcheck="false" /root/openshift-psap/playbooks/nvidia-container-runtime-hook.yaml'
+
+    - name: install the nvidia device plugin using the playbook
+      command: '/bin/ansible-playbook -i /etc/ansible/hosts -e hosts_to_apply="masters" -e gpu_hosts="nodes" /root/openshift-psap/playbooks/nvidia-device-plugin.yaml'
+
+- name: Pre-flight GPU checks
+  hosts: bastions
+  become: true
+  gather_facts: false
+  tags:
+    - step005.2
+    - gpu_preflight
+  tasks:
+    # if we do something multi-node this will have to change to look for the total number of gpu nodes
+    - name: Check that the daemonset is ready
+      command: oc get daemonset -n kube-system nvidia-deviceplugin-daemonset -o jsonpath --template='{.status.numberReady}'
+      register: daemonset_ready_out
+      until: 'daemonset_ready_out.stdout | int >= 1'
+      retries: 5
+      delay: 60
+
+    # if we do something multi-node this will have to change
+    - name: Check that the node reports capacity
+      command: oc get node {{ item }} -o jsonpath --template='{.status.capacity.nvidia\.com/gpu}' 
+      register: node_gpu_capacity_out
+      failed_when: '"1" not in node_gpu_capacity_out.stdout'
+      with_items: '{{ groups["masters"] }}'
+
+    - name: Delete cuda vector pod in case it was already created
+      command: oc delete pod cuda-vector-add -n nvidia-device-plugin
+      ignore_errors: true
+
+    - name: Deploy the cuda vector pod
+      shell: 'cat /root/openshift-psap/blog/gpu/device-plugin/cuda-vector-add.yaml | grep -v "namespace: nvidia" | oc create -n nvidia-device-plugin -f -'
+
+    - name: Wait for pod completion
+      command: oc get pod -n nvidia-device-plugin cuda-vector-add -o jsonpath --template='{.status.phase}'
+      register: cuda_status_out
+      until: '"Succeeded" in cuda_status_out.stdout'
+      retries: 5
+      delay: 60
+
+    - name: Double check cuda pod success
+      command: oc logs -n nvidia-device-plugin cuda-vector-add
+      register: cuda_pod_out
+      failed_when: '"Test PASSED" not in cuda_pod_out.stdout'
+
+- name: User administration
+  hosts: bastions
+  become: true
+  gather_facts: false
+  tags:
+    - step005.3
+    - user_admin
+  tasks:
+    - name: Give the gpu-user cluster admin privileges
+      command: oc adm policy add-cluster-role-to-user cluster-admin gpu-user
+
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+  - post_flight_check
+  tasks:
+  - debug:
+      msg: "Post-Software checks completed successfully"

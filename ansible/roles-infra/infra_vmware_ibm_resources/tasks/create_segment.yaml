@@ -1,0 +1,66 @@
+- name: Create a list of possible subnets
+  set_fact:
+    _possible_subnets: "{% for i in range(2,254) %}{{ '192.168.0.0/16' | ipsubnet(24, i) }},{% endfor %}"
+
+
+- name: Check if segment exits
+  ansible.builtin.uri:
+    url: "{{ nsxt_proxy_url }}/policy/api/v1/infra/segments/segment-{{ env_type }}-{{ guid }}"
+    method: GET
+    status_code: [200, 404]
+    url_username: "{{ nsxt_username }}"
+    url_password: "{{ nsxt_password }}"
+    force_basic_auth: true
+    return_content: true
+  register: _check_segment
+
+- name: Add a new segment if doesnt exist
+  when: _check_segment.status == 404
+  block:
+    - name: Get segments
+      ansible.builtin.uri:
+        url: "{{ nsxt_proxy_url }}/policy/api/v1/infra/segments/"
+        method: GET
+        url_username: "{{ nsxt_username }}"
+        url_password: "{{ nsxt_password }}"
+        force_basic_auth: true
+        return_content: true
+      register: _segments
+
+    - name: Get list used subnets
+      set_fact:
+        _segments_subnets: "{{ _segments_subnets|default([]) + [item.subnets[0].network|default('')] }}"
+      loop: "{{ _segments.json.results }}"
+    - name: Set a variable for availablesubnet
+      set_fact:
+        _available_subnet: "{{ _possible_subnets.split(',')|difference(_segments_subnets) | first }}"
+
+    - name: Create segment
+      ansible.builtin.uri:
+        url: "{{ nsxt_proxy_url }}/policy/api/v1/infra/segments/segment-{{ env_type }}-{{ guid }}"
+        method: PATCH
+        url_username: "{{ nsxt_username }}"
+        url_password: "{{ nsxt_password }}"
+        force_basic_auth: true
+        body_format: json
+        body:
+          display_name: "segment-{{ env_type }}-{{ guid }}"
+          dhcp_config_path: "/infra/dhcp-server-configs/dhcp-prfile"
+          subnets:
+            - gateway_address: "{{ _available_subnet | ipaddr('next_usable') }}/24"
+              dhcp_config:
+                server_address: "{{ _available_subnet | nthhost(2) }}/24"
+                resource_type: "SegmentDhcpV4Config"
+                lease_time: 86400
+                dns_servers: ["8.8.8.8"]
+              dhcp_ranges:
+                - "{{ _available_subnet | nthhost(10) }}-{{ _available_subnet | nthhost(200) }}"
+          connectivity_path: '/infra/tier-0s/T0-workload-vcs-nsx-vcs-shared'
+          type: ROUTED
+        return_content: true
+      register: _segments
+
+- name: Set facts for segment name and cidr
+  set_fact:
+    project_segment_name: "segment-{{ env_type }}-{{ guid }}"
+    project_segment_cidr: "{{ _available_subnet | default(_check_segment.json.subnets.0.network) }}"

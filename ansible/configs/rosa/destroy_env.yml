@@ -1,0 +1,75 @@
+---
+- name: Destroy environment on AWS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  tasks:
+    - name: Run infra-ec2-create-inventory role
+      include_role:
+        name: infra-ec2-create-inventory
+
+    - name: Create local ssh provision facts (key already exists)
+      include_role:
+        name: create_ssh_provision_key
+      when:
+        - ssh_provision_key_name is undefined
+
+    - name: SSH config setup
+      when:
+        - groups["bastions"] is defined
+        - groups["bastions"] | length > 0
+      include_role:
+        name: infra-common-ssh-config-generate
+
+- name: Set ssh extra args for all hosts, use ssh_config just created
+  hosts: all
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  tasks:
+    - name: add -F option ansible_ssh_extra_args
+      set_fact:
+        ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|d() }} -F {{ hostvars['localhost'].ansible_ssh_config }}"
+
+- name: Start all EC2 instances if they are stopped
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+    AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+    AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+  tasks:
+    - include_tasks: ec2_instances_start.yaml
+
+- name: Destroy ROSA
+  hosts: bastions
+  gather_facts: false
+  become: false
+  environment:
+    AWS_DEFAULT_REGION: "{{ aws_region }}"
+  tasks:
+    - name: Check for ROSA binary
+      stat:
+        path: /usr/local/bin/rosa
+      register: rosa_check
+      ignore_errors: true
+
+    - name: Get a list of ROSA clusters
+      when: rosa_check.stat.exists
+      ansible.builtin.command: "/usr/local/bin/rosa list cluster -o json"
+      register: r_rosa_list
+
+    - name: Try to gracefully uninstall ROSA cluster
+      when: rosa_check.stat.exists
+      include_tasks: uninstall_rosa.yml
+      loop: "{{ r_rosa_list.stdout | from_json }}"
+
+- name: Import cloud provider specific destroy playbook
+  import_playbook: "../../cloud_providers/{{ cloud_provider }}_destroy_env.yml"

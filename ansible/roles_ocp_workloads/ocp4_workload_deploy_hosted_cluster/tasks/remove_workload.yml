@@ -1,0 +1,92 @@
+---
+# ------------------------------------------
+# Implement your workload removal tasks here
+# ------------------------------------------
+
+- name: Delete cert-manager policy
+  when: ocp4_workload_deploy_hosted_cluster_certmanager_enabled | bool
+  kubernetes.core.k8s:
+    state: absent
+    definition: "{{ lookup('template', item) | from_yaml }}"
+  loop:
+  - certmanager/policy.yaml.j2
+  - certmanager/placement.yaml.j2
+  - certmanager/placementbinding.yaml.j2
+
+# Don't delete Channel or ManagedClusterSetBinding
+# They may be used by other instances
+- name: Delete clusterresourcequota application
+  when: ocp4_workload_deploy_hosted_cluster_user_quota | default( [] ) | length > 0
+  kubernetes.core.k8s:
+    state: absent
+    definition: "{{ lookup('template', item) | from_yaml }}"
+  loop:
+  - clusterresourcequota/placement.yaml.j2
+  - clusterresourcequota/subscription.yaml.j2
+  - clusterresourcequota/application.yaml.j2
+
+- name: Delete klusterlet addon config
+  kubernetes.core.k8s:
+    state: absent
+    api_version: agent.open-cluster-management.io/v1
+    kind: KlusterletAddonConfig
+    name: "{{ ocp4_workload_deploy_hosted_cluster_name }}"
+    namespace: "{{ ocp4_workload_deploy_hosted_cluster_name }}"
+
+- name: Wait until klusterlet addon config is gone
+  kubernetes.core.k8s_info:
+    api_version: agent.open-cluster-management.io/v1
+    kind: KlusterletAddonConfig
+    name: "{{ ocp4_workload_deploy_hosted_cluster_name }}"
+    namespace: "{{ ocp4_workload_deploy_hosted_cluster_name }}"
+  register: r_klusterlet
+  until: r_klusterlet.resources | length == 0
+  delay: 10
+  retries: 100
+  ignore_errors: true
+
+- name: Delete managed cluster
+  kubernetes.core.k8s:
+    state: absent
+    api_version: cluster.open-cluster-management.io/v1
+    kind: ManagedCluster
+    name: "{{ ocp4_workload_deploy_hosted_cluster_name }}"
+
+- name: Wait until managed cluster is gone
+  kubernetes.core.k8s_info:
+    api_version: cluster.open-cluster-management.io/v1
+    kind: ManagedCluster
+    name: "{{ ocp4_workload_deploy_hosted_cluster_name }}"
+  register: r_managed_cluster
+  until: r_managed_cluster.resources | length == 0
+  delay: 10
+  retries: 100
+  ignore_errors: true
+
+- name: Run hcp CLI to destroy hosted cluster
+  ansible.builtin.command: >-
+    /usr/bin/hcp destroy cluster aws
+      --name {{ ocp4_workload_deploy_hosted_cluster_name }}
+      --infra-id {{ ocp4_workload_deploy_hosted_cluster_infra_id }}
+      --secret-creds aws-credentials
+      --namespace local-cluster
+  register: r_hcp_destroy
+  ignore_errors: true
+
+- name: Delete hosted cluster secrets
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: secret
+    name: "{{ item }}"
+    namespace: local-cluster
+  loop:
+  - "htpasswd-{{ guid }}"
+  - "oauth-{{ guid }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: Remove_workload tasks complete
+  ansible.builtin.debug:
+    msg: "Remove Workload tasks completed successfully."
+  when: not silent|bool

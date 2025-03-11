@@ -1,0 +1,292 @@
+---
+## Request Let's Encrypt Certificates for a host
+- name: Set Certbot directory
+  set_fact:
+    _certbot_dir: "{{ _certbot_remote_dir }}/certbot"
+
+- name: Get home directory for {{ _certbot_user }} user
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ _certbot_user }}"
+
+- name: Check on AWS credentials
+  when: _certbot_dns_provider is match('route53')
+  block:
+    - name: Verify if AWS Credentials exist on the host
+      stat:
+        path: "{{ ansible_facts.getent_passwd[_certbot_user][4] + '/.aws/credentials' }}"
+      register: aws_credentials_result
+
+    - name: Fail if AWS Credentials are not on the host
+      when: aws_credentials_result.stat.exists == False
+      fail:
+        msg: AWS Credentials are required when requesting certificates for a wildcard domain
+
+- name: Check on azure credentials
+  when: _certbot_dns_provider is match('azure')
+  block:
+    - name: Verify if Azure Credentials exist on the host
+      stat:
+        path: "{{ ansible_facts.getent_passwd[_certbot_user][4] + '/.azure.ini' }}"
+      register: azure_credentials_result
+
+    - name: Fail if Azure Credentials are not on the host
+      when: azure_credentials_result.stat.exists == False
+      fail:
+        msg: Azure Credentials are required when requesting certificates for a wildcard domain
+
+- name: Check on GCP credentials
+  when: _certbot_dns_provider is match('gcp')
+  block:
+    - name: Verify if GCP Credentials exist on the host
+      stat:
+        path: "{{ ansible_facts.getent_passwd[_certbot_user][4] + '/.gcp/osServiceAccount.json' }}"
+      register: gcp_credentials_result
+
+    - name: Fail if GCP Credentials are not on the host
+      when: gcp_credentials_result.stat.exists == False
+      fail:
+        msg: GCP Credentials are required when requesting certificates for a wildcard domain
+
+- name: Check on DDNS credentials
+  when: _certbot_dns_provider is match('rfc2136')
+  block:
+    - name: Verify credential are present on host
+      when: _certbot_dns_provider is match('rfc2136')
+      stat:
+        path: "{{ ansible_facts.getent_passwd[_certbot_user][4] }}/.rfc2136.ini"
+      register: ddns_credentials_result
+
+    - name: Fail if DDNS credentials are missing
+      when: ddns_credentials_result.stat.exists == False
+      fail:
+        msg: You need a key and secret to update DNS
+
+- name: Set _certbot_wildcard_certs fact
+  set_fact:
+    _certbot_wildcard_certs: "{{ (_certbot_wildcard_domain|length|int>0)|ternary('true','false') }}"
+
+- name: Test if Let's Encrypt Certificates are already there
+  stat:
+    path: "{{ _certbot_install_dir }}/fullchain.pem"
+  register: cacert
+
+- name: No Certificates on host or _certbot_force_issue=true -> set up Let's Encrypt Certificates
+  when:
+    - cacert.stat.exists|bool == false or _certbot_force_issue|bool
+  block:
+  # We expect Python3 and Python3-pip to be installed
+  # They should be on the bastion that this role is running
+
+  - name: Set python to 3.9 when using GCP
+    when: cloud_provider == 'gcp'
+    set_fact:
+      certbot_python: "/bin/python3.9"
+
+  - name: Set python version when not using GCP
+    when: cloud_provider != 'gcp'
+    set_fact:
+      certbot_python: "/usr/bin/python3"
+
+  # The requirements_certbot.txt file has the Python modules
+  # For certbot, certbot-dns-route53 and certbot-dns-rfc2136
+  - name: Copy requirements_certbot_gcp.txt to target for certbot virtualenv
+    when: cloud_provider == 'gcp'
+    copy:
+      src: requirements_certbot_gcp.txt
+      dest: /tmp/requirements_certbot.txt
+
+  - name: Copy requirements_certbot.txt to target for certbot virtualenv
+    when: cloud_provider != 'gcp'
+    copy:
+      src: requirements_certbot.txt
+      dest: /tmp/requirements_certbot.txt
+
+  - name: Upgrade pip
+    become: True
+    become_user: "{{ _certbot_user }}"
+    pip:
+      name: pip
+      state: latest
+      virtualenv: "{{ _certbot_virtualenv }}"
+      virtualenv_command: "{{ certbot_python }} -m venv"
+
+  # Run as _certbot_user in order to set up the correct permissions
+  # Running without will create links to /root/.local/... which won't be readable
+  - name: Create Virtualenv Certbot
+    become: True
+    become_user: "{{ _certbot_user }}"
+    pip:
+      requirements: /tmp/requirements_certbot.txt
+      virtualenv: "{{ _certbot_virtualenv }}"
+      virtualenv_command: "{{ certbot_python }} -m venv"
+
+  - name: Copy certbot script to virtualenv
+    template:
+      src: ./templates/run-certbot.j2
+      dest: "{{ _certbot_virtualenv }}/bin/run-certbot"
+      owner: "{{ _certbot_user }}"
+      mode: 0755
+
+  - name: Check if cached certificate archive exists
+    become: false
+    stat:
+      path: "{{ _certbot_cache_archive_file }}"
+    delegate_to: localhost
+    register: cache_archive_file
+
+  - name: Restore entire certificate archive
+    when:
+    - _certbot_use_cache|bool
+    - cache_archive_file.stat.exists|bool
+    - not _certbot_force_issue|bool
+    block:
+    - name: Upload certificate archive
+      unarchive:
+        src: "{{ _certbot_cache_archive_file }}"
+        dest: "{{ _certbot_remote_dir }}"
+        owner: "{{ _certbot_install_dir_owner }}"
+        keep_newer: yes
+    - name: Set _certbot_setup_complete=true
+      set_fact:
+        _certbot_setup_complete: true
+
+  - name: Ensure Certbot Directories are present
+    file:
+      name: "{{ item }}"
+      state: directory
+      owner: "{{ _certbot_remote_dir_owner }}"
+      mode: 0775
+    loop:
+    - "{{ _certbot_dir }}"
+    - "{{ _certbot_dir }}/config"
+    - "{{ _certbot_dir }}/work"
+    - "{{ _certbot_dir }}/logs"
+    - "{{ _certbot_dir }}/renewal-hooks"
+    - "{{ _certbot_dir }}/renewal-hooks/deploy"
+     
+  - name: Request Certificates from Let's Encrypt (force or no cache)
+    when:
+    - _certbot_force_issue|bool or not _certbot_setup_complete|bool
+    block:
+    - name: Download Let's Encrypt  account file 
+      get_url:
+        url: "{{ certbot_account_url }}"
+        dest: "{{ _certbot_dir }}/account.tar"
+        url_username: "{{ certbot_account_download_user | default(omit) }}"
+        url_password: "{{ certbot_account_download_password | default(omit) }}"
+        force_basic_auth: true
+      when: certbot_account_url is defined
+
+    - name: Extract Let's Encrypt account file
+      unarchive:
+        copy: false
+        src: "{{ _certbot_dir }}/account.tar"
+        dest: "{{ _certbot_dir }}"
+      when: certbot_account_url is defined
+    # Get Intermediary CA Certificate.
+    # This is also used in the SSO configuration!
+    - name: Get Let's Encrypt Intermediary CA Certificate
+      get_url:
+        url: https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.pem.txt
+        dest: "{{ _certbot_dir }}/lets-encrypt-x3-cross-signed.pem"
+    - name: Print Shell Command
+      debug:
+        msg: >-
+          About to request certificates using the following command:
+          certbot certonly -n --agree-tos --email {{ _certbot_le_email }}
+          -d {{ _certbot_domain }}
+          {{ (_certbot_wildcard_domain|length>0)|ternary('-d','')}} {{ (_certbot_wildcard_domain|length>0)|ternary(_certbot_wildcard_domain,'')}}
+          {{ (_certbot_wildcard_certs|bool)|ternary('--dns-'+_certbot_dns_provider, '') }}
+          --config-dir={{ _certbot_dir }}/config
+          --work-dir={{ _certbot_dir }}/work
+          --logs-dir={{ _certbot_dir }}/logs
+          {{ (_certbot_production|bool)|ternary('','--test-cert') }}
+          {{ _certbot_additional_args|d(_certbot_args)|d('') }}
+
+    - name: Request API and Wildcard Certificates
+      # become: false
+      become_user: "{{ _certbot_user }} "
+      command: "{{ _certbot_virtualenv }}/bin/run-certbot"
+      retries: 5
+      delay: 30
+      register: r_request_le
+      until: r_request_le is succeeded
+
+    - name: Save certificates to cache
+      when:
+      - _certbot_use_cache|bool
+      - _certbot_cache_archive_file is defined
+      - _certbot_cache_archive_file|trim != ""
+      block:
+      - name: Create archive of certbot directory for cache
+        archive:
+          path: "{{ _certbot_dir }}"
+          dest: "/tmp/certbot.tgz"
+      - name: Save certbot archive to cache
+        fetch:
+          src: "/tmp/certbot.tgz"
+          dest: "{{ _certbot_cache_archive_file }}"
+          flat: yes
+      - name: Remove archive from server
+        file:
+          name: "/tmp/certbot.tgz"
+          state: absent
+
+      - name: Clean Let's Encrypt account files
+        when: certbot_account_url is defined
+        block:
+          - name: Remove account file from server
+            file:
+              name: "{{ _certbot_dir }}/account.tar"
+              state: absent
+      - name: Remove Let's Encrypt account directory from server
+        file:
+          name: "{{ _certbot_dir }}/accounts"
+          state: absent
+
+- name: Install the certificates into {{ _certbot_install_dir }}
+  block:
+  - name: Ensure {{ _certbot_install_dir }} exists
+    file:
+      path: "{{ _certbot_install_dir }}"
+      state: directory
+      owner: "{{ _certbot_install_dir_owner }}"
+      mode: 0775
+
+  - name: Install certificates
+    copy:
+      src: "{{ _certbot_dir }}/config/live/{{ _certbot_domain }}/{{ item }}"
+      dest: "{{ _certbot_install_dir }}/{{ item }}"
+      remote_src: yes
+      owner: "{{ _certbot_install_dir_owner }}"
+    loop:
+    - "cert.pem"
+    - "fullchain.pem"
+    - "chain.pem"
+    - "privkey.pem"
+
+  - name: Set _certbot_setup_complete to true
+    set_fact:
+      _certbot_setup_complete: true
+
+# When activating automatic renewals the script
+# {{ _certbot_dir }}/renewal-hooks/deploy/deploy_certs.sh
+# needs to be set up by the caller of this role
+- name: Install Automatic renewals of Certificates
+  when:
+  - _certbot_renew_automatically|bool
+  block:
+  - name: Install crontab to renew certificates when they expire
+    become: False
+    cron:
+      name: "{{ _certbot_cron_job_name }}"
+      special_time: daily
+      job: >-
+        {{ _certbot_virtualenv }}/bin/certbot renew
+        {{ _certbot_additional_args | default(_certbot_args) | default('') }}
+        --config-dir={{ _certbot_dir }}/config
+        --work-dir={{ _certbot_dir }}/work
+        --logs-dir={{ _certbot_dir }}/logs
+        --post-hook={{ _certbot_dir }}/renewal-hooks/deploy/deploy_certs.sh
+        --quiet

@@ -1,0 +1,220 @@
+---
+- name: Step 005 Post Software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Set admin password
+      set_fact:
+        openshift_admin_password: >-
+          {{- lookup('password', '/dev/null length=1 chars=letters') -}}
+          {{- lookup('password', '/dev/null length=10') -}}
+          {{- lookup('password', '/dev/null length=1 chars=digits') -}}
+    - debug:
+        msg: "Step 005 Post Software"
+
+- name: Deploy some operators
+  hosts: bastion-vm
+  tasks:
+
+    - name: Copy Approve CSR script
+      copy:
+        src: "approve_csr.sh"
+        dest: "/tmp/approve_csr.sh"
+        mode: '0755'
+
+    - name: Run approve CSRs script
+      shell: "/tmp/approve_csr.sh"
+      async: 1200
+      poll: 0
+      register: approve_csr
+
+    - name: 'approve csr - check on async task'
+      async_status:
+        jid: "{{ approve_csr.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      retries: 100
+      delay: 30
+
+    - name: Post tasks
+      block:
+        - name: Make .kube directory
+          ansible.builtin.file:
+            path: /root/.kube/
+            state: directory
+          when: ocp4_aio_deploy_type == 'sno'
+
+        - name: Make rhacm the default cluster for bastion oc commands
+          when: ocp4_aio_deploy_type == 'sno'
+          ansible.builtin.copy:
+            remote_src: true
+            src: /root/sno-rhacm/auth/kubeconfig
+            dest: /root/.kube/config
+
+        - name: Copy file htpasswd.yaml
+          copy:
+            src: "htpasswd.yaml"
+            dest: "/tmp/htpasswd.yaml"
+
+        - name: Configure admin user
+          shell: "{{ item }}"
+          args:
+            chdir: /tmp/
+          loop:
+            - htpasswd -c -B -b users.htpasswd admin {{ hostvars['localhost']['openshift_admin_password'] }}
+            - /usr/bin/oc create secret generic htpass-secret --from-file=htpasswd=users.htpasswd -n openshift-config
+            - /usr/bin/oc apply -f htpasswd.yaml
+            - /usr/bin/oc adm policy add-cluster-role-to-user cluster-admin admin
+            - /usr/bin/oc delete secrets kubeadmin -n kube-system
+
+        #- name: Pre-install operators
+        #  script: files/configure_operators.sh
+
+    #    - name: Run configure_ssl.sh
+    #      script: files/configure_ssl.sh
+
+        - name: Setting up OCS Storage
+          include_role:
+            name: ocp4_aio_role_ocs
+          when: ocp4_aio_deploy_ocs and ocp4_aio_deploy_type == 'ipi'
+
+        - name: Configure image registry
+          shell: >
+            oc patch configs.imageregistry.operator.openshift.io cluster
+            --type merge --patch '{"spec":{"storage":{"pvc":{"claim":"ocs-imgreg"}}, "managementState": "Managed"}}'
+
+        - name: Enable the route for the image registry
+          shell: >
+            oc patch configs.imageregistry.operator.openshift.io/cluster --patch '{"spec":{"defaultRoute":true}}'
+            --type=merge
+
+        - name: Rename default appsDomain
+          shell: >
+            oc patch ingresses.config cluster --type merge -p '{"spec":{"appsDomain": "apps.{{ guid }}.{{ cluster_dns_zone }}"}}'
+
+        - name: Install the k9s rpm from a remote repo
+          when: software_install_k9s | default(false) | bool
+          ansible.builtin.yum:
+            name: https://github.com/derailed/k9s/releases/download/v0.32.4/k9s_linux_amd64.rpm
+            state: present
+            disable_gpg_check: true
+
+    #- name: Execute script to change the domain
+    #  ansible.builtin.shell: "sh -x /root/renameDomain.sh"
+    #  when: not build_lab|bool
+
+    - name: Setting up Openshift Virtualisation Lab
+      when: ocp4_aio_deploy_cnvlab | default(true) | bool
+      include_role:
+        name: ocp4_aio_workload_cnvlab
+
+- name: Update motd on bastions
+  hosts: hypervisor,bastion-vm
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Remove register for insights motd
+      when: bastion_remove_insights_motd | bool
+      ansible.builtin.file:
+        state: absent
+        path: /etc/motd.d/insights-client
+
+    - name: Add a custom motd to the bastion
+      when: bastion_custom_motd | default("") | length > 0
+      ansible.builtin.copy:
+        dest: /etc/motd.d/agnosticd
+        owner: root
+        group: root
+        mode: "o=rw,g=rw,o=r"
+        content: "{{ bastion_custom_motd }}"
+
+
+- name: Prepare Hypervisor for proxypass
+  hosts: hypervisor
+  gather_facts: false
+  tasks:
+    - name: Install required packages
+      yum:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - httpd
+        - mod_ssl
+
+    - name: Copy ssl.conf
+      template:
+        src: httpd/ssl.conf
+        dest: /etc/httpd/conf.d/ssl.conf
+
+    - name: Copy ocp.conf
+      template:
+        src: httpd/ocp.conf
+        dest: /etc/httpd/conf.d/ocp.conf
+
+    - name: Enable httpd service
+      service:
+        name: httpd
+        state: started
+        enabled: true
+
+    - name: Fill /etc/hosts with internal names
+      blockinfile:
+        dest: /etc/hosts
+        content: |
+          192.168.123.11 console-openshift-console.apps.ocp.example.com
+          192.168.123.11 oauth-openshift.apps.ocp.example.com
+          192.168.123.11 zzzzz.apps.ocp.example.com
+
+- name: Print informations
+  hosts: localhost
+  tasks:
+    - name: Print Bastion Connection Information
+      agnosticd_user_info:
+        data:
+          hypervisor_ip: "{{ hostvars['hypervisor']['public_ip_address'] }}"
+          ssh_user: "{{ student_name }}"
+          ssh_password: "{{ hostvars['hypervisor']['student_password'] }}"
+          ocp_console_url: "https://console-openshift-console.apps.{{ guid }}.{{ cluster_dns_zone }}"
+          ocp_admin_password: "{{ hostvars['localhost']['openshift_admin_password'] }}"
+        msg: "{{ item }}"
+      loop:
+        - "Host you will be using for lab : {{ hostvars['hypervisor']['public_ip_address'] }}"
+        - "SSH User : {{ student_name }}"
+        - "SSH Password : {{ hostvars['hypervisor']['student_password'] }}"
+#        - "OpenShift web console : https://console-openshift-console.apps.{{ guid }}.{{ cluster_dns_zone }}"
+#        - "kubeadmin user Password : {{ hostvars['kube_holder']['kubeadmin_password'] }}"
+
+    - when: ocp4_aio_deploy_cnvlab
+      name: Print Openshift Virtualization lab infos
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+        - "Lab instructions : http://{{ hostvars['cnvlab_holder']['route']|default('') }}"
+
+    - name: Print Kube Configuration for IPI
+      when: ocp4_aio_deploy_ipi
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+        - "The console is available at: https://console-openshift-console.apps.{{ guid }}.{{ cluster_dns_zone }}"
+        - "The password for admin user is: {{ hostvars['localhost']['openshift_admin_password'] }}"
+        - "If you'd like CLI access, the bastion host will have already been setup - `ssh root@192.168.123.100` and password `redhat`"
+        - "You should then automatically have oc/kubectl access to the cluster. Check out ~/ocp-install/auth/."
+
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+
+    - name: Deploy Showroom on shared cluster
+      when: showroom_deploy_shared_cluster_enable | default(false) | bool
+      include_role:
+        name: ocp4_workload_showroom
+
+    - debug:
+        msg: "Post-Software checks completed successfully"

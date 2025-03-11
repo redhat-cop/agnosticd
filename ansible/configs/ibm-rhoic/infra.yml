@@ -1,0 +1,150 @@
+---
+- name: Step 000 Infrastructure
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  tags:
+    - step001
+    - infrastructure
+  tasks:
+    - name: Infra - Starting
+      ansible.builtin.debug:
+        msg: "Step 001 Infra - Starting"
+
+- name: Creating and activting a workspace in IBM Schematics
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+
+    # Authenticating
+    - name: Authorizing with IBM CLoud using Sandbox credentials
+      ansible.builtin.include_tasks: auth_sandbox.yml
+
+    # Create Workspace to support VPC
+    - name: Create a new workspace
+      ansible.builtin.uri:
+        url: "{{ ibm_cloud_schematics_url }}"
+        method: POST
+        status_code: 201
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+        body_format: json
+        body:
+          name: "rhpds-vpc"
+          type:
+            - "{{ terraform_version }}"
+          location: "us-east"
+          description: "Creating VPC, Subnet, and Public Gateway for RHOIC"
+          tags: []
+          template_repo:
+            url: "{{ terraform_vpc }}"
+          template_data:
+            - folder: "."
+              type: "{{ terraform_version }}"
+              variablestore:
+                - name: ibmcloud_api_key
+                  value: "{{ sandbox_master_api_key }}"
+                  secure: true
+                - name: ibmcloud_region
+                  value: "{{ rhoic_region }}"
+      register: r_ws_vpc_create
+      tags: create-ws-vpc
+      until: r_ws_vpc_create.status == 201
+      retries: 10
+      delay: 3
+
+    - name: Get a list of workspaces
+      ansible.builtin.uri:
+        url: "{{ ibm_cloud_schematics_url }}"
+        method: GET
+        status_code: 200
+        headers:
+          Authorization: "{{ ibm_access_token }}"
+      register: r_ws_list
+      tags: retrieve-ws-list
+      until: r_ws_list.status == 200
+      retries: 10
+      delay: 3
+
+    - name: Setting the vpc_ws_id variable
+      ansible.builtin.set_fact:
+        vpc_ws_id: "{{ item.id }}"
+      with_items: "{{ r_ws_list.json.workspaces }}"
+      when: item.name == "rhpds-vpc"
+
+    - name: Pausing for 30 seconds for lock to be released
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Making the plan that IBM Schematics will run
+      ansible.builtin.uri:
+        url: "{{ ibm_cloud_schematics_url }}/{{ vpc_ws_id }}/plan"
+        method: POST
+        status_code: 202
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+          refresh_token: "{{ ibm_refresh_token }}"
+      register: r_ws_vpc_plan
+      tags: plan-ws-vpc
+      until: r_ws_vpc_plan.status == 202
+      retries: 10
+      delay: 3
+
+    - name: Waiting for the plan to finish creating
+      ansible.builtin.uri:
+        url: "{{ ibm_cloud_schematics_url }}/{{ vpc_ws_id }}"
+        method: GET
+        status_code: 200
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+      register: r_ws_detail
+      tags: retrieve-ws
+      until: r_ws_detail.json.status is defined and r_ws_detail.json.status != "INPROGRESS"
+      retries: 30
+      delay: 30
+
+    - name: Pausing for 60 seconds for lock to be released
+      ansible.builtin.pause:
+        seconds: 60
+
+    - name: Applying the plan
+      ansible.builtin.uri:
+        url: "{{ ibm_cloud_schematics_url }}/{{ vpc_ws_id }}/apply"
+        method: PUT
+        status_code: 202
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+          refresh_token: "{{ ibm_refresh_token }}"
+      register: r_ws_vpc_apply
+      tags: apply-ws-vpc
+      until: r_ws_vpc_apply.status == 202
+      retries: 20
+      delay: 30
+
+    - name: Waiting for the plan to be active
+      ansible.builtin.uri:
+        url: "{{ ibm_cloud_schematics_url }}/{{ vpc_ws_id }}"
+        method: GET
+        status_code: 200
+        headers:
+          Authorization: "Bearer {{ ibm_access_token }}"
+      register: r_ws_detail
+      tags: retrieve-ws
+      until: r_ws_detail.json.status is defined and r_ws_detail.json.status == "ACTIVE"
+      retries: 30
+      delay: 60
+
+- name: Infra flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - name: Infra checks complete
+      ansible.builtin.debug:
+        msg: "Infra checks completed successfully"

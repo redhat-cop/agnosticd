@@ -1,0 +1,126 @@
+---
+# Implement your Post Workload deployment tasks here
+# Leave these as the last tasks in the playbook
+
+- agnosticd_user_info:
+    data:
+      ocp4_guid: "{{ guid }}"
+      ocp4_domain: "{{ guid }}{{ subdomain_base_suffix }}"
+      ocp4_ssh_user: "{{ student_name }}"
+      ocp4_password: "{{ student_password }}"
+      ocp4_bastion: "{{ hostvars[groups.bastions.0].ansible_hostname }}.{{ guid }}{{ subdomain_base_suffix }}"
+  when:
+  - student_name is defined
+  - groups.bastions is defined
+
+- set_fact:
+    ansible_hostname: "{{ hostvars[groups.bastions.0].ansible_hostname }}"
+  when: groups.bastions is defined
+
+- name: Get oadp lab bookbag
+  block:
+  - name: Get Konveyor lab git
+    git:
+      repo: "{{ bookbag_repo }}"
+      dest: "{{ bookbag_dir }}"
+      version: master
+  - name: create .aws dir
+    file:
+      state: directory
+      path: "{{ bookbag_dir }}/{{ bookbag_build_dir }}/.aws"
+      mode: "777"
+  - name: create .aws/credentials file to noobaa s3
+    copy:
+      content: "{{ cloud_credentials_data_string }}"
+      dest: "{{ bookbag_dir }}/{{ bookbag_build_dir }}/.aws/credentials"
+      mode: 777
+
+  - name: Create project
+    k8s:
+      state: present
+      definition:
+        kind: Project
+        apiVersion: project.openshift.io/v1
+        metadata:
+          name: lab-instructions
+  - name: Discovering Console URL
+    k8s_info:
+      api_version: route.openshift.io/v1
+      kind: Route
+      name: console
+      namespace: openshift-console
+    register: openshiftconsole_results
+  - command: oc whoami --show-server
+    register: api_url_results
+  - set_fact:
+      console_url: "{{ openshiftconsole_results.resources[0].status.ingress[0].host }}"
+  - set_fact:
+      apps_url: "{{ console_url | regex_replace('console-openshift-console.','') }}"
+  - set_fact:
+      ocp4_info:
+        apps_url: "{{ apps_url | default('appsurl') }}"
+      # yamllint disable-line rule:line-length
+        cluster_admin_user: "{{ cluster_admin_user | default(ocp4_workload_oadp_cluster_admin) | default('kubeadmin') }}"
+        cluster_admin_password: >-
+          "{{ ocp4_workload_authentication_htpasswd_admin_password | default('undefined') }}"
+        api_url: "{{ api_url_results.stdout }}"
+        ocp4_password: "{{ student_password | default('undefined')}}"
+  - name: "Building bookbag image"
+    shell: "{{ item }}"
+    args:
+      chdir: "{{ bookbag_dir }}/{{ bookbag_build_dir }}"
+    loop:
+    - "oc project lab-instructions"
+    - "oc process -f build-template.yaml -p GIT_REPO='{{ bookbag_repo }}' | oc apply -f -"
+    - "oc start-build bookbag --follow --from-dir={{ bookbag_dir }}"
+  - name: "Deploying bookbag image"
+    shell: "oc process -f deploy-template.yaml -p WORKSHOP_VARS='{{ ocp4_info | to_json }}' | oc apply -f -"
+    args:
+      chdir: "{{ bookbag_dir }}/{{ bookbag_build_dir }}"
+
+  - agnosticd_user_info:
+      data:
+        bookbag_route: output.stdout
+
+  - name: deploy sample apps
+    loop: "{{ pre_deploy_sample_apps }}"
+    k8s:
+      state: present
+      definition: "{{ lookup('url', item, split_lines=False) }}"
+    register: results
+
+  - debug:
+      var: results
+
+  - name: "Read bookbag route"
+    shell: "oc get route -n lab-instructions bookbag
+      -o go-template='{{ '{{' }} .spec.host {{ '}}' }}{{ '{{' }} println {{ '}}' }}'"
+    register: output
+
+  - agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - ""
+    - "Your Bookbag Lab instructions are located at:"
+    - " {{ output.stdout }}"
+    - ""
+
+# For deployment onto a dedicated cluster (as part of the
+# cluster deployment) set workload_shared_deployment to False
+# This is the default so it does not have to be set explicitely
+- name: post_workload tasks complete
+  debug:
+    msg: "Post-Workload tasks completed successfully."
+  when:
+  - not silent | bool
+  - not workload_shared_deployment | default(false) | bool
+
+# For RHPDS deployment (onto a shared cluster) set
+# workload_shared_deployment to True
+# (in the deploy script or AgnosticV configuration)
+- name: post_workload tasks complete
+  debug:
+    msg: "Post-Software checks completed successfully"
+  when:
+  - not silent | bool
+  - workload_shared_deployment | default(false) | bool

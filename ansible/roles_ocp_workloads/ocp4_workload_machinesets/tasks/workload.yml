@@ -1,0 +1,54 @@
+---
+- name: Setup MachineConfigPools
+  when: machineset.machineConfigPool.setup | default( false ) | bool
+  include_tasks: setup-machine-config-pool.yml
+  loop: "{{ ocp4_workload_machinesets_machineset_groups }}"
+  loop_control:
+    loop_var: machineset
+    label: "{{ machineset.name }}"
+
+- name: Configure OpenShift MachineSets
+  include_role:
+    name: ocp4_machineset_config
+  vars:
+    ocp4_machineset_config_groups: "{{ ocp4_workload_machinesets_machineset_groups }}"
+    ocp4_machineset_config_disable_base_worker_machinesets: >-
+      {{ ocp4_workload_machinesets_disable_default_machinesets }}
+
+- name: Wait for Nodes to be available
+  when: ocp4_workload_machinesets_wait_for_nodes | bool
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+    label_selectors:
+    - "node-role.kubernetes.io/{{ item.role }}="
+  register: r_nodes
+  until:
+  - r_nodes.resources | length | int == item.total_replicas | int
+  delay: 30
+  retries: 50
+  loop: "{{ ocp4_workload_machinesets_machineset_groups }}"
+
+- name: Set up Infra nodes when one MaschineSet group is called 'infra'
+  when: ocp4_workload_machinesets_machineset_groups | selectattr('name', 'contains', 'infra') | list | length > 0
+  block:
+  - name: Configure Ingress Controllers and Image Registry
+    kubernetes.core.k8s:
+      state: present
+      merge_type:
+      - merge
+      definition: "{{ lookup('template', '{{ item }}') }}"
+    loop:
+    - ingress-controller.yaml.j2
+    - image-registry.yaml.j2
+
+  - name: Create Config Map for Cluster Monitoring
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('file', 'cluster-monitoring-config.yaml') }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

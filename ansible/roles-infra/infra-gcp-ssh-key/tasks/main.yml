@@ -1,0 +1,74 @@
+---
+# This role creates a GCP secret to store the generated SSH key
+# output_dir on creation so it can be retrieved on destroy.
+# That way, it will be used in the common SSH config
+
+# The role:
+# SKIP if key exists locally
+
+- name: Set infra_ssh_key
+  set_fact:
+    infra_ssh_key: "{{ env_authorized_key_path }}"
+
+- name: Stat infra ssh key
+  stat:
+    path: "{{ infra_ssh_key }}"
+  register: stat_infra_ssh_key
+
+- name: Stat ssh key
+  stat:
+    path: "{{ env_authorized_key_path }}"
+  register: stat_ssh_key
+
+- when: not stat_ssh_key.stat.exists
+  block:
+    - name: Retrieve SSH Key from secrets
+      environment:
+        PATH: '{{ output_dir }}/google-cloud-sdk/bin:/usr/bin:/usr/local/bin'
+        CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ gcp_credentials_file }}"
+        CLOUDSDK_COMPUTE_REGION: "{{ gcp_region }}"
+        CLOUDSDK_CONFIG: "{{ output_dir }}/.gcloud-{{ guid }}"
+        CLOUDSDK_CORE_PROJECT: "{{ gcp_project_id }}"
+      command: >
+          gcloud secrets versions access latest
+          --secret="{{ project_tag }}-bastion-ssh-secret"
+      register: r_ssh_key
+      failed_when:
+        - (r_ssh_key.rc != 0)
+        - ("NOT_FOUND" not in r_ssh_key.stderr)
+
+    - name: Create the SSH key locally
+      copy:
+        dest: "{{ env_authorized_key_path }}"
+        mode: 0400
+        content: "{{ r_ssh_key.stdout }}\n"
+      when:
+        - r_ssh_key is changed
+        - r_ssh_key.rc == 0
+
+    - name: Generate SSH pub key
+      shell: ssh-keygen -y -f "{{ env_authorized_key_path }}" > "{{ env_authorized_key_path_pub }}"
+      args:
+        creates: "{{ env_authorized_key_path_pub }}"
+      when:
+        - r_ssh_key is changed
+        - r_ssh_key.rc == 0
+
+- when: stat_infra_ssh_key.stat.exists
+  block:
+    - name: Create secret to store bastion SSH key
+      environment:
+        PATH: '{{ output_dir }}/google-cloud-sdk/bin:/usr/bin:/usr/local/bin'
+        CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ gcp_credentials_file }}"
+        CLOUDSDK_COMPUTE_REGION: "{{ gcp_region }}"
+        CLOUDSDK_CONFIG: "{{ output_dir }}/.gcloud-{{ guid }}"
+        CLOUDSDK_CORE_PROJECT: "{{ gcp_project_id }}"
+      command: >
+          gcloud secrets create "{{ project_tag }}-bastion-ssh-secret"
+          --replication-policy="user-managed"
+          --locations="{{gcp_region}}"
+          --data-file="{{ infra_ssh_key }}"
+      register: secrets_result
+      failed_when:
+        - (secrets_result.rc != 0)
+        - ("is the subject of a conflict" not in secrets_result.stderr)

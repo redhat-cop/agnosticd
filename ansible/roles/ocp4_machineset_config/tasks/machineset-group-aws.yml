@@ -1,0 +1,86 @@
+---
+
+- name: Block to determine AWS AMI if instance ami_architecture is set
+  when: machineset_group.aws_instance_ami_architecture is defined
+  block:
+
+    - name: Gather coreos stream json
+      ansible.builtin.command: "openshift-install coreos print-stream-json"
+      register: stream_json
+
+    - name: Format output
+      ansible.builtin.set_fact:
+        prepare_stream_json: "{{ stream_json.stdout | to_json | from_json }}"
+
+    - name: Overwrite aws_coreos_ami_id
+      ansible.builtin.set_fact:
+      # yamllint disable-line rule:line-length
+        custom_aws_coreos_ami_id: "{{ prepare_stream_json.architectures[machineset_group.aws_instance_ami_architecture].images.aws.regions[aws_region].image }}"
+
+- name: Define {{ machineset_group.name }} machinesets
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'machineset-aws.j2') | from_yaml }}"
+  # Iterate through availability zones in reverse order as it makes the math
+  # easier to scale zone "a" before "b" to match expected behavior.
+  loop: "{{ aws_worker_availability_zones[::-1] }}"
+  loop_control:
+    label: "{{ machineset_name }}"
+    loop_var: aws_worker_availability_zone
+    index_var: loop_index
+  vars:
+    availability_zone: "{{ aws_worker_availability_zone.name }}"
+    availability_zone_region: "{{ aws_worker_availability_zone.region }}"
+    availability_zone_subnet: "{{ aws_worker_availability_zone.subnet }}"
+    aws_instance_ami_id: "{{ custom_aws_coreos_ami_id | default(aws_coreos_ami_id) }}"
+    aws_instance_type: >-
+      {{ machineset_group.instance_type | default(default_aws_instance_type) }}
+    aws_root_volume_size: >-
+      {{ machineset_group.root_volume_size | default(default_aws_root_volume_size) }}
+    aws_root_volume_type: >-
+      {{ machineset_group.root_volume_type | default(default_aws_root_volume_type) }}
+    aws_root_volume_iops: >-
+      {{ machineset_group.root_volume_iops | default(default_aws_root_volume_iops) }}
+    machineset_name: >-
+      {{ [cluster_label, machineset_group.name, availability_zone] | join('-') }}
+    machineset_group_node_labels: >-
+      {{ machineset_group.node_labels
+       | default({'node-role.kubernetes.io/' + machineset_group.role: ''}
+           if machineset_group.role | default(false) else {})
+      }}
+    machineset_group_total_replicas: >-
+      {{ machineset_group.total_replicas
+       | default(machineset_group.total_replicas_min)
+       | default(0)
+      }}
+    machineset_replicas: >-
+      {{ (
+        (machineset_group_total_replicas | int + loop_index) / aws_worker_availability_zones|count
+      ) | int }}
+
+- name: Define {{ machineset_group.name }} machineautoscalers
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'machineautoscaler.yml.j2') | from_yaml }}"
+  # Iterate through availability zones in reverse order as it makes the math
+  # easier to scale zone "a" before "b" to match expected behavior.
+  loop: "{{ aws_worker_availability_zones[::-1] }}"
+  loop_control:
+    label: "{{ machineset_name }}"
+    loop_var: aws_worker_availability_zone
+    index_var: loop_index
+  vars:
+    availability_zone: "{{ aws_worker_availability_zone.name }}"
+    machineset_name: >-
+      {{ [cluster_label, machineset_group.name, availability_zone] | join('-') }}
+    machineset_min_replicas: >-
+      {{ (
+         (machineset_group.total_replicas_min|default(0) + loop_index) /
+         aws_worker_availability_zones | count
+      ) | int }}
+    machineset_max_replicas: >-
+      {{ (
+         (machineset_group.total_replicas_max | default(100) + loop_index) /
+         aws_worker_availability_zones | count
+      ) | int }}
+  when: machineset_group.autoscale | default(false) | bool

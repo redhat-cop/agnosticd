@@ -1,0 +1,112 @@
+---
+# First target is OCP with bastion
+#
+# if we're using the shared cluster
+# .. create a kubeconfig file
+# .. get the user-data.yaml
+# .. create the namespace
+# .. run the helm chart
+#
+# for a shared cluster with a serviceaccount user
+# must create namespace here because
+# helm chart cannot create the namespace
+# because it doesn't respect ProjectRequest
+#
+# use _showroom_kubeconfig if showroom user was setup
+# otherwise use default
+
+- name: Prepare Variables
+  ansible.builtin.include_tasks: prepare-variables.yaml
+
+- name: Deploy via ArgoCD
+  when: ocp4_workload_showroom_deployment_type == "argocd"
+  block:
+
+  - name: Check if ArgoCD has been installed
+    kubernetes.core.k8s_info:
+      kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+      api_version: argoproj.io/v1beta1
+      kind: ArgoCD
+      name: openshift-gitops
+      namespace: openshift-gitops
+    register: r_argocd_present
+
+  - name: Check if an older ArgoCD has been installed
+    kubernetes.core.k8s_info:
+      kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+      api_version: argoproj.io/v1alpha1
+      kind: ArgoCD
+      name: openshift-gitops
+      namespace: openshift-gitops
+    register: r_old_argocd_present
+
+  - name: Fail if no ArgoCD detected
+    when: not (r_argocd_present.resources | default([]) | length == 1 or r_old_argocd_present.resources | default([]) | length == 1)
+    ansible.builtin.fail:
+      msg: "ArgoCD Deployment requested yet no default ArgoCD installation found."
+
+  - name: Debug showroom_user data
+    ansible.builtin.debug:
+      var: _showroom_user_data
+
+  - name: Install showroom Application (single user)
+    when: not _showroom_user_data.users is defined
+    kubernetes.core.k8s:
+      kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+      state: present
+      definition: "{{ lookup('template', 'application.yaml.j2') }}"
+
+  - name: Install showroom ApplicationSet (multi user)
+    when: _showroom_user_data.users is defined
+    kubernetes.core.k8s:
+      kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+      state: present
+      definition: "{{ lookup('template', 'applicationset.yaml.j2') }}"
+
+- name: Deploy using Helm
+  when: ocp4_workload_showroom_deployment_type == "helm"
+  block:
+  - name: Check if Helm needs to be installed
+    ansible.builtin.include_tasks: check-and-install-helm.yaml
+
+  - name: Deploy showroom via Helm (single user)
+    when: not _showroom_user_data.users is defined
+    vars:
+      _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}"
+      _showroom_vars: "{{ _showroom_user_data | combine({'guid': guid}) }}"
+    ansible.builtin.include_tasks:
+      file: deploy-showroom-helm.yaml
+
+  - name: Deploy showroom via Helm (multi user)
+    when: _showroom_user_data.users is defined
+    vars:
+      _showroom_user: "{{ _showroom_users_item.key }}"
+      _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}-{{ _showroom_user }}"
+      _showroom_vars: "{{ _showroom_users_item.value | combine({'guid': guid, 'user': _showroom_user}) }}"
+    ansible.builtin.include_tasks:
+      file: deploy-showroom-helm.yaml
+    loop: "{{ _showroom_user_data.users | dict2items }}"
+    loop_control:
+      loop_var: _showroom_users_item
+      label: "{{ _showroom_users_item.key }}"
+
+- name: Report Variables to user_data (single user)
+  when: not _showroom_user_data.users is defined
+  vars:
+    _showroom_vars: "{{ _showroom_user_data | combine({'guid': guid}) }}"
+    _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}"
+  ansible.builtin.include_tasks:
+    file: report-variables.yaml
+
+- name: Report Variables to user_data (multi user)
+  when: _showroom_user_data.users is defined
+  vars:
+    _showroom_user: "{{ _showroom_users_item.key }}"
+    _showroom_namespace: "{{ ocp4_workload_showroom_namespace }}-{{ _showroom_user }}"
+    _showroom_vars: "{{ _showroom_users_item.value | combine({'guid': guid, 'user': _showroom_user}) }}"
+  ansible.builtin.include_tasks:
+    file: report-variables.yaml
+  loop: "{{ _showroom_user_data.users | dict2items }}"
+  loop_control:
+    loop_var: _showroom_users_item
+    label: "{{ _showroom_users_item.key }}"

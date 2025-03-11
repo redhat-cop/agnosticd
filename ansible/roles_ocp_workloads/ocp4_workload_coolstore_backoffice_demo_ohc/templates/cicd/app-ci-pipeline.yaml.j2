@@ -1,0 +1,229 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: app-ci-pipeline
+  namespace: cicd
+spec:
+  params:
+
+  - name: REPO
+    type: string
+  - name: COMMIT_SHA
+    type: string
+  - name: TLSVERIFY
+    type: string
+  - name: BUILD_EXTRA_ARGS
+    type: string
+  - name: IMAGE_REPO_DEV
+    type: string
+  - name: IMAGE_REPO_PROD
+    type: string
+  - name: IMAGE_TAG
+    type: string
+  - name: MANIFEST_FILE
+    type: string
+  - name: MANIFEST_FILE_PROD
+    type: string
+  - name: MANIFEST_REPO
+    type: string
+  - name: GIT_REF
+    type: string
+  - name: COMMIT_DATE
+    type: string
+  - name: COMMIT_AUTHOR
+    type: string
+  - name: COMMIT_MESSAGE
+    type: string
+  - name: GIT_REPO
+    type: string
+  - name: SONARQUBE_HOST_URL
+    type: string
+  - name: SONARQUBE_PROJECT_KEY
+    type: string
+  - name: SONARQUBE_PROJECT_SECRET
+    type: string
+  - name: STACKROX_IMAGE
+    type: string
+
+  tasks:
+
+  - name: clone-source
+    taskRef:
+      kind: ClusterTask
+      name: git-clone
+    params:
+    - name: url
+      value: $(params.GIT_REPO)
+    - name: revision
+      value: $(params.GIT_REF)
+    - name: deleteExisting
+      value: "true"
+    workspaces:
+    - name: output
+      workspace: shared-data
+
+  - name: scan-code
+    params:
+      - name: gitRepositoryUrl
+        value: $(params.GIT_REPO)
+      - name: gitRepositoryRevision
+        value: $(params.GIT_REF)
+      - name: sonarqubeHostUrl
+        value: $(params.SONARQUBE_HOST_URL)
+      - name: sonarqubeProjectKey
+        value: $(params.SONARQUBE_PROJECT_KEY)
+      - name: sonarqubeProjectSecret
+        value: $(params.SONARQUBE_PROJECT_SECRET)
+    taskRef:
+      kind: Task
+      name: scan-code
+    runAfter:
+    - clone-source
+
+  - name: build-image
+    runAfter:
+    - scan-code
+    taskRef:
+      kind: ClusterTask
+      name: buildah
+    params:
+    - name: TLSVERIFY
+      value: $(params.TLSVERIFY)
+    - name: BUILD_EXTRA_ARGS
+      value: --label=io.openshift.build.commit.author='$(params.COMMIT_AUTHOR)' --label=io.openshift.build.commit.date='$(params.COMMIT_DATE)'
+        --label=io.openshift.build.commit.id='$(params.COMMIT_SHA)' --label=io.openshift.build.commit.message='$(params.COMMIT_MESSAGE)'
+        --label=io.openshift.build.commit.ref='$(params.GIT_REF)' --ulimit=nofile=4096:4096
+    - name: IMAGE
+      value: $(params.IMAGE_REPO_DEV):$(params.IMAGE_TAG)
+    workspaces:
+    - name: source
+      workspace: shared-data
+
+  - name: acs-image-check
+    params:
+      - name: rox_central_endpoint
+        value: stackrox-endpoint
+      - name: rox_api_token
+        value: stackrox-secret
+      - name: image
+        value: >-
+          $(params.STACKROX_IMAGE)
+      - name: insecure-skip-tls-verify
+        value: 'true'
+    runAfter:
+      - build-image
+    taskRef:
+      kind: Task
+      name: acs-image-check
+
+  - name: acs-image-scan
+    params:
+      - name: rox_central_endpoint
+        value: stackrox-endpoint
+      - name: rox_api_token
+        value: stackrox-secret
+      - name: image
+        value: >-
+          $(params.STACKROX_IMAGE)
+      - name: insecure-skip-tls-verify
+        value: 'true'
+    runAfter:
+      - build-image
+    taskRef:
+      kind: Task
+      name: acs-image-scan
+
+  - name: update-dev-manifest
+    runAfter:
+    - acs-image-check
+    - acs-image-scan
+    taskRef:
+      kind: Task
+      name: update-manifest
+    params:
+    - name: image
+      value: $(params.IMAGE_REPO_DEV):$(params.IMAGE_TAG)
+    - name: deployment_file
+      value: $(params.MANIFEST_FILE)
+    - name: deployment_repo
+      value: $(params.MANIFEST_REPO)
+    - name: git_user_name
+      value: $(params.COMMIT_AUTHOR)
+
+  - name: tag-for-prod
+    params:
+      - name: SCRIPT
+        value: >
+          oc tag {{ ocp4_workload_coolstore_backoffice_demo_ohc_dev_namespace }}/inventory:$(params.IMAGE_TAG) {{ ocp4_workload_coolstore_backoffice_demo_ohc_prod_namespace }}/inventory:$(params.IMAGE_TAG)
+    runAfter:
+      - update-dev-manifest
+    taskRef:
+      kind: ClusterTask
+      name: openshift-client
+
+  - name: create-prod-manifest-branch
+    runAfter:
+    - tag-for-prod
+    taskRef:
+      kind: Task
+      name: pr-manifest
+    params:
+    - name: image
+      value: $(params.IMAGE_REPO_PROD):$(params.IMAGE_TAG)
+    - name: deployment_file
+      value: $(params.MANIFEST_FILE_PROD)
+    - name: deployment_repo
+      value: $(params.MANIFEST_REPO)
+    - name: git_user_name
+      value: $(params.COMMIT_AUTHOR)
+    - name: target-branch
+      value: feature-for-$(params.COMMIT_SHA)
+
+  - name: acs-deploy-scan
+    params:
+      - name: gitRepositoryUrl
+        value: $(params.MANIFEST_REPO)
+      - name: gitRepositoryRevision
+        value: feature-for-$(params.COMMIT_SHA)
+      - name: rox_central_endpoint
+        value: stackrox-endpoint
+      - name: rox_api_token
+        value: stackrox-secret
+      - name: deployment_file
+        value: $(params.MANIFEST_FILE_PROD)
+      - name: insecure-skip-tls-verify
+        value: 'true'
+    runAfter:
+      - create-prod-manifest-branch
+    taskRef:
+      kind: Task
+      name: acs-deploy-scan
+
+  - name: issue-prod-pull-request
+    runAfter:
+    - acs-deploy-scan
+    taskRef:
+      kind: Task
+      name: gitea-open-pull-request
+    params:
+    - name: GITHUB_HOST_URL
+      value: {{ _ocp4_workload_coolstore_backoffice_demo_ohc_gitea_hostname }}
+    - name: API_PATH_PREFIX
+      value: /api/v1
+    - name: GITHUB_TOKEN_SECRET_NAME
+      value: gitea-token
+    - name: REPO_FULL_NAME
+      value: {{ ocp4_workload_coolstore_backoffice_demo_ohc_gitea_user }}/gitops
+    - name: HEAD
+      value: feature-for-$(params.COMMIT_SHA)
+    - name: BASE
+      value: main
+    - name: BODY
+      value: "Update prod image for $(params.COMMIT_MESSAGE)"
+    - name: TITLE
+      value: "Production update: $(params.COMMIT_MESSAGE)"
+
+  workspaces:
+  - description: This workspace will receive the cloned git repo.
+    name: shared-data

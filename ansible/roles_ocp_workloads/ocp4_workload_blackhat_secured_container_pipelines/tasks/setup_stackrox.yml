@@ -1,0 +1,213 @@
+---
+- name: Create service account
+  k8s:
+    api_version: v1
+    kind: ServiceAccount
+    name: "{{ ocp4_workload_blackhat_secured_container_pipelines_docker_username }}"
+    namespace: "{{ ocp4_workload_blackhat_secured_container_pipelines_namespace }}"
+
+- name: Add role
+  shell: |
+    oc adm policy add-role-to-user registry-admin system:serviceaccount:{{
+    ocp4_workload_blackhat_secured_container_pipelines_namespace }}:{{
+    ocp4_workload_blackhat_secured_container_pipelines_docker_username }}
+
+- name: Get service account token
+  shell: |
+    oc get secret $(oc get secret -n {{
+    ocp4_workload_blackhat_secured_container_pipelines_namespace }} | \
+    grep registry-admin-token | awk '{print $1}') -n {{
+    ocp4_workload_blackhat_secured_container_pipelines_namespace }} \
+    -o json | jq -r '.data.token' | base64 --decode
+  register: r_token
+
+- name: Set SA token
+  set_fact:
+    ocp4_workload_blackhat_secured_container_pipelines_docker_password: "{{ r_token.stdout }}"
+
+- name: Expose registry
+  command: oc patch configs.imageregistry.operator.openshift.io/cluster --type=merge --patch '{"spec":{"defaultRoute":true}}'
+
+- name: Get route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: openshift-image-registry
+  register: r_route
+  retries: 120
+  delay: 10
+  until:
+  - r_route is defined
+  - r_route.resources is defined
+  - r_route.resources | length > 0
+
+- name: Set docker registry
+  set_fact:
+    ocp4_workload_blackhat_secured_container_pipelines_docker_registry: "{{ r_route.resources.0.spec.host }}"
+
+- name: Get stackrox route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: "{{ ocp4_workload_blackhat_secured_container_pipelines_stackrox_namespace }}"
+    name: central
+  register: r_route
+  retries: 120
+  delay: 10
+  until:
+  - r_route is defined
+  - r_route.resources is defined
+  - r_route.resources | length > 0
+
+- name: Set stackrox endpoint and url
+  set_fact:
+    _ocp4_workload_blackhat_secured_container_pipelines_central_stackrox_endpoint: "{{ r_route.resources[0].spec.host }}:443" # yamllint disable-line rule:line-length
+    _ocp4_workload_blackhat_secured_container_pipelines_centeral_stackrox_url: https://{{ r_route.resources[0].spec.host }} # yamllint disable-line rule:line-length
+
+- name: Create stackrox token
+  uri:
+    url: "{{ _ocp4_workload_blackhat_secured_container_pipelines_centeral_stackrox_url }}/v1/apitokens/generate"
+    user: admin
+    password: "{{ common_password }}"
+    method: POST
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body: {"name":"admin", "role":"Admin"}
+  register: r_uri
+
+- name: Set stackrox token
+  set_fact:
+    _ocp4_workload_blackhat_secured_container_pipelines_central_stackrox_token: "{{ r_uri.json.token }}"
+
+- name: Create secret (token)
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: stackrox-secret
+        namespace: "{{ ocp4_workload_blackhat_secured_container_pipelines_namespace }}"
+      type: Opaque
+      data:
+        rox_api_token: "{{ _ocp4_workload_blackhat_secured_container_pipelines_central_stackrox_token | string | b64encode }}"
+
+- name: Create secret (endpoint)
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: stackrox-endpoint
+        namespace: "{{ ocp4_workload_blackhat_secured_container_pipelines_namespace }}"
+      type: Opaque
+      data:
+        rox_central_endpoint: "{{ _ocp4_workload_blackhat_secured_container_pipelines_central_stackrox_endpoint | string | b64encode }}"
+
+- name: Stackrox imagestream integration - add registry integration
+  uri:
+    url: "{{ _ocp4_workload_blackhat_secured_container_pipelines_centeral_stackrox_url }}/v1/imageintegrations"
+    user: "{{ ocp4_workload_blackhat_secured_container_pipelines_stackrox_admin }}"
+    password: "{{ common_password }}"
+    method: POST
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body: >-
+      {
+      "name": "registry-admin-{{ guid }}",
+      "type": "docker",
+      "categories": ["REGISTRY"],
+      "docker": {
+      "endpoint": "{{ ocp4_workload_blackhat_secured_container_pipelines_docker_registry }}",
+      "username": "{{ ocp4_workload_blackhat_secured_container_pipelines_docker_username }}",
+      "password": "{{ ocp4_workload_blackhat_secured_container_pipelines_docker_password }}",
+      "insecure": true
+      },
+      "skipTestIntegration": false
+      }
+
+- name: Get Clusters
+  uri:
+    url: "{{ _ocp4_workload_blackhat_secured_container_pipelines_centeral_stackrox_url }}/v1/clusters"
+    user: "{{ ocp4_workload_blackhat_secured_container_pipelines_stackrox_admin }}"
+    password: "{{ common_password }}"
+    method: GET
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+  register: r_cluster_response
+  retries: 60
+  delay: 10
+  until:
+  - r_cluster_response.json is defined
+  - r_cluster_response.json.clusters is defined
+  - r_cluster_response.json.clusters | length > 0
+
+- name: Cluster response data
+  debug:
+    var: r_cluster_response
+
+- name: Set JSON Query (production)
+  set_fact:
+    _jsonQuery: "[?name=='production']"
+
+- name: Set cluster id for production {{ _jsonQuery }}
+  set_fact:
+    _scoped_cluster_id: "{{ selected[0].id }}"
+  vars:
+    selected: >-
+      {{
+        r_cluster_response.json.clusters | json_query(_jsonQuery)
+      }}
+
+- name: Read policy payload
+  set_fact:
+    _ocp4_workload_blackhat_secured_container_pipelines_signature_policy: "{{ lookup('template', 'templates/acs-signature-policy.json.j2', convert_data=False) | string }}" # yamllint disable-line rule:line-length
+  vars:
+    _scoped_cluster_namespace: "{{ ocp4_workload_blackhat_secured_container_pipelines_app_namespace }}"
+
+- name: Create stackrox image signature policy
+  uri:
+    url: "{{ _ocp4_workload_blackhat_secured_container_pipelines_centeral_stackrox_url }}/v1/policies"
+    user: admin
+    password: "{{ common_password }}"
+    method: POST
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body: "{{ _ocp4_workload_blackhat_secured_container_pipelines_signature_policy }}"
+  ignore_errors: true
+
+- name: Get Stackrox policies
+  uri:
+    url: "{{ _ocp4_workload_blackhat_secured_container_pipelines_centeral_stackrox_url }}/v1/policies"
+    user: admin
+    password: "{{ common_password }}"
+    method: GET
+    force_basic_auth: true
+    validate_certs: false
+    body_format: json
+    headers:
+      Content-Type: application/json
+  register: r_policies
+  retries: 60
+  delay: 5
+  until:
+  - r_policies.json is defined
+  - r_policies.json.policies is defined
+  - r_policies.json.policies | length > 0
+
+- name: Inform only policies
+  include_tasks: inform_only_policy_tasks.yml
+  loop: "{{ ocp4_workload_blackhat_secured_container_pipelines_inform_only_policies }}"

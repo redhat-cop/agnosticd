@@ -1,0 +1,205 @@
+---
+- name: Generate user password if not defined
+  when:
+  - studentvm_user_use_password | bool
+  - studentvm_user_password | default("") | length == 0
+  ansible.builtin.set_fact:
+    _studentvm_user_password: >-
+      {{ lookup('password', '/dev/null length={{ studentvm_user_password_length }} chars=ascii_letters,digits') }}
+
+- name: Use provided password
+  when:
+  - studentvm_user_use_password | bool
+  - studentvm_user_password | default("") | length > 0
+  ansible.builtin.set_fact:
+    _studentvm_user_password: "{{ studentvm_user_password }}"
+
+- name: Add GUID to /etc/skel/.bashrc
+  ansible.builtin.lineinfile:
+    path: "/etc/skel/.bashrc"
+    regexp: "^export GUID"
+    line: "export GUID={{ guid }}"
+
+# If we don't delete the user the next task fails if the user already exists
+- name: Ensure user does not exist
+  ansible.builtin.user:
+    name: "{{ studentvm_user_name }}"
+    state: absent
+
+- name: Remove user home directory if it exists
+  ansible.builtin.file:
+    state: absent
+    path: "/home/{{ studentvm_user_name }} "
+
+- name: User with password
+  when: studentvm_user_use_password | bool
+  block:
+  - name: Create user with password
+    ansible.builtin.user:
+      name: "{{ studentvm_user_name }}"
+      password: "{{ _studentvm_user_password | password_hash( 'sha512' ) }}"
+      comment: Student User
+      group: users
+      groups: "{{ 'wheel' if studentvm_user_enable_sudo | bool else '' }}"
+      shell: /bin/bash
+      state: present
+
+  - name: Enable password authentication
+    ansible.builtin.lineinfile:
+      line: PasswordAuthentication yes
+      regexp: '^ *PasswordAuthentication'
+      path: /etc/ssh/sshd_config
+
+- name: Create user without password
+  when: not studentvm_user_use_password
+  block:
+  - name: Create user
+    ansible.builtin.user:
+      name: "{{ studentvm_user_name }}"
+      comment: Student User
+      group: users
+      groups: "{{ 'wheel' if studentvm_user_enable_sudo | bool else '' }}"
+      shell: /bin/bash
+      state: present
+
+  - name: Generate student SSH key if no public key specified
+    when: studentvm_user_public_key | default("") | length == 0
+    block:
+    - name: Ensure .ssh directory exists
+      ansible.builtin.file:
+        state: directory
+        path: "/home/{{ studentvm_user_name }}/.ssh"
+        owner: "{{ studentvm_user_name }}"
+        mode: 0700
+
+    - name: Generate student SSH key
+      openssh_keypair:
+        state: present
+        comment: Student User
+        path: "/home/{{ studentvm_user_name }}/.ssh/student"
+        owner: "{{ studentvm_user_name }}"
+        mode: 0600
+      register: r_student_key
+
+    - name: Read generated student private SSH key
+      ansible.builtin.slurp:
+        src: "/home/{{ studentvm_user_name }}/.ssh/student"
+      register: r_student_private_key
+
+    - name: Set public and private key facts
+      ansible.builtin.set_fact:
+        studentvm_user_public_key: "{{ r_student_key.public_key }}"
+        studentvm_user_private_key: "{{ r_student_private_key['content'] | b64decode }}"
+
+  - name: Set student key fact
+    when: studentvm_user_public_key | default("") | length > 0
+    ansible.builtin.set_fact:
+      studentvm_user_public_key: "{{ studentvm_user_public_key }}"
+
+  - name: Add student public key to student vm
+    authorized_key:
+      user: "{{ studentvm_user_name }}"
+      key: "{{ studentvm_user_public_key }}"
+
+- name: Set up root user
+  when: studentvm_user_enable_sudo | bool
+  block:
+  - name: Disable root password authentication
+    ansible.builtin.lineinfile:
+      line: PermitRootLogin without-password
+      regexp: '^ *PermitRootLogin'
+      path: /etc/ssh/sshd_config
+
+  - name: Allow passwordless sudo
+    ansible.builtin.lineinfile:
+      path: '/etc/sudoers'
+      state: present
+      line: "{{ studentvm_user_name }}         ALL=(ALL)       NOPASSWD: ALL"
+      insertafter: "'^{{ remote_user }}"
+
+- name: Restart sshd
+  ansible.builtin.service:
+    name: sshd
+    state: restarted
+
+- name: Ensure output_dir exists
+  delegate_to: localhost
+  become: false
+  ansible.builtin.file:
+    path: "{{ output_dir | default('/tmp')}}"
+    state: directory
+
+- name: Ensure output_dir/user_data.yaml file exists
+  delegate_to: localhost
+  become: false
+  ansible.builtin.copy:
+    content: ""
+    dest: "{{ output_dir | default('/tmp') }}/user_data.yaml"
+    force: false
+    mode: 0664
+
+- name: Print user info for password authentication
+  when: studentvm_user_use_password | bool
+  block:
+  - name: Print user info for password authentication to stdout
+    when: studentvm_user_show_user_messages | bool
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - "user: {{ studentvm_user_name }}"
+    - "ssh_command: ssh {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"
+    - "password: {{ _studentvm_user_password }}"
+    - "workstation: studentvm.{{ subdomain_base }}"
+
+  - name: Add user info for password authentication to user_data.yaml
+    when: studentvm_user_report_user_data | bool
+    agnosticd_user_info:
+      data:
+        ssh_command: "ssh {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"
+        ssh_host: "studentvm.{{ subdomain_base }}"
+        user: "{{ studentvm_user_name }}"
+        password: "{{ _studentvm_user_password }}"
+
+- name: Print user info for public key authentication (generated key)
+  when:
+  - not studentvm_user_use_password | bool
+  - studentvm_user_private_key | default("") | length > 0
+  block:
+  - name: Print user info for public key authentication (generated key) to stdout
+    when: studentvm_user_show_user_messages | bool
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - "user: {{ studentvm_user_name }}"
+    - "ssh_command: ssh -i 'your private key' {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"
+    - "private_key: {{ studentvm_user_private_key }}"
+
+  - name: Print user info for public key authentication (generated key) to user_data.yaml
+    when: studentvm_user_report_user_data | bool
+    agnosticd_user_info:
+      data:
+        ssh_command: "ssh -i 'your private key' {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"
+        ssh_host: "studentvm.{{ subdomain_base }}"
+        user: "{{ studentvm_user_name }}"
+        private_key: "{{ studentvm_user_private_key }}"
+
+- name: Print user info for public key authentication (provided public key)
+  when:
+  - not studentvm_user_use_password | bool
+  - studentvm_user_public_key | default("") | length > 0
+  block:
+  - name: Print user info for public key authentication (provided public key) to stdout
+    when: studentvm_user_show_user_messages | bool
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - "user: {{ studentvm_user_name }}"
+    - "ssh_command: ssh -i 'your private key' {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"
+
+  - name: Print user info for public key authentication (provided public key) to user_data.yaml
+    when: studentvm_user_report_user_data | bool
+    agnosticd_user_info:
+      data:
+        ssh_command: "ssh -i 'your private key' {{ studentvm_user_name }}@studentvm.{{ subdomain_base }}"
+        ssh_host: "studentvm.{{ subdomain_base }}"
+        user: "{{ studentvm_user_name }}"

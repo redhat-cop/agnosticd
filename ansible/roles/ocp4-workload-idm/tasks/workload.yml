@@ -1,0 +1,169 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- include_role:
+    name: idm-server
+  vars:
+    become_override: yes
+
+# /home/{{ ansible_user }}/.aws/credentials needs to exist before calling this role
+- name: Create Let's Encrypt Certificates
+  include_role:
+    name: host-lets-encrypt-certs-certbot
+  vars:
+  - _certbot_domain: "{{ idm_dns_name }}"
+  - _certbot_wildcard_domain: "{{cluster_name}}{{subdomain_base_suffix}}"
+  - _certbot_dns_provider: "route53"
+  - _certbot_remote_dir: "/home/{{ ansible_user }}/idm"
+  - _certbot_remote_dir_owner: "{{ ansible_user }}"
+  - _certbot_install_dir: "/home/{{ ansible_user }}/idm/certificates"
+  - _certbot_install_dir_owner: "{{ ansible_user }}"
+  - _certbot_cache_archive_file: "{{ output_dir|d('/tmp') }}/{{ guid }}-idm-certs.tar.gz"
+  - _certbot_renew_automatically: True
+  - _certbot_use_cache: True
+  - _certbot_force_issue: False
+  - _certbot_production: True
+  - _certbot_cron_job_name: LETS_ENCRYPT_RENEW_IDM
+
+- name: Get Root CA
+  copy:
+    src: ./files/DSTRootCAX3.pem
+    dest: /tmp/DSTRootCAX3.pem
+
+- name: Get Intermediate CA
+  copy:
+    src: ./files/LEAuthX3.pem
+    dest: /tmp/LEAuthX3.pem
+
+- name: Install CAs
+  shell: |
+    echo {{ idm_admin_password }} | kinit admin
+    ipa-cacert-manage -p {{ idm_dm_password }} install /tmp/DSTRootCAX3.pem -n DSTRootCAX3 -t C,,
+    ipa-cacert-manage -p {{ idm_dm_password }} install /tmp/LEAuthX3.pem -n LEAuthX3 -t C,,
+    ipa-certupdate -v
+  become: True
+
+- name: Install IPA Certificate
+  shell: |
+    ipa-server-certinstall -w -d /home/{{ ansible_user }}/idm/certificates/privkey.pem /home/{{ ansible_user }}/idm/certificates/fullchain.pem -p {{ idm_dm_password }} --pin=''
+    ipactl restart
+  become: True
+
+- name: Install redeploy hook scripts
+  template:
+    src: ./files/deploy_certs.sh
+    dest: "/home/{{ ansible_user }}/idm/certbot/renewal-hooks/deploy/deploy_certs.sh"
+    mode: 0775
+    owner: "{{ ansible_user }}"
+- name: Install redeploy hook ansible components
+  copy:
+    src: "./files/{{ item }}"
+    dest: "/home/{{ ansible_user }}/idm/certbot/renewal-hooks/deploy/{{ item }}"
+    mode: 0664
+    owner: "{{ ansible_user }}"
+  loop:
+  - deploy_certs.yml
+
+# Find public IP of bastion
+- name: Gather VPC facts
+  ec2_vpc_net_facts:
+    filters:
+      tag:Name: "{{ aws_vpc_name }}"
+    region: "{{ aws_region_final | default(aws_region) }}"
+  register: vpc
+
+- name: Get instance facts
+  ec2_instance_facts:
+    filters:
+# FIXME - find a better way to discover the bastion name
+      "tag:Name": "{{ instances[0].name }}"
+    region: "{{ aws_region_final | default(aws_region) }}"
+  register: instancesr
+  failed_when: instancesr|length == 0
+
+- name: Get non-terminated instance
+  set_fact:
+    ec2instance: "{{ item }}"
+  with_items:
+  - "{{ instancesr.instances }}"
+  when: not item.state.name == 'terminated'
+  failed_when: ec2instance is undefined
+
+# Make external DNS of IdM available to OpenShift cluster
+- name: Get cluster metadata
+  slurp:
+    path: "{{ cluster_name }}/metadata.json"
+  register: metadata
+
+- name: Get cluster infrastructure ID
+  set_fact:
+    cluster_vpc_name: "{{ metadata.content | b64decode | from_json | json_query('infraID')}}-vpc"
+
+- name: Gather Cluster VPC facts
+  ec2_vpc_net_facts:
+    filters:
+      tag:Name: "{{ cluster_vpc_name }}"
+    region: "{{ aws_region_final | default(aws_region) }}"
+  register: cluster_vpc
+  failed_when: cluster_vpc.vpcs | length == 0
+
+- name: Create Private DNS Entry for IdM in cluster private zone
+  route53:
+    state: present
+    overwrite: yes
+    private_zone: yes
+    record: "{{ idm_dns_name }}"
+    type: A
+    ttl: 60
+    value: "{{ ec2instance.public_ip_address }}"
+    zone: "{{ cluster_name }}{{ subdomain_base_suffix }}."
+    vpc_id: "{{ cluster_vpc.vpcs[0].vpc_id }}"
+
+- name: Configure Local Authentication
+  when:
+  - install_ocp4 | d(False) | bool
+  - install_idm is defined
+  environment:
+    KUBECONFIG: "{{ cluster_name }}/auth/kubeconfig"
+  block:
+  - name: Set up Local IdM LDAP
+    when:
+    - install_idm == "local-ldap"
+    block:
+    - name: Create admin user
+      when: admin_user is defined
+      ipa_user:
+        name: "{{ admin_user }}"
+        password: "{{ admin_password }}"
+        state: present
+        givenname: OpenShift
+        sn: Administrator
+        mail:
+        - "{{ email }}"
+        ipa_host: "{{ idm_dns_name }}"
+        ipa_user: admin
+        ipa_pass: "{{ idm_admin_password }}"
+    - name: Upload OAuth Configuration File
+      template:
+        src: "./files/oauth-ldap.yaml"
+        dest: "/home/{{ ansible_user }}/oauth-ldap.yaml"
+        owner: "{{ ansible_user }}"
+        mode: 0664
+    - name: Update OAuth Configuration
+      shell: "oc apply -f /home/{{ ansible_user }}/oauth-ldap.yaml"
+    - name: Remove kubeadmin User
+      when:
+      - admin_user is defined
+      - auth_remove_kubeadmin
+      command: oc delete secret kubeadmin -n kube-system
+      ignore_errors: true
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

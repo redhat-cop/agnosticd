@@ -1,0 +1,168 @@
+---
+- name: install rhbk operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_name: rhbk-operator
+    install_operator_namespace: rhbk
+    install_operator_manage_namespaces: [rhbk]
+    install_operator_channel: "{{ ocp4_workload_eap_camelq_lab_rhbk_channel }}"
+    install_operator_starting_csv: "{{ ocp4_workload_eap_camelq_lab_rhbk_startingcsv }}"
+    install_operator_catalogsource_setup: true
+    install_operator_catalogsource_image: "{{ ocp4_workload_eap_camelq_lab_catalogsource_image }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_eap_camelq_lab_catalogsource_tag }}"
+
+- name: wait for keycloak CRD to be ready
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: keycloaks.k8s.keycloak.org
+  register: r_keycloak_crd
+  retries: 200
+  delay: 20
+  until: r_keycloak_crd.resources | list | length == 1
+
+- name: create postgreSQL PVC
+  kubernetes.core.k8s:
+    state: present
+    kind: PersistentVolumeClaim
+    api_version: v1
+    definition:
+      kind: PersistentVolumeClaim
+      apiVersion: v1
+      metadata:
+        name: postgresql
+        namespace: rhbk
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+
+- name: create rhbk PostgreSQL database
+  kubernetes.core.k8s:
+    state: present
+    kind: StatefulSet
+    api_version: apps/v1
+    definition:
+      metadata:
+        name: postgresql-db
+        namespace: rhbk
+      spec:
+        serviceName: postgresql-db-service
+        selector:
+          matchLabels:
+            app: postgresql-db
+        replicas: 1
+        template:
+          metadata:
+            labels:
+              app: postgresql-db
+          spec:
+            containers:
+              - name: postgresql-db
+                image: postgres:latest
+                volumeMounts:
+                  - mountPath: /data
+                    name: postgresql-data
+                env:
+                  - name: POSTGRES_PASSWORD
+                    value: testpassword
+                  - name: PGDATA
+                    value: /data/pgdata
+                  - name: POSTGRES_DB
+                    value: keycloak
+            volumes:
+              - name: postgresql-data
+                persistentVolumeClaim:
+                  claimName: postgresql
+
+- name: create rhbk PostgreSQL service
+  kubernetes.core.k8s:
+    state: present
+    kind: Service
+    api_version: v1
+    definition:
+      metadata:
+        name: postgres-db
+        namespace: rhbk
+      spec:
+        selector:
+          app: postgresql-db
+        type: LoadBalancer
+        ports:
+          - port: 5432
+            targetPort: 5432
+
+- name: create postgres db secret
+  kubernetes.core.k8s:
+    state: present
+    kind: Secret
+    api_version: v1
+    definition:
+      metadata:
+        name: keycloak-db-secret
+        namespace: rhbk
+      data:
+        database-name: c2FtcGxlZGI=
+        password: dGVzdHBhc3N3b3Jk
+        username: cG9zdGdyZXM=
+
+- name: create rhbk instance
+  kubernetes.core.k8s:
+    state: present
+    kind: Keycloak
+    api_version: k8s.keycloak.org/v2alpha1
+    definition:
+      metadata:
+        name: eap-keycloak
+        labels:
+          app: sso
+        namespace: rhbk
+      spec:
+        instances: 1
+        http:
+          httpEnabled: true
+        hostname:
+          strict: false
+          strictBackchannel: false
+        db:
+          vendor: postgres
+          host: postgres-db
+          usernameSecret:
+            name: keycloak-db-secret
+            key: username
+          passwordSecret:
+            name: keycloak-db-secret
+            key: password
+
+- name: create the Route for rhbk
+  kubernetes.core.k8s:
+    api_version: route.openshift.io/v1
+    namespace: rhbk
+    state: present
+    kind: Route
+    definition:
+      metadata:
+        name: rhbk
+        labels:
+          app: rhbk
+      spec:
+        host: ''
+        to:
+          kind: Service
+          name: eap-keycloak-service
+          weight: 100
+        port:
+          targetPort: http
+        tls:
+          termination: edge
+          insecureEdgeTerminationPolicy: Allow
+
+- name: create rhbk realm
+  kubernetes.core.k8s:
+    state: present
+    kind: KeycloakRealmImport
+    api_version: k8s.keycloak.org/v2alpha1
+    definition: "{{ lookup('template', './rhbk_realm.j2') }}"

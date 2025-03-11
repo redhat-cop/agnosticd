@@ -1,0 +1,447 @@
+---
+
+env_type: smart-management
+output_dir: /tmp/workdir              # Writable working scratch directory
+email: smart-management@example.com
+cloud_provider: osp
+guid: wtome-patching
+
+student_name: student
+student_password: ansible123 #"{{ lookup('password', '/dev/null length=15 chars=ascii_letters') }}"
+lab_user: devops
+node_instance_count: 2
+
+#### Tower variables ############
+tower_version: 3.8.0-1
+tower_hostname: "tower.{{ guid }}.{{ osp_cluster_dns_zone }}"
+tower_username: admin
+tower_password: "{{ tower_admin_password }}"
+tower_validate_certs: false
+
+tower_infra_workloads:
+  - redhat_cop.tower_utilities.tower_virtual_environments
+  - redhat_cop.tower_configuration.credential_types
+  - redhat_cop.tower_configuration.credentials
+  - redhat_cop.tower_configuration.projects
+  - redhat_cop.tower_configuration.inventories
+  - redhat_cop.tower_configuration.inventory_sources
+  - redhat_cop.tower_configuration.job_templates
+  - redhat_cop.tower_configuration.workflow_job_templates
+
+tower_venv_pylibs:
+  - "apypie"
+
+tower_credential_types:
+  - name: Satellite_Collection
+    description: Credential for redhat.satellite collection
+    kind: cloud
+    inputs:
+      fields:
+        - type: string
+          id: username
+          label: Satellite Username
+        - type: string
+          id: password
+          label: Satellite Password
+          secret: true
+        - type: string
+          id: host
+          label: Satellite Hostname
+      required:
+        - username
+        - password
+        - host
+    injectors:
+      env:
+        FOREMAN_SERVER: "{% raw %}{{ '{{host}}' }}{% endraw %}"
+        FOREMAN_USER: "{% raw %}{{ '{{username}}' }}{% endraw %}"
+        FOREMAN_PASSWORD: "{% raw %}{{ '{{password}}' }}{% endraw %}"
+
+tower_credentials:
+  - name: SSH
+    description: credential for ssh to linux systems
+    organization: Default
+    credential_type: Machine
+    inputs:
+      username: cloud-user
+      ssh_key_data: "{{ lookup('file', '{{output_dir}}/{{guid}}key') }}"
+  - name: Satellite
+    credential_type: Satellite_Collection
+    state: present
+    organization: Default
+    inputs:
+      host: "https://{{ satellite_hostname }}"
+      username: 'admin' #"{{ hostvars['satellite']['satellite_admin'] }}"
+      password: "{{ hostvars['satellite']['satellite_admin_password'] }}"
+  - name: OpenStack
+    credential_type: OpenStack
+    state: present
+    organization: Default
+    inputs:
+      host: "{{ osp_auth_url }}"
+      domain: "{{ osp_auth_user_domain }}"
+      project: "{{ osp_project_name }}"
+      password: "{{ osp_auth_password }}"
+      username: "{{ osp_auth_username }}"
+      verify_ssl: false
+      project_domain_name: "{{ osp_auth_project_domain }}"
+
+tower_projects:
+  - name: Automated Management
+    organization: Default
+    scm_update_on_launch: true
+    scm_update_cache_timeout: 3600
+    scm_type: git
+    scm_url: 'https://github.com/willtome/automated-smart-management.git'
+  - name: Fact Scan
+    organization: Default
+    scm_type: git
+    scm_url: 'https://github.com/ansible/awx-facts-playbooks.git'
+
+tower_inventories:
+  - name: Local
+    organization: Default
+  - name: Servers
+    organization: Default
+
+tower_inventory_sources:
+  - name: satellite_source
+    inventory: Servers
+    credential: Satellite
+    source: scm
+    source_project: Automated Management
+    source_path: inventory.foreman.yml
+  - name: openstack_source
+    inventory: Servers
+    credential: OpenStack
+    source: openstack
+    source_vars:
+      private: true
+      keyed_groups:
+        - key: openstack.metadata.AnsibleGroup.split(',')
+          prefix: "tag"
+
+tower_templates:
+  - name: SERVER / Register
+    project: Automated Management
+    playbook: server_register.yml
+    inventory: Servers
+    credentials:
+      - SSH
+    extra_vars:
+      sat_url: "{{ satellite_hostname }}"
+      org_id: "{{org}}"
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Server Name or Pattern
+          type: text
+          variable: HOSTS
+          required: false
+
+  - name: Satellite / Publish Content View
+    project: Automated Management
+    playbook: satellite_publish.yml
+    inventory: Local
+    credentials:
+      - Satellite
+    extra_vars:
+      sat_url: "{{ satellite_hostname }}"
+      organization: "{{ org }}"
+      content_view: RHEL7
+      lifecycle_environment: RHEL7_Dev
+
+  - name: Satellite / Promote Content View
+    project: Automated Management
+    playbook: satellite_promote.yml
+    inventory: Local
+    credentials:
+      - Satellite
+    extra_vars:
+      sat_url: "{{ satellite_hostname }}"
+      organization: "{{ org }}"
+      content_view: RHEL7
+      lifecycle_environment: RHEL7_Dev
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Current Lifecycle Environment
+          variable: current_lifecycle_environment
+          type: multiplechoice
+          choices:
+            - RHEL7_Dev
+            - RHEL7_QA
+            - RHEL7_Prod
+          required: false
+        - question_name: Next Lifecycle Environment
+          variable: lifecycle_environment
+          type: multiplechoice
+          choices:
+            - RHEL7_Dev
+            - RHEL7_QA
+            - RHEL7_Prod
+          required: false
+
+  - name: Server / Patch
+    project: Automated Management
+    playbook: server_patch.yml
+    inventory: Servers
+    use_fact_cache: true
+    credentials:
+      - SSH
+    survey_enabled: true
+    survey:
+      name: ''
+      description: ''
+      spec:
+        - question_name: Select Environment
+          type: multiplechoice
+          variable: server_type
+          choices:
+            - RHEL7_Dev
+            - RHEL7_QA
+            - RHEL7_Prod
+          required: false
+        - question_name: Check
+          type: multiplechoice
+          variable: check_only
+          choices:
+            - 'yes'
+            - 'no'
+          required: true
+
+  - name: Server / Fact Scan
+    project: Fact Scan
+    playbook: scan_facts.yml
+    inventory: Servers
+    ask_limit_on_launch: true
+    use_fact_cache: true
+    credentials:
+      - SSH
+
+tower_hosts:
+  - name: node
+    inventory: Cloud
+    variables:
+      ansible_host: node.example.com
+      tags:
+        Group: RHEL7_DEV
+
+tower_workflows:
+  - name: PATCH / Dev
+    organization: Default
+    workflow_nodes:
+      - unified_job_template: Satellite / Publish Content View
+        identifier: node101
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node301
+      - unified_job_template: openstack_source
+        identifier: node102
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node201
+      - unified_job_template: satellite_source
+        identifier: node103
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node201
+      - unified_job_template: Server / Fact Scan
+        identifier: node201
+        limit: env_RHEL7_Dev
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node301
+      - unified_job_template: Server / Patch
+        identifier: node301
+        all_parents_must_converge: true
+        always_nodes:
+          - node401
+        failure_nodes: []
+        success_nodes: []
+        extra_data:
+          server_type: RHEL7_Dev
+          check_only: "no"
+      - unified_job_template: Server / Fact Scan
+        identifier: node401
+        limit: env_RHEL7_Dev
+        always_nodes: []
+        failure_nodes: []
+        success_nodes: []
+
+  - name: PATCH / QA
+    organization: Default
+    workflow_nodes:
+      - unified_job_template: Satellite / Promote Content View
+        identifier: node101
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node301
+        extra_data:
+          current_lifecycle_environment: RHEL7_Dev
+          lifecycle_environment: RHEL7_QA
+      - unified_job_template: openstack_source
+        identifier: node102
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node201
+      - unified_job_template: satellite_source
+        identifier: node103
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node201
+      - unified_job_template: Server / Fact Scan
+        identifier: node201
+        limit: env_RHEL7_QA
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node301
+      - unified_job_template: Server / Patch
+        identifier: node301
+        all_parents_must_converge: true
+        always_nodes:
+          - node401
+        failure_nodes: []
+        success_nodes: []
+        extra_data:
+          server_type: RHEL7_QA
+          check_only: "no"
+      - unified_job_template: Server / Fact Scan
+        identifier: node401
+        limit: env_RHEL7_QA
+        always_nodes: []
+        failure_nodes: []
+        success_nodes: []
+
+  - name: PATCH / Prod
+    organization: Default
+    workflow_nodes:
+      - unified_job_template: Satellite / Promote Content View
+        identifier: node101
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node301
+        extra_data:
+          current_lifecycle_environment: RHEL7_QA
+          lifecycle_environment: RHEL7_Prod
+      - unified_job_template: openstack_source
+        identifier: node102
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node201
+      - unified_job_template: satellite_source
+        identifier: node103
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node201
+      - unified_job_template: Server / Fact Scan
+        identifier: node201
+        limit: env_RHEL7_Prod
+        always_nodes: []
+        failure_nodes: []
+        success_nodes:
+          - node301
+      - unified_job_template: Server / Patch
+        identifier: node301
+        all_parents_must_converge: true
+        always_nodes:
+          - node401
+        failure_nodes: []
+        success_nodes: []
+        extra_data:
+          server_type: RHEL7_Prod
+          check_only: "no"
+      - unified_job_template: Server / Fact Scan
+        identifier: node401
+        limit: env_RHEL7_Prod
+        always_nodes: []
+        failure_nodes: []
+        success_nodes: []
+
+###### satellite variables ###############
+#configure_satellite: true
+satellite_version: 6.7
+satellite_hostname: "satellite.{{ guid }}.{{ osp_cluster_dns_zone }}"
+
+satellite_arguments:
+  - --foreman-initial-organization "{{ org }}"
+
+org: gpte
+org_label: gpte
+org_description: "Global Partner Training and Enablement"
+publicname: "satellite.{{ guid }}.{{ osp_cluster_dns_zone }}"
+
+satellite_infra_workloads:
+  - satellite-manage-organization
+  - satellite-manage-manifest
+  - satellite-manage-repositories
+  - satellite-manage-lifecycle
+  - satellite-manage-content-view
+  - satellite-manage-activationkey
+
+satellite_manifest:
+  type: file
+  path: "{{ satellite_manifest_path }}" #from secrets
+
+satellite_repos_sync:
+  - label: rhel-7-server-rpms
+    release: 7Server
+
+satellite_products:
+  - product: "Red Hat Enterprise Linux Server"
+
+lifecycle_environment_path:
+  - name: "RHEL7_Dev"
+    label: "rhel7_dev"
+    description: "Development Environment"
+    prior_env: "Library"
+  - name: "RHEL7_QA"
+    label: "rhel7_qa"
+    description: "Quality Environment"
+    prior_env: "RHEL7_Dev"
+  - name: "RHEL7_Prod"
+    label: "rhel7_prod"
+    description: "Production Enviornment"
+    prior_env: "RHEL7_QA"
+
+satellite_content:
+  - name: "RHEL7"
+    content_view: "RHEL7"
+    content_view_update: true
+    repos:
+      - name: 'Red Hat Enterprise Linux 7 Server (RPMs)'
+        product: 'Red Hat Enterprise Linux Server'
+        basearch: 'x86_64'
+        releasever: '7Server'
+
+satellite_activation_keys:
+  - life_cycle: "RHEL7_Dev"
+    content_view: "RHEL7"
+    activation_key: "RHEL7_Dev"
+    subscriptions:
+      - name: "Employee SKU"
+  - life_cycle: "RHEL7_QA"
+    content_view: "RHEL7"
+    activation_key: "RHEL7_QA"
+    subscriptions:
+      - name: "Employee SKU"
+  - life_cycle: "RHEL7_Prod"
+    content_view: "RHEL7"
+    activation_key: "RHEL7_Prod"
+    subscriptions:
+      - name: "Employee SKU"

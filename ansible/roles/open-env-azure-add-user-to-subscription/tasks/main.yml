@@ -1,0 +1,196 @@
+---
+- name: Check if email is Red Hat associate
+  set_fact:
+    internal_user: True
+  when:
+    - '"@redhat.com" in requester_email'
+    - agnosticd_open_environment | default(false) | bool
+
+- name: Check if email is not a Red Hat associate
+  set_fact:
+    internal_user: False
+  when:
+    - '"@redhat.com" not in requester_email'
+
+- name: Checking if user is in Active Directory
+  when:
+    - internal_user | default(false) | bool
+  azure.azcollection.azure_rm_aduser_info:
+    auth_source: env
+    user_principal_name: "{{ requester_email }}"
+    tenant: "{{ azure_tenant }}"
+  register: azuser
+
+- name: Retrieving an available pool ID and locking it in CosmosDB
+  ansible.builtin.uri:
+    return_content: yes
+    url: "{{ az_function_get }}{{ project_tag }}/{{ az_pool_id }}?code={{ azure_pool_api_secret }}"
+  register: poolid
+
+- name: Write out the assigned pool ID
+  debug:
+    msg: "{{ poolid.content }}"
+
+- name: Create subscription based sandbox in Azure
+  when: poolid.content
+  block:
+    - name: Get facts for assigned subscription by pool ID name
+      azure.azcollection.azure_rm_subscription_info:
+        auth_source: env
+        name: "{{ poolid.content }}"
+      register: assignedsubscription
+
+    - name: Write out assignedsubscription
+      debug:
+        msg: "{{ assignedsubscription }}"
+
+    - name: Get subscription FQID
+      set_fact:
+        subscription_fqid: "{{ assignedsubscription.subscriptions[0].fqid }}"
+
+    - name: Get subscription ID
+      set_fact:
+        subscription_id: "{{ assignedsubscription.subscriptions[0].subscription_id }}"
+
+    - name: Log into Azure CLI
+      no_log: True
+      command: >
+        az login --service-principal -u {{ azure_service_principal }}
+        -p {{ azure_password }} --tenant {{ azure_tenant }}
+
+    - name: Tag the assigned Azure subscription with the users email and guid
+      command: >
+        az tag create --resource-id {{ subscription_fqid }} --tags GUID={{ guid }} EMAIL={{ requester_email }} cost-center={{ cost_center }}
+
+    - name: Get Role Definition to use for subscription access
+      azure.azcollection.azure_rm_roledefinition_info:
+        auth_source: env
+        scope: "{{ subscription_fqid }}"
+        role_name: "{{ azure_owner_role_name }}"
+      register: role_definition
+
+    - name: Set user as Owner for the subscription
+      when:
+        - internal_user | default(false) | bool
+      azure.azcollection.azure_rm_roleassignment:
+        auth_source: env
+        scope: "{{ subscription_fqid }}"
+        assignee_object_id: "{{ azuser.ad_users[0].object_id }}"
+        role_definition_id:
+          "{{ role_definition.roledefinitions[0].id }}"
+        state: present
+      register: result
+      failed_when: "result.msg is defined and 'The role assignment already exists' not in result.msg"
+
+    - name: Create resource group in subscription
+      environment:
+        AZURE_SUBSCRIPTION_ID: "{{ subscription_id }}"
+      azure.azcollection.azure_rm_resourcegroup:
+        auth_source: env
+        subscription_id: "{{ subscription_id }}"
+        name: "openenv-{{ guid }}"
+        location: "{{ azure_region }}"
+        state: present
+        tags:
+          guid: "{{ guid }}"
+      register: rg_info
+
+    - name: Get facts for management subscription
+      azure.azcollection.azure_rm_subscription_info:
+        auth_source: env
+        id: "{{ azure_subscription_id }}"
+      register: management_subscription
+
+    - name: Write out management_subscription
+      debug:
+        msg: "{{ management_subscription }}"
+
+    - name: Create a DNS zone
+      command: >
+        az network dns zone create
+          -g openenv-{{ guid }}
+          -n {{ guid }}.{{ azure_root_dns_zone }}
+          -p {{ management_subscription.subscriptions.fqid }}/resourceGroups/{{ azure_dns_resource_group }}/providers/Microsoft.Network/dnszones/{{ azure_root_dns_zone }}
+          --subscription {{ subscription_id }}
+
+    - name: Create the Application and SP
+      command: >-
+        az ad sp create-for-rbac
+        --name "api://openenv-{{ guid }}"
+        --role "{{ azure_owner_role_name }}"
+        --scopes "{{ subscription_fqid }}"
+      register: azappcreate
+      retries: 10
+      delay: 10
+      until: azappcreate is succeeded
+
+    - name: Get application info
+      azure.azcollection.azure_rm_adapplication_info:
+        auth_source: cli
+        tenant: "{{ azure_tenant }}"
+        app_id: "{{ azappcreate.stdout | from_json | json_query('appId') }}"
+        subscription_id: "{{ subscription_id }}"
+      register: azapp
+      retries: 30
+      delay: 10
+      until:
+        - azapp.applications | length > 0
+
+    - name: Get password
+      when: azappcreate.changed
+      set_fact: azpass="{{ azappcreate.stdout | from_json | json_query('password') }}"
+
+    - name: Log out of Azure CLI
+      command: >
+        az logout
+
+- name: Create ARO SP
+  when: ( install_aro | default(false) | bool )
+  block:
+    - name: Log into Azure CLI
+      no_log: True
+      command: >
+        az login --service-principal -u {{ azure_service_principal }}
+        -p {{ azure_password }} --tenant {{ azure_tenant }}
+
+    - name: Create the Service Principal for ARO
+      ansible.builtin.command: >-
+        az ad sp create-for-rbac
+        --name "api://openenv-aro-{{ guid }}"
+        --role "{{ azure_owner_role_name }}"
+        --scopes "{{ subscription_fqid }}"
+      register: azaroappcreate
+      retries: 10
+      delay: 10
+      until: azaroappcreate is succeeded
+
+    - name: Get ARO app info
+      azure.azcollection.azure_rm_adapplication_info:
+        auth_source: cli
+        tenant: "{{ azure_tenant }}"
+        app_id: "{{ azaroappcreate.stdout | from_json | json_query('appId') }}"
+        subscription_id: "{{ azure_subscription_id }}"
+      register: azaroapp
+      retries: 30
+      delay: 10
+      until:
+        - azaroapp.applications | length > 0
+
+    - name: Get ARO app SP info
+      azure.azcollection.azure_rm_adserviceprincipal_info:
+        auth_source: cli
+        app_id: "{{ azaroapp.applications[0].app_id }}"
+        tenant: "{{ azure_tenant }}"
+      register: azaroappsp
+
+    - name: Save ARO SP password
+      ansible.builtin.set_fact: az_aro_pass="{{ azaroappcreate.stdout | from_json | json_query('password') }}"
+
+    - name: Log out of Azure CLI
+      command: >
+        az logout
+
+- name: Write Pool ID to user info data
+  agnosticd_user_info:
+    data:
+      sandbox_name: "{{ poolid.content }}"

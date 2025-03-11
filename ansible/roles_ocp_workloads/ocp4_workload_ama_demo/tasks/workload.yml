@@ -1,0 +1,233 @@
+---
+# Create RHEV VM from existing RHEV template
+# Needs ovirt collection https://github.com/ovirt/ovirt-ansible-collection
+#   ansible-galaxy collection install ovirt.ovirt # Version 1.6.6
+# New Virtualenv:
+#   virtualenv -p $(which python3) ~/virtualenvs/ovirt
+#   source ~/virtualenvs/ovirt/bin/activate
+#
+#   export PYCURL_SSL_LIBRARY=openssl
+#   export LDFLAGS=-L/usr/local/opt/openssl/lib
+#   export CPPFLAGS=-I/usr/local/opt/openssl/include
+#   pip install pycurl --compile --no-cache-dir
+#   pip install -U pip ovirt-engine-sdk-python netaddr jmespath ansible==2.9.27
+
+# Requirements:
+# ansible==2.9.27
+# cffi==1.15.0
+# cryptography==36.0.1
+# Jinja2==3.0.3
+# jmespath==0.10.0
+# MarkupSafe==2.0.1
+# netaddr==0.8.0
+# ovirt-engine-sdk-python==4.5.0
+# pycparser==2.21
+# pycurl==7.44.1
+# PyYAML==6.0
+# six==1.16.0
+
+# Setup:
+# Clone Template rhel85-empty to create the VM
+# That template contains a user rhev-user with opentlc_admin_backdoor key
+# Create a new user, lab-user, with password as specified
+
+# To set up AgnosticV with all prereqs use the following variables:
+# -----------------------------------------------------------------
+# requirements_content:
+#   collections:
+#   - name: kubernetes.core
+#     version: 2.3.1
+#   - name: openstack.cloud
+#     version: 1.8.0
+#   - name: amazon.aws
+#     version: 2.2.0
+#   - name: community.general
+#     version: 4.8.0
+#   - name: ansible.posix
+#     version: 1.3.0
+#   - name: ovirt.ovirt
+#     version: 2.0.3
+
+# host_virtualenv_package_prereqs:
+# - gcc
+# - python3
+# - python3-devel
+# - python3-libselinux
+# - python3-pip
+# - libcurl-devel
+# - openssl-devel
+# - libxml2-devel
+
+# host_virtualenv_requirements_override:
+# - ovirt-engine-sdk-python==4.5.0
+# - passlib==1.7.4
+
+- name: Configure Bastion VM (as root)
+  become: true
+  block:
+  - name: Determine cluster wildcard domain
+    k8s_info:
+      api_version: operator.openshift.io/v1
+      kind: IngressController
+      name: default
+      namespace: openshift-ingress-operator
+    register: r_ingress_controller
+
+  - name: Save cluster apps domain variable
+    ansible.builtin.set_fact:
+      _ocp4_workload_ama_demo_apps_domain: "{{ r_ingress_controller.resources[0].status.domain }}"
+
+- name: Setup credentials
+  block:
+  - name: Generate VM user password if no password specified
+    when: ocp4_workload_ama_demo_vm_user_password | default('') | length == 0
+    ansible.builtin.set_fact:
+      ocp4_workload_ama_demo_vm_user_password: >-
+        {{ lookup('password', '/dev/null length={{ ocp4_workload_ama_demo_vm_user_password_length }} chars=ascii_letters,digits') }}
+
+  - name: Generate RHV user password if no password specified
+    when: rhev_user_password | default('') | length == 0
+    ansible.builtin.set_fact:
+      ocp4_workload_ama_demo_rhev_user_password: >-
+        {{ lookup('password', '/dev/null length={{ ocp4_workload_ama_demo_rhev_user_password_length }} chars=ascii_letters,digits') }}
+
+  - name: Write private key for root account on RHV to /tmp/rhev.pem
+    delegate_to: localhost
+    ansible.builtin.copy:
+      content: "{{ ocp4_workload_ama_demo_rhev_root_private_key }}"
+      dest: /tmp/rhev.pem
+      mode: 0600
+
+  - name: Add RHV host to inventory
+    ansible.builtin.add_host:
+      groupname: rhevhosts
+      name: "{{ ocp4_workload_ama_demo_rhev_host }}"
+      ansible_ssh_host: "{{ ocp4_workload_ama_demo_rhev_host }}"
+      ansible_ssh_user: root
+      ansible_ssh_private_key_file: /tmp/rhev.pem
+
+- name: Create a new user in RHV Identity Management
+  delegate_to: "{{ ocp4_workload_ama_demo_rhev_host }}"
+  vars:
+    ansible_ssh_user: root
+    ansible_ssh_private_key_file: /tmp/rhev.pem
+  block:
+  - name: Set up RHV IM user
+    ansible.builtin.include_tasks: rhev-setup-im-user.yml
+
+- name: Create a VMs in RHV
+  environment:
+    OVIRT_URL: "{{ ocp4_workload_ama_demo_rhev_url }}"
+    OVIRT_USERNAME: "{{ ocp4_workload_ama_demo_rhev_admin_user_name }}"
+    OVIRT_PASSWORD: "{{ ocp4_workload_ama_demo_rhev_admin_user_password }}"
+  block:
+  # Create Oracle VM
+  - name: Create and start Oracle VM
+    when: ocp4_workload_ama_demo_oracle_vm_setup | bool
+    ansible.builtin.include_tasks: rhev-setup-oracle-vm.yml
+
+  # Create Tomcat VM
+  - name: Create and start Tomcat VM
+    when: ocp4_workload_ama_demo_tomcat_vm_setup | bool
+    ansible.builtin.include_tasks: rhev-setup-tomcat-vm.yml
+
+  # Create the user in RHEV after the VMs have been created
+  - name: Create new user in RHV
+    ansible.builtin.include_tasks: rhev-setup-user.yml
+
+# Oracle host gets added to inventory by rhev-setup-vm.yaml
+- name: Set up Oracle VM
+  delegate_to: "{{ _ocp4_workload_ama_demo_oracle_ip }}"
+  when: ocp4_workload_ama_demo_oracle_vm_setup | bool
+  become: true
+  vars:
+    ansible_ssh_user: "{{ ocp4_workload_ama_demo_vm_user_name }}"
+    _ocp4_workload_ama_demo_name: "{{ ocp4_workload_ama_demo_oracle_vm_name }}"
+  block:
+  - name: Configure Oracle database VM (packages)
+    when: ocp4_workload_ama_demo_oracle_vm_install_from_scratch | bool
+    ansible.builtin.include_tasks: vm-common-install-packages.yml
+
+  - name: Configure Oracle database VM (common tasks)
+    ansible.builtin.include_tasks: vm-common-configure.yml
+
+  - name: Configure Oracle database VM
+    when: ocp4_workload_ama_demo_oracle_vm_install_from_scratch | bool
+    ansible.builtin.include_tasks: vm-oracledb-install-and-configure.yml
+
+# Tomcat host gets added to inventory by rhev-setup-vm.yaml
+# Tomcat needs to be configured after Oracle because it needs
+# to connect to Oracle
+- name: Set up Tomcat VM
+  delegate_to: "{{ _ocp4_workload_ama_demo_tomcat_ip }}"
+  when: ocp4_workload_ama_demo_tomcat_vm_setup | bool
+  become: true
+  vars:
+    ansible_ssh_user: "{{ ocp4_workload_ama_demo_vm_user_name }}"
+    _ocp4_workload_ama_demo_name: "{{ ocp4_workload_ama_demo_tomcat_vm_name }}"
+  block:
+  - name: Configure Tomcat VM (packages)
+    when: ocp4_workload_ama_demo_tomcat_vm_install_from_scratch | bool
+    ansible.builtin.include_tasks: vm-common-install-packages.yml
+
+  - name: Configure Tomcat VM (common tasks)
+    ansible.builtin.include_tasks: vm-common-configure.yml
+
+  - name: Configure Tomcat VM
+    ansible.builtin.include_tasks: vm-tomcat-install-and-configure.yml
+
+- name: Print student information (common)
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Red Hat Virtualization Properties:"
+  - "  URL:          https://{{ ocp4_workload_ama_demo_rhev_host }}"
+  - "  Hostname:     {{ ocp4_workload_ama_demo_rhev_host }}"
+  - "  User:         {{ ocp4_workload_ama_demo_rhev_user_name }}"
+  - "  Profile:      {{ ocp4_workload_ama_demo_rhev_user_postfix }}"
+  - "  User for MTV: {{ ocp4_workload_ama_demo_rhev_user_name }}@{{ ocp4_workload_ama_demo_rhev_user_postfix }}"
+  - "  Password:     {{ ocp4_workload_ama_demo_rhev_user_password }}"
+
+- name: Print student information (Tomcat VM)
+  when: ocp4_workload_ama_demo_tomcat_vm_setup | bool
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Customer Service (Tomcat VM)"
+  - "  VM Name:     {{ ocp4_workload_ama_demo_tomcat_vm_name }}"
+  - "  IP Address:  {{ _ocp4_workload_ama_demo_tomcat_ip }}"
+  - "  User:        {{ ocp4_workload_ama_demo_vm_user_name }}"
+  - "  Password:    {{ ocp4_workload_ama_demo_vm_user_password }}"
+
+- name: Print student information (Oracle VM)
+  when: ocp4_workload_ama_demo_oracle_vm_setup | bool
+  agnosticd_user_info:
+    msg: "{{ item }}"
+  loop:
+  - ""
+  - "Oracle Database VM (on RHV):"
+  - "  VM Name:     {{ ocp4_workload_ama_demo_oracle_vm_name }}"
+  - "  IP Address:  {{ _ocp4_workload_ama_demo_oracle_ip }}"
+  - "  User ID:     {{ ocp4_workload_ama_demo_vm_user_name }}"
+  - "  VM Password: {{ ocp4_workload_ama_demo_vm_user_password }}"
+  - ""
+  - "  SSH Command: ssh {{ ocp4_workload_ama_demo_vm_user_name }}@{{ _ocp4_workload_ama_demo_oracle_ip }}"
+  - ""
+  - "Oracle Database:"
+  - "  Database: customer"
+  - "  User: {{ ocp4_workload_ama_demo_oracle_db_user }}"
+  - "  Password: {{ ocp4_workload_ama_demo_oracle_db_password }}"
+  - "  Admin Password: {{ ocp4_workload_ama_demo_oracle_dba_password }}"
+
+- name: Set up Gitops environment
+  when: ocp4_workload_ama_demo_gitops_setup | bool
+  ansible.builtin.include_tasks: setup-gitops.yml
+
+# Cleanup Private Key
+- name: Remove private key
+  delegate_to: localhost
+  ansible.builtin.file:
+    state: absent
+    path: /tmp/rhev.pem

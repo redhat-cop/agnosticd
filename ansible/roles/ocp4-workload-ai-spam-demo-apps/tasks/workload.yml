@@ -1,0 +1,376 @@
+# vim: set ft=ansible
+---
+# Implement your Workload deployment tasks here
+- set_fact:
+    user_name: "user1"
+
+- set_fact:
+    project_name: "ai-ml-workflows"
+
+- name: Create the scaling RBAC
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  with_items:
+    - "{{ lookup('file', 'scaling_role.yaml') }}"
+    - "{{ lookup('file', 'scaling_sa.yaml') }}"
+    - "{{ lookup('file', 'scaling_rolebinding.yaml') }}"
+
+- name: Create the custom notebook image
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  with_items:
+    - "{{ lookup('template', 'custom-notebook-imagestream.yaml.j2') }}"
+
+- name: Create the pipeline builder image
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  with_items:
+    - "{{ lookup('template', 'pipeline-s2i-imagestream.yaml.j2') }}"
+
+- name: Create the pipeline build and app
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  with_items:
+    - "{{ lookup('template', 'pipeline-imagestream.yaml.j2') }}"
+    - "{{ lookup('template', 'pipeline-buildconfig.yaml.j2') }}"
+    - "{{ lookup('template', 'pipeline-deploymentconfig.yaml.j2') }}"
+    - "{{ lookup('template', 'pipeline-service.yaml.j2') }}"
+
+- name: check for any pipeline builds
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: Build
+    namespace: "{{ project_name }}"
+    label_selectors:
+      - buildconfig=pipeline
+  register: pipeline_builds
+
+- name: build the pipeline if not built
+  shell: |
+      oc start-build pipeline -n {{ project_name }}
+  when: pipeline_builds.resources | length | int == 0
+
+- name: check for pipeline buildconfig
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: pipeline
+    namespace: "{{ project_name }}"
+  register: pipeline_buildconfig
+
+#- name: Kick Jupyterhub
+#  shell: |
+#      oc scale dc/jupyterhub --replicas=0 -n {{ project_name }}
+#
+#- name: Nudge Jupyterhub
+#  shell: |
+#      oc scale dc/jupyterhub --replicas=1 -n {{ project_name }}
+
+- name: check for spam emitter buildconfig
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: spam-emitter
+    namespace: "{{ project_name }}"
+  register: spam_emitter_buildconfig
+
+- name: build the spam emitter if not built
+  shell: |
+      oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-stream-generator -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092  -e KAFKA_TOPIC=social-firehose -e RATE=300 -e SPAM_PROPORTION=.95 --name=spam-emitter
+  when: spam_emitter_buildconfig.resources | length | int == 0
+
+- name: check for spam emitter buildconfig
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: spam-emitter
+    namespace: "{{ project_name }}"
+  register: spam_emitter_buildconfig
+
+- name: check for legitimate emitter buildconfig
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: legitimate-emitter
+    namespace: "{{ project_name }}"
+  register: legitimate_emitter_buildconfig
+
+- name: build the legitimate emitter if not built
+  shell: |
+      oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-stream-generator -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092  -e KAFKA_TOPIC=social-firehose -e RATE=300 -e SPAM_PROPORTION=.3 --name=legitimate-emitter
+  when: legitimate_emitter_buildconfig.resources | length | int == 0
+
+- name: check for legitimate emitter buildconfig
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: legitimate-emitter
+    namespace: "{{ project_name }}"
+  register: legitimate_emitter_buildconfig
+
+- name: check for legitimate flood buildconfig
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: legitimate-flood
+    namespace: "{{ project_name }}"
+  register: legitimate_flood_emitter_buildconfig
+
+- name: build the emitter for too many legitimate messages
+  shell: |
+      oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-stream-generator -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092  -e KAFKA_TOPIC=legitimate-firehose -e RATE=1000 -e SPAM_PROPORTION=.01 --name=legitimate-flood
+  when: legitimate_flood_emitter_buildconfig.resources | length | int == 0
+
+- name: check for legitimate flood buildconfig
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: legitimate-flood
+    namespace: "{{ project_name }}"
+  register: legitimate_flood_emitter_buildconfig
+
+- name: check for flood filter buildconfig
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: flood-filter
+    namespace: "{{ project_name }}"
+  register: flood_filter_buildconfig
+
+- name: build the flood filter for legitimate messages
+  shell: |
+      oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-processor -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092 -e KAFKA_TOPIC=legitimate-firehose  --name=flood-filter
+  when: flood_filter_buildconfig.resources | length | int == 0
+
+- name: check for flood filter buildconfig
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: flood-filter
+    namespace: "{{ project_name }}"
+  register: flood_filter_buildconfig
+
+- name: check for spam filter buildconfig
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: spam-filter
+    namespace: "{{ project_name }}"
+  register: spam_filter_buildconfig
+
+- name: build the filter for spam messages
+  shell: |
+      oc new-app -n {{ project_name }} centos/python-36-centos7~https://github.com/willb/spam-processor -e KAFKA_BROKERS=odh-message-bus-kafka-bootstrap:9092 -e KAFKA_TOPIC=social-firehose  --name=spam-filter
+  when: spam_filter_buildconfig.resources | length | int == 0
+
+- name: check for spam filter buildconfig
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: BuildConfig
+    name: spam-filter
+    namespace: "{{ project_name }}"
+  register: spam_filter_buildconfig
+
+- name: Wait for the spam filter build to complete
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: Build
+    name: "spam-filter-{{ spam_filter_buildconfig.resources[0].status.lastVersion }}"
+    namespace: "{{ project_name }}"
+  register: build_wait
+  until:
+    - build_wait.resources is defined
+    - build_wait.resources[0].status is defined
+    - build_wait.resources[0].status.phase is defined
+    - build_wait.resources[0].status.phase == "Complete"
+  delay: 30
+  retries: 10
+
+- name: Wait for the pipeline build to complete
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: Build
+    name: "pipeline-{{ pipeline_buildconfig.resources[0].status.lastVersion }}"
+    namespace: "{{ project_name }}"
+  register: build_wait
+  until:
+    - build_wait.resources is defined
+    - build_wait.resources[0].status is defined
+    - build_wait.resources[0].status.phase is defined
+    - build_wait.resources[0].status.phase == "Complete"
+  delay: 30
+  retries: 24
+
+- name: Wait for the spam emitter build to complete
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: Build
+    name: "spam-emitter-{{ spam_emitter_buildconfig.resources[0].status.lastVersion }}"
+    namespace: "{{ project_name }}"
+  register: build_wait
+  until:
+    - build_wait.resources is defined
+    - build_wait.resources[0].status is defined
+    - build_wait.resources[0].status.phase is defined
+    - build_wait.resources[0].status.phase == "Complete"
+  delay: 30
+  retries: 10
+
+- name: Wait for the legitimate emitter build to complete
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: Build
+    name: "legitimate-emitter-{{ legitimate_emitter_buildconfig.resources[0].status.lastVersion }}"
+    namespace: "{{ project_name }}"
+  register: build_wait
+  until:
+    - build_wait.resources is defined
+    - build_wait.resources[0].status is defined
+    - build_wait.resources[0].status.phase is defined
+    - build_wait.resources[0].status.phase == "Complete"
+  delay: 30
+  retries: 10
+
+- name: Wait for the legitimate flood build to complete
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: Build
+    name: "legitimate-flood-{{ legitimate_flood_emitter_buildconfig.resources[0].status.lastVersion }}"
+    namespace: "{{ project_name }}"
+  register: build_wait
+  until:
+    - build_wait.resources is defined
+    - build_wait.resources[0].status is defined
+    - build_wait.resources[0].status.phase is defined
+    - build_wait.resources[0].status.phase == "Complete"
+  delay: 30
+  retries: 10
+
+- name: Wait for the flood filter build to complete
+  k8s_info:
+    api_version: build.openshift.io/v1
+    kind: Build
+    name: "flood-filter-{{ flood_filter_buildconfig.resources[0].status.lastVersion }}"
+    namespace: "{{ project_name }}"
+  register: build_wait
+  until:
+    - build_wait.resources is defined
+    - build_wait.resources[0].status is defined
+    - build_wait.resources[0].status.phase is defined
+    - build_wait.resources[0].status.phase == "Complete"
+  delay: 30
+  retries: 10
+
+- name: create a pod to scale the flood filter to 4 replicas in approximately 45 minutes
+  shell: "oc run scaleit --image=openshift/origin-cli -n {{ project_name }} --serviceaccount=scaling-sa --restart=Never --command -- /bin/bash -c \"echo 'sleeping 45min'; /usr/bin/sleep 45m; echo 'scaling'; oc scale -n {{ project_name }} dc/flood-filter --replicas=12\""
+
+- name: create the prometheus cluster monitoring config
+  k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: cluster-monitoring-config
+        namespace: openshift-monitoring
+      data:
+        config.yaml: |
+          techPreviewUserWorkload:
+            enabled: true
+
+- name: create the monitor crd clusterrole which may not be required
+  k8s:
+    state: present
+    definition:
+      kind: ClusterRole
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: monitor-crd-edit
+      rules:
+      - apiGroups: ["monitoring.coreos.com"]
+        resources: ["prometheusrules", "servicemonitors", "podmonitors"]
+        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+- name: Wait for the prometheus user monitoring pods to roll out
+  k8s_info:
+    api_version: apps/v1
+    kind: StatefulSet
+    name: prometheus-user-workload
+    namespace: openshift-user-workload-monitoring
+  register: prometheus
+  until:
+    - prometheus.resources is defined
+    - prometheus.resources | length | int > 0
+    - prometheus.resources[0].status is defined
+    - prometheus.resources[0].status.readyReplicas is defined
+    - prometheus.resources[0].status.readyReplicas == 2
+  delay: 30
+  retries: 10
+
+- name: create the pipeline servicemonitor
+  k8s:
+    state: present
+    definition:
+      apiVersion: monitoring.coreos.com/v1
+      kind: ServiceMonitor
+      metadata:
+        labels:
+          k8s-app: pipeline-monitor
+        name: pipeline-monitor
+        namespace: "{{ project_name }}"
+      spec:
+        endpoints:
+        - interval: 15s
+          port: "8080-tcp"
+          scheme: http
+        selector:
+          matchLabels:
+            app: pipeline
+
+- name: grab the console route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: console
+    namespace: openshift-console
+  register: console_route_out
+
+- name: grab the jupyterhub route
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: jupyterhub
+    namespace: "{{ project_name }}"
+  register: jh_route_out
+
+- set_fact:
+    console_route: "https://{{ console_route_out.resources[0].spec.host }}"
+    jh_route: "https://{{ jh_route_out.resources[0].spec.host }}"
+
+- debug:
+    msg:
+    - "user.info: "
+    - "user.info: Here are the URLs that you need for the demo (open each in a browser tab):"
+    - "user.info: "
+    - "user.info: OperatorHub Page: {{ console_route}}/k8s/ns/{{ project_name }}/operators.coreos.com~v1alpha1~ClusterServiceVersion/opendatahub-operator.v0.5.1"
+    - "user.info: Pipeline BuildConfig: {{ console_route}}/k8s/ns/{{ project_name }}/buildconfigs/pipeline/"
+    - "user.info: Pipeline Build Log: {{ console_route}}/k8s/ns/{{ project_name }}/builds/pipeline-1/logs"
+    - "user.info: Prediction metrics: {{ console_route}}/metrics/ns/{{ project_name }}?query0=ln%28sum%28pipeline_predictions_total%29+by+%28app%2C+value%29%29"
+    - "user.info: Main JH notebook: {{ jh_route }}/user/opentlc-mgr/tree/rhte-demo-notebook"
+    - "user.info: Feature engineering notebook: {{ jh_route }}/user/opentlc-mgr/notebooks/rhte-demo-notebook/rendered/feature-engineering.ipynb"
+    - "user.info: Model notebook: {{ jh_route }}/user/opentlc-mgr/notebooks/rhte-demo-notebook/rendered/model.ipynb"
+    - "user.info: Services notebook: {{ jh_route }}/user/opentlc-mgr/notebooks/rhte-demo-notebook/services.ipynb"
+  
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

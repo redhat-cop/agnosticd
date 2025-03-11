@@ -1,0 +1,87 @@
+---
+- name: Teardown OpenStack project and resources
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    OS_AUTH_URL: "{{ osp_auth_url }}"
+    OS_USERNAME: "{{ osp_auth_username }}"
+    OS_PASSWORD: "{{ osp_auth_password }}"
+    OS_PROJECT_NAME: "admin"
+    OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+    OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+  tasks:
+    - set_fact:
+        osp_project_name: >-
+          {{ project
+          | replace('-bp','')
+          }}-{{ guid }}
+
+    - name: Check if project exists
+      openstack.cloud.project_info:
+        name: "{{ osp_project_name }}"
+      register: project_facts
+
+    - meta: end_play
+      when: project_facts.projects | length == 0
+
+    - name: Gather instance facts
+      environment:
+        OS_PROJECT_NAME: "{{ osp_project_name }}"
+      openstack.cloud.server_info:
+        all_projects: false
+        server: "*"
+        filters:
+          metadata:
+            guid: "{{ guid }}"
+      register: r_osp_server_facts
+
+    - name: Iterate over all instances and delete DNS entries
+      loop: "{{ r_osp_server_facts.servers }}"
+      loop_control:
+        loop_var: _instance
+      vars:
+        _infra_osp_dns_default_ttl: 300
+        _dns_state: absent
+      include_tasks: instance_loop.yml
+
+    - name: Delete all servers inside the project
+      when: r_osp_server_facts.servers | length > 0
+      environment:
+        OS_PROJECT_NAME: "{{ osp_project_name }}"
+      openstack.cloud.server:
+        name: "{{ item.id }}"
+        state: absent
+        wait: true
+      loop: "{{ r_osp_server_facts.servers }}"
+
+    - name: Gather volume facts
+      environment:
+        OS_PROJECT_NAME: "{{ osp_project_name }}"
+      ansible.builtin.command:
+        openstack volume list --project {{ osp_project_name }} -f json
+      register: r_osp_volume_facts
+
+    - name: Detach all volumes
+      when:
+        - r_osp_volume_facts.stdout|from_json | length > 0
+      environment:
+        OS_PROJECT_NAME: "{{ osp_project_name }}"
+      command:
+        openstack volume set --state available {{ item.ID }} --detached
+      loop: "{{ r_osp_volume_facts.stdout|from_json }}"
+
+    - name: Delete remaining objects inside the project
+      environment:
+        OS_PROJECT_NAME: "{{ osp_project_name }}"
+      openstack.cloud.stack:
+        name: "create-objects-{{ osp_project_name }}"
+        state: absent
+        wait: true
+
+    - name: Delete project and unassign permission
+      openstack.cloud.stack:
+        name: "create-project-{{ osp_project_name }}"
+        state: absent
+        wait: true

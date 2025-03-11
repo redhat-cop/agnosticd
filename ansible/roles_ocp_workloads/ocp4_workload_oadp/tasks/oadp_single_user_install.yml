@@ -1,0 +1,95 @@
+---
+- name: Install OADP Operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: redhat-oadp-operator
+    install_operator_namespace: openshift-adp
+    install_operator_manage_namespaces:
+    - openshift-adp
+    install_operator_channel: "{{ ocp4_workload_oadp_channel }}"
+    install_operator_catalog: redhat-operators
+    install_operator_csv_nameprefix: oadp-operator
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_oadp_automatic_install_plan_approval | default(true) }}"
+    install_operator_starting_csv: "{{ ocp4_workload_oadp_starting_csv }}"
+    install_operator_catalogsource_setup: "{{ ocp4_workload_oadp_use_catalog_snapshot | default(false) }}"
+    install_operator_catalogsource_name: "{{ ocp4_workload_oadp_catalogsource_name | default('') }}"
+    install_operator_catalogsource_namespace: openshift-adp
+    install_operator_catalogsource_image: "{{ ocp4_workload_oadp_catalog_snapshot_image | default('') }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_oadp_catalog_snapshot_image_tag | default('') }}"
+
+- name: Configure OADP
+  when: ocp4_workload_oadp_configure_dpa | bool
+  block:
+  - name: Configure OADP Storage on OCS
+    when: ocp4_workload_oadp_storage == "ocs"
+    block:
+    - name: Create ObjectBucketClaim
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('file', 'objectbucketclaim.yaml') }}"
+
+    - name: Wait for Secret with credentials to exist
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: obc-backups
+        namespace: openshift-storage
+      register: r_obc_backups_secret
+      retries: 40
+      delay: 5
+      until: r_obc_backups_secret.resources | default([]) | length > 0
+
+    - name: Create cloud credentials variable
+      ansible.builtin.set_fact:
+        _ocp4_workload_oadp_storage_user: "{{ r_obc_backups_secret.resources[0].data.AWS_ACCESS_KEY_ID | b64decode }}"
+        _ocp4_workload_oadp_storage_password: "{{ r_obc_backups_secret.resources[0].data.AWS_SECRET_ACCESS_KEY | b64decode }}"
+
+    - name: Create cloud credentials secret for OADP
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'secret_cloud_credentials.yaml.j2') }}"
+
+    - name: Get Bucket ConfigMap
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: ConfigMap
+        name: obc-backups
+        namespace: openshift-storage
+      register: r_obc_backups_configmap
+
+    - name: Set Bucket facts
+      ansible.builtin.set_fact:
+        _ocp4_workload_oadp_bucket_host: "{{ r_obc_backups_configmap.resources[0].data.BUCKET_HOST }}"
+        _ocp4_workload_oadp_bucket_name: "{{ r_obc_backups_configmap.resources[0].data.BUCKET_NAME }}"
+
+    - name: Debug Bucket facts
+      ansible.builtin.debug:
+        msg: "Host: {{ _ocp4_workload_oadp_bucket_host }}, Name: {{ _ocp4_workload_oadp_bucket_name }}"
+
+  - name: Configure OADP Storage on Minio
+    when: ocp4_workload_oadp_storage == "minio"
+    block:
+    - name: Set Storage facts
+      ansible.builtin.set_fact:
+        _ocp4_workload_oadp_bucket_host: "{{ ocp4_workload_oadp_storage_minio_name }}.{{ ocp4_workload_oadp_storage_minio_namespace }}.svc:9000"
+        _ocp4_workload_oadp_bucket_name: "{{ ocp4_workload_oadp_storage_minio_bucket_name }}"
+        _ocp4_workload_oadp_storage_user: "{{ ocp4_workload_oadp_storage_minio_user }}"
+        _ocp4_workload_oadp_storage_password: "{{ ocp4_workload_oadp_storage_minio_password }}"
+
+    - name: Debug Bucket facts
+      ansible.builtin.debug:
+        msg: "Host: {{ _ocp4_workload_oadp_bucket_host }}, Name: {{ _ocp4_workload_oadp_bucket_name }}"
+
+    - name: Create cloud credentials secret for OADP
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', 'secret_cloud_credentials.yaml.j2') }}"
+
+  - name: Create the DPA instance
+    vars:
+      _ocp4_workload_oadp_namespace: openshift-adp
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'dataprotectionapplication.yaml.j2') }}"

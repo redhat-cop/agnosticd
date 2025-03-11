@@ -1,0 +1,97 @@
+# The following taks install a staging and prod gateway for use within the tenant
+---
+
+- name: Set up a namespace for the tenant
+  kubernetes.core.k8s:
+    state: present
+    api_version: v1
+    kind: Namespace
+    name: "{{ ocp4_workload_lpe_3scale_tenant_gw_project }}"
+
+- name: "Add {{ ocp_username }} to the {{ ocp4_workload_lpe_3scale_tenant_gw_project }} namepaces"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', './../templates/role-binding.yml.j2' ) | from_yaml }}"
+  loop:
+    - "{{ ocp4_workload_lpe_3scale_tenant_gw_project }}"
+
+- name: Set the 3scale tenant admin portal endpoint
+  set_fact:
+    ocp4_workload_lpe_3scale_tenant_admin_endpoint: "{{ocp4_workload_lpe_3scale_tenant_admin_url | regex_search('(?<=https:\\/\\/).*') }}"
+
+- name: Set the 3scale tenant admin access endpoint
+  set_fact:
+    ocp4_workload_lpe_3scale_tenant_admin_access_endpoint: "https://{{ ocp4_workload_lpe_3scale_tenant_access_token }}@{{ ocp4_workload_lpe_3scale_tenant_admin_endpoint }}"    # yamllint disable-line rule:line-length
+
+- name: "Create threescale-portal-endpoint-stage secret in {{ ocp4_workload_lpe_3scale_tenant_gw_project }}"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', './../templates/apicast-url-secret.yml.j2' ) | from_yaml }}"
+  loop:
+    - apicast-configuration-url-secret-stage
+    - apicast-configuration-url-secret-prod
+
+# Install 3scale API Cast operator in the tenant
+- name: Try to install the 3scale APICast operator.  On failure, patch memory on deployment config.
+  block:
+    - name: Install Operator
+      include_role:
+        name: install_operator
+      vars:
+        install_operator_action: install
+        install_operator_name: "{{ ocp4_workload_lpe_3scale_apicast_operator_package_name }}"
+        install_operator_namespace: "{{ ocp4_workload_lpe_3scale_tenant_gw_project }}"
+        install_operator_channel: "{{ ocp4_workload_lpe_3scale_apicast_current_channel | default('')}}"
+        install_operator_csv_nameprefix: "{{ ocp4_workload_lpe_3scale_apicast_operator_package_name }}"
+        install_operator_catalog: redhat-operators
+        install_operator_automatic_install_plan_approval: "true"
+        install_operator_starting_csv: "{{ ocp4_workload_lpe_3scale_apicast_current_csv | default('')}}"
+        install_operator_catalogsource_setup: "false"
+        install_operator_manage_namespaces:
+          - "{{ ocp4_workload_lpe_3scale_tenant_gw_project }}"
+  rescue:
+    - name: Patch deployment config for apicast operator
+      kubernetes.core.k8s:
+        state: present
+        merge_type:
+          - strategic-merge
+          - merge
+        definition: "{{ lookup('template', './../templates/apicast-operator-deployment.yml.j2' ) | from_yaml }}"
+
+# Create API cast gateway for the tenant
+- name: "Create stage & prod gateways"
+  kubernetes.core.k8s:
+    state: present
+    merge_type:
+      - strategic-merge
+      - merge
+    definition: "{{ lookup('template', item ) | from_yaml }}"
+    namespace: '{{ ocp4_workload_lpe_3scale_tenant_gw_project }}'
+  loop:
+    - ./templates/apicast-stage.yml.j2
+    - ./templates/apicast-prod.yml.j2
+
+- name: "Check if the gateway services are created"
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Service
+    namespace: "{{ ocp4_workload_lpe_3scale_tenant_gw_project }}"
+    label_selectors:
+      - threescale_component = apicast
+  register: r_dc
+  until:
+    - r_dc is defined
+    - r_dc.resources is defined
+    - r_dc.resources | list | length > 0
+  retries: 60
+  delay: 15
+
+- name: "Create gateway routes"
+  kubernetes.core.k8s:
+    state: present
+    merge_type:
+      - strategic-merge
+      - merge
+    definition: "{{ lookup('template', './templates/apicast-routes.yml.j2' ) | from_yaml }}"
+    namespace: '{{ ocp4_workload_lpe_3scale_tenant_gw_project }}'
+  loop: "{{ ocp4_workload_lpe_3scale_apicast_services }}"

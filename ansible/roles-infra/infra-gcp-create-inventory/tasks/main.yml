@@ -1,0 +1,82 @@
+---
+# Setting the stack_tag
+- set_fact:
+    stack_tag: "{{env_type | replace('-', '_')}}_{{guid}}"
+  tags:
+    - create_inventory
+    - must
+
+- name: Find Bastion
+  environment:
+    PATH: '{{ output_dir }}/google-cloud-sdk/bin:/usr/bin:/usr/local/bin'
+    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ gcp_credentials_file }}"
+    CLOUDSDK_COMPUTE_REGION: "{{ gcp_region }}"
+    CLOUDSDK_CONFIG: "{{ output_dir }}/.gcloud-{{ guid }}"
+    CLOUDSDK_CORE_PROJECT: "{{ gcp_project_id }}"
+  command: "gcloud compute instances list --filter=\"name~'^{{ project_tag }}-vm$'\" --format json"
+  register: r_vm_info
+
+- block:
+    - name: Get Zone
+      set_fact:
+        gcp_zone: "{{ r_vm_info.stdout | from_json | first | json_query('zone') | regex_replace('^.*zones\/', '') }}"
+
+    - name: Get list of VMs
+      gcp_compute_instance_info:
+        auth_kind: "{{ gcp_auth_type }}"
+        project: "{{ gcp_project_id }}"
+        service_account_file: "{{ gcp_credentials_file }}"
+        zone: "{{ gcp_zone }}"
+        filters:
+          - labels.project eq "{{ project_tag }}"
+        scopes: ["https://www.googleapis.com/auth/compute.readonly"]
+      register: instance_list
+      tags:
+        - create_inventory
+        - must
+
+    - name: Build inventory
+      add_host:
+        name: "{{item.name}}"
+        shortname: "{{item.tags.Name|default(item.name)}}"
+        groups:
+          - "tag_Project_{{stack_tag}}"
+          - "tag_{{stack_tag}}_{{item.labels.ansiblegroup | default('unknowns')}}"
+          - "tag_{{stack_tag}}_ostype_{{item.labels.ostype | default('unknown')}}"
+          - "{{item.labels.ostype | default('unknowns')}}"
+          - "{{ 'newnodes' if (item.labels.newnode|d()|bool) else 'all'}}"
+        ansible_user: "{{ remote_user }}"
+        remote_user: "{{ remote_user | d('gcp') }}"
+        ansible_ssh_private_key_file: "{{ env_authorized_key_path }}"
+        key_name: "env_key"
+        state: "{{item.status|d('unknown')}}"
+        internaldns: "{{item.networkInterfaces[0].networkIP | d(item.name)}}"
+        instance_id: "{{ item.id | d('unknown')}}"
+        region: "{{gcp_region}}"
+        zone: "{{gcp_zone}}"
+        public_dns_name: "{{item.networkInterfaces[0].accessConfigs[0].natIP}}"
+        private_dns_name: "{{item.name}}"
+        private_ip_address: "{{item.networkInterfaces[0].networkIP}}"
+        public_ip_address: "{{item.networkInterfaces[0].accessConfigs[0].natIP}}"
+        ansible_host: "{{item.networkInterfaces[0].accessConfigs[0].natIP}}"
+        placement: "{{item.zone}}"
+        image_id: "{{item.disks[0].source|d('unknown')}}"
+        ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+        instance_canonical_name: "{{ item.name }}"
+      with_items: "{{ instance_list.resources }}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - create_inventory
+        - must
+
+    - add_host:
+        name: "{{item.name}}"
+        groups: "{{item.labels['ansiblegroup']}}"
+      with_items: "{{instance_list.resources}}"
+      loop_control:
+        label: "{{ item.name }}"
+      tags:
+        - create_inventory
+        - must
+  when: r_vm_info.stdout | from_json | length > 0

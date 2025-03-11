@@ -1,0 +1,129 @@
+#vim: set ft=ansible:
+---
+- name: Step 005 - Post Software deployment
+  hosts: localhost
+  connection: local
+  become: false
+  tags:
+    - step005
+  tasks:
+    - name: Generate /etc/ansible/hosts file with lab hosts template
+      template:
+        src: >-
+          {% if repo_version == '3.11' -%}
+          ./files/labs_hosts_template-3.11.j2
+          {%- else -%}
+          ./files/labs_hosts_template.j2
+          {%- endif %}
+        dest: "{{output_dir}}/labs_hosts-{{ env_type }}-{{ guid }}"
+
+    - name: Generate solved ansible hosts file
+      template:
+        src: >-
+          {% if repo_version == '3.11' -%}
+          ./files/labs_hosts_template-3.11.j2
+          {%- else -%}
+          ./files/labs_hosts_template.j2
+          {%- endif %}
+        dest: "{{output_dir}}/labs_hosts-{{ env_type }}-{{ guid }}-solved"
+      vars:
+        show_solution: true
+
+- name: Configure NFS host for user-vols if required
+  hosts: support
+  gather_facts: False
+  become: yes
+  tasks:
+    - name: Create user vols
+      shell: "mkdir -p /srv/nfs/user-vols/vol{1..{{user_vols}}}"
+      tags:
+        - openshift_nfs_config
+    - name: chmod the user vols
+      shell: "chmod -R 777 /srv/nfs/user-vols"
+      tags:
+        - openshift_nfs_config
+
+- name: Step lab post software deployment
+  hosts: bastions
+  gather_facts: False
+  become: yes
+  tags:
+    - opentlc_bastion_tasks
+  tasks:
+    - name: Copy over ansible hosts file, lab version
+      copy:
+        backup: no
+        src: "{{output_dir}}/labs_hosts-{{ env_type }}-{{ guid }}-solved"
+        dest: /var/preserve/hosts
+      tags: preserve_complete_ansible_inventory
+
+    - name: Copy over ansible hosts file, lab version
+      copy:
+        backup: no
+        src: "{{output_dir}}/labs_hosts-{{ env_type }}-{{ guid }}"
+        dest: /etc/ansible/hosts
+      tags:
+        - overwrite_hosts_with_lab_hosts
+
+    ## Create PVs for uservols if required
+    - name: get nfs Hostname
+      set_fact:
+        nfs_host: "{{ groups['support']|sort|first }}"
+      tags:
+        - openshift_nfs_config
+    - set_fact:
+        pv_size: '10Gi'
+        pv_list: "{{ ocp_pvs }}"
+        persistentVolumeReclaimPolicy: Retain
+      tags:
+        - openshift_nfs_config
+    - name: Generate PV file
+      template:
+        src: "./files/pvs.j2"
+        dest: "/root/pvs-{{ env_type }}-{{ guid }}.yml"
+      tags: [ gen_pv_file ]
+      when: pv_list.0 is defined
+      tags:
+        - openshift_nfs_config
+    - set_fact:
+        pv_size: "{{user_vols_size}}"
+        persistentVolumeReclaimPolicy: Recycle
+      tags:
+        - openshift_nfs_config
+      notify: restart nfs services
+      run_once: True
+
+    - name: Generate user vol PV file
+      template:
+        src: "./files/userpvs.j2"
+        dest: "/root/userpvs-{{ env_type }}-{{ guid }}.yml"
+      tags:
+        - gen_user_vol_pv
+        - openshift_nfs_config
+
+    - shell: 'oc create -f /root/pvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/pvs-{{ env_type }}-{{ guid }}.yml'
+      tags:
+        - create_user_pv
+      when: pv_list.0 is defined
+      tags:
+        - openshift_nfs_config
+
+    - shell: 'oc create -f /root/userpvs-{{ env_type }}-{{ guid }}.yml || oc replace -f /root/userpvs-{{ env_type }}-{{ guid }}.yml'
+      tags:
+        - create_user_pv
+        - openshift_nfs_config
+
+    - import_role:
+        name: "bastion-opentlc-ipa"
+      when: install_ipa_client|bool
+
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Post-Software checks completed successfully"

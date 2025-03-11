@@ -1,0 +1,141 @@
+---
+- name: define ocp_project
+  set_fact:
+    ocp_project: dm7-qlb-{{guid}}
+
+    # Templates come from here: https://raw.githubusercontent.com/jorgemoralespou/ose-sample-apps-layouts
+
+- name: Create project for rhdm7 quick loan bank demo
+  shell: |
+         oc new-project {{ocp_project}} \
+         --display-name="RHDM7 Quick Loan Bank Demo" \
+         --description="Red Hat Decision Manager 7 Quick Loan Bank Demo"
+  ignore_errors: true
+
+#- name: Set project limit LimitRange
+#  shell: "oc create -f /tmp/{{guid}}//limit-range.yaml -n {{ocp_project}}"
+
+# Check whether the required ImageStreams are available in the "openshift" namespace.
+# If they are not, we import them.
+# We need to do this in the "openshift" namespace, in order to have the secret to pull from registry.redhat.io.
+- name: Check if DM ImageStreams exists
+  shell: oc get is/rhdm73-decisioncentral-openshift -n openshift
+  register: rhdm_is_exists_result
+  ignore_errors: true
+
+- name: Import the RHDM73 ImageStreams into the cluster.
+  shell: "oc create -f {{dm_imagestreams_yml}} -n openshift"
+  when: rhdm_is_exists_result is failed
+  ignore_errors: true
+
+- name: "Import templates"
+  shell: "oc create -f {{dm_template_yml}} -n {{ocp_project}}"
+
+- name: "Create decision-central secret and service account"
+  shell: "oc process -f {{dm_secrets_template_yml}} -p SECRET_NAME=decisioncentral-app-secret | oc create -f - -n {{ocp_project}}"
+
+- name: "Create KIE-Server secret and service account"
+  shell: "oc process -f {{dm_secrets_template_yml}} -p SECRET_NAME=kieserver-app-secret | oc create -f - -n {{ocp_project}}"
+
+- name: "Deploy KIE-Server with CORS support."
+  shell: "oc process -f /tmp/{{guid}}/rhdm73-kieserver-cors.yaml -p DOCKERFILE_REPOSITORY=\"http://www.github.com/jbossdemocentral/rhdm7-qlb-loan-demo\" -p DOCKERFILE_REF=master -p DOCKERFILE_CONTEXT=support/openshift/rhdm73-kieserver-cors -n {{ocp_project}} | oc create -n {{ocp_project}} -f -"
+
+- name: Create ConfigMap Decision Central
+  shell: oc create configmap rhdm-dc-setup-config-map --from-file=/tmp/{{guid}}/dc-clone-git-repository.sh,/tmp/{{guid}}/provision-properties-static.sh -n {{ocp_project}}
+
+- name: "Create the Decision Manager application."
+  shell: |
+          oc new-app --template=rhdm73-authoring \
+            -p APPLICATION_NAME={{application_name}} \
+            -p KIE_ADMIN_USER={{kie_admin_user}} \
+            -p KIE_ADMIN_PWD={{kie_admin_pwd}} \
+            -p KIE_SERVER_CONTROLLER_USER={{kie_server_controller_user}} \
+            -p KIE_SERVER_CONTROLLER_PWD={{kie_server_controller_pwd}} \
+            -p KIE_SERVER_USER={{kie_server_user}} \
+            -p KIE_SERVER_PWD={{kie_server_pwd}} \
+            -p DECISION_CENTRAL_HTTPS_SECRET="decisioncentral-app-secret" \
+            -p KIE_SERVER_HTTPS_SECRET="kieserver-app-secret" \
+            -p MAVEN_REPO_USERNAME={{kie_admin_user}} \
+            -p MAVEN_REPO_PASSWORD={{kie_admin_pwd}} \
+            -p DECISION_CENTRAL_MEMORY_LIMIT="2Gi" \
+            -p DECISION_CENTRAL_VOLUME_CAPACITY={{pv_capacity}} \
+            -p IMAGE_STREAM_NAMESPACE=openshift -n {{ocp_project}}
+
+- name: "Add ConfigMap as Volume to Decision Central DC"
+  shell: oc set volume dc/rhdm7-qlb-rhdmcentr --add --name=config-volume --configmap-name=rhdm-dc-setup-config-map --mount-path=/tmp/config-files
+
+- name: "Add DC deployment hook."
+  shell: oc set deployment-hook dc/rhdm7-qlb-rhdmcentr --post -c rhdm7-qlb-rhdmcentr -e DC_URL="http://rhdm7-qlb-rhdmcentr:8080" -v config-volume --failure-policy=abort -- /bin/bash /tmp/config-files/dc-clone-git-repository.sh
+
+#- name: "Cancel deployment Decision Central."
+#  shell: oc deploy rhdm7-qlb-rhdmcentr --cancel=true
+
+#- name: "Deploy Decision Central."
+#  shell: oc deploy rhdm7-qlb-rhdmcentr
+
+#- name: "Cancel DC rollout"
+#  shell: oc rollout cancel dc/rhdm7-qlb-rhdmcentr
+
+
+#- name: "New DC rollout"
+#  shell: oc rollout latest dc/rhdm7-qlb-rhdmcentr
+
+- name: "Patch the KIE-Server deployment to use CORS"
+  shell: "oc patch dc/rhdm7-qlb-kieserver --type='json' -p=\"[{'op': 'replace', 'path': '/spec/triggers/0/imageChangeParams/from/name', 'value': 'rhdm73-kieserver-cors:latest'}]\""
+
+- name: "Patch the KIE-Server deployment namespace to use CORS"
+  shell: "oc patch dc/rhdm7-qlb-kieserver --type='json' -p '[{\"op\": \"replace\", \"path\": \"/spec/triggers/0/imageChangeParams/from/namespace\", \"value\": \"{{ocp_project}}\"}]'"
+
+- name: "Create the QLB client application"
+  shell: "oc new-app nodejs:6~https://github.com/jbossdemocentral/rhdm7-qlb-loan-demo#master --name=qlb-client-application --context-dir=support/application-ui -e NODE_ENV=development --build-env NODE_ENV=development"
+
+- name: "Get KIE Server Route"
+  shell: "oc get route rhdm7-qlb-kieserver | awk 'FNR > 1 {print $2}'"
+  register: oc_get_route_output
+
+- name: "Set KIE-Server Route fact"
+  set_fact:
+    kie_server_route: "{{ oc_get_route_output.stdout }}"
+
+- name: "Configure config file kie-server route"
+  shell: "sed \"s/.*kieserver_host.*/\ \ \ \ \\'kieserver_host\\'\ :\ \\'{{kie_server_route}}\\',/g\" /tmp/{{guid}}/config.js.orig > /tmp/{{guid}}/config.js"
+
+- name: "Create config-map"
+  shell: "oc create configmap qlb-client-application-config-map --from-file=/tmp/{{guid}}/config.js"
+
+- name: "Attach ConfigMap"
+  shell: "oc patch dc/qlb-client-application -p '{\"spec\":{\"template\":{\"spec\":{\"volumes\":[{\"name\": \"volume-qlb-client-app-1\", \"configMap\": {\"name\": \"qlb-client-application-config-map\", \"defaultMode\": 420}}]}}}}'"
+
+- name: "Mount Volume from ConfigMap"
+  shell: "oc patch dc/qlb-client-application -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\": \"qlb-client-application\", \"volumeMounts\":[{\"name\": \"volume-qlb-client-app-1\",\"mountPath\":\"/opt/app-root/src/config\"}]}]}}}}'"
+
+- name: "Patch QLB client application target port"
+  shell: "oc patch svc/qlb-client-application --type='json' -p=\"[{'op': 'replace', 'path': '/spec/ports/0/targetPort', 'value': 3000}]\""
+
+- name: "Create QLB client application route"
+  shell: "oc expose svc/qlb-client-application"
+
+  #### Wait for the build to complete before slapping on the quota ....
+- include_tasks: ./wait_for_build.yml
+  vars:
+    build_to_wait:
+      - qlb-client-application
+      - rhdm73-kieserver-cors
+
+#### Wait for the deployment to complete before slapping on the quota ...
+- include_tasks: ./wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - qlb-client-application
+      - rhdm7-qlb-kieserver
+      - rhdm7-qlb-rhdmcentr
+
+- name: Annotate the completed project as requested by user
+  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
+
+- name: Give user access to the completed project
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete

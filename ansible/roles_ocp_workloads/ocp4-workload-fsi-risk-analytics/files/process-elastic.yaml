@@ -1,0 +1,94 @@
+apiVersion: camel.apache.org/v1
+kind: Integration
+metadata:
+  name: process-elastic
+  namespace: risk
+spec:
+  configuration:
+    - type: property
+      value: >-
+        camel.beans.sslParams=#class\:org.apache.camel.support.jsse.SSLContextParameters
+    - type: property
+      value: camel.beans.sslParams.trustManagers.keyStore.resource=trust.jks
+    - type: property
+      value: camel.beans.sslParams.trustManagers.keyStore.type=jks
+    - type: property
+      value: camel.beans.sslParams.trustManagers.keyStore.password=changeit
+    - type: property
+      value: 'camel.component.https.sslContextParameters=#sslParams'
+    - type: configmap
+      value: elastic-config
+    - type: secret
+      value: trust
+  sources:
+    - content: |+
+        // camel-k: language=java property-file=tls.properties secret=trust
+        import org.apache.camel.Processor;
+        import org.apache.camel.builder.RouteBuilder;
+        import org.apache.camel.model.rest.RestParamType;
+        import org.apache.camel.component.kafka.KafkaComponent;
+        import org.apache.camel.Exchange;
+        public final class processElastic extends RouteBuilder {
+              String kafkaBootstrap = "my-cluster-kafka-brokers:9092";
+            private String consumerMaxPollRecords = "50000";
+            private String consumerCount = "3";
+            private String consumerSeekTo = "end";
+            private String consumerGroup = "process-elastic";
+            public void configure() {
+        from("kafka:" + "var-calc-response" + "?brokers=" + kafkaBootstrap + "&maxPollRecords="
+                        + consumerMaxPollRecords + "&seekTo=" + "end"
+                        + "&groupId=" + "newgroup")
+                        .setHeader(Exchange.HTTP_METHOD, constant("POST"))
+                        .setHeader("Content-Type",constant("application/json"))
+                        .process(new OffEnricher())
+                        .to("https://elastic:{{operator}}@elasticsearch-sample-es-http:9200/off/off")
+                        .log("${body}");
+
+                from("kafka:" + "jbpm-tasks-events" + "?brokers=" + kafkaBootstrap + "&maxPollRecords="
+                        + consumerMaxPollRecords + "&seekTo=" + "beginning"
+                        + "&groupId=" + "task")
+                        .setHeader(Exchange.HTTP_METHOD, constant("POST"))
+                        .setHeader("Content-Type",constant("application/json"))
+                        .to("https://elastic:{{operator}}@elasticsearch-sample-es-http:9200/tasks/tasks")
+                        .log("${body}");
+
+                from("kafka:" + "jbpm-processes-events" + "?brokers=" + kafkaBootstrap + "&maxPollRecords="
+                        + consumerMaxPollRecords + "&seekTo=" + "beginning"
+                        + "&groupId=" + "process")
+                        .setHeader(Exchange.HTTP_METHOD, constant("POST"))
+                        .setHeader("Content-Type",constant("application/json"))
+                        .process(new Enricher())
+                        .log("${body}")
+                        .to("https://elastic:{{operator}}@elasticsearch-sample-es-http:9200/processes/process")
+                        .log("${body}");
+            }
+
+            private final class Enricher implements Processor {
+
+                @Override
+                public void process(Exchange exchange) throws Exception {
+
+                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                    java.util.Map valueMap = mapper.readValue(exchange.getIn().getBody().toString(), java.util.HashMap.class);
+                    java.util.Map  value = (java.util.Map )valueMap.get("data");
+                    String responseStr = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(value);
+
+                    exchange.getIn().setBody(responseStr.replace("data","process-data"));
+
+                }
+            }
+
+            private final class OffEnricher implements Processor {
+
+                @Override
+                public void process(Exchange exchange) throws Exception {
+
+                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                    java.util.Map valueMap = mapper.readValue(exchange.getIn().getBody().toString(), java.util.HashMap.class);
+                    String value = (String)valueMap.get("data");
+                    exchange.getIn().setBody(value);
+
+                }
+            }
+        }
+      name: processElastic.java

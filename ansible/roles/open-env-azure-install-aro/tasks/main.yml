@@ -1,0 +1,203 @@
+---
+- name: Login with azure admin user
+  when: env_type == 'open-environment-azure'
+  ansible.builtin.command: >-
+    az login -u "{{ azure_user }}"
+    -p="{{ azure_user_password }}" --tenant="{{ azure_tenant }}"
+  no_log: true
+
+- name: Login with azure admin service principal
+  when: env_type == 'open-environment-azure-subscription'
+  ansible.builtin.command: >-
+    az login --service-principal -u "{{ azure_service_principal }}"
+    -p="{{ azure_password }}" --tenant="{{ azure_tenant }}"
+  no_log: true
+
+# This app_id is constant for all azure tenants
+- name: Get Azure Red Hat OpenShift RP SP info
+  azure.azcollection.azure_rm_adserviceprincipal_info:
+    auth_source: cli
+    app_id: "f1dd0a37-89c6-4e07-bcd1-ffd3d43d8875"
+    tenant: "{{ azure_tenant }}"
+  register: azrpsp
+
+- name: Set default subscription
+  when: env_type == 'open-environment-azure-subscription'
+  ansible.builtin.command: >-
+    az account set --subscription {{ assignedsubscription.subscriptions[0].subscription_id }}
+
+- name: Create ARO virtual network
+  azure.azcollection.azure_rm_virtualnetwork:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    name: "aro-vnet-{{ guid }}"
+    address_prefixes_cidr:
+      - "10.0.0.0/22"
+  register: az_aro_vnet
+
+- name: Get Network Contributor Role Definition
+  azure.azcollection.azure_rm_roledefinition_info:
+    auth_source: cli
+    scope: "{{ az_aro_vnet.state.id }}"
+    role_name: "Network Contributor"
+  register: az_nc_role_definition
+
+- name: Set ARO SP as Network Contributor for the vnet
+  azure.azcollection.azure_rm_roleassignment:
+    auth_source: cli
+    scope: "{{ az_aro_vnet.state.id }}"
+    assignee_object_id: "{{ azaroappsp.service_principals[0].object_id }}"
+    role_definition_id:
+      "{{ az_nc_role_definition.roledefinitions[0].id }}"
+    state: present
+  register: az_nc_app_result
+  failed_when: "az_nc_app_result.msg is defined and 'The role assignment already exists' not in az_nc_app_result.msg"
+
+- name: Set ARO RP SP as Network Contributor for the vnet
+  azure.azcollection.azure_rm_roleassignment:
+    auth_source: cli
+    scope: "{{ az_aro_vnet.state.id }}"
+    assignee_object_id: "{{ azrpsp.service_principals[0].object_id }}"
+    role_definition_id:
+      "{{ az_nc_role_definition.roledefinitions[0].id }}"
+    state: present
+  register: az_nc_rp_app_result
+  failed_when: "az_nc_rp_app_result.msg is defined and 'The role assignment already exists' not in az_nc_rp_app_result.msg"
+
+- name: Check if ARO master subnet exists
+  azure.azcollection.azure_rm_subnet_info:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: master-subnet
+  ignore_errors: true
+  register: master_subnet_check
+
+- name: Create ARO master subnet
+  when: "'subnets' not in master_subnet_check"
+  azure.azcollection.azure_rm_subnet:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: master-subnet
+    address_prefix_cidr: "10.0.0.0/23"
+    service_endpoints:
+      - service: "Microsoft.ContainerRegistry"
+        locations:
+          - "{{ azure_region }}"
+    private_link_service_network_policies: "Disabled"
+
+- name: Check if ARO worker subnet exists
+  azure.azcollection.azure_rm_subnet_info:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: worker-subnet
+  ignore_errors: true
+  register: worker_subnet_check
+
+- name: Create ARO worker subnet
+  when: "'subnets' not in worker_subnet_check"
+  azure.azcollection.azure_rm_subnet:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: worker-subnet
+    address_prefix_cidr: "10.0.2.0/23"
+    service_endpoints:
+      - service: "Microsoft.ContainerRegistry"
+        locations:
+          - "{{ azure_region }}"
+
+- name: Wait for ARO master subnet to provision
+  azure.azcollection.azure_rm_subnet_info:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: master-subnet
+  register: master_subnet
+  until: "master_subnet.subnets[0].provisioning_state == 'Succeeded'"
+  retries: 10
+  delay: 10
+
+- name: Wait for ARO worker subnet to provision
+  azure.azcollection.azure_rm_subnet_info:
+    auth_source: cli
+    tenant: "{{ azure_tenant }}"
+    resource_group: "openenv-{{ guid }}"
+    virtual_network_name: "aro-vnet-{{ guid }}"
+    name: worker-subnet
+  register: worker_subnet
+  until: "worker_subnet.subnets[0].provisioning_state == 'Succeeded'"
+  retries: 10
+  delay: 10
+
+- name: Sleep before running ARO install
+  ansible.builtin.pause:
+    minutes: 5
+
+- name: Install ARO using azcollection
+  when: install_aro_with_azcollection | default(false) | bool
+  include_tasks:
+    file: ./install-aro-azcollection.yml
+
+- name: Install ARO using az commands
+  when: not install_aro_with_azcollection | default(false) | bool
+  include_tasks:
+    file: ./install-aro-az-command.yml
+
+- name: Run kubeconfig role
+  include_tasks:
+    file: ./create-kubeconfig.yml
+  vars:
+    kube_config_root: "{{ output_dir }}"
+
+- name: Configure AAD Oauth in ARO cluster
+  when:
+    - preconfigure_aad | default(true) | bool
+    - env_type == 'open-environment-azure'
+  block:
+    - name: Add redirect URI to service principal
+      ansible.builtin.command: >-
+        az ad app update --id "{{ azappcreate.stdout | from_json | json_query('appId') }}" --public-client-redirect-uris "{{ az_aro4_reply_url }}"
+
+    - name: Create a secret to store the azureAD App ID password in the cluster
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ lookup('template', 'secret-azuread.yaml.j2' ) | from_yaml }}"
+      register: r_create_secret
+      retries: 6
+      delay: 60
+      until: r_create_secret is success
+
+    - name: Make openenv admin user cluster admin
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ lookup('template', 'admin.yaml.j2' ) | from_yaml }}"
+      register: r_make_admin
+      retries: 6
+      delay: 60
+      until: r_make_admin is success
+
+    - name: Update OAuth configuration on the cluster to add AAD
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ lookup('template', 'aad_oidc.yaml.j2' ) | from_yaml }}"
+      register: r_update_oauth
+      retries: 6
+      delay: 60
+      until: r_update_oauth is success
+
+    - name: Put preconfigure_aad status in user_data
+      agnosticd_user_info:
+        data:
+          preconfigure_aad: "{{ preconfigure_aad }}"

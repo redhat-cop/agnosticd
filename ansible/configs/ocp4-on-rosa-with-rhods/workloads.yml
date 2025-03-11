@@ -1,0 +1,116 @@
+---
+# Workloads are being run on bastion.
+# This enables using the k8s module in the workload.
+# openshift python module is installed for Python3
+- name: Install workloads
+  hosts: bastions
+  gather_facts: false
+  run_once: true
+  become: false
+  tasks:
+  - name: Set Ansible Python interpreter to k8s virtualenv
+    set_fact:
+      ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+
+  - name: Generate cluster api
+    set_fact:
+      rosa_api_server_url: "https://api{{ rosa_console_url.stdout | regex_search('(?<=\\.apps).*') }}:6443"
+
+  - name: Run authentication
+    community.okd.openshift_auth:
+      validate_certs: false
+      host: "{{ rosa_api_server_url }}"
+      username: cluster-admin
+      password: "{{ rosa_admin_result.stdout }}"
+    register: _r_kube_auth
+    retries: 30
+    delay: 120
+    until:
+    - _r_kube_auth is defined
+    - _r_kube_auth.k8s_auth is defined
+    - _r_kube_auth.k8s_auth.api_key is defined
+
+  - name: Create a directory if it does not exist
+    ansible.builtin.file:
+      path: ~/.kube
+      state: directory
+      mode: '0755'
+
+  - name: generate kubeconfig
+    template:
+      src: templates/kubeconfig.j2
+      dest: ~/.kube/config
+
+  - name: Install ocp-student-workloads
+    when:
+    - user_count | default(0) | int > 0
+    - student_workloads | default("") | length > 0
+    tags:
+    - student_workloads
+    block:
+    - name: Check if authentication mechanism is set to htpasswd
+      when: install_idm | default("") != "htpasswd"
+      fail:
+        msg: Authentication Mechanism must be htpasswd
+
+    - name: Generate list of User IDs
+      set_fact:
+        users: "{{ lookup('sequence', 'start=1 end={{ user_count|int }}', wantlist=true) | map('int') | list }}"
+
+    - name: Deploy ocp-student-workloads for each user ID
+      include_role:
+        name: "{{ workload_loop_var[1] }}"
+      vars:
+        ocp_username: "user{{ workload_loop_var[0] }}"
+        become_override: true
+        ACTION: "provision"
+      loop: "{{ users | product(student_workloads) | list }}"
+      loop_control:
+        loop_var: workload_loop_var
+
+  - name: install ocp-infra-workloads
+    vars:
+      ACTION: "provision"
+      ocp_username: "system:admin"
+      # Variables defined for running infra workloads
+      output_dir: "/tmp"
+      num_users: "{{ num_users }}"
+      ocp4_workload_authentication_rosa_admin_user: admin
+      ocp4_workload_authentication_rosa_admin_password: Openshift@1
+      ocp4_workload_generate_kubeconfig_openshift_username: cluster-admin
+      ocp4_workload_generate_kubeconfig_openshift_password: "{{ rosa_admin_result.stdout }}"
+      ocp4_workload_generate_kubeconfig_openshift_api_url: "{{ rosa_api_server_url }}"
+      guid: "{{ guid | default(omit) }}"
+      ocp4_workload_authentication_rosa_aws_access_key_id: "{{ aws_access_key_id }}"
+      ocp4_workload_authentication_rosa_aws_region: "{{ aws_region }}"
+      ocp4_workload_authentication_rosa_aws_secret_access_key: "{{ aws_secret_access_key }}"
+      ocp4_workload_authentication_rosa_token: "{{ gpte_rosa_token | default(omit) }}"
+    ansible.builtin.include_role:
+      name: "{{ workload_loop_var }}"
+    loop: "{{ infra_workloads }}"
+    loop_control:
+      loop_var: workload_loop_var
+
+  - name: Check validatingwebhooconfiguration sre-namespace-validation exists.
+    k8s_info:
+      api_version: admissionregistration.k8s.io/v1
+      kind: ValidatingWebhookConfiguration
+    register: r_failed_validation
+    until: "{{ r_failed_validation.resources | json_query('[?metadata.name == `sre-namespace-validation`]') }}"
+    retries: 60
+    delay: 10
+
+  - name: Remove restricted operations on ROSA clusters from validatingwebhookconfiguration.
+    shell: |
+      oc login --insecure-skip-tls-verify=true -u cluster-admin -p {{ rosa_admin_result.stdout }} {{ rosa_api_server_url }}
+      sleep 10
+      oc delete validatingwebhookconfiguration sre-namespace-validation
+
+  - name: Update project template
+    k8s:
+      state: present
+      definition: "{{ lookup('template', 'templates/project-request-template.yaml' ) | from_yaml }}"
+      validate_certs: false
+    register: r_project_template
+    retries: 2
+    delay: 5

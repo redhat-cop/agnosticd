@@ -1,0 +1,102 @@
+---
+
+- name: check if user is cluster admin
+  shell: "oc get project default"
+  register: default_project_result
+  ignore_errors: true
+  changed_when: false
+
+- fail:
+    msg: "User does not have cluster-admin rights to install software"
+  when: default_project_result is failed
+
+# ####### Start of Installation of Apicurio Studio, Microcks and Persistent RHSSO  ############## #
+
+- name: "Create project"
+  shell: "oc new-project {{ocp_project}} --description='{{project_description}}' --display-name={{ocp_project}}"
+
+- name: "Label namespace"
+  command: "oc label namespace {{ocp_project}} AAD='{{lab_name}}'"
+
+- name: Make sure we go back do default project
+  shell: "oc project default"
+
+
+- name: Annotate the empty project as requested by user
+  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{ocp_username}} --overwrite"
+
+
+- name: Add the view role to the default service account
+  shell: "oc policy add-role-to-user view -z default -n {{ocp_project}}"
+
+- name: Give ocp_username access to Lab Infra project; user = {{ocp_username}}
+  shell: "oc policy add-role-to-user admin {{ocp_username}} -n {{ocp_project}}"
+
+
+
+#####	Persistent RHSSO
+
+- name: Create SSO Service Account
+  shell: "oc create serviceaccount sso-service-account -n {{ocp_project}}"
+
+- name: Give service account access to Lab Infra project
+  shell: "oc policy add-role-to-user view system:serviceaccount:{{ocp_project}}:sso-service-account"
+
+- name: Create RHSSO template
+  shell: "oc create -f {{persistent_sso_template_url}} -n {{ocp_project}}"
+
+- name: Create RHSSO app
+  shell: "oc new-app --template=sso72-x509-mysql-persistent --param=SSO_ADMIN_USERNAME={{SSO_ADMIN_USERNAME}} --param=SSO_ADMIN_PASSWORD={{SSO_ADMIN_PASSWORD}}  --param=HOSTNAME_HTTP={{SSO_HOSTNAME_HTTP}} --param=HOSTNAME_HTTPS={{SSO_HOSTNAME_HTTPS}} -n {{ocp_project}}"
+- pause:
+    seconds: 5
+
+- include_tasks: wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - sso
+      - sso-mysql
+
+##  RH SSO Realms & OAuthClient
+
+- name: Process RHSSO Realm template
+  shell: "oc process -f {{sso_oauth_realm_template_url}}  --param=OPENSHIFT_MASTER={{OPENSHIFT_MASTER}} --param=KEYCLOAK_ROUTE_HOSTNAME={{SSO_HOSTNAME_HTTP}} --param=MICROCKS_ROUTE_HOSTNAME={{MICROCKS_ROUTE_HOSTNAME}} --param=APICURIO_UI_ROUTE_HOSTNAME=http://{{APICURIO_UI_ROUTE}} --param=OPENSHIFT_OAUTH_CLIENT_NAME={{OPENSHIFT_OAUTH_CLIENT_NAME}} -n {{ocp_project}}| oc create -f - -n {{ocp_project}} "
+
+
+
+#####	Apicurio
+
+- name: Create Apicurio Studio template
+  shell: "oc create -f {{apibiz_url}}/apicurio-template.yml -n {{ocp_project}}"
+
+- name: Create Apicurio Studio app
+  shell: "oc new-app --template=apicurio-studio --param=AUTH_ROUTE=http://{{SSO_HOSTNAME_HTTP}}/auth --param=UI_ROUTE={{APICURIO_UI_ROUTE}} --param=API_ROUTE={{APICURIO_API_ROUTE}} --param=WS_ROUTE={{APICURIO_WS_ROUTE}} --param=API_JVM_MAX=2000m --param=API_MEM_LIMIT=3000Mi --param=WS_JVM_MAX=2000m --param=WS_MEM_LIMIT=2500Mi --param=UI_JVM_MAX=1800m --param=UI_MEM_LIMIT=2500Mi -n {{ocp_project}}"
+- pause:
+    seconds: 5
+- include_tasks: wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - apicurio-studio-api
+      - apicurio-studio-ui
+      - apicurio-studio-ws
+      - postgresql
+
+
+
+#####	Microcks
+
+- name: Create Microcks template
+  shell: "oc create -f {{apibiz_url}}/microcks-persistent-no-keycloak-template.yml -n {{ocp_project}}"
+
+- name: Create Microcks app
+  shell: "oc new-app --template=microcks-persistent-no-keycloak --param=APP_ROUTE_HOSTNAME={{MICROCKS_ROUTE_HOSTNAME}} --param=KEYCLOAK_ROUTE_HOSTNAME={{KEYCLOAK_ROUTE_HOSTNAME}} -n {{ocp_project}}"
+- pause:
+    seconds: 5
+- include_tasks: wait_for_deploy.yml
+  vars:
+    pod_to_wait:
+      - microcks
+      - microcks-mongodb
+      - microcks-postman-runtime
+
+
+# #######   End of Installation of Apicurio Studio, Microcks, and RHSSO   ############## #

@@ -1,0 +1,95 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Ensure management cluster is deployed via kcli
+  ansible.builtin.shell:
+    cmd: kcli create cluster openshift --pf management.yml
+  args:
+    chdir: /root/mgmt-cluster-install/
+  register: result
+  failed_when: result.rc != 0 and ("Remove existing directory" not in result.stderr)
+
+- name: Remove kubeadmin user
+  kubernetes.core.k8s:
+    kubeconfig: /root/.kcli/clusters/management/auth/kubeconfig
+    state: absent
+    api_version: v1
+    kind: Secret
+    namespace: kube-system
+    name: kubeadmin
+
+- name: Wait until LVMCluster is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/.kcli/clusters/management/auth/kubeconfig
+    api_version: lvm.topolvm.io/v1alpha1
+    kind: LVMCluster
+    name: lvmcluster
+    namespace: openshift-storage
+  register: lvmcluster
+  retries: 60
+  delay: 10
+  until:
+    - lvmcluster is defined
+    - lvmcluster.resources is defined and lvmcluster.resources | length > 0 and lvmcluster.resources[0].status.state == "Ready"
+
+
+- name: Ensure LVMCLuster storageclass is set as default
+  kubernetes.core.k8s:
+    kubeconfig: /root/.kcli/clusters/management/auth/kubeconfig
+    state: patched
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    name: lvms-vg1
+    definition:
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+  register: result
+  until: result.failed != true
+  retries: 5
+  delay: 60
+
+- name: Wait until MetalLB is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/.kcli/clusters/management/auth/kubeconfig
+    api_version: metallb.io/v1beta1
+    kind: MetalLB
+    name: metallb
+    namespace: openshift-operators
+  register: metallb
+  retries: 60
+  delay: 10
+  until:
+    - metallb is defined
+    - metallb.resources | length > 0
+    - metallb.resources[0].status.conditions | json_query(metallb_query) == "False"
+  vars:
+    metallb_query: >-
+      [?type=='Progressing'].status[] | [0]
+
+# HAproxy was installed in pre_workload
+- name: Ensure HAProxy can listen on port 6443
+  community.general.seport:
+    ports: 6443
+    proto: tcp
+    setype: http_port_t
+    state: present
+
+- name: Ensure HAProxy config is downloaded
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/RHsyseng/hypershift-baremetal-lab/{{ lab_version }}/lab-materials/lab-env-data/haproxy/haproxy.cfg"
+    dest: "/etc/haproxy/haproxy.cfg"
+    mode: "0644"
+
+- name: Ensure HAProxy service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: haproxy
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

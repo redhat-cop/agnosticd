@@ -1,0 +1,131 @@
+---
+- name: Step 000 pre-software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - debug:
+        msg: "Pre-Software tasks Started"
+
+- name: Configure bastion with repositories
+  hosts:
+  - bastions
+  become: true
+  gather_facts: false
+  tags:
+  - step003
+  roles:
+  - role: set-repositories
+    when: repo_method is defined
+  - role: common
+    when: install_common | bool
+
+- name: Some ILT bastion settings - mosh, ports
+  hosts: bastions
+  become: true
+  gather_facts: true
+  tasks:
+
+    - name: Debug RHEL version
+      debug:
+        msg: "RHEL Version: {{ ansible_facts['distribution_major_version']}}"
+      ignore_errors: true
+
+    - name: Install mosh on RHEL
+      ansible.builtin.dnf:
+        name: "https://infrastructure-binaries.s3.us-east-2.amazonaws.com/mosh-1.4.0-1.el{{ ansible_facts['distribution_major_version'] }}.x86_64.rpm"
+        disable_gpg_check: true
+      ignore_errors: true
+
+    - name: Open TCP port 443 for Showroom (if enabled)
+      when: showroom_deploy | default(false) | bool
+      ansible.posix.firewalld:
+        port: "443/tcp"
+        permanent: true
+        state: enabled
+        immediate: true
+      ignore_errors: true
+
+    - name: Open TCP port 22 for Lets Encrypt
+      ansible.posix.firewalld:
+        port: "22/tcp"
+        permanent: true
+        state: enabled
+        immediate: true
+      ignore_errors: true
+
+    - name: Open TCP port 80 for Lets Encrypt
+      ansible.posix.firewalld:
+        port: "80/tcp"
+        permanent: true
+        state: enabled
+        immediate: true
+      ignore_errors: true
+
+- name: Install Azure CLI
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Install Azure CLI
+      when: ( install_aro | default(false) | bool )
+        or ( azure_deploy_bastion | default(false) | bool )
+      block:
+        - name: Import Azure CLI GPG key
+          ansible.builtin.rpm_key:
+            state: present
+            key: https://packages.microsoft.com/keys/microsoft.asc
+
+        - name: Add Azure CLI repository
+          ansible.builtin.yum:
+            name: https://packages.microsoft.com/config/rhel/9/packages-microsoft-prod.rpm
+            state: present
+
+        - name: Install Azure CLI package
+          ansible.builtin.yum:
+            name: azure-cli
+            state: latest
+
+        - name: Install git and pip
+          ansible.builtin.package:
+            name:
+              - git
+              - python3-pip
+            state: latest
+
+- name: Stash Creds For Azure CLI
+  hosts: bastions
+  gather_facts: false
+  become: true
+  become_user: "{{ remote_user }}"
+  tasks:
+    - name: Stash Creds For Azure CLI
+      when: install_aro | default(false) | bool
+      block:
+        - name: Log into Azure SP and stash creds in remote user
+          ansible.builtin.command: >-
+            az login --service-principal -u "{{ hostvars.localhost.azappsp.service_principals[0].app_id }}"
+            -p="{{ hostvars.localhost.azpass }}" --tenant="{{ azure_tenant }}"
+
+- name: Set GUID in bashrc
+  hosts: bastions
+  gather_facts: false
+  become: true
+  become_user: "{{ remote_user }}"
+  tasks:
+  - name: "Add GUID to /home/{{ remote_user }}.bashrc"
+    lineinfile:
+      path: "/home/{{ remote_user }}/.bashrc"
+      regexp: "^export GUID"
+      line: "export GUID={{ guid }}"
+
+- name: Software flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Pre-Software checks completed successfully"

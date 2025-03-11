@@ -1,0 +1,77 @@
+---
+- name: Check that ocp4_workload_authentication_idm_type is defined and valid
+  ansible.builtin.assert:
+    that:
+    - ocp4_workload_authentication_idm_type is defined
+    - >-
+      ocp4_workload_authentication_idm_type == "none" or
+      ocp4_workload_authentication_idm_type == "htpasswd" or
+      ocp4_workload_authentication_idm_type == "ldap"
+    fail_msg: >-
+      ocp4_workload_authentication_idm_type is not defined or not in ('none', 'htpasswd', 'ldap').
+
+- name: Retrieve OpenShift Ingress
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: r_ingress_config
+  until:
+  - r_ingress_config.resources.0 is defined
+  - r_ingress_config.resources | length  > 0
+  delay: 15
+  retries: 60
+
+- name: Retrieve API server configuration (for API endpoint)
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: r_cluster
+
+- name: Save OpenShift access facts
+  vars:
+    _ingress_config: "{{ r_ingress_config.resources[0] }}"
+  ansible.builtin.set_fact:
+    _ocp4_workload_authentication_cluster_ingress_domain: "{{ _ingress_config.spec.domain }}"
+    _ocp4_workload_authentication_console_route: "https://console-openshift-console.{{ _ingress_config.spec.domain }}"
+    _ocp4_workload_authentication_api_server: "{{ r_cluster.resources[0].status.apiServerURL }}"
+
+- name: Setup htpasswd authentication
+  when: ocp4_workload_authentication_idm_type == "htpasswd"
+  ansible.builtin.include_tasks: setup_htpasswd.yml
+
+- name: Setup LDAP authentication
+  when: ocp4_workload_authentication_idm_type == "ldap"
+  ansible.builtin.include_tasks: setup_ldap.yml
+
+- name: Set up cluster admin users
+  when: ocp4_workload_authentication_idm_type != "none"
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'cluster_role_binding.yaml.j2') | from_yaml }}"
+  register: r_cluster_admin_role_binding
+  until: r_cluster_admin_role_binding is successful
+  delay: 15
+  retries: 20
+
+- name: Remove kubeadmin user
+  when:
+  - ocp4_workload_authentication_idm_type != "none"
+  - ocp4_workload_authentication_remove_kubeadmin | bool
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Secret
+    name: kubeadmin
+    namespace: kube-system
+  register: r_remove_kubadmin_secret
+  until: r_remove_kubadmin_secret is successful
+  delay: 15
+  retries: 20
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

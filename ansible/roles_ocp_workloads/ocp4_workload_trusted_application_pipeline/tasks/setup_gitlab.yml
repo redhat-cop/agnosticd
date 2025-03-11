@@ -1,0 +1,141 @@
+---
+- name: Wait for GitLab init job to complete
+  k8s_info:
+    api_version: batch/v1
+    kind: Job
+    name: initialize-gitlab
+    namespace: "{{ ocp4_workload_trusted_application_pipeline_gitlab_namespace }}"
+  register: r_gitlab
+  retries: 180
+  delay: 10
+  until:
+  - r_gitlab.resources | length > 0
+  - r_gitlab.resources[0] | json_query(query) is true
+  vars:
+    query: "status.conditions[?(@.type==`Complete`)].status | [0] == `True`"
+
+- name: Retrieve root private token
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: root-user-personal-token
+    namespace: "{{ ocp4_workload_trusted_application_pipeline_gitlab_namespace }}"
+  register: r_root_token
+  retries: 120
+  delay: 10
+  until:
+  - r_root_token is defined
+  - r_root_token.resources is defined
+  - r_root_token.resources | length > 0
+  - r_root_token.resources[0] is defined
+  - r_root_token.resources[0].data is defined
+  - r_root_token.resources[0].data.token is defined
+  - r_root_token.resources[0].data.token | length > 0
+
+- name: Decode root token
+  ansible.builtin.set_fact:
+    ocp4_workload_trusted_application_pipeline_gitlab_root_token: "{{ r_root_token.resources[0].data.token | b64decode }}"
+
+- name: Create vault secret for gitlab token
+  kubernetes.core.k8s_exec:
+    namespace: "{{ ocp4_workload_trusted_application_pipeline_vault_namespace }}"
+    pod: vault-0
+    command: "{{ item }}"
+  loop:
+  - "vault kv put kv/secrets/janusidp/gitlab token={{ ocp4_workload_trusted_application_pipeline_gitlab_root_token }}"
+  - "vault kv put kv/secrets/janusidp/gitlab_webhook secret={{ lookup('password', '/dev/null chars=ascii_lowercase length=12') }}"
+
+- name: Create Keycloak GitLab application
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_trusted_application_pipeline_gitlab_host }}/api/v4/applications
+    method: POST
+    body_format: form-urlencoded
+    body:
+      name: keycloak
+      redirect_uri: https://{{ ocp4_workload_trusted_application_pipeline_keycloak_host }}/auth/realms/backstage/broker/GitLab/endpoint
+      scopes: api read_user read_repository write_repository sudo openid profile email
+      confidential: false
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_trusted_application_pipeline_gitlab_root_token }}"
+    validate_certs: false
+    status_code: [201]
+  register: r_keycloak_app
+  retries: 60
+  delay: 10
+  until: r_keycloak_app.status == 201
+
+- name: Get Keycloak client credentials
+  ansible.builtin.set_fact:
+    ocp4_workload_trusted_application_pipeline_keycloak_client_id: "{{ r_keycloak_app.json.application_id }}"
+    ocp4_workload_trusted_application_pipeline_keycloak_client_secret: "{{ r_keycloak_app.json.secret }}"
+
+- name: Create Devspaces GitLab application
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_trusted_application_pipeline_gitlab_host }}/api/v4/applications
+    method: POST
+    body_format: form-urlencoded
+    body:
+      name: devspaces
+      redirect_uri: https://{{ ocp4_workload_trusted_application_pipeline_devspaces_host }}/api/oauth/callback
+      scopes: api read_user read_repository write_repository sudo openid profile email
+      confidential: false
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_trusted_application_pipeline_gitlab_root_token }}"
+    validate_certs: false
+    status_code: [201]
+  register: r_devspaces_app
+  retries: 60
+  delay: 10
+  until: r_devspaces_app.status == 201
+
+- name: Get Keycloak client credentials
+  ansible.builtin.set_fact:
+    ocp4_workload_trusted_application_pipeline_devspaces_client_id: "{{ r_devspaces_app.json.application_id }}"
+    ocp4_workload_trusted_application_pipeline_devspaces_client_secret: "{{ r_devspaces_app.json.secret }}"
+
+- name: List Gitlab users
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_trusted_application_pipeline_gitlab_host }}/api/v4/users?per_page=100
+    method: GET
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_trusted_application_pipeline_gitlab_root_token }}"
+    validate_certs: false
+    status_code: 200
+  register: r_users
+
+- name: Create development group
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_trusted_application_pipeline_gitlab_host }}/api/v4/groups
+    method: POST
+    body_format: form-urlencoded
+    body:
+      name: development
+      path: development
+      visibility: public
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_trusted_application_pipeline_gitlab_root_token }}"
+    validate_certs: false
+    status_code: 201
+  register: r_group
+  retries: 100
+  delay: 5
+  until: r_group.status == 201
+
+- name: Add users to development group
+  when: item.username.startswith('user')
+  ansible.builtin.uri:
+    url: https://{{ ocp4_workload_trusted_application_pipeline_gitlab_host }}/api/v4/groups/{{ r_group.json.id }}/members
+    method: POST
+    body_format: form-urlencoded
+    body:
+      user_id: "{{ item.id }}"
+      access_level: 50
+    headers:
+      PRIVATE-TOKEN: "{{ ocp4_workload_trusted_application_pipeline_gitlab_root_token }}"
+    validate_certs: false
+    status_code: 201
+  register: r_group_user
+  retries: 100
+  delay: 5
+  until: r_group_user.status == 201
+  loop: "{{ r_users.json }}"

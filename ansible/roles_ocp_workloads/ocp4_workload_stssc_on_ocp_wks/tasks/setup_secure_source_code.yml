@@ -1,0 +1,72 @@
+---
+- name: Copy GPG Setup script to remote server
+  ansible.builtin.copy:
+    src: files/{{ item }}
+    dest: /tmp/{{ item }}
+  loop:
+  - setup_gpg.sh
+  - init_gpg_passphrase.sh
+
+- name: Wait for codeserver deployment to complete
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: codeserver
+    namespace: codeserver
+  register: r_codeserver_dep
+  until:
+  - r_codeserver_dep.resources | length > 0
+  - r_codeserver_dep.resources[0].status is defined
+  - r_codeserver_dep.resources[0].status.readyReplicas is defined
+  - r_codeserver_dep.resources[0].status.readyReplicas > 0
+  retries: 60
+  delay: 5
+
+- name: Get codeserver pod
+  shell: |
+    oc get pod -l app.kubernetes.io/name=codeserver -n codeserver --no-headers | awk '{print $1}'
+  register: r_codeserver_pod
+
+- name: Copy GPG scripts
+  shell: |
+    oc cp /tmp/{{ item }} codeserver/{{ r_codeserver_pod.stdout }}:/home/codeserver -n codeserver -c codeserver
+  loop:
+  - setup_gpg.sh
+  - init_gpg_passphrase.sh
+
+- name: Run GPG Setup script
+  shell: |
+    oc exec -n codeserver {{ r_codeserver_pod.stdout }} -c codeserver -- /bin/sh /home/codeserver/setup_gpg.sh
+
+- name: Get the GPG Key ID
+  shell: |
+    oc exec -n codeserver {{ r_codeserver_pod.stdout }} \
+    -c codeserver -- /bin/bash -c "gpg --list-keys --keyid-format LONG" \
+    | grep 'pub ' | awk '{print $2}' | cut -d'/' -f2
+  register: r_gpg_key_id
+
+- name: Export the GPG Public Key
+  shell: |
+    oc exec -n codeserver {{ r_codeserver_pod.stdout }} -c codeserver -- gpg --armor --export {{ r_gpg_key_id.stdout }}
+  register: r_gpg_public_key
+
+- name: Create gpg public key secret
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'secret-gpg-public-key.yml.j2' ) | from_yaml }}"
+  vars:
+    _gpg_public_key: "{{ r_gpg_public_key.stdout | b64encode }}"
+
+- name: Create GPG Key in Gitea
+  uri:
+    url: >-
+      {{ _ocp4_workload_stssc_on_ocp_wks_gitea_route_url }}/api/v1/user/gpg_keys
+    user: "{{ ocp4_workload_stssc_on_ocp_wks_gitea_username }}"
+    password: "{{ ocp4_workload_stssc_on_ocp_wks_gitea_password }}"
+    method: POST
+    validate_certs: false
+    force_basic_auth: true
+    status_code: 201
+    body_format: json
+    body:
+      armored_public_key: "{{ r_gpg_public_key.stdout }}"

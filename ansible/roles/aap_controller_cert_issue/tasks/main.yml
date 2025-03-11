@@ -1,0 +1,129 @@
+---
+
+- name: SSL cert block
+  block:
+
+    - name: Make sure Ansible Automation Controller is online before changing Controller base URL
+      ansible.builtin.service:
+        name: automation-controller.service
+        state: started
+      register: r_start_controller
+      until: r_start_controller is not failed
+      retries: 5
+
+    - name: Enable EPEL for Certbot
+      ansible.builtin.dnf:
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm"
+        state: present
+        disable_gpg_check: true
+
+    # directions found here https://certbot.eff.org/lets-encrypt/centosrhel8-other
+
+    - name: install certbot packages
+      ansible.builtin.dnf:
+        name:
+          - certbot
+          - python3-certbot-nginx
+          - python3-pyOpenSSL
+        state: latest  # so that EPEL packages can upgrade RHEL ones to avoid
+        # "AttributeError: module 'lib' has no attribute 'X509_get_notAfter'"
+
+    - name: remove EPEL repository after usage
+      ansible.builtin.dnf:
+        name: "epel-release"
+        state: absent
+
+    - &tower-pinger-block
+      block:
+
+        - name: Check Ansible Automation Controller status
+          ansible.builtin.shell: |
+            curl \
+              --user 'admin:{{ controller_admin_password | default(hostvars[groups['bastions'][0]]['tower_admin_password']) }}' \
+              -vkL -XGET https://localhost/api/v2/ping/
+          register: r_check2
+
+        - name: Display /api/v2/ping results (stdout)
+          ansible.builtin.debug:
+            msg: '{{ r_check2.stdout }}'
+
+        - name: Display /api/v2/ping results (stderr)
+          ansible.builtin.debug:
+            msg: '{{ r_check2.stderr }}'
+
+    - name: Change Ansible Controller base URL
+      block:
+
+        - &tower-baseurl-task
+          awx.awx.settings:
+            name: TOWER_URL_BASE
+            value: "https://{{ ansible_host.split('.')[0] | lower }}.{{ subdomain_base }}"
+            tower_verify_ssl: false
+            tower_host: https://localhost/
+            tower_username: "{{ controller_admin_username | default('admin') }}"
+            tower_password: "{{ controller_admin_password | default(hostvars[groups['bastions'][0]]['tower_admin_password']) }}"
+          register: r_change_base_url
+          until: r_change_base_url is not failed
+          # Controller may not be fully up yet, wait for it gratuitously
+          retries: 12
+          delay: 5
+
+      rescue:
+
+        - name: Try restarting Controller
+          ansible.builtin.service:
+            name: automation-controller.service
+            state: restarted
+
+        - *tower-pinger-block
+
+        - <<: *tower-baseurl-task
+          name: Run failed task again
+
+    # https://docs.ansible.com/ansible-tower/latest/html/administration/init_script.html
+    - name: Ensure Ansible Controller is stopped
+      ansible.builtin.service:
+        name: automation-controller.service
+        state: stopped
+      register: r_stop_controller
+      until: r_stop_controller is not failed
+      retries: 5
+
+    # If this fails check out status of certbot: https://letsencrypt.status.io/
+    - name: Issue Lets Encrypt Cert for Ansible Automation Controller
+      ansible.builtin.shell: |
+        certbot certonly --no-bootstrap --standalone \
+          -d {{ ansible_host.split(".")[0] | lower }}.{{ subdomain_base }} \
+          --email ansible-network@redhat.com --noninteractive --agree-tos
+      register: r_issue_cert
+      until: r_issue_cert is not failed
+      retries: 5
+
+    - name: Copy SSL key to /etc/tower/tower.key
+      ansible.builtin.copy:
+        remote_src: true
+        src: "/etc/letsencrypt/live/{{ ansible_host.split('.')[0] | lower }}.{{ subdomain_base }}/privkey.pem"
+        dest: /etc/tower/tower.key
+
+    - name: Copy SSL cert chain to /etc/tower/tower.cert
+      ansible.builtin.copy:
+        remote_src: true
+        src: "/etc/letsencrypt/live/{{ ansible_host.split('.')[0] | lower }}.{{ subdomain_base }}/fullchain.pem"
+        dest: /etc/tower/tower.cert
+
+  rescue:
+
+    - name: No SSL cert for Ansible Controller
+      ansible.builtin.debug:
+        msg: "SSL cert problem - no cert applied"
+
+  always:
+
+    # Turn on Ansible Controller if successful
+    - name: Ensure Ansible Controller is started
+      ansible.builtin.service:
+        name: automation-controller.service
+        state: started
+      register: r_start_controller
+      until: r_start_controller is not failed
+      retries: 5

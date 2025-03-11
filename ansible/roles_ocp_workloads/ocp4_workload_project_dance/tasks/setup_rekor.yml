@@ -1,0 +1,50 @@
+---
+- name: Create rekor server
+  shell: |
+    oc new-project rekor
+    helm repo add sigstore https://sigstore.github.io/helm-charts
+    helm repo update
+    oc adm policy add-scc-to-user privileged system:serviceaccount:rekor:rekor-server
+    oc adm policy add-scc-to-user privileged system:serviceaccount:rekor:rekor-createtree
+    helm upgrade -i -n rekor rekor sigstore/rekor --version 1.3.13
+
+- name: Wait for rekor deployment for ready status
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: rekor-server
+    namespace: rekor
+  register: r_rekor
+  retries: 120
+  delay: 10
+  until:
+  - r_rekor.resources | length > 0
+  - r_rekor.resources[0].status is defined
+  - r_rekor.resources[0].status.readyReplicas is defined
+  - r_rekor.resources[0].status.readyReplicas > 0
+
+- name: Create Rekor Route
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'templates/route-rekor.yml.j2' ) | from_yaml }}"
+
+- name: Get Rekor public key
+  ansible.builtin.uri:
+    url: https://rekor-server-rekor.{{ ocp4_workload_project_dance_apps_domain }}/api/v1/log/publicKey
+    method: GET
+    validate_certs: false
+    status_code: 200
+    dest: /tmp/rekor.public.key
+  register: r_rekor_pk
+  retries: 60
+  delay: 10
+  until: r_rekor_pk.status == 200
+
+- name: Read public key to fact
+  slurp:
+    src: /tmp/rekor.public.key
+  register: r_rekor_public_key
+
+- name: Create vault secret for rekor public key
+  shell: |
+    oc exec vault-0 -n {{ ocp4_workload_project_dance_vault_namespace
+    }} -- vault kv put kv/secrets/janusidp/rekor public_key="{{ r_rekor_public_key.content | b64decode }}"

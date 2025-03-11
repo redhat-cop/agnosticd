@@ -1,0 +1,197 @@
+# vim: set ft=ansible
+---
+# Implement your Workload deployment tasks here
+
+- set_fact:
+    user_name: "user1"
+
+- set_fact:
+    project_name: "ai-ml-workflows"
+
+- name: create project for demo
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: "{{ project_name }}"
+
+- name: Create Open Data Hub operator RBAC
+  k8s:
+    state: present
+    definition: "{{ item }}"
+    namespace: "{{ project_name }}"
+  loop:
+    - "{{ lookup('file', 'deploy_service_account.yaml') }}"
+    - "{{ lookup('file', 'deploy_role.yaml') }}"
+    - "{{ lookup('file', 'deploy_role_binding.yaml') }}"
+
+- name: Create the Strimzi ServiceAccount, RoleBinding and ClusterRoleBinding
+  k8s:
+    state: present
+    definition: "{{ item }}"
+    namespace: "{{ project_name }}"
+  with_items:
+    - "{{ lookup('template', 'kafka/strimzi.serviceaccount.yaml.j2') }}"
+    - "{{ lookup('template', 'kafka/strimzi.rolebinding.yaml.j2') }}"
+    - "{{ lookup('template', 'kafka/strimzi.clusterrolebinding.yaml.j2') }}"
+
+- name: Make user project admin
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: "admin-{{ user_name }}"
+        namespace: "{{ project_name }}"
+      subjects:
+        - kind: User
+          name: "{{ user_name }}"
+      roleRef:
+        kind: ClusterRole
+        name: admin
+        apiGroup: rbac.authorization.k8s.io
+
+- name: Make user ODH admin
+  k8s:
+    state: present
+    definition:
+      kind: RoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: "opendatahub-admin-{{ user_name }}"
+        namespace: "{{ project_name }}"
+      subjects:
+        - kind: User
+          name: "{{ user_name }}"
+      roleRef:
+        kind: ClusterRole
+        name: opendatahub-admin
+        apiGroup: rbac.authorization.k8s.io
+
+- name: 'Add Open Data Hub to the project "Installed Operators" in {{ project_name }}'
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ item }}"
+  loop:
+    - "{{ lookup('template', 'opendatahub-operator.operatorgroup.yaml.j2') }}"
+    - "{{ lookup('template', 'opendatahub-operator.v0.5.2.clusterserviceversion.yaml.j2') }}"
+
+- name: Wait for Open Data Hub ClusterServiceVersion to finish installing
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ project_name }}"
+    name: opendatahub-operator.v0.5.2
+  register: odh_csv
+  until: 
+    - odh_csv.resources is defined
+    - odh_csv.resources | list | length > 0
+    - odh_csv.resources[0].status is defined
+    - odh_csv.resources[0].status.phase is defined
+    - odh_csv.resources[0].status.phase == 'Succeeded'
+  retries: 20
+  delay: 60
+
+- name: "Create the JupyterHub Single User ConfigMap for {{ user_name }}"
+  k8s:
+    namespace: "{{ project_name }}"
+    definition: "{{ lookup('template', 'jupyterhub-single-user-profile-user.configmap.yaml.j2') }}"
+
+- name: "Create the ImageStream for the notebook used in this workshop"
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ lookup('template', 'workshop-notebook.imagestream.yaml.j2') }}"
+
+- name: Deploy the Strimzi Cluster Operator
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ lookup('template', 'kafka/strimzi-cluster-operator.deployment.yaml.j2') }}"
+
+- name: Create the ODH Custom Resource
+  k8s:
+    state: present
+    namespace: "{{ project_name }}"
+    definition: "{{ lookup('template', 'opendatahub_v1alpha1_opendatahub_cr.yaml.j2') }}"
+
+- name: Wait for various deploymentconfigs to deploy
+  k8s_info:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    name: "{{ item }}"
+    namespace: "{{ project_name }}"
+  register: deployment_out
+  until:
+    - deployment_out is defined
+    - deployment_out.resources is defined
+    - deployment_out.resources | list | length > 0
+    - deployment_out.resources[0].status is defined
+    - deployment_out.resources[0].status.readyReplicas is defined
+    - deployment_out.resources[0].status.readyReplicas | int >= 1
+  loop: "{{ validation_deploymentconfigs | list }}"
+  retries: 10
+  delay: 30
+
+- name: Wait for various deployments to deploy
+  k8s_info:
+    api_version: extensions/v1beta1
+    kind: Deployment
+    name: "{{ item }}"
+    namespace: "{{ project_name }}"
+  register: deployment_out
+  until:
+    - deployment_out is defined
+    - deployment_out.resources is defined
+    - deployment_out.resources | list | length > 0
+    - deployment_out.resources[0].status is defined
+    - deployment_out.resources[0].status.readyReplicas is defined
+    - deployment_out.resources[0].status.readyReplicas | int >= 1
+  loop: "{{ validation_deployments | list }}"
+  retries: 10
+  delay: 30
+
+- name: Wait for various statefulsets to deploy
+  k8s_info:
+    api_version: apps/v1
+    kind: StatefulSet
+    name: "{{ item }}"
+    namespace: "{{ project_name }}"
+  register: deployment_out
+  until:
+    - deployment_out is defined
+    - deployment_out.resources is defined
+    - deployment_out.resources[0].status is defined
+    - deployment_out.resources[0].status.readyReplicas is defined
+    - deployment_out.resources[0].status.readyReplicas | int >= 1
+  loop: "{{ validation_statefulsets | list }}"
+  retries: 10
+  delay: 30
+
+- name: Wait for various 3-member statefulsets to deploy
+  k8s_info:
+    api_version: apps/v1
+    kind: StatefulSet
+    name: "{{ item }}"
+    namespace: "{{ project_name }}"
+  register: deployment_out
+  until:
+    - deployment_out is defined
+    - deployment_out.resources is defined
+    - deployment_out.resources | list | length > 0
+    - deployment_out.resources[0].status is defined
+    - deployment_out.resources[0].status.readyReplicas is defined
+    - deployment_out.resources[0].status.readyReplicas | int >= 3
+  loop: "{{ validation_3statefulsets | list }}"
+  retries: 10
+  delay: 30
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

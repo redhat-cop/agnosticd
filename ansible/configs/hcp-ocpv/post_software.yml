@@ -1,0 +1,168 @@
+---
+- name: Step 005 Post Software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Set admin password
+      set_fact:
+        openshift_admin_password: >-
+          {{- lookup('password', '/dev/null length=1 chars=letters') -}}
+          {{- lookup('password', '/dev/null length=10') -}}
+          {{- lookup('password', '/dev/null length=1 chars=digits') -}}
+    - debug:
+        msg: "Step 005 Post Software"
+
+- name: Deploy some operators
+  hosts: bastion-vm
+  tasks:
+    - name: Make .kube directory
+      ansible.builtin.file:
+        path: /root/.kube/
+        state: directory
+      when: ocp4_aio_deploy_type == 'sno'
+
+    - name: Make rhacm the default cluster for bastion oc commands
+      when: ocp4_aio_deploy_type == 'sno'
+      ansible.builtin.copy:
+        remote_src: true
+        src: /root/sno-rhacm/auth/kubeconfig
+        dest: /root/.kube/config
+
+    - name: Copy file htpasswd.yaml
+      copy:
+        src: "htpasswd.yaml"
+        dest: "/tmp/htpasswd.yaml"
+
+    - name: Configure admin user
+      shell: "{{ item }}"
+      args:
+        chdir: /tmp/
+      loop:
+        - htpasswd -c -B -b users.htpasswd admin "{{ hostvars['hypervisor']['student_password'] | default(hostvars[groups.bastions.0]['student_password']) }}"
+#            - htpasswd -B -b users.htpasswd developer hostvars['hypervisor']['student_password']
+        - /usr/bin/oc create secret generic htpass-secret --from-file=htpasswd=users.htpasswd -n openshift-config
+        - /usr/bin/oc apply -f htpasswd.yaml
+        - /usr/bin/oc adm policy add-cluster-role-to-user cluster-admin admin
+        - /usr/bin/oc delete secrets kubeadmin -n kube-system
+
+
+    - name: Setting up OCS Storage
+      include_role:
+        name: ocp4_aio_role_ocs
+      when: ocp4_aio_deploy_ocs and ocp4_aio_deploy_type == 'ipi'
+
+    - name: Enable internal registry
+      include_role:
+        name: ocp4_aio_role_imgreg
+
+    - name: Installing ACM Operator
+      include_role:
+        name: ocp4_aio_role_acm
+      when: ocp4_aio_deploy_acm or ocp4_aio_deploy_ocp_plus or ocp4_aio_deploy_sno
+
+    - name: Installing CNV Operator
+      include_role:
+        name: ocp4_aio_role_cnv
+      when: ocp4_aio_deploy_cnv
+
+    - name: Save user data
+      agnosticd_user_info:
+        data:
+          ocp_api: "https://api.{{ guid }}.{{ cluster_dns_zone }}:6443"
+          ocp_console: "https://console-openshift-console.apps.{{ guid }}.{{ cluster_dns_zone }}"
+          ocp_username: "admin"
+          ocp_password: "{{ hostvars['hypervisor']['student_password'] }}"
+
+
+    - name: Run the ocp4_workload_showroom lab
+      include_role:
+        name: ocp4_workload_showroom
+
+    - name: Write Route53 credentials into /root/.aws/credentials
+      blockinfile:
+        dest: "/root/.aws/credentials"
+        create: true
+        owner: "root"
+        mode: u=rw,g=,o=
+        content: |
+          [default]
+          aws_access_key_id={{ route53_aws_access_key_id }}
+          aws_secret_access_key={{ route53_aws_secret_access_key }}
+
+    - name: Request Both Let's Encrypt Static and Wildcard Certificates
+      include_role:
+        name: host-lets-encrypt-certs-certbot
+      vars:
+        _certbot_domain: "api.{{ guid }}.{{ cluster_dns_zone }}"
+        _certbot_wildcard_domain: "*.apps.{{ guid }}.{{ cluster_dns_zone }}"
+        _certbot_production: True
+        _certbot_dns_provider: "route53"
+        _certbot_remote_dir: "/root/"
+        _certbot_cache_cert_file: "/tmp/server.cert"
+        _certbot_cache_key_file: "/tmp/server.key"
+        _certbot_cache_ca_file: "/tmp/server_ca.cer"
+        _certbot_cache_fullchain_file: "/tmp/fullchain.cer"
+        _certbot_cache_archive_file: "/tmp/certbot.tar.gz"
+        _certbot_renew_automatically: False
+        _certbot_force_issue: False
+        _certbot_user: "root"
+
+    - name: Remove credentials once LE certs complete
+      file:
+        state: absent
+        path: "/root/.aws"
+
+    - name: Update openshift certs
+      script: files/replace_certs.sh
+
+    - name: Pre-install operators
+      script: files/configure_operators.sh
+      register: r_preinstall
+      until: "r_preinstall is not failed"
+      retries: 60
+      delay: 30
+
+- name: Print informations
+  hosts: localhost
+  tasks:
+
+    - name: Print Bastion Connection Information
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+        - "Host you will be using for lab : {{ hostvars['hypervisor']['public_ip_address'] }}"
+        - "SSH User : {{ student_name }}"
+        - "SSH Password : {{ hostvars['hypervisor']['student_password'] }}"
+        - "Bastion/CNV VMs root password : {{ hostvars['passwd_holder']['root_password'] }}"
+#        - "OpenShift web console : https://console-openshift-console.apps.{{ guid }}.{{ cluster_dns_zone }}"
+#        - "kubeadmin user Password : {{ hostvars['kube_holder']['kubeadmin_password'] }}"
+
+    - when: ocp4_aio_deploy_cnvlab
+      name: Print Openshift Virtualization lab infos
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+        - "Lab instructions : https://{{ hostvars['cnvlab_holder']['route'] }}"
+
+    - name: Print Kube Configuration for IPI
+      when: ocp4_aio_deploy_ipi
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+        - "The console is available at: https://console-openshift-console.apps.{{ guid }}.{{ cluster_dns_zone }}"
+        - "The password for admin user is: {{ hostvars['hypervisor']['student_password'] | default(hostvars[groups.bastions.0]['public_ip_address']) }}"
+#        - "The password for developer user is: {{ hostvars['localhost']['openshift_admin_password'] }}"
+        - "If you'd like CLI access, the bastion host will have already been setup - `sudo ssh root@192.168.123.100`"
+        - "You should then automatically have oc/kubectl access to the cluster. Check out ~/ocp-install/auth/."
+
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Post-Software checks completed successfully"

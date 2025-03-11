@@ -1,0 +1,124 @@
+---
+# vim: set ft=ansible
+# Implement your Workload deployment tasks here
+
+#############################################################
+###############Deploying the ServiceMeshControlplane CR######
+#############################################################
+- name: set relevant facts for re-use
+  set_fact:
+    smcp_project_name: "-smcp"
+    sm_tutorial_project_name: "-tutorial"
+
+- name: create user control plane projects
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: "user{{ item }}{{ smcp_project_name }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: create user tutorial projects
+  k8s:
+    state: present
+    definition:
+      apiVersion: project.openshift.io/v1
+      kind: Project
+      metadata:
+        name: "user{{ item }}{{ sm_tutorial_project_name }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: need to make the user an admin of the control plane project
+  shell: "oc adm policy add-role-to-user admin user{{ item }} -n user{{ item }}{{ smcp_project_name }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: need to make the user an admin of the tutorial project
+  shell: "oc adm policy add-role-to-user admin user{{ item }} -n user{{ item }}{{ sm_tutorial_project_name }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: istio servicemeshcontrolplane cr
+  k8s:
+    state: present
+    definition:
+      apiVersion: maistra.io/v1
+      kind: ServiceMeshControlPlane
+      metadata:
+        name: basic-install
+        namespace: "user{{ item }}{{ smcp_project_name }}"
+      spec:
+        istio:
+          global:
+            disablePolicyChecks: false
+          gateways:
+            istio-egressgateway:
+              autoscaleEnabled: false
+            istio-ingressgateway:
+              autoscaleEnabled: false
+          mixer:
+            policy:
+              autoscaleEnabled: false
+            telemetry:
+              autoscaleEnabled: false
+          pilot:
+            autoscaleEnabled: false
+            traceSampling: 100
+          kiali:
+            enabled: true
+          grafana:
+            enabled: true
+          tracing:
+            enabled: true
+            jaeger:
+              template: all-in-one
+  register: result
+  retries: 20
+  until: not ('Failed' or 'failed' or 'Internal Server Error') in result
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: wait for CR to indicate everything is running
+  k8s_info:
+    api_version: maistra.io/v1
+    kind: ServiceMeshControlPlane
+    name: basic-install
+    namespace: "user{{ item }}{{ smcp_project_name }}"
+  register: crd_status_out
+  until:
+    - crd_status_out.resources[0].status.lastAppliedConfiguration | length > 0
+  retries: 10
+  delay: 600
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: wait for kiali route to exist
+  k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: kiali
+    namespace: "user{{ item }}{{ smcp_project_name }}"
+  register: result
+  failed_when: result.resources | length == 0
+  retries: 120
+  until: result.resources | length > 0
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+- name: create the service mesh member roll to point to the tutorial project
+  k8s:
+    state: present
+    definition:
+      apiVersion: maistra.io/v1
+      kind: ServiceMeshMemberRoll
+      metadata:
+        name: default
+        namespace: "user{{ item }}{{ smcp_project_name }}"
+      spec:
+        members:
+          # a list of projects joined into the service mesh
+          - "user{{item}}{{ sm_tutorial_project_name }}"
+  loop: "{{ range(1, num_users | int + 1, 1) | list }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

@@ -1,0 +1,163 @@
+---
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+# To Do: Implement your workload deployment tasks here
+# -------------------------------------------------------------------------
+
+- set_fact:
+    ocp4_workload_nginxplus_imagestream: "{{ ocp4_workload_nginxplus_image_name }}"
+
+- name: create {{ ocp4_workload_nginxplus_namespace }} namespace/project
+  kubernetes.core.k8s:
+    name: "{{ ocp4_workload_nginxplus_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create secret for {{ ocp4_workload_nginxplus_base_url }}
+  kubernetes.core.k8s:
+    state: present
+    template: nginx-registry-secret.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create imagestream
+  kubernetes.core.k8s:
+    state: present
+    template: nginx-imagestream.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: get imageregistry url
+  kubernetes.core.k8s_info:
+    kind: ImageStream
+    name: "{{ ocp4_workload_nginxplus_imagestream }}"
+    namespace: "{{ ocp4_workload_nginxplus_namespace }}"
+  register: ocp4_workload_nginxplus_imagestream_url
+
+- name: set imageregistry url
+  set_fact:
+    # yamllint disable-line rule:line-length
+    ocp4_workload_nginxplus_registry_url: "{{ ocp4_workload_nginxplus_imagestream_url.resources[0].status.dockerImageRepository }}"
+
+- name: Create operatorgroup
+  kubernetes.core.k8s:
+    state: present
+    template: nginx-operatorgroup.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create subscription
+  kubernetes.core.k8s:
+    state: present
+    template: nginx-subscription.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Wait for 2 minutes for operator to fully install and start
+  ansible.builtin.wait_for:
+    timeout: 120
+
+- name: Create tls secret
+  kubernetes.core.k8s:
+    state: present
+    template: nginx-tls-secret.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create Security Context Constraint for nginx ingress
+  kubernetes.core.k8s:
+    state: present
+    template: nginx-scc.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+# rbac is set to true in ingress controller yaml but cluster role is not being created
+# This is related to this issue: https://github.com/nginxinc/nginx-ingress-helm-operator/issues/111
+# The fix is to create the cluster role until the upstream issue is resolved
+- name: Create cluster role for nginx ingress
+  kubernetes.core.k8s:
+    state: present
+    template: nginx-cluster-role.j2
+  register: result
+  until: result is not failed
+  retries: 10
+  delay: 6
+
+- name: Create ingress controller
+  kubernetes.core.k8s:
+    state: present
+    template: nginx-ingress-controller.j2
+  register: result
+  until: result is not failed
+  retries: 20
+  delay: 6
+
+- name: Wait for {{ ocp4_workload_nginxplus_wait_time }} seconds so ingress controller has time to start
+  ansible.builtin.wait_for:
+    timeout: "{{ ocp4_workload_nginxplus_wait_time | int }}"
+
+### Start: This fixes an issue where the ingress controller pod does not start in some clusters
+- name: Get {{ ocp4_workload_nginxplus_ic_instance_name }} pod output
+  # yamllint disable-line rule:line-length
+  shell: oc get pods -n "{{ ocp4_workload_nginxplus_namespace }}" --no-headers=true | grep "{{ ocp4_workload_nginxplus_ic_instance_name }}"
+  register: pod_output
+  changed_when: false
+
+- name: Parse pod status
+  set_fact:
+    pod_status: "{{ pod_output.stdout_lines[0].split()[2] }}"
+  when: pod_output.stdout_lines | length > 0
+
+- name: Parse pod name
+  set_fact:
+    pod_name: "{{ pod_output.stdout_lines[0].split()[0] }}"
+  when: pod_output.stdout_lines | length > 0
+
+- name: Delete pod if state is ImagePullBackOff
+  k8s:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ ocp4_workload_nginxplus_namespace }}"
+    name: "{{ pod_name }}"
+    state: absent
+  when: pod_status == "ImagePullBackOff"
+
+- name: Make sure {{ ocp4_workload_nginxplus_ic_instance_name }} pod is in running
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: "{{ ocp4_workload_nginxplus_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/instance = {{ ocp4_workload_nginxplus_ic_instance_name }}"
+  register: pod_list
+  until: pod_list.resources[0].status.phase == "Running"
+  retries: 100
+  delay: 6
+  ignore_errors: true
+### End: This fixes an issue where the ingress controller pod does not start in some clusters
+
+# END
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

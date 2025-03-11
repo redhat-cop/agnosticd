@@ -1,0 +1,169 @@
+---
+- name: Create rocketchat project
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'project.yaml.j2') | from_yaml }}"
+  register: project_result
+  until: project_result is succeeded
+  retries: 10
+  delay: 30
+
+- name: output project results
+  debug:
+    var: project_result
+    verbosity: 2
+
+- name: Deploy Rocket Chat
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template',  item ) | from_yaml }}"
+  loop:
+    - database_pvc1.yaml.j2
+    - database_pvc2.yaml.j2
+    - database_service.yaml.j2
+    - rocketchat_service.yaml.j2
+    - db_deployment_config.yaml.j2
+    - rocketchat_deployment_config.yaml.j2
+    - rocketchat_route.yaml.j2
+  register: route_result
+  until: route_result is succeeded
+  retries: 10
+  delay: 30
+
+- name: Print the results
+  debug:
+    var: route_result
+    verbosity: 2
+
+- name: Get rocketchat route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: rocket-chat # get from rocket_chat_deployment.yaml.j2 route creation task.
+    namespace: "{{ ocp4_workload_rocket_chat_namespace }}"
+  register: route_result
+  until:
+    - route_result.resources[0].spec.host is defined
+    - route_result.resources[0].spec.host | length > 0
+  retries: 10
+  delay: 10
+
+- name: Print rocketchat host
+  debug:
+    var: route_result.resources[0].spec.host
+
+- name: Set RocketChat URL
+  ansible.builtin.set_fact:
+    _rocketchat_url: "https://{{ route_result.resources[0].spec.host }}"
+
+- name: Get User ID and Auth Token
+  uri:
+    url: "{{ _rocketchat_url }}/api/v1/login"
+    method: POST
+    body_format: json
+    headers:
+      Content-Type: application/json
+    body:
+      user: "{{ ocp4_workload_rocket_chat_username }}"
+      password: "{{ ocp4_workload_rocket_chat_password }}"
+    return_content: true
+  register: response
+  until: not response.failed
+  retries: 30
+  delay: 30
+
+- name: Extract User ID and AuthToken
+  set_fact:
+    _rocketchat_userId: "{{ response.content | regex_search('\"userId\":\"([^\"]+)', '\\1') }}"
+    _rocketchat_authToken: "{{ response.content | regex_search('\"authToken\":\"([^\"]+)', '\\1') }}"
+
+- name: Print userID and AuthToken
+  debug:
+    msg: |
+      UserId: {{ _rocketchat_userId }}
+      AuthToken: {{ _rocketchat_authToken }}
+
+- name: Create clothing and utensils channels
+  uri:
+    url: "{{ _rocketchat_url }}/api/v1/channels.create"
+    method: POST
+    body_format: json
+    headers:
+      Content-Type: application/json
+      X-Auth-Token: "{{ _rocketchat_authToken.0 }}"
+      X-User-Id: "{{ _rocketchat_userId.0 }}"
+    body:
+      '{
+          "name": "{{ item.roomName }}",
+          "members": []
+      }'
+    return_content: true
+  loop: "{{ ocp4_workload_rocket_chat_user_vars }}"
+  register: r_channel_result
+
+- name: Create  pm_clothing and pm_utensils users
+  uri:
+    url: "{{ _rocketchat_url }}/api/v1/users.create"
+    method: POST
+    body_format: json
+    headers:
+      Content-Type: application/json
+      X-Auth-Token: "{{ _rocketchat_authToken.0 }}"
+      X-User-Id: "{{ _rocketchat_userId.0 }}"
+    body:
+      '{
+        "name": "{{ item.user }}",
+        "email": "{{ item.user }}@example.com",
+        "password": "{{ item.password }}",
+        "username": "{{ item.user }}"
+      }'
+  loop: "{{ ocp4_workload_rocket_chat_user_vars }}"
+  register: r_user_result
+
+- name: Assign pm_clothing user full access to clothing channel
+  uri:
+    url: "{{ _rocketchat_url }}/api/v1/channels.invite"
+    method: POST
+    body_format: json
+    headers:
+      Content-Type: application/json
+      X-Auth-Token: "{{ _rocketchat_authToken.0 }}"
+      X-User-Id: "{{ _rocketchat_userId.0 }}"
+    body:
+      '{
+        "roomName": "{{ item.roomName }}",
+        "username": "{{ item.user }}"
+      }'
+  loop: "{{ ocp4_workload_rocket_chat_user_vars }}"
+
+- name: Send message to the clothing channel
+  uri:
+    url: "{{ _rocketchat_url }}/api/v1/chat.postMessage"
+    method: POST
+    body_format: json
+    headers:
+      Content-Type: application/json
+      X-Auth-Token: "{{ _rocketchat_authToken.0 }}"
+      X-User-Id: "{{ _rocketchat_userId.0 }}"
+    body:
+      '{
+        "channel": "#{{ item.roomName }}",
+        "text": "{{ item.msg }}"
+      }'
+  loop: "{{ ocp4_workload_rocket_chat_user_vars }}"
+
+- name: print out user.info
+  agnosticd_user_info:
+    msg: |
+      RocketChat URL: {{ _rocketchat_url }}
+      RocketChat Admin Name: {{ ocp4_workload_rocket_chat_username }}
+      RocketChat Admin Password: {{ ocp4_workload_rocket_chat_password }}
+
+- name: Save user data
+  agnosticd_user_info:
+    data:
+      rocketchat_url: "{{ _rocketchat_url }}"
+      rocketchat_admin_name: "{{ ocp4_workload_rocket_chat_username }}"
+      rocketchat_admin_password: "{{ ocp4_workload_rocket_chat_password }}"
+      rocketchat_auth_token: "{{ _rocketchat_authToken.0 }}"
+      rocketchat_user_id: "{{ _rocketchat_userId.0 }}"

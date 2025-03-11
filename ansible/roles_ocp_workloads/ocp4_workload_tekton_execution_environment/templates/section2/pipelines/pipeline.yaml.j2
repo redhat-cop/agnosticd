@@ -1,0 +1,235 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: "{{ _pipeline_name_ }}-{{ _pipeline_dir_ }}-pipeline-ee-builder"
+spec:
+  workspaces:
+  - name: ee-repo
+  params:
+ 
+  - description: Project namespace
+    name: NAMESPACE
+    type: string
+    default: {{ ocp4_workload_tekton_ee_namespace }}
+  - description: url of the git repo for the code of deployment
+    name: GIT_URL
+    type: string
+  - description: revision to be used from repo of the code for deployment (Commit id)
+    name: GIT_REVISION
+    type: string
+    default: main
+  - description: The location of the ansible-builder image.
+    name: ANSIBLE_BUILDER_IMAGE
+    type: string
+    default: {{ ocp4_workload_tekton_ee_default_builder_image }}
+  - description: Internal registry route
+    name: INT_REGISTRY
+    type: string
+  - description: External registry route
+    name: EXT_REGISTRY
+    type: string
+  - description: Name of the container image to be built
+    name: IMAGE_NAME
+    type: string
+  - description: Tag of the container image to be built
+    name: TAG
+    type: string
+    default: latest
+  - description: Path to the directory to use as context for buildah.
+    name: CONTEXT
+    type: string
+    default: "./"
+  - description: The path to the Dockerfile to execute.
+    name: DOCKERFILE
+    type: string
+    default: "Containerfile"
+  - description: buildah build Args
+    name: BUILD_ARGS
+    type: string
+    default: ""
+  - description: buildah push Args
+    name: PUSH_ARGS
+    type: string
+    default: ""
+  - description: Verify the TLS on the registry endpoint (for push/pull to a non-TLS registry)
+    name: TLSVERIFY
+    type: string
+    default: "false"
+  - description: execution environment credentials
+    name: CREDENTIAL
+    type: string
+    default: {{ocp4_workload_tekton_ee_automation_controller_registry_credential}}
+  - description: Automation Controller Route
+    name: AC_API_URL
+    type: string
+    default: {{ocp4_workload_tekton_ee_automation_controller_route}}
+  - description: Automation Controller User Name 
+    name: AC_USER
+    type: string
+    default: {{ocp4_workload_tekton_ee_automation_controller_username}}
+  - description: Automation Controller User's password
+    name: AC_PASSWORD
+    type: string
+    default: {{ocp4_workload_tekton_ee_automation_controller_password}}
+  - description: Automation Controller Registry credential
+    name: AC_REGISTRY_CREDENTIAL
+    type: string
+    default: {{ocp4_workload_tekton_ee_automation_controller_registry_credential}}
+  - description: Automation Controller Job template name
+    name: AC_JOB_TEMPLATE
+    type: string
+    default: {{ocp4_workload_tekton_ee_automation_controller_job_template}}
+
+  tasks:
+    - name: clone-repository
+      taskRef:
+        name: git-clone
+        kind: ClusterTask
+      workspaces:
+      - name: output
+        workspace: ee-repo
+      params:
+      - name: url
+        value: $(params.GIT_URL)
+      - name: deleteExisting
+        value: "true"
+      - name: revision
+        value: $(params.GIT_REVISION)
+
+    - name: build-image
+      taskRef:
+        name: image-builder
+        kind: Task
+      params:
+      - name: BUILDER_IMAGE
+        value: $(params.ANSIBLE_BUILDER_IMAGE)
+      - name: BUILD_CONTEXT
+        value: $(params.CONTEXT)
+      - name: TLSVERIFY
+        value: "false"
+      - name: IMAGE
+        value: $(params.INT_REGISTRY)/$(params.NAMESPACE)/$(params.IMAGE_NAME):$(params.TAG)
+      - name: CONTEXT
+        value: "$(params.CONTEXT)"
+      - name: DOCKERFILE
+        value: "$(params.DOCKERFILE)"
+      - name: BUILD_EXTRA_ARGS
+        value: "$(params.BUILD_ARGS)"
+      workspaces:
+      - name: source
+        workspace: ee-repo
+      runAfter:
+      - clone-repository
+        
+    - name: acs-image-check
+      taskRef:
+        kind: Task
+        name: acs-image-check   
+      params:
+      - name: rox_central_endpoint
+        value: stackrox-endpoint
+      - name: rox_api_token
+        value: stackrox-secret
+      - name: image
+        value: $(params.INT_REGISTRY)/$(params.NAMESPACE)/$(params.IMAGE_NAME):$(params.TAG)
+      - name: insecure-skip-tls-verify
+        value: 'true'
+      runAfter:
+        - build-image
+
+    - name: acs-image-scan
+      taskRef:
+        kind: Task
+        name: acs-image-scan
+      params:
+      - name: rox_central_endpoint
+        value: stackrox-endpoint
+      - name: rox_api_token
+        value: stackrox-secret
+      - name: image
+        value: $(params.INT_REGISTRY)/$(params.NAMESPACE)/$(params.IMAGE_NAME):$(params.TAG)
+      - name: insecure-skip-tls-verify
+        value: 'true'
+      runAfter:
+        - build-image
+
+    - name: image-push
+      taskRef:
+        kind: ClusterTask
+        name: skopeo-copy
+      params:
+      - name: srcImageURL
+        value: docker://$(params.INT_REGISTRY)/$(params.NAMESPACE)/$(params.IMAGE_NAME):$(params.TAG)
+      - name: destImageURL
+        value: docker://$(params.EXT_REGISTRY)/$(params.IMAGE_NAME):$(params.TAG)
+      - name: srcTLSverify
+        value: 'false'
+      - name: destTLSverify
+        value: 'false'
+      workspaces:
+        - name: images-url
+          workspace: ee-repo
+      runAfter:
+      - acs-image-scan
+      - acs-image-check
+
+    - name: add-ee
+      taskRef:
+        kind: Task
+        name: add-ee
+      params:
+      - name: API_URL
+        value: $(params.AC_API_URL)
+      - name: NAME
+        value: $(params.IMAGE_NAME):$(params.TAG)
+      - name: USER
+        value: $(params.AC_USER)
+      - name: PASSWORD
+        value: $(params.AC_PASSWORD)
+      - name: IMAGE
+        value: $(params.EXT_REGISTRY)/$(params.IMAGE_NAME):$(params.TAG)
+      - name: CREDENTIAL
+        value: $(params.AC_REGISTRY_CREDENTIAL)
+      runAfter:
+      - image-push
+      workspaces:
+        - name: source
+          workspace: ee-repo
+
+    - name: update-jt
+      taskRef:
+        kind: Task
+        name: update-job-template
+      params:
+      - name: API_URL
+        value: $(params.AC_API_URL)
+      - name: JOB_TEMPLATE
+        value: $(params.AC_JOB_TEMPLATE)
+      - name: USER
+        value: $(params.AC_USER)
+      - name: PASSWORD
+        value: $(params.AC_PASSWORD)
+      runAfter:
+      - add-ee
+      workspaces:
+        - name: source
+          workspace: ee-repo
+
+    - name: launch-jt
+      taskRef:
+        kind: Task
+        name: launch-job-template
+      params:
+      - name: API_URL
+        value: $(params.AC_API_URL)
+      - name: JOB_TEMPLATE
+        value: $(params.AC_JOB_TEMPLATE)
+      - name: USER
+        value: $(params.AC_USER)
+      - name: PASSWORD
+        value: $(params.AC_PASSWORD)
+      runAfter:
+      - update-jt
+      workspaces:
+        - name: source
+          workspace: ee-repo

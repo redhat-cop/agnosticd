@@ -1,0 +1,73 @@
+---
+- name: Load GCP credentials into string
+  set_fact:
+    gcp_creds: "{{ gcp_credentials | from_json }}"
+
+- name: Set JWT header as string
+  set_fact:
+    jwt_header:
+      alg: "RS256"
+      typ: "JWT"
+
+- name: Base64 encode JWT header
+  set_fact:
+    jwt_header_base64: "{{ jwt_header | to_json | b64encode | replace('=','') }}"
+
+- name: Set current epoch time as string
+  set_fact:
+    current_epoch_date_time: "{{ now().strftime('%s') }}"
+
+- name: Set current epoch + 5 mins as string
+  set_fact:
+    expire_epoch_date_time: "{{ current_epoch_date_time | int + 300 }}"
+
+- name: Set JWT claim set as string
+  set_fact:
+    jwt_claim_set:
+      iss: "{{ gcp_creds.client_email }}"
+      scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/cloud-billing"
+      aud: "https://oauth2.googleapis.com/token"
+      exp: "{{ expire_epoch_date_time }}"
+      iat: "{{ current_epoch_date_time }}"
+
+- name: Base64 encode JWT claim set
+  set_fact:
+    jwt_claim_set_base64: "{{ jwt_claim_set | to_json | b64encode | replace('=','') }}"
+
+- name: Concatenate encoded JWT header and claim set
+  set_fact:
+    jwt_to_sign: '{{ jwt_header_base64 + "." + jwt_claim_set_base64 }}'
+
+- name: Create private key file
+  ansible.builtin.lineinfile:
+    path: "{{ output_dir }}/private.key"
+    line: "{{ gcp_creds.private_key }}"
+    mode: 0600
+    create: yes
+
+- name: Sign JWT with SHA256
+  shell: |
+    echo -n '{{ jwt_to_sign }}' | openssl sha256 -hex -binary -sign {{ output_dir }}/private.key | openssl base64 -e -A | sed s/\+/-/g | sed -E s/=+$// | sed 's/\//_/g'
+  register: jwt_signature
+
+- name: Remove private key file
+  ansible.builtin.file:
+    path: "{{ output_dir }}/private.key"
+    state: absent
+
+- name: Set up JWT as an assertion
+  set_fact:
+    assertion: '{{ jwt_to_sign + "." + jwt_signature.stdout }}'
+
+- name: Get OAuth Token for GCP API
+  ansible.builtin.uri:
+    url: "https://oauth2.googleapis.com/token"
+    method: POST
+    headers:
+      Content-Type: application/x-www-form-urlencoded
+    body:
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer"
+      assertion: "{{ assertion }}"
+    body_format: form-urlencoded
+    validate_certs: true
+  register: auth_response

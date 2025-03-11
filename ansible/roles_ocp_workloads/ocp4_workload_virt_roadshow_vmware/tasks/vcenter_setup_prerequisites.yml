@@ -1,0 +1,75 @@
+---
+- name: Create private key for AD jumphost
+  delegate_to: localhost
+  ansible.builtin.copy:
+    dest: /tmp/jumphost_ad.pem
+    content: "{{ vmware_ibm_ldap_jumphost_privatekey }}"
+    mode: "0600"
+
+- name: Add AD jumphost host to the temporary inventory
+  ansible.builtin.add_host:
+    groupname: network
+    name: jumphost_ad
+    bastion: ""
+    isolated: true
+    ansible_ssh_host: "{{ vmware_ibm_ldap_jumphost }}"
+    ansible_ssh_user: "{{ vmware_ibm_ldap_jumphost_user }}"
+    ansible_ssh_private_key_file: /tmp/jumphost_ad.pem
+    private_ip_address: "{{ vmware_ibm_ldap_jumphost }}"
+    public_ip_address: "{{ vmware_ibm_ldap_jumphost }}"
+
+- name: Get vSphere login session
+  ansible.builtin.uri:
+    url: "https://{{ vcenter_hostname }}/api/session"
+    method: POST
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    force_basic_auth: true
+    url_username: "{{ vcenter_username }}"
+    url_password: "{{ vcenter_password }}"
+    validate_certs: "{{ ocp4_workload_virt_roadshow_vmware_enable_cert_validation | bool }}"
+    status_code: 201
+  register: r_session_id
+
+- name: Set vSphere login token fact
+  ansible.builtin.set_fact:
+    _ocp4_workload_virt_roadshow_vmware_token: "{{ r_session_id.vmware_api_session_id }}"
+
+- name: Set up provisioning facts
+  when: ACTION == "create" or ACTION == "provision"
+  block:
+  - name: Get list of datastores
+    ansible.builtin.uri:
+      validate_certs: "{{ ocp4_workload_virt_roadshow_vmware_enable_cert_validation | bool }}"
+      url: "https://{{ vcenter_hostname }}/api/vcenter/datastore"
+      method: GET
+      headers:
+        Content-Type: "application/json"
+        vmware-api-session-id: "{{ _ocp4_workload_virt_roadshow_vmware_token }}"
+    register: r_datastores
+
+  - name: Filter datastores starting with prefix 'workload_share'
+    ansible.builtin.set_fact:
+      filtered_datastores: "{{ r_datastores.json | json_query(query) }}"
+    vars:
+      query: "[?starts_with(name, 'workload_share')].{name: name, free_space: free_space}"
+
+  - name: Choose the least used datastore
+    ansible.builtin.set_fact:
+      _ocp4_workload_virt_roadshow_vmware_datastore: "{{ (filtered_datastores | sort(attribute='free_space') | last).name }}"
+
+  - name: Debug datastore
+    ansible.builtin.debug:
+      msg: "Least used datastore: {{ _ocp4_workload_virt_roadshow_vmware_datastore }}"
+
+  - name: Set vCenter user password
+    ansible.builtin.set_fact:
+      _ocp4_workload_virt_roadshow_vmware_vcenter_user_password: >-
+        {{- lookup('password', '/dev/null length=1 chars=letters') -}}
+        {{- lookup('password', '/dev/null length={{ ocp4_workload_virt_roadshow_vmware_vcenter_user_password_length }}') -}}
+        {{- lookup('password', '/dev/null length=1 chars=digits') -}}
+
+  - name: Debug vCenter user password
+    ansible.builtin.debug:
+      msg: "vCenter user password: '{{ _ocp4_workload_virt_roadshow_vmware_vcenter_user_password }}'"

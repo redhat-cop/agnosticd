@@ -1,0 +1,116 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+#####################################################################
+# Common pre installation configuration
+#####################################################################
+
+- name: Ensure the namespace exists
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Namespace
+    name: "{{ ocp4_workload_sealed_secrets_namespace }}"
+    state: present
+
+#####################################################################
+# Deploy Sealed Secrets Helm chart
+#####################################################################
+
+- name: Install Sealed Secrets controller via Helm chart
+  when: ocp4_workload_sealed_secrets_deploy_using_helm | bool
+  block:
+  - name: Download OpenShift Helm
+    become: true
+    get_url:
+      url: "{{ ocp4_workload_sealed_secrets_helm_url }}"
+      dest: /usr/bin/helm
+      owner: root
+      group: root
+      mode: 0775
+
+  - name: Add Sealed Secrets chart repository
+    kubernetes.core.helm_repository:
+      name: sealed-secrets
+      repo_url: https://bitnami-labs.github.io/sealed-secrets
+
+  - name: Deploy Sealed Secrets Helm chart
+    kubernetes.core.helm:
+      name: "{{ ocp4_workload_sealed_secrets_name }}"
+      chart_ref: sealed-secrets/sealed-secrets
+      chart_version: "{{ ocp4_workload_sealed_secrets_helm_chart_version }}"
+      release_namespace: "{{ ocp4_workload_sealed_secrets_namespace }}"
+      create_namespace: false
+      values:
+        crd:
+          keep: false
+        podSecurityContext:
+          enabled: false
+        containerSecurityContext:
+          enabled: false
+
+#####################################################################
+# Deploy Sealed Secrets controller YAML
+#####################################################################
+
+- name: Install Sealed Secrets controller via YAML
+  when: not ocp4_workload_sealed_secrets_deploy_using_helm | bool
+  block:
+  - name: Set up sealed-secrets directory
+    file:
+      state: directory
+      path: /tmp/sealed-secrets
+      owner: "{{ ansible_user }}"
+      mode: 0755
+
+  - name: Copy kustomization.yaml file to bastion
+    template:
+      src: kustomization.yaml.j2
+      dest: /tmp/sealed-secrets/kustomization.yaml
+      owner: "{{ ansible_user }}"
+      mode: 0664
+
+  - name: Install sealed secrets controller
+    command:
+      chdir: /tmp/sealed-secrets
+      cmd: oc apply -k .
+
+  - name: Remove sealed-secrets directory
+    file:
+      state: absent
+      path: /tmp/sealed-secrets
+
+#####################################################################
+# Common post installation configuration
+#####################################################################
+
+- name: Deploy Sealed Secrets user ClusterRole
+  when: ocp4_workload_sealed_secrets_deploy_admin_role | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'clusterrole-sealed-secrets-user.yaml' ) | from_yaml }}"
+
+- name: Download kubeseal
+  when: ocp4_workload_sealed_secrets_kubeseal_install | bool
+  become: true
+  unarchive:
+    src: >-
+      https://github.com/bitnami-labs/sealed-secrets/releases/download/v{{
+      ocp4_workload_sealed_secrets_kubeseal_version }}/kubeseal-{{
+      ocp4_workload_sealed_secrets_kubeseal_version }}-linux-amd64.tar.gz
+    remote_src: true
+    dest: /usr/local/bin
+    owner: root
+    group: root
+    mode: 0775
+  args:
+    creates: /usr/local/bin/kubeseal
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

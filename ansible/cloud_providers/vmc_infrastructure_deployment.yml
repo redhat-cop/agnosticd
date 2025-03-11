@@ -1,0 +1,120 @@
+---
+- import_playbook: vmc_pre_checks.yml
+
+- name: Step 001.1 Deploy Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - step001
+    - step001.1
+    - deploy_infrastructure
+    - infra
+    - infra_tasks
+  tasks:
+    - name: Install community.vmware and community.general collections
+      command: >-
+        ansible-galaxy collection install
+        -p collections -r cloud_providers/requirements-vmc.yml
+        --force-with-deps
+      args:
+        chdir: "{{ playbook_dir }}/.."
+
+    - name: Create ssh provision key
+      include_role:
+        name: create_ssh_provision_key
+      when:
+        - instances | default([]) | length
+        - ssh_provision_key_name is undefined
+
+    - name: Locate environment SSH key
+      include_role:
+        name: locate_env_authorized_key
+      when: instances | default([]) | length > 0
+
+    - name: Run infra-vmc-resources Role
+      include_role:
+        name: infra-vmc-resources
+      vars:
+        ACTION: provision
+
+- name: Step 001.2 Create Inventory and SSH config setup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - step001
+    - step001.2
+    - create_inventory
+    - create_ssh_config
+  tasks:
+    - name: Run infra-dns Role
+      when: cluster_dns_server is defined
+      include_role:
+        name: infra-dns
+      vars:
+        _dns_state: present
+
+    - name: Create ssh provision key
+      include_role:
+        name: create_ssh_provision_key
+      when:
+        - instances | default([]) | length
+        - ssh_provision_key_name is undefined
+
+
+    - name: Run infra-vmc-create-inventory Role
+      import_role:
+        name: infra-vmc-create-inventory
+
+    - name: Run Common SSH Config Generator Role
+      import_role:
+        name: infra-common-ssh-config-generate
+
+
+# include global vars again, this time for all hosts now that the inventory is built
+- import_playbook: ../include_vars.yml
+  tags:
+    - create_inventory
+    - must
+
+- name: Step 001.3 Configure Linux Hosts and Wait for Connection
+  hosts:
+    - all:!windows:!network
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  become: true
+  tags:
+    - step001
+    - step001.3
+    - wait_ssh
+    - set_hostname
+  tasks:
+    - name: set facts for remote access
+      tags:
+        - create_inventory
+      set_fact:
+        ansible_ssh_extra_args: >-
+          {{ ansible_ssh_extra_args|d() }}
+          -F {{output_dir}}/{{ env_type }}_{{ guid }}_ssh_conf
+
+    - name: Run infra-generic-wait_for_linux_hosts Role
+      include_role:
+        name: infra-generic-wait_for_linux_hosts
+      vars:
+        infra_generic_wait_for_linux_hosts_delay: 30
+        infra_generic_wait_for_linux_hosts_sleep: 10
+        infra_generic_wait_for_linux_hosts_connect_timeout: 20
+        infra_generic_wait_for_linux_hosts_timeout: 1200
+        infra_generic_wait_for_linux_hosts_retries: 10
+
+    - name: Add authorized_keys
+      include_role:
+        name: ssh_authorized_keys
+      when: >-
+        ssh_authorized_keys | default([]) | length > 0
+        or
+        all_ssh_authorized_keys | default([]) | length > 0

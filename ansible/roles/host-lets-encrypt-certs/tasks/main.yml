@@ -1,0 +1,295 @@
+---
+## Request Let's Encrypt Certificates for a host
+
+- name: Verify if AWS Credentials provided if required
+  fail:
+    msg: AWS Credentials are required when requesting certificates for a wildcard domain
+  when:
+    - acme_wildcard_domain|length|int>0
+    - (acme_aws_access_key is not defined or acme_aws_access_key|trim == "" or acme_aws_secret_access_key is not defined or acme_aws_secret_access_key|trim == "") 
+
+- name: Set acme_wildcard_certs fact
+  set_fact:
+    acme_wildcard_certs: "{{ (acme_wildcard_domain|length|int>0)|ternary('true','false') }}"
+
+- name: Test if Let's Encrypt Certificates are already there
+  stat:
+    path: "{{ acme_install_dir }}/fullchain.pem"
+  register: cacert
+
+- name: No Certificates on host or acme_force_issue=true -> set up Let's Encrypt Certificates
+  when:
+    - cacert.stat.exists|bool == false or acme_force_issue|bool
+  block:
+    # Get Intermediary CA Certificate.
+    # This is also used in the SSO configuration!
+    - name: Get Let's Encrypt Intermediary CA Certificate
+      get_url:
+        url: https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.pem.txt
+        dest: "{{ acme_remote_dir }}/lets-encrypt-x3-cross-signed.pem"
+
+    - name: Setup acme.sh
+      # when:
+      #   - not cache_archive_file.stat.exists|bool or acme_force_issue|bool
+      block:
+      - name: Ensure git is installed
+        yum:
+          name: git
+          state: latest
+      - name: Remove acme.sh and .acme.sh directories if present
+        file:
+          name: "{{ item }}"
+          state: absent
+        with_items:
+        - "{{ acme_remote_dir }}/acme.sh"
+        - "{{ acme_remote_dir }}/.acme.sh"
+      - name: Clone Let's Encrypt Acme.sh Repository
+        git:
+          repo: https://github.com/Neilpang/acme.sh.git
+          clone: yes
+          dest: "{{ acme_remote_dir }}/acme.sh"
+
+      - name: Add AWS Access Key to Let's Encrypt Acme.sh configuration
+        lineinfile:
+          path: "{{ acme_remote_dir }}/acme.sh/dnsapi/dns_aws.sh"
+          line: "AWS_ACCESS_KEY_ID={{ acme_aws_access_key }}"
+          state: present
+          insertbefore: '^#AWS_ACCESS_KEY_ID'
+        when:
+          - acme_wildcard_certs|d(False)|bool
+
+      - name: Add AWS Secret Access Key to Let's Encrypt Acme.sh configuration
+        lineinfile:
+          path: "{{ acme_remote_dir }}/acme.sh/dnsapi/dns_aws.sh"
+          line: "AWS_SECRET_ACCESS_KEY={{ acme_aws_secret_access_key }}"
+          state: present
+          insertbefore: '^#AWS_SECRET_ACCESS_KEY'
+        when:
+          - acme_wildcard_certs|d(False)|bool
+
+    - name: Check if cached .acme.sh archive exists
+      become: False
+      stat:
+        path: "{{ acme_cache_archive_file }}"
+      delegate_to: localhost
+      register: cache_archive_file
+
+    - name: Restore entire .acme.sh archive
+      when:
+      - acme_use_cache|bool
+      - cache_archive_file.stat.exists|bool
+      - not acme_force_issue|bool
+      block:
+      - name: Upload .acme.sh archive
+        unarchive:
+          src: "{{ acme_cache_archive_file }}"
+          dest: "{{ acme_remote_dir }}"
+          owner: "{{ acme_install_dir_owner }}"
+          group: "{{ acme_install_dir_group }}"
+          keep_newer: yes
+      - name: Update AWS Key in .acme.sh/account.conf
+        lineinfile:
+          path: "{{ acme_remote_dir }}/.acme.sh/account.conf"
+          line: "SAVED_AWS_ACCESS_KEY_ID='{{ acme_aws_access_key }}'"
+          state: present
+          regexp: '^SAVED_AWS_ACCESS_KEY_ID$'
+        when:
+          - acme_wildcard_certs|d(False)|bool
+      - name: Add AWS Secret Access Key to Let's Encrypt Acme.sh configuration
+        lineinfile:
+          path: "{{ acme_remote_dir }}/.acme.sh/account.conf"
+          line: "SAVED_AWS_SECRET_ACCESS_KEY_ID='{{ acme_aws_secret_access_key }}'"
+          state: present
+          regexp: '^SAVED_AWS_SECRET_ACCESS_KEY_ID$'
+        when:
+          - acme_wildcard_certs|d(False)|bool
+      - name: Set acme_setup_complete=true
+        set_fact:
+          acme_setup_complete: true
+
+    - name: Check for cached certificate and key
+      when:
+        - acme_use_cache|bool
+        - not acme_force_issue|bool
+      block:
+      - name: Check if cached Certificate exists
+        become: False
+        stat:
+          path: "{{ acme_cache_cert_file }}"
+        delegate_to: localhost
+        register: cache_cert_file
+
+      - name: Check if cached Key exists
+        become: False
+        stat:
+          path: "{{ acme_cache_key_file }}"
+        delegate_to: localhost
+        register: cache_key_file
+
+      - name: Check if cached CA Certificate exists
+        become: False
+        stat:
+          path: "{{ acme_cache_ca_file }}"
+        delegate_to: localhost
+        register: cache_ca_file
+
+      - name: Check if cached Fullchain exists
+        become: False
+        stat:
+          path: "{{ acme_cache_fullchain_file }}"
+        delegate_to: localhost
+        register: cache_fullchain_file
+
+      - name: Check that both key and certificate have been provided
+        debug:
+          msg: "Both Certificate and Key file need to be provided - proceeding with full setup"
+        when:
+        - not (cache_cert_file.stat.exists|bool and cache_key_file.stat.exists|bool)
+
+      - name: Copy cached certificates
+        when:
+        - cache_cert_file.stat.exists|bool
+        - cache_key_file.stat.exists|bool
+        block:
+        - name: Ensure directory for key and certificate exists on host
+          file:
+            path: "{{ acme_remote_dir }}/.acme.sh/{{ acme_domain }}"
+            state: directory
+            owner: "{{ acme_install_dir_owner }}"
+            group: "{{ acme_install_dir_group }}"
+        - name: Copy all cached files to remote host
+          copy:
+            src: "{{ item.src }}"
+            dest: "{{ item.dest }}"
+          with_items:
+          - { src: "{{ acme_cache_cert_file }}", dest: "{{ acme_remote_dir }}/.acme.sh/{{ acme_domain }}/{{ acme_domain }}.cer" }
+          - { src: "{{ acme_cache_key_file }}", dest: "{{ acme_remote_dir }}/.acme.sh/{{ acme_domain }}/{{ acme_domain }}.key" }
+        - name: Copy cached CA Certificate if it exists
+          copy:
+            src: "{{ acme_cache_ca_file }}"
+            dest: "{{ acme_remote_dir }}/.acme.sh/{{ acme_domain }}/ca.cer"
+          when:
+          - cache_ca_file.stat.exists|bool
+        - name: Copy cached Fullchain if it exists
+          copy:
+            src: "{{ acme_cache_fullchain_file }}"
+            dest: "{{ acme_remote_dir }}/.acme.sh/{{ acme_domain }}/fullchain.cer"
+          when:
+          - cache_fullchain_file.stat.exists|bool
+        - name: Set acme_setup_complete=true
+          set_fact:
+            acme_setup_complete: true
+
+    - name: Request Certificates from Let's Encrypt (force or no cache)
+      when:
+      - acme_force_issue|bool or not acme_setup_complete|bool
+      block:
+      - name: Print Shell Command
+        debug:
+          msg: >-
+            {{ acme_remote_dir }}/acme.sh/acme.sh
+            {{ (acme_production|bool)|ternary('','--staging') }}
+            {{ acme_additional_args|d(acme_args)|d('') }}
+            --issue
+            -d {{ acme_domain }}
+            {{ (acme_wildcard_domain|length>0)|ternary('-d','')}} {{ (acme_wildcard_domain|length>0)|ternary(acme_wildcard_domain,'')}}
+            {{ (acme_wildcard_certs|bool)|ternary('--dns dns_aws', '--standalone') }}
+
+      - name: Request API and Wildcard Certificates from Let's Encrypt
+        shell: >-
+          {{ acme_remote_dir }}/acme.sh/acme.sh
+          {{ (acme_production|bool)|ternary('','--staging') }}
+          {{ acme_additional_args|d(acme_args)|d('') }}
+          --issue
+          -d {{ acme_domain }}
+          {{ (acme_wildcard_domain|length>0)|ternary('-d','')}} {{ (acme_wildcard_domain|length>0)|ternary(acme_wildcard_domain,'')}}
+          {{ (acme_wildcard_certs|bool)|ternary('--dns dns_aws', '--standalone') }}
+        args:
+          chdir: "{{ acme_remote_dir }}/acme.sh"
+        retries: 5
+        delay: 30
+        register: r_request_le
+        until: r_request_le is succeeded
+
+      - name: Save certificates to cache
+        when: acme_use_cache|bool
+        block:
+        - name: Save certificate to cache
+          fetch:
+            src: "{{ acme_remote_dir }}/.acme.sh/{{ acme_domain }}/{{ acme_domain }}.cer"
+            dest: "{{ acme_cache_cert_file }}"
+            flat: true
+          when:
+            - acme_cache_cert_file is defined and acme_cache_cert_file|trim != ""
+
+        - name: Save fullchain.cer to cache
+          fetch:
+            src: "{{ acme_remote_dir }}/.acme.sh/{{ acme_domain }}/fullchain.cer"
+            dest: "{{ acme_cache_fullchain_file }}"
+            flat: true
+          when:
+            - acme_cache_fullchain_file is defined and acme_cache_fullchain_file|trim != ""
+
+        - name: Save key to cache
+          fetch:
+            src: "{{ acme_remote_dir }}/.acme.sh/{{ acme_domain }}/{{ acme_domain }}.key"
+            dest: "{{ acme_cache_key_file }}"
+            flat: true
+          when:
+            - acme_cache_key_file is defined and acme_cache_key_file|trim != ""
+
+        - name: Save CA Certificate to cache
+          fetch:
+            src: "{{ acme_remote_dir }}/.acme.sh/{{ acme_domain }}/ca.cer"
+            dest: "{{ acme_cache_ca_file }}"
+            flat: true
+          when:
+            - acme_cache_ca_file is defined and acme_cache_ca_file|trim != ""
+            
+        - name: Save archive of .acme.sh to cache
+          when:
+            - acme_cache_archive_file is defined
+            - acme_cache_archive_file|trim != ""
+          block:
+          - name: Create archive of .acme.sh archive for cache
+            archive:
+              path: "{{ acme_remote_dir }}/.acme.sh"
+              dest: "{{ acme_remote_dir }}/acme.tgz"
+          - name: Save .acme.sh archive to cache
+            fetch:
+              src: "{{ acme_remote_dir }}/acme.tgz"
+              dest: "{{ acme_cache_archive_file }}"
+              flat: yes
+          - name: Remove archive from server
+            file:
+              name: "{{ acme_remote_dir }}/acme.tgz"
+              state: absent
+
+- name: Install the certificates into {{ acme_install_dir }}
+  block:
+  - name: Ensure {{ acme_install_dir }} exists
+    file:
+      path: "{{ acme_install_dir }}"
+      state: directory
+      owner: "{{ acme_install_dir_owner }}"
+      group: "{{ acme_install_dir_group }}"
+      mode: 0775
+  - name: Install certificates
+    shell: "{{ acme_remote_dir }}/acme.sh/acme.sh --install-cert -d {{ acme_domain }} {{ (acme_wildcard_domain|length>0)|ternary('-d','')}} {{ (acme_wildcard_domain|length>0)|ternary(acme_wildcard_domain,'')}} --cert-file {{ acme_install_dir }}/cert.pem --key-file {{ acme_install_dir }}/key.pem --fullchain-file {{ acme_install_dir}}/fullchain.pem --ca-file {{ acme_install_dir }}/ca.cer"
+    args:
+      chdir: "{{ acme_remote_dir }}/acme.sh"
+
+- name: Install Automatic renewals of Certificates
+  when:
+  - acme_renew_automatically|bool
+  block:
+  - name: Install crontab to renew certificates when they expire
+    cron:
+      name: LETS_ENCRYPT_RENEW
+      special_time: daily
+      job: "{{ acme_install_dir }}/acme.sh/acme.sh {{ acme_additional_args|d(acme_args)|d('') }} --cron --home {{ acme_install_dir }}/.acme.sh > /dev/null"
+
+  - name: Install deploy_LE_certs.yml playbook
+    copy:
+      src: deploy_LE_certs.yml
+      dest: "{{ acme_install_dir }}/deploy_LE_certs.yml"

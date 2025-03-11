@@ -1,0 +1,104 @@
+---
+- name: Configure OCP4 infra machinesets
+  include_role:
+    name: ocp4_machineset_config
+  vars:
+    ocp4_machineset_config_groups:
+    - name: infra
+      role: infra
+      taint: infra
+      instance_type: "{{ _infra_node_instance_type }}"
+      total_replicas: "{{ _infra_node_replicas }}"
+      autoscale: "{{ _infra_node_autoscale }}"
+      total_replicas_min: "{{ _infra_node_replicas_min }}"
+      total_replicas_max: "{{ _infra_node_replicas_max }}"
+
+- name: Configure OCP4 Elasticsearch machinesets
+  when: _infra_node_elasticsearch_nodes | default(false) | bool
+  include_role:
+    name: ocp4_machineset_config
+  vars:
+    ocp4_machineset_config_groups:
+    - name: elasticsearch
+      role: elasticsearch
+      taint: elasticsearch
+      instance_type: "{{ _infra_node_elasticsearch_instance_type }}"
+      total_replicas: "{{ _infra_node_elasticsearch_replicas }}"
+      autoscale: "{{ _infra_node_elasticsearch_autoscale }}"
+      total_replicas_min: "{{ _infra_node_elasticsearch_replicas_min }}"
+      total_replicas_max: "{{ _infra_node_elasticsearch_replicas_max }}"
+
+- name: Wait for Infra Nodes to be available
+  k8s_info:
+    api_version: v1
+    kind: Node
+    label_selectors:
+    - node-role.kubernetes.io/infra =
+  register: r_infra_nodes
+  until:
+  - r_infra_nodes.resources | length | int == _infra_node_replicas | int
+  delay: 30
+  retries: 15
+
+- name: Wait for Elasticsearch Nodes to be available
+  when: _infra_node_elasticsearch_nodes | default(false) | bool
+  k8s_info:
+    api_version: v1
+    kind: Node
+    label_selectors:
+    - node-role.kubernetes.io/elasticsearch =
+  register: r_es_nodes
+  until:
+  - r_es_nodes.resources | length | int == _infra_node_elasticsearch_replicas | int
+  delay: 30
+  retries: 15
+
+- name: Get ClusterVersion
+  k8s_info:
+    api_version: config.openshift.io/v1
+    kind: ClusterVersion
+    name: version
+  register: r_cluster_version
+
+- name: Set ocp4_workload_machinesets_cluster_version fact
+  set_fact:
+    ocp4_workload_machinesets_cluster_version: "{{ r_cluster_version.resources[0].status.history[0].version }}"
+
+# The Machine Config Daemon DaemonSet does not include
+# Universal Tolerations. So by adding taints to Infra
+# (and Elasticsearch) nodes the Machine Config Daemon
+# pods would be removed from those nodes.
+# This adds the necessary tolerations.
+# Fixed in 4.5+ versions
+# See https://bugzilla.redhat.com/show_bug.cgi?id=1780318
+- name: Fix Machine Config and Node CA Daemon Sets (add Tolerations for Infra and Elasticsearch nodes)
+  when: ocp4_workload_machinesets_cluster_version is version_compare('4.5', '<')
+  k8s:
+    state: present
+    merge_type:
+    - merge
+    definition: "{{ lookup('template', '{{ item }}') }}"
+  loop:
+  - ./templates/machine-config-daemonset.j2
+  - ./templates/node-ca-daemonset.j2
+
+- name: Configure Ingress Controllers and Image Registry
+  k8s:
+    state: present
+    merge_type:
+    - merge
+    definition: "{{ lookup('template', '{{ item }}') }}"
+  loop:
+  - ./templates/ingress-controller.j2
+  - ./templates/image-registry.j2
+
+- name: Create Config Map for Cluster Monitoring
+  k8s:
+    state: present
+    definition: "{{ lookup('file', './files/cluster-monitoring-config.yml') }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

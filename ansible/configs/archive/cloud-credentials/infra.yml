@@ -1,0 +1,80 @@
+---
+- name: Step 001.1 Deploy Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - step001
+    - step001.1
+    - deploy_infrastructure
+  tasks:
+    - name: Test aws command
+      shell: command -v aws
+      failed_when: false
+      changed_when: false
+      register: raws
+
+    - name: Fail if AWS command CLI if not available
+      fail:
+        msg: AWS command not found in PATH.
+      when: raws.rc != 0
+
+    - name: Set fact for template location
+      set_fact:
+        cloudformation_template: "{{output_dir}}/{{ env_type }}.{{ guid }}.{{cloud_provider}}_cloud_template"
+
+    - name: AWS Generate CloudFormation Template
+      template:
+        src: "./files/cloud_providers/{{ cloud_provider }}_cloud_template.j2"
+        dest: "{{ cloudformation_template }}"
+
+    - name: validation cloudformation template
+      assert:
+        that: >
+          lookup('file', cloudformation_template) | from_yaml is succeeded
+          or lookup('file', cloudformation_template) | from_json is succeeded
+        success_msg: Cloudformation template is syntactically valid
+
+    - name: validate cloudformation template with validate-template (local)
+      environment:
+        AWS_ACCESS_KEY_ID: "{{aws_access_key_id}}"
+        AWS_SECRET_ACCESS_KEY: "{{aws_secret_access_key}}"
+        AWS_DEFAULT_REGION: "{{aws_region_final|d(aws_region)}}"
+      command: >-
+        aws cloudformation validate-template
+        --region {{ aws_region_final | default(aws_region) | default(region) | default('us-east-1') }}
+        --template-body file://{{ cloudformation_template }}
+      changed_when: false
+      register: cloudformation_validation
+      until: cloudformation_validation is succeeded
+      retries: "{{ cloudformation_retries }}"
+      delay: 20
+
+    - name: Stat CloudFormation template
+      stat:
+        path: "{{ cloudformation_template }}"
+      register: stat_template
+
+    - name: Run infra-ec2-template-create Role
+      import_role:
+        name: infra-ec2-template-create
+      vars:
+        aws_region_loop: "{{aws_region}}"
+
+    - name: Run infra-ec2-template-create Role into FallBack region
+      include_role:
+        name: infra-ec2-template-create
+      vars:
+        aws_region_loop: "{{item}}"
+      with_items: "{{ fallback_regions }}"
+      when:
+        - fallback_regions is defined
+        - cloudformation_out is failed
+
+    - name: report Cloudformation error
+      fail:
+        msg: "FAIL {{ project_tag }} Create Cloudformation"
+      when: not cloudformation_out is succeeded
+      tags:
+        - provision_cf_template

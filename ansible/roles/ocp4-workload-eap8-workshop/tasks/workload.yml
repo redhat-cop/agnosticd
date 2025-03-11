@@ -1,0 +1,127 @@
+# vim: set ft=ansible
+---
+# Implement your Workload deployment tasks here
+
+# Access for admin
+- name: Give access to opentlc-mgr
+  shell: |
+         oc adm policy add-cluster-role-to-user cluster-admin opentlc-mgr
+
+- name: Setting up module_type for workshop
+  debug:
+    msg: "Setting up module_type for workshop module_type = {{ ocp4_workload_eap8_workshop_guides_module_type }}"
+
+- name: Create module list
+  ansible.builtin.set_fact:
+    _ocp4_workload_guides_modules: "{{ ocp4_workload_eap8_workshop_guides_module_type.split(';') | map('trim') | list }}"
+
+- name: Print selected modules
+  debug:
+    msg: "Selected list of modules: {{ _ocp4_workload_guides_modules }}"
+
+- name: Create CatalogSource Index 4.10
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - redhat-operators-index.yaml
+  - community-operators-index.yaml
+
+# Install EAP operator
+
+- name: Create operator subscription for EAP
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/eap_subscription.yaml
+
+- name: Install Gitea
+  ansible.builtin.include_role:
+    name: ocp4_workload_gitea_operator
+  vars:
+    ocp4_workload_gitea_user: user1
+    ocp4_workload_gitea_operator_create_admin: True
+    ocp4_workload_gitea_operator_create_users: True
+    ocp4_workload_gitea_operator_migrate_repositories: true
+    ocp4_workload_gitea_operator_gitea_image_tag: 1.20.0
+    ocp4_workload_gitea_operator_repositories_list:
+    - repo: "{{ gitea_git_url }}"
+      name: "workshop"
+      private: false
+
+
+# Install rhbk
+- name: install rhbk
+  include_tasks: install-rhbk.yaml
+
+# Install AMQ Broker operator
+- name: install AMQ Broker operator
+  include_tasks: install-amq.yaml
+
+# Create projects for user
+- name: create projects for users
+  include_tasks: create_project.yaml
+  vars:
+    t_project_name: "{{ t_user }}-project"
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: t_user
+
+- name: create guides project
+  when: num_users | int > 0
+  k8s:
+    state: present
+    kind: Project
+    api_version: project.openshift.io/v1
+    definition:
+      metadata:
+        name: "guides"
+        annotations:
+          openshift.io/description: ""
+          openshift.io/display-name: "JBoss EAP 8 workshop Guides"
+
+- name: install guides
+  when: num_users | int > 0
+  include_tasks: install-guides.yaml
+  vars:
+    guide: "{{ item }}"
+  loop: "{{ _ocp4_workload_guides_modules }}"
+
+- name: install username distribution
+  when: num_users | int > 0
+  include_tasks: install-username-distribution.yaml
+
+
+# Build and push image to OpenShift
+- name: Download artifacts
+  include_tasks: load-artifacts.yaml
+
+# Install dev spaces via operator
+- name: see if dev spaces is installed
+  k8s_info:
+    api_version: org.eclipse.che/v1
+    kind: CheCluster
+    name: codeready-workspaces
+    namespace: codeready
+  register: r_codeready_cr
+
+- name: show dev spaces cr
+  debug:
+    msg: "existing codeready project: {{ r_codeready_cr }}"
+
+- name: install devspaces
+  when: r_codeready_cr.resources | list | length == 0
+  include_tasks: install-devspaces.yaml
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

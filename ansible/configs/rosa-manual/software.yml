@@ -1,0 +1,327 @@
+---
+- name: Set up bastion
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Generate user password if not defined
+      ansible.builtin.set_fact:
+        rosa_user_password: >-
+          {{ lookup('password', '/dev/null length={{ bastion_user_password_length }} chars=ascii_letters,digits') }}
+
+    - name: Create user with password
+      ansible.builtin.user:
+        state: present
+        name: "{{ bastion_user_name }}"
+        password: "{{ rosa_user_password | password_hash( 'sha512' ) }}"
+        password_lock: false
+        comment: ROSA User
+        group: users
+        groups: "{{ 'wheel' if bastion_user_enable_sudo | bool else '' }}"
+        shell: /bin/bash
+
+    - name: Enable password authentication
+      ansible.builtin.lineinfile:
+        line: PasswordAuthentication yes
+        regexp: '^ *PasswordAuthentication'
+        path: /etc/ssh/sshd_config
+
+    - name: Restart sshd
+      ansible.builtin.service:
+        name: sshd
+        state: restarted
+
+- name: Step 00xxxxx software
+  hosts: bastions
+  gather_facts: false
+  become: false
+  environment:
+    AWS_DEFAULT_REGION: "{{ aws_region }}"
+  tasks:
+    - tags:
+        - install_awscli
+      block:
+        - name: Get awscli
+          ansible.builtin.get_url:
+            url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+            dest: /tmp/awscliv2.zip
+
+        - name: Unzip awscliv2.zip
+          ansible.builtin.unarchive:
+            src: /tmp/awscliv2.zip
+            dest: /tmp/
+            remote_src: true
+
+        - name: Install awscli
+          become: true
+          ansible.builtin.command: /tmp/aws/install -i /usr/local/aws -b /usr/bin
+          args:
+            creates: /usr/local/aws
+
+        - name: cleanup archive and tmp files
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/aws
+            - /tmp/awscliv2.zip
+
+    - tags:
+        - install_oc
+      block:
+        - name: Set URL for OpenShift GA release
+          ansible.builtin.set_fact:
+            ocp4_client_url: >-
+              {{ '{0}/ocp/latest/openshift-client-linux.tar.gz'.format(
+                ocp4_installer_root_url | default("https://mirror.openshift.com/pub/openshift-v4/clients")
+              ) }}
+
+        - name: Ensure ocp4_client_url is set
+          ansible.builtin.assert:
+            that: ocp4_client_url | default('') | length > 0
+
+        - name: Install OpenShift CLI
+          become: true
+          ansible.builtin.unarchive:
+            src: "{{ ocp4_client_url }}"
+            remote_src: true
+            dest: /usr/bin
+            mode: 0775
+            owner: root
+            group: root
+          retries: 10
+          register: r_client
+          until: r_client is success
+          delay: 30
+
+        - name: Create OpenShift Bash completion file
+          become: true
+          ansible.builtin.shell: /usr/bin/oc completion bash >/etc/bash_completion.d/openshift
+
+    - tags:
+        - install_helm
+      block:
+        - name: Set URL for helm
+          ansible.builtin.set_fact:
+            helm_url: >-
+              {{ '{0}/helm/latest/helm-linux-amd64.tar.gz'.format(
+                ocp4_installer_root_url | default("https://mirror.openshift.com/pub/openshift-v4/clients")
+              ) }}
+
+        - name: Install helm command
+          become: true
+          ansible.builtin.unarchive:
+            src: "{{ helm_url }}"
+            remote_src: true
+            dest: /usr/bin
+            mode: 0775
+            owner: root
+            group: root
+          retries: 10
+          register: r_client
+          until: r_client is success
+          delay: 30
+
+        - name: Link downloaded helm command to helm
+          become: true
+          ansible.builtin.file:
+            src: /usr/bin/helm-linux-amd64
+            dest: /usr/bin/helm
+            owner: root
+            group: root
+            state: link
+
+        - name: Create Helm Bash completion file
+          become: true
+          ansible.builtin.shell: /usr/bin/helm completion bash >/etc/bash_completion.d/helm
+
+
+    - tags:
+        - create_aws_dir
+      block:
+        - name: Create .aws directory
+          ansible.builtin.file:
+            path: ~/.aws
+            state: directory
+
+    - tags:
+        - create_aws_creds
+      block:
+        - name: Add aws credentials
+          ansible.builtin.blockinfile:
+            path: ~/.aws/credentials
+            create: true
+            mode: 0600
+            block: |-
+              [default]
+              aws_access_key_id={{ hostvars.localhost.rosa_access_key_id }}
+              aws_secret_access_key={{ hostvars.localhost.rosa_secret_access_key }}
+              region={{ aws_region  }}
+
+    - tags:
+        - create_aws_config
+      block:
+        - name: Add aws config
+          ansible.builtin.blockinfile:
+            path: ~/.aws/config
+            create: true
+            mode: 0600
+            block: |-
+              [default]
+              region={{ aws_region }}
+
+    - tags:
+        - install_rosacli
+      block:
+        - name: Get ROSA CLI
+          ansible.builtin.get_url:
+            url: "{{ rosa_installer_url }}"
+            dest: /tmp/rosa-linux.tar.gz
+        - name: Unzip rosa-linux.tar.gz
+          ansible.builtin.unarchive:
+            src: /tmp/rosa-linux.tar.gz
+            dest: /usr/local/bin/
+            remote_src: true
+          become: true
+        - name: cleanup archive file
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/rosa-linux.tar.gz
+
+    - tags:
+        - verify_rosa_installer
+      block:
+        - ansible.builtin.set_fact:
+            rosa_token: "{{ gpte_rosa_token }}"
+          when: rosa_token == ""
+        - name: Log into ROSA
+          ansible.builtin.command: "/usr/local/bin/rosa login --token {{ rosa_token }}"
+
+    - block:
+        - name: Create .config/ocm directory in rosa user homedir
+          become: true
+          ansible.builtin.file:
+            path: "~{{ bastion_user_name }}/.config/ocm"
+            owner: "{{ bastion_user_name }}"
+            state: directory
+        - name: Copy ROSA token to ec2 user dir
+          become: true
+          ansible.builtin.copy:
+            src: /home/ec2-user/.config/ocm/ocm.json
+            dest: "~{{ bastion_user_name }}/.config/ocm/ocm.json"
+            owner: "{{ bastion_user_name }}"
+            mode: '0600'
+            remote_src: true
+        - name: Create .aws directory in rosa user homedir
+          become: true
+          ansible.builtin.file:
+            path: "~{{ bastion_user_name }}/.aws"
+            owner: "{{ bastion_user_name }}"
+            state: directory
+        - name: Copy AWS credentials to rosa user dir
+          become: true
+          ansible.builtin.copy:
+            src: /home/ec2-user/.aws/credentials
+            dest: "~{{ bastion_user_name }}/.aws/credentials"
+            owner: "{{ bastion_user_name }}"
+            remote_src: true
+        - name: Copy AWS config to rosa user dir
+          become: true
+          ansible.builtin.copy:
+            src: /home/ec2-user/.aws/config
+            dest: "~{{ bastion_user_name }}/.aws/config"
+            owner: "{{ bastion_user_name }}"
+            remote_src: true
+
+    - when: install_tektoncd_cli | default(false) | bool
+      become: true
+      block:
+        - name: Enable dnf copr chmouel/tektoncd-cli repository
+          ansible.builtin.command: >-
+            dnf copr enable chmouel/tektoncd-cli -y
+
+        - name: Install tektoncd-cli
+          ansible.builtin.package:
+            name: tektoncd-cli
+            state: present
+
+    - when: install_github_cli | default(false) | bool
+      become: true
+      block:
+        - name: Packages for the GitHub CLI
+          ansible.builtin.yum_repository:
+            name: github-cli
+            description: Packages for the GitHub CLI
+            file: github-cli
+            baseurl: https://cli.github.com/packages/rpm
+            gpgkey: https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x23F3D4EA75716059
+            gpgcheck: true
+            enabled: true
+
+        - name: Install gh-cli
+          ansible.builtin.package:
+            name: gh
+            state: present
+
+    - block:
+        - name: Set ROSA token warning boolean true
+          when: rosa_token == gpte_rosa_token
+          ansible.builtin.set_fact:
+            rosa_token_warning: true
+
+        - name: Set ROSA token warning boolean false
+          when: rosa_token != gpte_rosa_token
+          ansible.builtin.set_fact:
+            rosa_token_warning: false
+
+        - name: Save ansible vars to user_info data
+          agnosticd_user_info:
+            data:
+              rosa_sandbox_account_id: "{{ sandbox_account_id }}"
+              rosa_console_user_name: "{{ hostvars.localhost.rosa_console_user_name }}"
+              rosa_console_password: "{{ hostvars.localhost.rosa_console_password }}"
+              rosa_bastion_user_name: "{{ bastion_user_name }}"
+              rosa_subdomain_base: "{{ subdomain_base }}"
+              rosa_user_password: "{{ rosa_user_password }}"
+              rosa_token_warning: "{{ rosa_token_warning }}"
+              rosa_console_url: "none"
+
+        - name: Print ROSA admin credentials as user.info
+          when: print_agnosticd_user_info | bool
+          agnosticd_user_info:
+            msg: |
+
+              *NOTE:* With great power comes great responsibility. We monitor usage.
+
+              == AWS web console access:
+              * URL: https://{{ sandbox_account_id }}.signin.aws.amazon.com/console
+              * User: {{ hostvars.localhost.rosa_console_user_name }}
+              * Password: {{ hostvars.localhost.rosa_console_password }}
+
+              *IMPORTANT:* Please be very careful to not expose AWS credentials in GIT repos or anywhere else that could be public!
+              If your credentials are compromised, your environment will be deleted without warning.
+
+              == Bastion SSH access:
+              * ssh {{ bastion_user_name }}@bastion.{{ subdomain_base }}
+              * Password: {{ rosa_user_password }}
+              * Your AWS credentials are preconfigured in `~/.aws/credentials` on the bastion host.
+              * The ROSA CLI is preinstalled on the bastion host in `/usr/local/bin`. There is no need to use root.
+              * The ROSA CLI is already logged in using a ROSA token.
+              * You can now install a ROSA cluster manually from the bastion host running the `rosa` CLI.
+              * Please see the ROSA CLI documentation on necessary steps after `rosa login`.
+
+        - name: Print ROSA token warning
+          when:
+            - rosa_token_warning | bool
+            - print_agnosticd_user_info | bool
+          agnosticd_user_info:
+            msg: |
+
+              *IMPORTANT:* You did not provide a ROSA token.
+
+              This is fine as long as you do not need to access the managment console at
+              https://console.redhat.com/openshift. It is recommended that you generate and provide your own ROSA token when deploying
+              this catalog item so that you have full functionality and control of your cluster. You can generate a rosa token from
+              your Red Hat console account here: https://console.redhat.com/openshift/token/rosa

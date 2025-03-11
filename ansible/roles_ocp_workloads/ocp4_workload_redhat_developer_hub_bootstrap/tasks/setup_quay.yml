@@ -1,0 +1,105 @@
+---
+- name: Wait until ODF is ready
+  kubernetes.core.k8s_info:
+    api_version: ocs.openshift.io/v1
+    kind: StorageCluster
+    name: ocs-storagecluster
+    namespace: openshift-storage
+  register: r_storagecluster
+  until: r_storagecluster.resources.0.status.phase == "Ready"
+  retries: 120
+  delay: 10
+
+- name: Wait until NooBaa is ready
+  kubernetes.core.k8s_info:
+    api_version: noobaa.io/v1alpha1
+    kind: NooBaa
+    name: noobaa
+    namespace: openshift-storage
+  register: r_noobaa
+  until: r_noobaa.resources.0.status.phase == "Ready"
+  retries: 120
+  delay: 10
+
+- name: Install quay
+  ansible.builtin.include_role:
+    name: ocp4_workload_quay_operator
+
+# Ignore errors for potentially earlier releases of Quay than 3.10
+- name: Wait until Quay database has been redeployed
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: quay-quay-database
+    namespace: quay-enterprise
+  register: r_quay_database_deployment
+  retries: 10
+  delay: 5
+  ignore_errors: true
+  until:
+  - r_quay_database_deployment.resources is defined
+  - r_quay_database_deployment.resources | length == 1
+  - r_quay_database_deployment.resources[0].status is defined
+  - r_quay_database_deployment.resources[0].status.observedGeneration is defined
+  - r_quay_database_deployment.resources[0].status.observedGeneration | int == 2
+
+- name: Get Quay database pod and ensure it's running
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: quay-enterprise
+    label_selectors:
+    - quay-component = postgres
+  register: r_quay_database_pod
+  retries: 40
+  delay: 5
+  until:
+  - r_quay_database_pod.resources is defined
+  - r_quay_database_pod.resources | length == 1
+  - r_quay_database_pod.resources[0].status is defined
+  - r_quay_database_pod.resources[0].status.phase is defined
+  - r_quay_database_pod.resources[0].status.phase == "Running"
+
+- name: Debug database pod name
+  ansible.builtin.debug:
+    msg: "Found Quay database pod: {{ r_quay_database_pod.resources[0].metadata.name }}"
+
+# Ignore errors in case it found the wrong pod name. Next task will remain as failsafe
+- name: Extend Quay token expiration
+  kubernetes.core.k8s_exec:
+    namespace: quay-enterprise
+    pod: "{{ r_quay_database_pod.resources[0].metadata.name }}"
+    command: >-
+      psql -d quay-quay-database -c "update public.oauthaccesstoken set expires_at = '2300-12-31 00:00:00' where id = 1;"
+  register: r_extend_token
+  retries: 2
+  delay: 5
+  ignore_errors: true
+  until:
+  - r_extend_token.rc is defined
+  - r_extend_token.rc == 0
+
+# Failsafe in case the previous step failed
+- name: Extend Quay token expiration (using shell)
+  when: r_extend_token.failed
+  ansible.builtin.shell: |
+    oc exec $(oc get pod -n quay-enterprise | grep quay-quay-database | awk '{print $1}') \
+    -n quay-enterprise -- psql -d quay-quay-database -c \
+    "update public.oauthaccesstoken set expires_at = '2300-12-31 00:00:00' where id = 1;"
+  register: _r_ext_quay_token_exp
+  until: _r_ext_quay_token_exp.rc == 0
+  retries: 5
+  delay: 30
+
+- name: Create vault secrets for Quay access
+  vars:
+    quay_auth: "quayadmin:{{ ocp4_workload_redhat_developer_hub_bootstrap_quay_admin_password }}"
+  kubernetes.core.k8s_exec:
+    namespace: "{{ ocp4_workload_redhat_developer_hub_bootstrap_vault_namespace }}"
+    pod: vault-0
+    command: "{{ item }}"
+  loop:
+  - "vault kv put kv/secrets/janusidp/registry/auth value={{ quay_auth | b64encode }}"
+  - "vault kv put kv/secrets/janusidp/registry/username value=quayadmin"
+  - "vault kv put kv/secrets/janusidp/registry/password value={{
+    ocp4_workload_redhat_developer_hub_bootstrap_quay_admin_password }}"

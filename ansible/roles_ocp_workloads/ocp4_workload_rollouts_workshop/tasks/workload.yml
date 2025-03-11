@@ -1,0 +1,147 @@
+---
+- name: Get Ingress from Cluster
+  k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+    namespace: openshift-ingress
+  register: ingress
+
+- name: Get sub_domain from ingress
+  set_fact:
+    sub_domain: "{{ ingress | json_query('resources[0].spec.domain')}}"
+
+- name: Create cluster-admins group
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: user.openshift.io/v1
+      kind: Group
+      metadata:
+        name: cluster-admins
+      users:
+        - admin
+        - opentlc-mgr
+
+- name: Create openshift-gitops-operator namespace
+  kubernetes.core.k8s:
+    name: openshift-gitops-operator
+    api_version: v1
+    kind: Namespace
+    state: present
+
+- name: Create Operator Group
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      api_version: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: gitops
+        namespace: openshift-gitops-operator
+      spec:
+        upgradeStrategy: Default
+
+- name: Create Gitops Operator Subscription
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'gitops-operator/subscription.yaml') | from_yaml }}"
+
+- name: Wait until the openshift-gitops namespace is created
+  kubernetes.core.k8s_info:
+    kind: Namespace
+    wait: yes
+    name: openshift-gitops
+    wait_sleep: 10
+    wait_timeout: 360
+
+- name: Wait for deployments
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    wait: yes
+    name: "{{ item }}"
+    namespace: openshift-gitops
+    wait_sleep: 5
+    wait_timeout: 120
+  with_items:
+    - cluster
+    - openshift-gitops-server
+    - openshift-gitops-repo-server
+    - openshift-gitops-redis
+
+- name: Check that all deployments are up and running
+  command: "oc rollout status deployment {{ item }} -n openshift-gitops"
+  with_items:
+    - cluster
+    - openshift-gitops-redis
+    - openshift-gitops-repo-server
+    - openshift-gitops-server
+  retries: 20
+  delay: 20
+
+- name: Give application-controller cluster-admin permissions
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'gitops-operator/application-controller-rolebinding.yaml') | from_yaml }}"
+
+- name: Deploy ConfigurationManagementPlugin Configuration
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'gitops-operator/setenv-cmp-plugin-cm.yaml') | from_yaml }}"
+
+- name: Update openshift-gitops-instance
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'argocd-cr.yaml.j2') }}"
+
+- name: Sleep for 10 seconds
+  wait_for:
+    timeout: 10
+
+- name: Check that all deployments are up and running
+  command: "oc rollout status deployment {{ item }} -n openshift-gitops"
+  with_items:
+    - cluster
+    - openshift-gitops-redis
+    - openshift-gitops-repo-server
+    - openshift-gitops-server
+  retries: 3
+  delay: 5
+  until: result is not failed
+
+- name: Deploy Pipeline operator
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'applications/pipelines-operator.yaml') | from_yaml }}"
+
+- name: Deploy Web Terminal operator
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'applications/web-terminal-operator.yaml') | from_yaml }}"
+
+# Todo: Check health of apps
+- name: Wait 30 seconds for deployment
+  wait_for:
+    timeout: 30
+
+- name: Deploy users ApplicationSet
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'user-appset.yaml.j2') }}"
+
+- name: Output user information for workshop
+  agnosticd_user_info:
+    user: "user{{ n }}"
+    data:
+      user: "user{{ n }}"
+      password: "{{ ocp4_workload_authentication_htpasswd_user_password }}"
+      lab_guide_link: "https://openshiftdemos.github.io/argo-rollouts-workshop/argo-rollouts-workshop/main/index.html?USERNUM={{ n }}"
+  loop: "{{ range(1, num_users | int + 1) | list }}"
+  loop_control:
+    loop_var: n
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

@@ -1,0 +1,226 @@
+---
+- name: Install packages on the nodes
+  become: true
+  hosts: nodes
+  strategy: free
+  tasks:
+
+        - name: Install clusterha packages
+          yum:
+            name:
+                    - pcs
+                    - fence-agents-all
+                    - lvm2-cluster
+                    - gfs2-utils
+                    - iscsi-initiator-utils
+                    - httpd    
+                    - sysstat
+                    - mariadb
+                    - mariadb-server
+                    - tcpdump
+                    - wget
+                    - sysstat 
+                    - bzip2
+            state: present
+
+        - name: copying binary
+          get_url:
+            url: "{{courseurl}}/{{coursecode}}/breakfix1/mk"
+            dest: /usr/local/bin/
+            mode: '0755'
+
+        - name: Pull mysql config file
+          get_url:
+           url: "{{courseurl}}/{{coursecode}}/breakfix1/my.cnf"
+           dest: /etc/my.cnf
+
+        - name: Pull http config file
+          get_url:
+           url: "{{courseurl}}/{{coursecode}}/breakfix1/httpd.conf"
+           dest: /etc/httpd/conf/httpd.conf
+
+        - name: Create cluster system user
+          shell:  echo redhat | passwd hacluster --stdin
+
+        - name: Set iscsi initiator name
+          shell: sed -i 's/^InitiatorName=.*/InitiatorName=iqn.2020-07.com.redhat:srv1/' /etc/iscsi/initiatorname.iscsi
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: Set iscsi initiator name
+          shell: sed -i 's/^InitiatorName=.*/InitiatorName=iqn.2020-07.com.redhat:srv2/' /etc/iscsi/initiatorname.iscsi
+          when: inventory_hostname == "nodeb.example.com"
+
+        - name: Set iscsi initiator name
+          shell: sed -i 's/^InitiatorName=.*/InitiatorName=iqn.2020-07.com.redhat:srv3/' /etc/iscsi/initiatorname.iscsi
+          when: inventory_hostname == "nodec.example.com"
+
+        - name: Enable and start PCSD service
+          service:
+            name: pcsd
+            enabled: true
+            state: 'started'
+
+        - name: Enable and start iscsid service
+          service:
+            name: iscsid
+            enabled: true
+            state: 'restarted'
+
+        - name: Enable and start iscsi service
+          service:
+            name: iscsi
+            enabled: true
+            state: 'restarted'
+
+
+        - name: Perform a discovery on bastion and show available target nodes
+          shell: /sbin/iscsiadm --mode discovery --type sendtargets --portal frontend:3260
+
+        - name: Connect to the named target, after updating the local persistent database (cache)
+          shell: /sbin/iscsiadm --mode node --targetname iqn.2020-01.local.rhce.halvm:target --portal frontend:3260 --login
+
+        - name: Connect to the named target
+          shell: /sbin/iscsiadm --mode node --targetname iqn.2020-01.local.rhce.ipa:target --portal frontend:3260 --login
+
+
+        - name: Authorize cluster nodes
+          shell: pcs cluster auth nodea.example.com nodeb.example.com nodec.example.com -u hacluster -p redhat --force
+          ignore_errors: yes
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: start cluster
+          shell: pcs cluster setup --start --enable --name clusterhatroubleshooting nodea.example.com nodeb.example.com nodec.example.com --force
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: Setting up GFS
+          shell: pcs property set no-quorum-policy=freeze
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: Fencing
+          shell: pcs stonith create fence_node1 fence_ipmilan pcmk_host_list="nodea.example.com" ipaddr="192.168.47.220" login="admin" passwd="redhat" lanplus=1  power_wait=4; pcs stonith create fence_node2 fence_ipmilan pcmk_host_list="nodeb.example.com" ipaddr="192.168.47.221" login="admin" passwd="redhat" lanplus=1  power_wait=4; pcs stonith create fence_node3 fence_ipmilan pcmk_host_list="nodec.example.com" ipaddr="192.168.47.222" login="admin" passwd="redhat" lanplus=1  power_wait=4
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: Constraint fencing
+          shell: pcs constraint location fence_node1 prefers nodea.example.com; pcs constraint location fence_node2 prefers nodeb.example.com; pcs constraint location fence_node3 prefers nodec.example.com
+          when: inventory_hostname == "nodea.example.com"    
+
+        - name: Setup dlm
+          shell: pcs resource create dlm ocf:pacemaker:controld op monitor interval=30s on-fail=fence clone interleave=true ordered=true
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: lvm locking 
+          shell: /sbin/lvmconf --enable-cluster
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: lvm locking
+          shell: /sbin/lvmconf --enable-cluster
+          when: inventory_hostname == "nodeb.example.com"
+
+ 
+        - name: lvm locking
+          shell: /sbin/lvmconf --enable-cluster
+          when: inventory_hostname == "nodec.example.com"
+
+
+        - name: Setup clmvd
+          shell: pcs resource create clvmd ocf:heartbeat:clvm op monitor interval=30s on-fail=fence clone interleave=true ordered=true
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: Setup Constraint
+          shell: pcs constraint order start dlm-clone then clvmd-clone
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: Setup colocation
+          shell: pcs constraint colocation add clvmd-clone with dlm-clone
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: wiping
+          shell: wipefs --all --force /dev/sda
+          ignore_errors: yes
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: wiping
+          shell: wipefs --all --force /dev/sdb
+          ignore_errors: yes
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: Create pv
+          shell: pvcreate /dev/sda -ff -y; sleep 5
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: vgcreate
+          shell: vgcreate -Ay -cy webfs_vg /dev/sda; sleep 5
+          when: inventory_hostname == "nodea.example.com"
+  
+        - name: lvcreate
+          #shell: lvcreate -L1.3G -n webfs_lv webfs_vg -y -q 1>/dev/null 2>&1
+          lvol:
+            vg: webfs_vg
+            lv: webfs_lv
+            size: 1300m
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: GFS
+          shell: mkfs.gfs2 -j3 -p lock_dlm -O -t clusterhatroubleshooting:clusterfs /dev/webfs_vg/webfs_lv
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: resource creation IPaddr
+          shell: pcs resource create web_vip ocf:heartbeat:IPaddr2 ip=192.168.47.225 cidr_netmask=24 op monitor interval=30s --group web
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: NFS
+          shell: pcs resource create webnfs ocf:heartbeat:Filesystem device="frontend:/nfs" directory="/var/www/html" fstype="nfs" --group web
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: clusterfs
+          shell: pcs resource create clusterfs Filesystem device="/dev/webfs_vg/webfs_lv" directory="/var/log/httpd" fstype="gfs2" options="noatime" op monitor interval=10s on-fail=fence clone interleave=true
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: Constraint and colocation
+          shell: pcs constraint order start clvmd-clone then clusterfs-clone;pcs constraint colocation add clusterfs-clone with clvmd-clone
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: webserver
+          shell: pcs resource create apache_res apache configfile="/etc/httpd/conf/httpd.conf" statusurl="http://127.0.0.1/server-status" --group web
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: colcation
+          shell: pcs constraint order start clusterfs-clone then web;  pcs constraint location web prefers nodea.example.com
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: locationaction 1
+          local_action:
+            module: get_url
+            url: "{{courseurl}}/{{coursecode}}/breakfix1/typereset.sh"
+            dest: /usr/local/bin/
+            mode: '0755'
+          become: yes
+
+        - name: localaction 2
+          local_action:
+            module: shell
+            cmd: /usr/local/bin/typereset.sh
+          become: false 
+
+        - name: localaction 3
+          local_action:
+            module: shell
+            cmd: sleep 30
+          become: false
+
+
+        - name: colcation
+          shell: pcs resource cleanup
+          when: inventory_hostname == "nodea.example.com"
+
+        - name: copying binary
+          get_url:
+            url: "{{courseurl}}/{{coursecode}}/breakfix1/break-node.sh"
+            dest: /usr/local/bin/
+            mode: '0755'
+
+        - name: c-opying binary
+          get_url:
+            url: "{{courseurl}}/{{coursecode}}/breakfix1/break-log.sh"
+            dest: /usr/local/bin/
+            mode: '0755' 

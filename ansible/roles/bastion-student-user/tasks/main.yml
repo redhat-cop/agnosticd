@@ -1,0 +1,125 @@
+---
+######################### Setting up a bastion host to use student/password to access
+
+# Enable SSH Login with UserID/Password
+# needs a parameter:
+# - student_password: <password to be set for user student>
+# Add User student with password {{ student_password }}! and home directory /home/student
+# Allow sudo for user student
+
+- name: Generate student_password if not defined
+  when: student_password is not defined
+  ansible.builtin.set_fact:
+    student_password: "{{ lookup('password', '/dev/null length=12 chars=ascii_letters,digits') }}"
+
+- name: Create user
+  ansible.builtin.user:
+    name: "{{ student_name }}"
+    password: "{{ student_password | password_hash('sha512') }}"
+    comment: Red Hat Demo Platform Student
+    group: users
+    groups: "{{ 'wheel' if student_sudo | bool else '' }}"
+    shell: /bin/bash
+    state: present
+
+- name: Add student public key
+  when: student_key is defined
+  ansible.posix.authorized_key:
+    user: "{{ student_name }}"
+    key: "{{ student_key }}"
+
+- name: Add env authorized public key to student user
+  when:
+  - set_env_authorized_key | default(false) | bool
+  - student_name is defined
+  ansible.posix.authorized_key:
+    user: "{{ student_name }}"
+    state: present
+    key: "{{ hostvars.localhost.ssh_provision_pubkey_content
+      | default(hostvars.localhost.env_authorized_key_content_pub) }}"
+
+- name: Enable password authentication
+  ansible.builtin.lineinfile:
+    line: PasswordAuthentication yes
+    regexp: '^ *PasswordAuthentication'
+    path: /etc/ssh/sshd_config
+
+- name: Remove PasswordAuthentication line from 50-cloud-init.conf
+  when: bastion_remove_cloud_init_conf | default(true) | bool
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config.d/50-cloud-init.conf
+    regexp: PasswordAuthentication
+    state: absent
+
+- name: Disable root password authentication
+  ansible.builtin.lineinfile:
+    line: PermitRootLogin without-password
+    regexp: '^ *PermitRootLogin'
+    path: /etc/ssh/sshd_config
+
+- name: Allow passwordless sudo
+  ansible.builtin.lineinfile:
+    path: '/etc/sudoers'
+    state: present
+    line: "{{ student_name }}         ALL=(ALL)       NOPASSWD: ALL"
+    insertafter: "'^{{ remote_user | default(ansible_user) }}"
+  when: student_sudo | bool
+
+- name: Restart sshd
+  ansible.builtin.service:
+    name: sshd
+    state: restarted
+
+- name: Print and set access user info
+  vars:
+    bastion_public_hostname: >-
+      {{ hostvars[groups.bastions.0].public_dns_name
+      | default(hostvars[groups.bastions.0].public_ip_address)
+      }}
+  block:
+  - name: Print access info (non CNV)
+    when:
+    - bastion_student_show_user_info | bool
+    - not cloud_provider == "openshift_cnv"
+    agnosticd_user_info:
+      msg: |
+        You can access your bastion via SSH:
+        ssh {{ student_name }}@{{ bastion_public_hostname }}
+
+        Make sure you use the username '{{ student_name }}' and the password '{{ student_password }}' when prompted.
+
+  - name: Print access info (CNV)
+    when:
+    - bastion_student_show_user_info | bool
+    - cloud_provider == "openshift_cnv"
+    agnosticd_user_info:
+      msg: |
+        You can access your bastion via SSH:
+        ssh {{ student_name }}@{{ bastion_public_hostname }} -p {{ hostvars[groups['bastions'][0]].bastion_ssh_port }}
+
+        Make sure you use the username '{{ student_name }}' and the password '{{ student_password }}' when prompted.
+
+  - name: Set access data
+    when: bastion_student_set_user_data | bool
+    agnosticd_user_info:
+      data:
+        bastion_public_hostname: "{{ bastion_public_hostname }}"
+        bastion_ssh_password: "{{ student_password }}"
+        bastion_ssh_user_name: "{{ student_name }}"
+
+  - name: Set bastion port for CNV
+    when: cloud_provider == "openshift_cnv"
+    agnosticd_user_info:
+      data:
+        bastion_ssh_port: "{{ hostvars[groups['bastions'][0]].bastion_ssh_port }}"
+
+- name: Prepare student user for using Ansible within the environment
+  when:
+  - student_name is defined
+  - bastion_student_user_ansible | bool
+  ansible.builtin.include_role:
+    name: bastion
+    tasks_from: prepuser
+  vars:
+    bastion_prepared_user: "{{ student_name }}"
+    bastion_prepared_group: "users"

@@ -1,0 +1,100 @@
+---
+- name: Step 0000 Install Galaxy roles and collections
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    # User can override this variable to specify a different requirements.yml, like:
+    # -e requirements_path=.../requirements_prod.yml
+    ## PS: ROLE_IMPROVE_TASK
+    ## Needs to be validated
+    ## var is called from main.yml
+    requirements_path: "configs/{{ env_type }}/requirements.yml"
+    requirements_content: {}
+    __from_ee: >-
+      {{ lookup('env', 'LAUNCHED_BY_RUNNER') == '1'
+      or
+      lookup('env', 'HOME') == '/home/runner'
+      }}
+  tasks:
+    - name: requirements_content is provided
+      when: requirements_content | length > 0
+      block:
+        - name: Use requirements_content
+          set_fact:
+            requirements_path_final: "{{ output_dir }}/custom_requirements.yml"
+
+        - name: Copy requirements content to output_dir
+          copy:
+            dest: "{{ requirements_path_final }}"
+            content: "{{ requirements_content | to_yaml }}"
+
+    - when: requirements_content | length == 0
+      name: Use requirements_path from the config
+      set_fact:
+        requirements_path_final: "{{ requirements_path }}"
+
+    - name: Check if requirements.yml exists
+      stat:
+        path: "{{ requirements_path_final }}"
+      register: r_requirements_stat
+
+    - set_fact:
+        r_requirements_content: "{{ lookup('file', requirements_path_final) | from_yaml }}"
+      when: r_requirements_stat.stat.exists
+
+    - name: Install roles from requirements.yml
+      command: >-
+        ansible-galaxy install
+        -r "{{ requirements_path_final }}"
+        -p "{%- if requirements_content | length > 0 -%}
+        {{ playbook_dir }}/dynamic-roles
+        {%- else -%}
+        {{ ANSIBLE_REPO_PATH
+        | default(playbook_dir)
+        | default('.') }}/configs/{{ env_type }}/roles
+        {%- endif -%}"
+      when: >-
+        r_requirements_stat.stat.exists
+        and r_requirements_content|default([]) | length > 0
+        and (r_requirements_content is sequence
+             or (r_requirements_content is mapping
+                 and 'roles' in r_requirements_content)
+            )
+      register: r_ansible_galaxy_install_roles
+      until: r_ansible_galaxy_install_roles is successful
+      retries: 10
+      delay: 30
+
+    - name: Install collections from requirements.yml (Not EE)
+      vars:
+        __collections_path: "{{ lookup('config', 'COLLECTIONS_PATHS')[0] }}"
+      command: >-
+        ansible-galaxy collection install
+        -r "{{ requirements_path_final }}"
+        -p "{{ __collections_path | quote }}"
+        --force-with-deps
+      when: >-
+        not __from_ee | bool
+        and r_requirements_stat.stat.exists
+        and r_requirements_content|default([]) | length > 0
+        and r_requirements_content is mapping
+        and "collections" in r_requirements_content
+        and __collections_path.startswith('/tmp/')
+      register: r_ansible_galaxy_install_collections
+      until: r_ansible_galaxy_install_collections is successful
+      retries: 10
+      delay: 30
+
+    - name: Get installed collections (EE)
+      when: >-
+        __from_ee | bool
+        and r_requirements_content|default([]) | length > 0
+        and r_requirements_content is mapping
+        and "collections" in r_requirements_content
+      include_tasks: install_collections_ee.yml
+
+    - name: Install dynamic sources
+      include_role:
+        name: agnosticd_dynamic

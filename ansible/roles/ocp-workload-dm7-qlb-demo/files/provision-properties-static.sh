@@ -1,0 +1,12 @@
+PRJ_NAME="dm7-qlb"
+PRJ_DESCRIPTION="Red Hat Decision Manager 7 Quick Loan Bank Demo"
+
+DECISION_CENTRAL_REST_URL="$DC_URL/rest"
+SPACE="MySpace"
+DEFAULT_GROUPID="com.myspace"
+#PROJECT_GIT="https://github.com/DuncanDoyle/IT_Orders.git"
+PROJECT_GIT="https://github.com/jbossdemocentral/rhdm7-qlb-loan-demo-repo"
+PROJECT_ID="loan-application"
+PROJECT_NAME="loan-application"
+USERNAME="dmAdmin"
+PASSWORD="redhatdm1!"

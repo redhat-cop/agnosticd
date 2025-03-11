@@ -1,0 +1,228 @@
+---
+- name: Load GCP credentials into string
+  set_fact:
+    gcp_creds: "{{ gcp_credentials | from_json }}"
+
+- name: Check if email is Red Hat associate
+  set_fact:
+    internal_user: True
+  when:
+    - '"@redhat.com" in requester_email'
+    - agnosticd_open_environment | default(false) | bool
+
+- name: Check if email is not a Red Hat associate
+  set_fact:
+    internal_user: False
+  when:
+    - '"@redhat.com" not in requester_email'
+
+- name: Call GCP get token role
+  include_role:
+    name: gcp-get-token
+
+# Folders not supported
+#- name: Create GCP Project
+#  google.cloud.gcp_resourcemanager_project:
+#    auth_kind: serviceaccount
+#    service_account_contents: "{{ gcp_credentials }}"
+#    name: "{{ project_name }}"
+#    id: "{{ project_name }}"
+#    parent:
+#      type: organization
+#      id: "{{ gcp_organization }}"
+#    state: present
+
+- name: Create GCP Project
+  uri:
+    url: "https://cloudresourcemanager.googleapis.com/v1/projects"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ auth_response.json.access_token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body:
+      name: "{{ project_name }}"
+      projectId: "{{ project_name }}"
+      parent:
+        id: "{{ gcp_open_env_folder_id }}"
+        type: "folder"
+    body_format: json
+
+- name: Get all service accounts
+  google.cloud.gcp_iam_service_account_info:
+    auth_kind: serviceaccount
+    service_account_contents: "{{ gcp_credentials }}"
+    project: "{{ gcp_creds.project_id }}"
+  register: service_accounts
+
+- name: Define service account email
+  set_fact:
+    service_account_email: "sa-openenv-{{ guid }}@{{ gcp_creds.project_id }}.iam.gserviceaccount.com"
+
+- name: Delete any old OPEN Environment service accounts that might be orphaned
+  google.cloud.gcp_iam_service_account:
+    auth_kind: serviceaccount
+    service_account_contents: "{{ gcp_credentials }}"
+    name: "{{ service_account_email }}"
+    display_name: "OPEN Environment Service account {{ guid }}"
+    project: "{{ gcp_creds.project_id }}"
+    state: absent
+  when: service_account_email in ( service_accounts.resources | map(attribute='email') | list )
+
+- name: Create a service account for OPEN Environment
+  google.cloud.gcp_iam_service_account:
+    auth_kind: serviceaccount
+    service_account_contents: "{{ gcp_credentials }}"
+    name: "{{ service_account_email }}"
+    display_name: "OPEN Environment Service account {{ guid }}"
+    project: "{{ gcp_creds.project_id }}"
+    state: present
+  register: new_service_account
+
+- name: Wait 10 seconds for service account to exist
+  wait_for:
+    timeout: 10
+
+- name: Define service account creds file
+  set_fact:
+    svc_account_creds_file: "{{ output_dir }}/svc-acct-creds.json"
+
+- name: Remove creds file if exists
+  ansible.builtin.file:
+    path: "{{ svc_account_creds_file }}"
+    state: absent
+
+- name: Create a service account key for OPEN Environment
+  google.cloud.gcp_iam_service_account_key:
+    auth_kind: serviceaccount
+    service_account_contents: "{{ gcp_credentials }}"
+    service_account: "{{ new_service_account }}"
+    private_key_type: TYPE_GOOGLE_CREDENTIALS_FILE
+    path: "{{ svc_account_creds_file }}"
+    #project: "{{ project_name }}"
+    project: "{{ gcp_creds.project_id }}"
+    state: present
+  register: new_key
+
+- name: Get openenv project policy
+  uri:
+    url: "https://cloudresourcemanager.googleapis.com/v1/projects/{{ project_name }}:getIamPolicy"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ auth_response.json.access_token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body:
+  register: project_policy
+
+- name: Get openenv current members
+  set_fact:
+    current_members: "{{ project_policy.json.bindings[0].members }}"
+
+- name: Create service account string
+  set_fact:
+    service_account_to_add: "serviceAccount:{{ service_account_email }}"
+
+- name: Create user account string
+  when:
+    - internal_user | default(false) | bool
+  set_fact:
+    user_to_add: "user:{{ requester_email }}"
+
+- name: Service account, and admin group to members
+  set_fact:
+    new_members: "{{ current_members | union([ service_account_to_add, gcp_admin_group ]) }}"
+
+- name: Add user, service account, and admin group to members
+  when:
+    - internal_user | default(false) | bool
+    - user_to_add is defined
+  set_fact:
+    new_members: "{{ new_members | union([ user_to_add ]) }}"
+
+- name: Create new openenv policy
+  set_fact:
+    new_policy:
+      bindings: [ { members: "{{ new_members }}", role: "roles/owner" } ]
+      etag: "{{ project_policy.json.etag }}"
+      version: 1
+
+- name: Set new openenv project policy
+  uri:
+    url: "https://cloudresourcemanager.googleapis.com/v1/projects/{{ project_name }}:setIamPolicy"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ auth_response.json.access_token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body:
+      policy: "{{ new_policy }}"
+    body_format: json
+  register: updated_project_policy
+
+- name: Update billing info for project
+  ansible.builtin.uri:
+    url: "https://cloudbilling.googleapis.com/v1/projects/{{ project_name }}/billingInfo"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ auth_response.json.access_token }}"
+      Accept: "application/json"
+      Content-Type: "application/json"
+    body:
+      billingAccountName: "billingAccounts/{{ gcp_billing_account_id }}"
+    body_format: json
+
+- name: "Enable Google Cloud API services"
+  google.cloud.gcp_serviceusage_service:
+    auth_kind: serviceaccount
+    service_account_contents: "{{ gcp_credentials }}"
+    name: "{{ item }}.googleapis.com"
+    project: "{{ project_name }}"
+    state: present
+  loop:
+    - cloudresourcemanager
+    - compute
+    - deploymentmanager
+    - dns
+    - iam
+    - iamcredentials
+    - oslogin
+    - secretmanager
+    - servicemanagement
+    - serviceusage
+    - storage
+
+- name: Create managed DNS zone for OPEN Environment
+  google.cloud.gcp_dns_managed_zone:
+    auth_kind: serviceaccount
+    service_account_contents: "{{ gcp_credentials }}"
+    project: "{{ project_name }}"
+    name: '{{ "dns-zone-" + guid }}'
+    dns_name: '{{ guid + "." + gcp_root_dns_zone + "."}}'
+    description: "OPEN Env {{ guid }} DNS Zone"
+    state: present
+  register: new_zone
+
+- name: Fetch Root DNS zone Info
+  google.cloud.gcp_dns_managed_zone_info:
+    auth_kind: serviceaccount
+    service_account_contents: "{{ gcp_credentials }}"
+    project: "{{ gcp_creds.project_id }}"
+    dns_name: '{{ gcp_root_dns_zone + "."}}'
+  register: gcp_managed_zone
+
+- name: Add delegation for NS to the Root DNS Zone
+  google.cloud.gcp_dns_resource_record_set:
+    auth_kind: serviceaccount
+    service_account_contents: "{{ gcp_credentials }}"
+    project: "{{ gcp_creds.project_id }}"
+    managed_zone: "{{ gcp_managed_zone.resources[0] }}"
+    name: '{{ guid + "." + gcp_root_dns_zone + "."}}'
+    type: NS
+    ttl: 600
+    target:
+      - "{{ new_zone.nameServers[0] }}"
+      - "{{ new_zone.nameServers[1] }}"
+      - "{{ new_zone.nameServers[2] }}"
+      - "{{ new_zone.nameServers[3] }}"
+    state: present

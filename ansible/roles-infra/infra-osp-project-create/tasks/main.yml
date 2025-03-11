@@ -1,0 +1,177 @@
+---
+- name: Generate user password
+  set_fact:
+    heat_user_password_generated: "{{lookup('password', '/dev/null length=12 chars=ascii_letters,digits')}}"
+
+# The `heat_user_password` var will be deprecated and removed in favor of
+# osp_auth_password_member. Any config or role that references it will need to be updated.
+- name: Set heat_user_password
+  set_fact:
+    heat_user_password: "{{ heat_user_password_provided | default(heat_user_password_generated) }}"
+
+- name: Set fact for new user password
+  set_fact:
+    osp_auth_password_member: "{{ heat_user_password_provided | default(heat_user_password_generated) }}"
+
+- name: Set fact for new user
+  set_fact:
+    osp_auth_username_member: "{{ guid }}-user"
+
+- when: >-
+    not osp_project_create | bool
+    or osp_project_id is defined
+  environment:
+    OS_AUTH_URL: "{{ osp_auth_url }}"
+    OS_USERNAME: "{{ osp_auth_username_member }}"
+    OS_PASSWORD: "{{ osp_auth_password_member }}"
+    OS_PROJECT_NAME: "{{ osp_project_name }}"
+    OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+    OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+  block:
+  - when: osp_find_public_subnet | bool
+    block:
+    - name: Get public subnet to use
+      shell: |
+        openstack ip availability show {{ provider_network }} -f json \
+        | jq -r '.subnet_ip_availability | min_by(.used_ips) | .subnet_id'
+      register: r_floating_subnet
+      changed_when: false
+    - name: Set fact for public subnet
+      set_fact:
+        osp_public_subnet: "{{ r_floating_subnet.stdout }}"
+
+- when: >-
+    osp_project_create | bool
+    or osp_project_id is not defined
+    or osp_create_sandbox | bool
+  environment:
+    OS_AUTH_URL: "{{ osp_auth_url }}"
+    OS_USERNAME: "{{ osp_auth_username }}"
+    OS_PASSWORD: "{{ osp_auth_password }}"
+    OS_PROJECT_NAME: "admin"
+    OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+    OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+  block:
+  - when: osp_find_public_subnet | bool
+    block:
+    - name: Get public subnet to use
+      shell: |
+        openstack ip availability show {{ provider_network }} -f json \
+        | jq -r '.subnet_ip_availability | min_by(.used_ips) | .subnet_id'
+      register: r_floating_subnet
+      changed_when: false
+    - name: Set fact for public subnet
+      set_fact:
+        osp_public_subnet: "{{ r_floating_subnet.stdout }}"
+  - name: Create project and quota
+    when: osp_project_create
+    block:
+    - name: Create project for user
+      openstack.cloud.project:
+        name: "{{ osp_project_name }}"
+        state: present
+        description: "{{ env_type }} {{ guid }}"
+        enabled: true
+        domain_id: "Default"
+        endpoint_type: public
+      register: r_osp_project
+
+    - name: Set OpenStack project information in provision data
+      agnosticd_user_info:
+        data:
+          openstack_auth_url: "{{ osp_auth_url }}"
+          openstack_project_id: "{{ r_osp_project.project.id }}"
+          openstack_project_name: "{{ r_osp_project.project.name }}"
+
+    - name: Set OpenStack project information in provision data
+      when: osp_report_project_credentials | bool
+      agnosticd_user_info:
+        data:
+          openstack_username: "{{ osp_auth_username_member }}"
+          openstack_password: "{{ osp_auth_password_member }}"
+
+    - name: Set guid and uuid tags on project
+      command: >-
+        openstack project set
+        --tag {{ ('guid=' ~ guid) | quote }}
+        {% if uuid is defined %}
+        --tag {{ ('uuid=' ~ uuid) | quote }}
+        {% endif %}
+        {{ osp_project_name | quote }}
+
+    - name: Grant access to admin account on new project
+      openstack.cloud.role_assignment:
+        state: present
+        user: "{{ admin_user }}"
+        role: "admin"
+        project: "{{ osp_project_name }}"
+
+    - name: Set quotas on new project
+      openstack.cloud.quota:
+        name: "{{ osp_project_name }}"
+        instances: "{{ quota_num_instances }}"
+        cores: "{{ quota_num_cores }}"
+        ram: "{{ quota_memory }}" #in MB
+        volumes: "{{ quota_num_volumes }}"
+        gigabytes: "{{ quota_volumes_gigs }}" #volume storage
+        #loadbalancer: #when Octavia is available
+        #pool: #when Octavia is available
+        network: "{{ quota_networks }}"
+        subnet: "{{ quota_subnets }}"
+        router: "{{ quota_routers }}"
+        floatingip: "{{ quota_fip }}"
+        security_group: "{{ quota_sg }}"
+        security_group_rule: "{{ quota_sg_rules }}"
+
+    - name: Create user in new project
+      openstack.cloud.identity_user:
+        state: present
+        name: "{{ osp_auth_username_member }}"
+        password: "{{ heat_user_password }}"
+        domain: default
+        default_project: "{{ osp_project_name }}"
+
+    - name: Add member role to user
+      openstack.cloud.role_assignment:
+        user: "{{ osp_auth_username_member }}"
+        role: _member_
+        project: "{{ osp_project_name }}"
+
+    - name: Add Swift role to user
+      openstack.cloud.role_assignment:
+        user: "{{ osp_auth_username_member }}"
+        role: swiftoperator
+        project: "{{ osp_project_name }}"
+      when: osp_use_swift | default(false) | bool
+
+  - name: Get project info if project already exists
+    when: osp_project_id is not defined
+    block:
+    - name: Get project info
+      openstack.cloud.project_info:
+        name: "{{ osp_project_name }}"
+      register: r_osp_project
+
+    - set_fact:
+        osp_project_info: "{{ r_osp_project.projects }}"
+
+    - when: osp_project_info | length == 0
+      fail:
+        msg: No project '{{ osp_project_info }}' found
+
+  # - name: Add user if sandbox
+  #   when: osp_create_sandbox
+  #   block:
+  #   - name: Create sandbox user in project
+  #     openstack.cloud.identity_user:
+  #       state: present
+  #       name: sandbox-{{ guid }}-user
+  #       password: "{{ heat_user_password }}"
+  #       domain: default
+  #       default_project: "{{ osp_project_name }}"
+
+  #   - name: Add member role to user
+  #     openstack.cloud.role_assignment:
+  #       user: sandbox-{{ guid }}-user
+  #       role: _member_
+  #       project: "{{ osp_project_name }}"

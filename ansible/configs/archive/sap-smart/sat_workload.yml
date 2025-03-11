@@ -1,0 +1,150 @@
+- name: 'Install required packages'
+  yum:
+    name: satellite
+    state: installed
+
+- name: Add Satellite to /etc/hosts
+  lineinfile:
+    path: /etc/hosts
+    line: "{{ ansible_default_ipv4.address }} sat-{{ guid }}.{{ internal_domain |d('example.com') }}"
+    create: yes
+
+- name: "Install Satellite with default parameters"
+  command: > 
+    satellite-installer
+      --scenario satellite
+      --foreman-initial-organization "{{ satellite_organization }}"
+      --foreman-initial-location "{{ satellite_location }}"
+      --foreman-initial-admin-username "{{ satellite_username }}"
+      --foreman-initial-admin-password "{{ satellite_password }}"
+      --certs-cname "sat-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}"
+      --foreman-proxy-dns-managed=false
+      --foreman-proxy-dhcp-managed=false
+      --foreman-proxy-puppetca true \
+      --foreman-proxy-tftp true \
+      --enable-foreman-plugin-discovery
+
+- name: Get satellite-manifest.zip
+  when: sap_smart_satellite_manifest_path is undefined
+  block:
+  - name: Tempfile for satellite-manifest.zip
+    tempfile:
+      state: file
+      suffix: .zip
+    register: r_satellite_manifest_tmp
+    delegate_to: localhost
+    run_once: true
+    become: false
+
+  # Get then copy to allow vault to decrypt
+  - name: Get satellite-manifest.zip
+    get_url:
+      url: "{{ satellite_manifest.url }}"
+      dest: "{{ r_satellite_manifest_tmp.path }}"
+      force: true
+      mode: u=rw,go=
+      username: "{{ satellite_manifest.username | d(omit) }}"
+      password: "{{ satellite_manifest.password | d(omit) }}"
+    delegate_to: localhost
+    run_once: true
+    become: false
+
+- name: "Copy subscription manifest .zip file"
+  copy:
+    src: "{{ sap_smart_satellite_manifest_path | default(r_satellite_manifest_tmp.path) }}"
+    dest: /root/manifest.zip
+
+- name: Remove tempfile for satellite-manifest.zip
+  when: sap_smart_satellite_manifest_path is undefined
+  file:
+    state: absent
+    path: "{{ r_satellite_manifest_tmp.path }}"
+  delegate_to: localhost
+  run_once: true
+  become: false
+
+- name: Restart all Satellite services
+  command: satellite-maintain service restart
+
+- name: "Add manifest to Satellite"
+  command: >
+    hammer subscription upload
+    --file /root/manifest.zip
+    --organization "{{ satellite_organization }}"
+
+#- name: Ensure manifest is refreshed
+#  command: > 
+#    hammer
+#      -u "{{ satellite_username }}"
+#      -p "{{ satellite_password }}"
+#      subscription refresh-manifest
+#      --organization "{{ satellite_organization }}"
+
+- name: "Enable repositories for specific minor release"
+  command: > 
+    hammer
+      -u "{{ satellite_username }}"
+      -p "{{ satellite_password }}"
+      repository-set enable 
+      --organization "{{ satellite_organization }}"
+      --product "{{ item.product }}"
+      --name "{{ item.name }}"
+      --releasever "{{ item.release_version }}"
+      --basearch "{{ item.base_arch }}"
+  loop: "{{ satellite_repositories_minor }}"
+
+- name: "Enable repositories for major releases"
+  command: > 
+    hammer
+      -u "{{ satellite_username }}"
+      -p "{{ satellite_password }}"
+      repository-set enable 
+      --organization "{{ satellite_organization }}"
+      --product "{{ item.product }}"
+      --name "{{ item.name }}"
+      --basearch "{{ item.base_arch }}"
+  loop: "{{ satellite_repositories_major }}"
+
+- name: "Get Red Hat repo ids"
+  shell: hammer -u "{{ satellite_username }}" -p "{{ satellite_password }}" repository list --organization "{{ satellite_organization }}" | grep "Red Hat" | awk '{print $1}'
+  register: repoids
+
+- name: "Synchronize Red Hat repos"
+  command: >
+    hammer
+      -u "{{ satellite_username }}"
+      -p "{{ satellite_password }}"
+      repository synchronize
+      --id "{{ item }}"
+      --organization "{{ satellite_organization }}"
+  async: 1000
+  poll: 0
+  with_items:
+    - "{{ repoids.stdout.split('\n') }}"
+
+- name: Prevent Satellite to connect to access.redhat.com
+  lineinfile:
+    path: /etc/hosts
+    line: 127.0.0.1 access.redhat.com
+    create: yes
+
+- name: "Create activation key"
+  command: > 
+    hammer
+      -u "{{ satellite_username }}"
+      -p "{{ satellite_password }}"
+      activation-key create
+      --name "{{ satellite_activation_key }}"
+      --lifecycle-environment Library
+      --organization "{{ satellite_organization }}"
+  
+# Using Simple Content access mode, no need to add subscriptions to activation keys anymore  
+#- name: "Add subs to activation key"
+#  command: >
+#     hammer
+#       -u "{{ satellite_username }}"
+#       -p "{{ satellite_password }}"
+#       activation-key add-subscription
+#       --name "{{ satellite_activation_key }}"
+#       --subscription-id "1"
+#       --organization "{{ satellite_organization }}"

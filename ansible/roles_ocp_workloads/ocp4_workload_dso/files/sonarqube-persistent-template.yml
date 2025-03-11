@@ -1,0 +1,423 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: "sonarqube-persistent"
+objects:
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    annotations:
+      template.openshift.io/expose-database_name: '{.data[''database-name'']}'
+      template.openshift.io/expose-password: '{.data[''database-password'']}'
+      template.openshift.io/expose-username: '{.data[''database-user'']}'
+    name: '${APPLICATION_NAME}-postgresql'
+  stringData:
+    database-name: '${POSTGRES_DATABASE_NAME}'
+    database-password: '${POSTGRES_PASSWORD}'
+    database-user: '${POSTGRES_USERNAME}'
+- apiVersion: v1
+  kind: Service
+  metadata:
+    annotations:
+      template.openshift.io/expose-uri: >-
+        postgres://{.spec.clusterIP}:{.spec.ports[?(.name=="postgresql")].port}
+    name: '${APPLICATION_NAME}-postgresql'
+  spec:
+    ports:
+    - name: postgresql
+      nodePort: 0
+      port: 5432
+      protocol: TCP
+      targetPort: 5432
+    selector:
+      name: '${APPLICATION_NAME}-postgresql'
+    sessionAffinity: None
+    type: ClusterIP
+  status:
+    loadBalancer: {}
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: '${APPLICATION_NAME}-postgresql'
+  spec:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: '${POSTGRES_PERSISTENT_VOLUME_CLAIM_SIZE}'
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    annotations:
+      template.alpha.openshift.io/wait-for-ready: 'true'
+    name: '${APPLICATION_NAME}-postgresql'
+    labels:
+      app: ${APPLICATION_NAME}
+      app.kubernetes.io/component: database
+      app.kubernetes.io/instance: ${APPLICATION_NAME}
+      app.kubernetes.io/name: ${APPLICATION_NAME}-postgresql
+      app.kubernetes.io/part-of: ${APPLICATION_NAME}
+  spec:
+    replicas: 1
+    selector:
+      name: '${APPLICATION_NAME}-postgresql'
+    strategy:
+      type: Recreate
+    template:
+      metadata:
+        labels:
+          name: '${APPLICATION_NAME}-postgresql'
+      spec:
+        containers:
+        - resources:
+            limits:
+              memory: '256Mi'
+          readinessProbe:
+            exec:
+              command:
+              - /usr/libexec/check-container
+            initialDelaySeconds: 5
+            timeoutSeconds: 1
+          terminationMessagePath: /dev/termination-log
+          name: postgresql
+          livenessProbe:
+            exec:
+              command:
+              - /usr/libexec/check-container
+              - '--live'
+            initialDelaySeconds: 120
+            timeoutSeconds: 10
+          env:
+          - name: POSTGRESQL_USER
+            valueFrom:
+              secretKeyRef:
+                key: database-user
+                name: '${APPLICATION_NAME}-postgresql'
+          - name: POSTGRESQL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: database-password
+                name: '${APPLICATION_NAME}-postgresql'
+          - name: POSTGRESQL_DATABASE
+            valueFrom:
+              secretKeyRef:
+                key: database-name
+                name: '${APPLICATION_NAME}-postgresql'
+          securityContext:
+            capabilities: {}
+            privileged: false
+          ports:
+          - containerPort: 5432
+            protocol: TCP
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+          - mountPath: /var/lib/pgsql/data
+            name: '${APPLICATION_NAME}-postgresql-data'
+          capabilities: {}
+          image: ' '
+        dnsPolicy: ClusterFirst
+        restartPolicy: Always
+        volumes:
+        - name: '${APPLICATION_NAME}-postgresql-data'
+          persistentVolumeClaim:
+            claimName: '${APPLICATION_NAME}-postgresql'
+    triggers:
+    - imageChangeParams:
+        automatic: true
+        containerNames:
+        - postgresql
+        from:
+          kind: ImageStreamTag
+          name: 'postgresql:latest'
+          namespace: 'openshift'
+        lastTriggeredImage: ''
+      type: ImageChange
+    - type: ConfigChange
+- apiVersion: v1
+  stringData:
+    password: ${SONAR_LDAP_BIND_PASSWORD}
+    username: ${SONAR_LDAP_BIND_DN}
+  kind: Secret
+  metadata:
+    name: ${APPLICATION_NAME}-ldap-bind-dn
+  type: kubernetes.io/basic-auth
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: ${APPLICATION_NAME}-data
+  spec:
+    accessModes:
+    - ReadWriteOnce
+    resources:
+      requests:
+        storage: ${SONARQUBE_PERSISTENT_VOLUME_SIZE}
+  status: {}
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    labels:
+      app: ${APPLICATION_NAME}
+      app.kubernetes.io/component: app
+      app.kubernetes.io/instance: ${APPLICATION_NAME}
+      app.kubernetes.io/name: ${APPLICATION_NAME}
+      app.kubernetes.io/part-of: ${APPLICATION_NAME}
+    name: ${APPLICATION_NAME}
+  spec:
+    replicas: 1
+    selector:
+      matchLabels:
+        app: ${APPLICATION_NAME}
+    template:
+      metadata:
+        labels:
+          app: ${APPLICATION_NAME}
+          deploymentconfig: ${APPLICATION_NAME}
+      spec:
+        containers:
+        - name: sonarqube
+          image: ${SONAR_IMAGE}
+          ports:
+          - containerPort: 9000
+            protocol: TCP
+          env:
+          - name: JDBC_URL
+            value: jdbc:postgresql://${APPLICATION_NAME}-postgresql:5432/sonar
+          - name: JDBC_USERNAME
+            valueFrom:
+              secretKeyRef:
+                key: database-user
+                name: ${APPLICATION_NAME}-postgresql
+          - name: JDBC_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                key: database-password
+                name: ${APPLICATION_NAME}-postgresql
+          - name: FORCE_AUTHENTICATION
+            value: ${FORCE_AUTHENTICATION}
+          - name: PROXY_HOST
+            value: ${PROXY_HOST}
+          - name: PROXY_PORT
+            value: ${PROXY_PORT}
+          - name: PROXY_USER
+            value: ${PROXY_USER}
+          - name: PROXY_PASSWORD
+            value: ${PROXY_PASSWORD}
+          - name: LDAP_URL
+            value: ${SONAR_LDAP_URL}
+          - name: LDAP_REALM
+            value: ${SONAR_AUTH_REALM}
+          - name: LDAP_AUTHENTICATION
+            value: ${SONAR_LDAP_BIND_METHOD}
+          - name: LDAP_USER_BASEDN
+            value: ${SONAR_BASE_DN}
+          - name: LDAP_USER_REAL_NAME_ATTR
+            value: ${SONAR_LDAP_USER_REAL_NAME_ATTR}
+          - name: LDAP_USER_EMAIL_ATTR
+            value: ${SONAR_LDAP_USER_EMAIL_ATTR}
+          - name: LDAP_USER_REQUEST
+            value: ${SONAR_LDAP_USER_REQUEST}
+          - name: LDAP_GROUP_BASEDN
+            value: ${SONAR_LDAP_GROUP_BASEDN}
+          - name: LDAP_GROUP_REQUEST
+            value: ${SONAR_LDAP_GROUP_REQUEST}
+          - name: LDAP_GROUP_ID_ATTR
+            value: ${SONAR_LDAP_GROUP_ID_ATTR}
+          - name: LDAP_CONTEXTFACTORY
+            value: ${SONAR_LDAP_CONTEXTFACTORY}
+          - name: SONAR_AUTOCREATE_USERS
+            value: ${SONAR_AUTOCREATE_USERS}
+          - name: LDAP_BINDDN
+            valueFrom:
+              secretKeyRef:
+                key: username
+                name: ${APPLICATION_NAME}-ldap-bind-dn
+          - name: LDAP_BINDPASSWD
+            valueFrom:
+              secretKeyRef:
+                key: password
+                name: ${APPLICATION_NAME}-ldap-bind-dn
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /
+              port: 9000
+              scheme: HTTP
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /
+              port: 9000
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              cpu: ${SONARQUBE_CPU_LIMIT}
+              memory: ${SONARQUBE_MEMORY_LIMIT}
+          volumeMounts:
+          - name: sonarqube
+            mountPath: /opt/sonarqube/data
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: Always
+        volumes:
+        - name: sonarqube
+          persistentVolumeClaim:
+            claimName: ${APPLICATION_NAME}-data
+        restartPolicy: Always
+        terminationGracePeriodSeconds: 30
+        dnsPolicy: ClusterFirst
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 25%
+        maxSurge: 25%
+- apiVersion: v1
+  kind: Route
+  metadata:
+    labels:
+      app: ${APPLICATION_NAME}
+    name: ${APPLICATION_NAME}
+  spec:
+    port:
+      targetPort: 9000-tcp
+    tls:
+      termination: edge
+    to:
+      kind: Service
+      name: ${APPLICATION_NAME}
+      weight: 100
+    wildcardPolicy: None
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      app: ${APPLICATION_NAME}
+    name: ${APPLICATION_NAME}
+  spec:
+    ports:
+    - name: 9000-tcp
+      port: 9000
+      protocol: TCP
+      targetPort: 9000
+    selector:
+      deploymentconfig: ${APPLICATION_NAME}
+    sessionAffinity: None
+    type: ClusterIP
+parameters:
+- description: The name for the application.
+  name: APPLICATION_NAME
+  required: true
+  value: sonarqube
+- description: Password for the Posgres Database to be used by Sonarqube
+  displayName: Postgres password
+  name: POSTGRES_PASSWORD
+  generate: expression
+  from: '[a-zA-Z0-9]{16}'
+  required: true
+- description: Username for the Posgres Database to be used by Sonarqube
+  displayName: Postgres username
+  name: POSTGRES_USERNAME
+  generate: expression
+  from: 'user[a-z0-9]{8}'
+  required: true
+- description: Database name for the Posgres Database to be used by Sonarqube
+  displayName: Postgres database name
+  name: POSTGRES_DATABASE_NAME
+  value: sonar
+  required: true
+- description: Postgres Persistent volume claim size
+  displayName: Postgres Persistent volume claim size
+  name: POSTGRES_PERSISTENT_VOLUME_CLAIM_SIZE
+  value: 5Gi
+  required: true
+- name: SONARQUBE_MEMORY_LIMIT
+  description: SonarQube memory
+  displayName: SonarQube memory
+  value: 2Gi
+- name: SONARQUBE_CPU_LIMIT
+  description: SonarQube Container CPU limit
+  displayName: SonarQube Container CPU limit
+  value: "2"
+- name: SONARQUBE_PERSISTENT_VOLUME_SIZE
+  description: The persistent storage volume for SonarQube to use for plugins/config/logs/etc...
+  displayName: SonarQube Storage Space Size
+  required: true
+  value: 5Gi
+- name: FORCE_AUTHENTICATION
+  displayName: Force authentication
+  value: "false"
+- name: SONAR_AUTH_REALM
+  value: ''
+  description: The type of authentication that SonarQube should be using (None or LDAP) (Ref - https://docs.sonarqube.org/display/PLUG/LDAP+Plugin)
+  displayName: SonarQube Authentication Realm
+- name: SONAR_AUTOCREATE_USERS
+  value: 'false'
+  description: When using an external authentication system, should SonarQube automatically create accounts for users?
+  displayName: Enable auto-creation of users from external authentication systems?
+  required: true
+- name: PROXY_HOST
+  description: Hostname of proxy server the SonarQube application should use to access the Internet
+  displayName: Proxy server hostname/IP
+- name: PROXY_PORT
+  description: TCP port of proxy server the SonarQube application should use to access the Internet
+  displayName: Proxy server port
+- name: PROXY_USER
+  description: Username credential when the Proxy Server requires authentication
+  displayName: Proxy server username
+- name: PROXY_PASSWORD
+  description: Password credential when the Proxy Server requires authentication
+  displayName: Proxy server password
+- name: SONAR_LDAP_BIND_DN
+  description: When using LDAP authentication, this is the Distinguished Name used for binding to the LDAP server
+  displayName: LDAP Bind DN
+- name: SONAR_LDAP_BIND_PASSWORD
+  description: When using LDAP for authentication, this is the password with which to bind to the LDAP server
+  displayName: LDAP Bind Password
+- name: SONAR_LDAP_URL
+  description: When using LDAP for authentication, this is the URL of the LDAP server in the form of ldap(s)://<hostname>:<port>
+  displayName: LDAP Server URL
+- name: SONAR_LDAP_REALM
+  description: When using LDAP, this allows for specifying a Realm within the directory server (Usually not used)
+  displayName: LDAP Realm
+- name: SONAR_LDAP_AUTHENTICATION
+  description: When using LDAP, this is the bind method (simple, GSSAPI, kerberos, CRAM-MD5, DIGEST-MD5)
+  displayName: LDAP Bind Mode
+- name: SONAR_LDAP_USER_BASEDN
+  description: The Base DN under which SonarQube should search for user accounts in the LDAP directory
+  displayName: LDAP User Base DN
+- name: SONAR_LDAP_USER_REAL_NAME_ATTR
+  description: The LDAP attribute which should be referenced to get a user's full name
+  displayName: LDAP Real Name Attribute
+- name: SONAR_LDAP_USER_EMAIL_ATTR
+  description: The LDAP attribute which should be referenced to get a user's e-mail address
+  displayName: LDAP User E-Mail Attribute
+- name: SONAR_LDAP_USER_REQUEST
+  description: An LDAP filter to be used to search for user objects in the LDAP directory
+  displayName: LDAP User Request Filter
+- name: SONAR_LDAP_GROUP_BASEDN
+  description: The Base DN under which SonarQube should search for groups in the LDAP directory
+  displayName: LDAP Group Base DN
+- name: SONAR_LDAP_GROUP_REQUEST
+  description: An LDAP filter to be used to search for group objects in the LDAP directory
+  displayName: LDAP Group Request Filter
+- name: SONAR_LDAP_GROUP_ID_ATTR
+  description: The LDAP attribute which should be referenced to get a group's ID
+  displayName: LDAP Group Name Attribute
+- name: SONAR_LDAP_CONTEXTFACTORY
+  description: The ContextFactory implementation to be used when communicating with the LDAP server
+  displayName: LDAP Context Factory
+  value: com.sun.jndi.ldap.LdapCtxFactory
+- name: SONAR_IMAGE
+  description: SonarQube container image
+  displayName: SonarQube container image
+  value: docker.io/siamaksade/sonarqube:latest

@@ -1,0 +1,130 @@
+---
+- name: Step 003 pre-software
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+  - ansible.builtin.debug:
+      msg: "Pre-Software tasks Started"
+
+- name: Configure bastion with repositories
+  hosts:
+  - bastions
+  become: true
+  gather_facts: false
+  tags:
+  - step003
+  roles:
+  - role: set-repositories
+    when: repo_method is defined
+  - role: common
+    when: install_common | bool
+
+- name: Some ILT bastion settings - mosh, ports
+  hosts: bastions
+  become: true
+  gather_facts: true
+  tasks:
+  - name: Debug RHEL version
+    ansible.builtin.debug:
+      msg: "RHEL Version: {{ ansible_facts['distribution_major_version']}}"
+
+  - name: Install mosh on RHEL
+    ansible.builtin.dnf:
+      name: "https://infrastructure-binaries.s3.us-east-2.amazonaws.com/mosh-1.4.0-1.el{{ ansible_facts['distribution_major_version'] }}.x86_64.rpm"
+      disable_gpg_check: true
+    ignore_errors: true
+
+  - name: Open UDP Ports 60001 - 61000 for Mosh
+    ansible.posix.firewalld:
+      port: "60001-61000/udp"
+      permanent: true
+      state: enabled
+      immediate: true
+    ignore_errors: true
+
+  - name: Open TCP ports for Showroom (if enabled)
+    when: showroom_deploy | default(false) | bool
+    ansible.posix.firewalld:
+      port: "443/tcp"
+      permanent: true
+      state: enabled
+      immediate: true
+    ignore_errors: true
+
+- name: Install Azure CLI
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+  - name: Install Azure CLI
+    when: (install_aro | default(false) | bool)
+      or (azure_deploy_bastion | default(false) | bool)
+    block:
+    - name: Import Azure CLI GPG key
+      ansible.builtin.rpm_key:
+        state: present
+        key: https://packages.microsoft.com/keys/microsoft.asc
+      retries: 5        
+
+    - name: Add Azure CLI repository
+      ansible.builtin.yum:
+        state: present
+        name: https://packages.microsoft.com/config/rhel/8/packages-microsoft-prod.rpm
+      retries: 5
+
+    - name: Install Azure CLI package
+      ansible.builtin.yum:
+        state: latest
+        name: azure-cli
+
+    - name: Install git and pip
+      ansible.builtin.package:
+        state: latest
+        name:
+        - git
+        - python3-pip
+
+- name: Set GUID in bashrc
+  hosts: bastions
+  gather_facts: false
+  become: true
+  become_user: "{{ remote_user }}"
+  tasks:
+  - name: "Add GUID to /home/{{ remote_user }}.bashrc"
+    ansible.builtin.lineinfile:
+      path: "/home/{{ remote_user }}/.bashrc"
+      regexp: "^export GUID"
+      line: "export GUID={{ guid }}"
+
+- name: Update motd on bastions
+  hosts: bastions
+  gather_facts: false
+  become: true
+  tasks:
+  - name: Remove register for insights motd
+    when: bastion_remove_insights_motd | bool
+    ansible.builtin.file:
+      state: absent
+      path: /etc/motd.d/insights-client
+
+  - name: Add a custom motd to the bastion
+    when: bastion_custom_motd | default("") | length > 0
+    ansible.builtin.copy:
+      dest: /etc/motd.d/agnosticd
+      owner: root
+      group: root
+      mode: "o=rw,g=rw,o=r"
+      content: "{{ bastion_custom_motd }}"
+
+- name: PreSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+  - flight_check
+  tasks:
+  - name: Print pre-software checks message
+    ansible.builtin.debug:
+      msg: "Pre-Software checks completed successfully"

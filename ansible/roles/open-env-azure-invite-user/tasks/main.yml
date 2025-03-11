@@ -1,0 +1,97 @@
+---
+- name: Login with azure root user
+  no_log: true
+  ansible.builtin.command: >
+    az login --service-principal -u {{ azure_service_principal }}
+    -p {{ azure_password }} --tenant {{ azure_tenant }}
+- name: Get CICD User Default
+  ansible.builtin.set_fact:
+    cicd_user: "{{ open_env_azure_cicd_user | default('jenkins.sfo01@gmail.com') }}"
+- name: Set email variable (backwards compatible)
+  when: 'email is defined'
+  ansible.builtin.set_fact:
+    user_email: "{{ email }}"
+- name: Set email variable
+  when: 'requester_email is defined'
+  ansible.builtin.set_fact:
+    user_email: "{{ requester_email }}"
+- name: Check if email is External, Red Hat associate, or CICD User
+  ansible.builtin.set_fact:
+    external_user: true
+  when:
+    - '"@redhat.com" not in user_email'
+    - 'cicd_user not in user_email'
+    - '"@opentlc.com" not in user_email'
+- name: Set Up UPN for Red Hat Associate
+  when:
+    - '"@redhat.com" in user_email'
+    - 'user_email != "rhpds-opentlc-infra+rhpds-user@redhat.com"'
+  ansible.builtin.set_fact:
+    upn: "{{ user_email | replace('@redhat.com','_redhat.com#EXT#@prutledgopentlc.onmicrosoft.com') }}"
+    external_user: false
+- name: Set Up UPN for CICD user in Red Hat AD
+  when: 'user_email == "rhpds-opentlc-infra+rhpds-user@redhat.com"'
+  ansible.builtin.set_fact:
+    upn: "rhpds-user_redhat.com#EXT#@prutledgopentlc.onmicrosoft.com"
+    external_user: false
+- name: Set Up UPN for CICD user in OPENTLC AD
+  when: '"@opentlc.com" in user_email'
+  ansible.builtin.set_fact:
+    upn: "{{ user_email | replace('@opentlc.com','_opentlc.com#EXT#@prutledgopentlc.onmicrosoft.com') }}"
+    external_user: false
+- name: Set Up UPN for CICD user in gmail
+  when: 'cicd_user in user_email'
+  ansible.builtin.set_fact:
+    upn: "{{ user_email | replace('@gmail.com','_gmail.com#EXT#@prutledgopentlc.onmicrosoft.com') }}"
+    external_user: false
+- name: Checking if user is in Active Directory
+  when: not external_user | bool
+  register: azuserc
+  azure.azcollection.azure_rm_aduser_info:
+    auth_source: cli
+    user_principal_name: "{{ upn }}"
+    tenant: "{{ azure_tenant }}"
+  ignore_errors: true
+- name: Invite user
+  when:
+    - not external_user | bool
+    - azuserc is failed
+    - "'does not exist or one of its queried reference-property objects are not present.' in azuserc.msg"
+  block:
+    - name: Get OAuth Token
+      ansible.builtin.uri:
+        url: "https://login.microsoftonline.com/{{ azure_tenant }}/oauth2/v2.0/token"
+        method: POST
+        headers:
+          Content-Type: application/x-www-form-urlencoded
+        body:
+          grant_type: "client_credentials"
+          client_id: "{{ azure_service_principal }}"
+          scope: "https://graph.microsoft.com/.default"
+          client_secret: "{{ azure_password }}"
+        body_format: form-urlencoded
+        validate_certs: true
+      register: authtoken
+    - name: Invite user to org
+      ansible.builtin.uri:
+        url: https://graph.microsoft.com/v1.0/invitations
+        method: POST
+        headers:
+          Content-type: application/json
+          Authorization: "Bearer {{ authtoken.json.access_token }}"
+        status_code: 201
+        body_format: json
+        body:
+          invitedUserEmailAddress: "{{ user_email }}"
+          inviteRedirectUrl: "https://portal.azure.com"
+          sendInvitationMessage: true
+          invitedUserDisplayName: "OpenEnv_User_{{ user_email }}"
+    - name: Print Open Environment Information
+      agnosticd_user_info:
+        msg: "{{ item }}"
+      loop:
+        - "An invitation has been sent to your redhat.com inbox."
+        - "You will need to accept the invitation."
+    - name: Wait 60 seconds for Azure to create user
+      ansible.builtin.wait_for:
+        timeout: 60

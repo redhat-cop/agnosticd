@@ -1,0 +1,168 @@
+- name: Install Crunchy Postgres Operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: crunchy-postgres-operator
+    install_operator_namespace: openshift-operators
+    install_operator_csv_nameprefix: postgresoperator
+    install_operator_channel: "v5"
+    # install_operator_starting_csv: ""
+    # install_operator_catalog: certified-operators
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_performance_monitoring_automatic_install_plan_approval }}"
+    install_operator_catalogsource_setup: "{{ ocp4_workload_performance_monitoring_catalogsource_setup }}"
+    install_operator_catalogsource_name: "{{ ocp4_workload_performance_monitoring_certified_catalogsource_name }}"
+    # install_operator_catalogsource_namespace: "{{ ocp4_workload_performance_monitoring_catalogsource_namespace }}"
+    install_operator_catalogsource_image: "{{ ocp4_workload_performance_monitoring_certified_catalogsource_image }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_performance_monitoring_catalogsource_image_tag }}"
+
+- name: Wait Crunchy Postgres Operator
+  kubernetes.core.k8s_info:
+    validate_certs: '{{ verify_tls }}'
+    api_version: v1
+    kind: Pod
+    namespace: openshift-operators
+    label_selectors:
+      - postgres-operator.crunchydata.com/control-plane=postgres-operator
+    field_selectors:
+      - status.phase=Running
+  register: r_crunchy_pod
+  retries: 20
+  delay: 10
+  until: r_crunchy_pod.resources | list | length == 1
+
+- name: Create the DB Init Script for the PG Instance
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    api_version: v1
+    kind: ConfigMap
+    definition:
+      metadata:
+        name: db-init
+        namespace: '{{ user }}-staging'
+      data:
+        init-sql: |
+          DROP TABLE IF EXISTS Statistics_Quarkus;
+          DROP TABLE IF EXISTS Statistics_Micronaut;
+          DROP TABLE IF EXISTS Statistics_Springboot;
+          DROP SEQUENCE IF EXISTS hibernate_sequence;
+          DROP SEQUENCE IF EXISTS statistics_springboot_seq;
+
+          create sequence hibernate_sequence start 1 increment 1;
+
+          create sequence statistics_springboot_seq start 1 increment 50;
+
+          create table Statistics_Quarkus
+          (
+              id          int8 not null,
+              description varchar(255),
+              done_at     timestamp,
+              duration    int8,
+              framework   int4,
+              parameter   varchar(255),
+              type        int4,
+              primary key (id)
+          );
+
+          create table Statistics_Micronaut
+          (
+              id          int8 not null,
+              description varchar(255),
+              done_at     timestamp,
+              duration    int8,
+              framework   int4,
+              parameter   varchar(255),
+              type        int4,
+              primary key (id)
+          );
+
+
+          create table Statistics_Springboot
+          (
+              id          int8 not null,
+              description varchar(255),
+              done_at     timestamp,
+              duration    numeric(21,0),
+              framework   int4,
+              parameter   varchar(255),
+              type        int4,
+              primary key (id)
+          );
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user
+
+- name: Deploy a PG Cluster Instance for Users
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    namespace: '{{ user }}-staging'
+    resource_definition: "{{ lookup('file', 'crunchy-instance.yml') }}"
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user
+
+- name: Wait for Postgres Instances
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: '{{ user }}-staging'
+    label_selectors:
+      - postgres-operator.crunchydata.com/cluster=postgres
+      - postgres-operator.crunchydata.com/instance-set=instance1
+    field_selectors:
+      - status.phase=Running
+  register: running_pg
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user
+  retries: 60
+  delay: 10
+  until: (running_pg.resources | list | length) == 1
+
+- name: Patch Postgres Instance Secret
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: patched
+    api_version: v1
+    kind: Secret
+    name: postgres-pguser-postgres
+    namespace: "{{ user }}-staging"
+    merge_type:
+      - strategic-merge
+    definition:
+      stringData:
+        password: "password"
+        verifier: ""
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user
+
+- name: Create a Route for PGAdmin
+  kubernetes.core.k8s:
+    validate_certs: '{{ verify_tls }}'
+    state: present
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: pgadmin
+    namespace: "{{ user }}-staging"
+    definition:
+      metadata:
+        labels:
+          postgres-operator.crunchydata.com/cluster: postgres
+          postgres-operator.crunchydata.com/role: pgadmin
+        annotations:
+          openshift.io/host.generated: 'true'
+      spec:
+        to:
+          kind: Service
+          name: postgres-pgadmin
+          weight: 100
+        port:
+          targetPort: pgadmin
+        tls:
+          termination: edge
+        wildcardPolicy: None
+  loop: "{{ users }}"
+  loop_control:
+    loop_var: user

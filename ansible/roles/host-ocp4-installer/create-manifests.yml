@@ -1,0 +1,64 @@
+---
+- name: Run openshift-install create manifests
+  become: false
+  command: openshift-install create manifests --dir=/home/{{ ansible_user }}/{{ cluster_name }}
+
+# For Windows Nodes OVN is required.
+# For 4.6 this requires an install workaround to generate
+# manifests and then change the manifests
+# For SDN this is not necessary. Regardless the installation will either generate
+# manifests if there aren't any (default) or use the updated ones (OVN)
+- name: Create install workaround manifests/cluster-network-03-config.yml for OVN
+  when: ocp4_network_ovn_install_workaround | bool
+  copy:
+    src: cluster-network-03-config.yml
+    dest: "/home/{{ ansible_user }}/{{ cluster_name }}/manifests/cluster-network-03-config.yml"
+    owner: "{{ ansible_user }}"
+    mode: ug=rw,o=
+
+# On OpenStack 16 device ids are not truncated to 20 characters.
+# This MachineConfig adds a udev configuration to work around this issue.
+# https://bugzilla.redhat.com/show_bug.cgi?id=1897603
+- name: Create install workaround manifests/99-scsi-device-detection-machineconfig.yml
+  when: ocp4_scsi_device_detection_workaround | bool
+  template:
+    src: 99-scsi-device-detection-machineconfig.yml.j2
+    dest: "/home/{{ ansible_user }}/{{ cluster_name }}/manifests/99-scsi-device-detection-machineconfig.yml"
+    owner: "{{ ansible_user }}"
+    mode: ug=rw,o=
+
+# This downloads all the extra manifests which are maintained by Tigera
+# Can't use unarchive module as it does not handle .gz files that do not contain a .tar archive.
+- block:
+    - name: make sure manifests dir exists
+      file:
+        path: "/home/{{ ansible_user }}/{{ cluster_name }}/manifests/"
+        state: directory
+        mode: 0775
+
+    - name: Download Project Calico Manifest archive file to {{ ansible_user }} home dir
+      ansible.builtin.get_url:
+        url: "https://projectcalico.docs.tigera.io/manifests/ocp.tgz"
+        dest: "/home/{{ ansible_user }}/"
+        validate_certs: false
+      retries: 3
+      delay: 3
+      register: result
+      until: result is not failed
+
+    - name: Extract Project Calico manifest files
+      ansible.builtin.shell:
+        # yamllint disable-line rule:line-length
+        cmd: "gtar -x -f /home/{{ ansible_user }}/ocp.tgz --strip-components 1 -C /home/{{ ansible_user }}/{{ cluster_name }}/manifests/"
+
+    - name: verify permissions on Calico manifest files are set to 775
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/{{ cluster_name }}/manifests/"
+        state: directory
+        recurse: true
+        mode: 0775
+
+    - name: remove downloaded file
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/ocp.tgz"
+  when: ocp4_network_type|default("OVNKubernetes") == "Calico"

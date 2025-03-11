@@ -1,0 +1,82 @@
+---
+
+- name: check if user is cluster admin
+  shell: "oc get project default"
+  register: default_project_result
+  ignore_errors: true
+  changed_when: false
+
+- fail:
+    msg: "User does not have cluster-admin rights to install Istio"
+  when: default_project_result is failed
+
+- name: define user ocp_project
+  set_fact:
+    ocp_project: "istio-system"
+
+- name: Make sure we go back to default project
+  shell: "oc project default"
+
+
+
+# #######         Istio Control Plane      ############## #
+
+- name: Determine if istio-system namespace already exists.  Provision istio control plane once per OCP cluster
+  command: oc get projects -o name
+  register: oc_projects
+  changed_when: false
+
+
+
+- name: "Add anyuid scc to all authenticated in project {{oc_project}}"
+  shell: "oc adm policy add-scc-to-group anyuid system:authenticated -n {{ocp_project}}"
+  when: '"projects/" ~ "istio-system" not in oc_projects.stdout_lines'
+
+- name: Copy istio-demo template to known path
+  template:
+    src: templates/istio-demo-1.0.0.yaml.j2
+    dest: /tmp/istio-demo-1.0.0.yaml
+  when: '"projects/" ~ "istio-system" not in oc_projects.stdout_lines'
+
+
+- name: Provision Istio Control Plane (which creates istio-system namespace)
+  shell:  "oc create -f /tmp/istio-demo-1.0.0.yaml"
+  when: '"projects/" ~ "istio-system" not in oc_projects.stdout_lines'
+
+- name: wait for istio sidecar-injector to initialize
+  shell: "oc get deployment istio-sidecar-injector -o jsonpath='{.status.availableReplicas}' -n istio-system"
+  register: sidecar_injector_replicas
+  until: sidecar_injector_replicas.stdout == "1"
+  retries: "30"
+  delay: "30"
+
+- name: Create limitrange because Istio deploys are not pre-configured with limits and requests
+  template:
+    src: templates/limitrange.yaml.j2
+    dest: /tmp/{{ocp_project}}_limitrange.yaml
+- shell: |
+    oc create -f /tmp/{{ocp_project}}_limitrange.yaml -n {{ocp_project}}
+
+- name: Expose routes
+  shell: |
+      oc expose svc istio-ingressgateway -n istio-system && \ 
+      oc expose svc servicegraph -n istio-system && \
+      oc expose svc grafana -n istio-system && \
+      oc expose svc prometheus -n istio-system && \
+      oc expose svc tracing -n istio-system
+  when: '"projects/" ~ "istio-system" not in oc_projects.stdout_lines'
+
+###########################################################
+
+- name: "Label namespace"
+  command: "oc label namespace {{ocp_project}} AAD='{{lab_name}}'"
+
+- name: Annotate the empty project as requested by user
+  shell: "oc annotate namespace {{ocp_project}} openshift.io/requester={{admin_username}} --overwrite"
+
+- name: Give admin_username access to ocp_project; user = {{admin_username}}
+  shell: "oc policy add-role-to-user admin {{admin_username}} -n {{ocp_project}}"
+
+- name: workload Tasks Complete
+  debug:
+    msg: workload Tasks Complete

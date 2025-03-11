@@ -1,0 +1,304 @@
+---
+- hosts: localhost
+  gather_facts: true
+  vars:
+    api_user: "{{ guid }}"
+    default_metadata:
+      project: "{{ project |d('unknownproject')}}"
+      env_type: "{{ env_type |d('unknownenvtype') }}"
+      course_name: "{{ course_name | default('unkowncourse') }}"
+      purpose: "{{ purpose | default('unkownpurpose') }}"
+  tasks:
+    - set_fact:
+        osp_migration_api_pass: "{{ lookup('password', '/dev/null length=20 chars=ascii_letters') }}"
+
+    - import_tasks: pull_repo.yml
+
+    - name: Check if project exists
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ osp_auth_username }}"
+        OS_PASSWORD: "{{ osp_auth_password }}"
+        OS_PROJECT_NAME: "admin"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      openstack.cloud.project_info:
+        name: "{{ osp_project_name }}"
+      register: project_exists
+
+    - fail:
+        msg: Project exists, can't continue
+      when: project_exists.projects
+
+    - name: Create project and assign permission
+      register: stack_admin_output
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ osp_auth_username }}"
+        OS_PASSWORD: "{{ osp_auth_password }}"
+        OS_PROJECT_NAME: "admin"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      openstack.cloud.stack:
+        name: "create-project-{{osp_project_name}}"
+        template: "{{ output_dir }}/imported-templates/heat-templates/{{ project }}/stack_admin.yaml"
+        timeout: "{{ stack_create_timeout |d('3600') }}"
+        parameters:
+          project_name: "{{ osp_project_name }}"
+          project_guid: "{{ guid }}"
+          project_description: "created:{{ ansible_date_time.epoch }}"
+          project_api_user: "{{ guid }}"
+          project_api_pass: "{{ osp_migration_api_pass }}"
+          blueprint: "{{ project }}"
+
+    - name: Set OpenStack project information in provision data
+      agnosticd_user_info:
+        data:
+          openstack_auth_url: "{{ osp_auth_url }}"
+          openstack_project_name: "{{ osp_project_name }}"
+          openstack_username: "{{ guid }}"
+          openstack_password: "{{ osp_migration_api_pass }}"
+
+    # when deleting we need to be able to authenticate using that project
+    - name: Grant access to admin account to the new project
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ osp_auth_username }}"
+        OS_PASSWORD: "{{ osp_auth_password }}"
+        OS_PROJECT_NAME: "admin"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      openstack.cloud.role_assignment:
+        state: present
+        user: "{{ osp_auth_username }}"
+        role: "admin"
+        project: "{{ osp_project_name }}"
+
+    - name: Tag project with the name of the student
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ osp_auth_username }}"
+        OS_PASSWORD: "{{ osp_auth_password }}"
+        OS_PROJECT_NAME: "admin"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      command: >-
+        openstack project set
+        --tag {{ ('guid=' ~ guid) | quote }}
+        --tag {{ ('student=' ~ student_name) | quote }}
+        {% if uuid is defined %}
+        --tag {{ ('uuid=' ~ uuid) | quote }}
+        {% endif %}
+        {{ osp_project_name | quote }}
+
+    - name: Set authentication information to create objects
+      set_fact:
+        create_objects_user: "{{ guid }}"
+        create_objects_password: "{{ osp_migration_api_pass }}"
+      when: use_openstack_centralized_router | default(false) == false
+
+    - name: Set authentication information to create objects
+      set_fact:
+        create_objects_user: "{{ osp_auth_username }}"
+        create_objects_password: "{{ osp_auth_password }}"
+      when: use_openstack_centralized_router | default(false)
+
+    - name: Create objects inside the project
+      register: stack_user_output
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ create_objects_user }}"
+        OS_PASSWORD: "{{ create_objects_password }}"
+        OS_PROJECT_NAME: "{{ osp_project_name }}"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      openstack.cloud.stack:
+        name: "create-objects-{{osp_project_name}}"
+        template: "{{ output_dir }}/imported-templates/heat-templates/{{ project }}/stack_user.yaml"
+        timeout: "{{ stack_create_timeout |d('3600') }}"
+        parameters:
+          project_name: "{{ osp_project_name }}"
+          public_net_id: "{{ external_network }}"
+          api_url: "{{ osp_auth_url }}"
+          api_user: "{{ guid }}"
+          api_pass: "{{ osp_migration_api_pass }}"
+          project_guid: "{{ guid }}"
+          dns_domain: "{{ osp_cluster_dns_zone }}"
+
+    - name: Save services content
+      set_fact:
+        openstack_project_services: "{{ stack_user_output | json_query(query) }}"
+      vars:
+        query: "stack.outputs[?@.output_key=='openstack_project_services'].output_value|[0]"
+
+    - name: Save list of services
+      set_fact:
+        openstack_project_services: {}
+      when: openstack_project_services == ""
+
+    - name: Print lab documentation as user.info
+      agnosticd_user_info:
+        msg: "Access to the documentation: {{ document_link }}"
+      when: document_link | default('') != ''
+
+    - name: Print service access information as user.info
+      agnosticd_user_info:
+        msg: "You can connect to this environment from the following hostnames and services:"
+      when: openstack_project_services != {}
+
+    - name: Print service access information as user.info
+      agnosticd_user_info:
+        msg: >-
+          - {{ item.1
+          | replace(80,"http")
+          | replace(8443,"https")
+          | replace(443,"https") }}://{{ item.0.key
+          | regex_replace('REPL', guid)
+          | regex_replace('DOMAIN$', osp_cluster_dns_zone)
+          }}:{{ item.1 }}
+      when: "item.1 in ['80', '443', '8443']"
+      loop: "{{ openstack_project_services | dict2items | subelements('value') }}"
+
+    - name: Print service access information as user.info
+      agnosticd_user_info:
+        msg: >-
+          - {{ item.0.key
+          | regex_replace('REPL', guid)
+          | regex_replace('DOMAIN$', osp_cluster_dns_zone) }} port
+          {{ item.1 }}
+      when: "item.1 not in ['80', '443', '8443']"
+      loop: "{{ openstack_project_services | dict2items | subelements('value') }}"
+
+    - name: Print service access information as user.info
+      agnosticd_user_info:
+        msg: "NOTE: Some services are not available till some minutes after you receive this mail."
+      when: openstack_project_services != {}
+
+    - name: Save infra_key content
+      set_fact:
+        infra_private_key_content: "{{ stack_user_output | json_query(query) }}"
+      vars:
+        query: "stack.outputs[?@.output_key=='openstack_project_infra_key'].output_value|[0]"
+
+    - name: Set infra_ssh_key path
+      set_fact:
+        infra_ssh_key: "{{ output_dir}}/{{ guid }}_infra_ssh_key.pem"
+
+    - name: Copy infra_key content to output_dir
+      copy:
+        dest: "{{ infra_ssh_key }}"
+        content: "{{ infra_private_key_content }}"
+        mode: 0600
+
+    - debug:
+        var: stack_user_output
+        verbosity: 2
+
+    - name: Gather instance facts
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ guid }}"
+        OS_PASSWORD: "{{ osp_migration_api_pass }}"
+        OS_PROJECT_NAME: "{{ osp_project_name }}"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+      openstack.cloud.server_info:
+        server: "*"
+        filters:
+          metadata:
+            guid: "{{ guid }}"
+      register: r_osp_server_facts
+
+
+    - set_fact:
+        cloud_tags_final: "{{ cloud_tags | from_json }}"
+      when:
+        - cloud_tags is defined
+        - cloud_tags is string
+
+    - set_fact:
+        cloud_tags_final: "{{ cloud_tags | d({}) }}"
+      when:
+        - cloud_tags is not defined
+        - cloud_tags is not string
+
+    - set_fact:
+        cloud_metadata: "{{ cloud_tags_final |combine(default_metadata) }}"
+
+    - loop: "{{ r_osp_server_facts.servers }}"
+      loop_control:
+        loop_var: _server
+
+      environment:
+        OS_AUTH_URL: "{{ osp_auth_url }}"
+        OS_USERNAME: "{{ guid }}"
+        OS_PASSWORD: "{{ osp_migration_api_pass }}"
+        OS_PROJECT_NAME: "{{ osp_project_name }}"
+        OS_PROJECT_DOMAIN_ID: "{{ osp_auth_project_domain }}"
+        OS_USER_DOMAIN_NAME: "{{ osp_auth_user_domain }}"
+
+      openstack.cloud.server_metadata:
+        name: "{{ _server.name }}"
+        meta:
+          "{{ cloud_metadata }}"
+
+    - name: debug osp_facts
+      debug:
+        var: r_osp_server_facts
+
+    - name: Iterate over all instances and create DNS entries
+      loop: "{{ r_osp_server_facts.servers }}"
+      loop_control:
+        loop_var: _instance
+      when: _instance.access_ipv4 | default('') != ''
+      vars:
+        _infra_osp_dns_default_ttl: 300
+        _dns_state: present
+
+      include_tasks: instance_loop.yml
+
+    # Run common OSP create-inventory but don't use server.name.
+    # Use  server.metadata.hostname  instead
+    - name: Run infra-osp-create-inventory Role
+      include_role:
+        name: infra-osp-create-inventory
+      vars:
+        _name_selector: 'metadata.hostname'
+
+    - name: Run Common SSH Config Generator Role
+      import_role:
+        name: infra-common-ssh-config-generate
+
+# include global vars again, this time for all hosts now that the inventory is built
+- import_playbook: ../../include_vars.yml
+  tags:
+    - create_inventory
+    - must
+
+- name: Step 001.3 Configure Linux Hosts and Wait for Connection
+  hosts:
+    # For now, only bastion is necessary
+    - bastions:!windows:!network
+  gather_facts: false
+  any_errors_fatal: true
+  ignore_errors: false
+  tags:
+    - step001
+    - step001.3
+    - wait_ssh
+  tasks:
+    - name: set facts for remote access
+      tags:
+        - create_inventory
+      set_fact:
+        # set python interpreter: Useful when the distrib running ansible has a different path
+        # ex: when running using the alpine image
+        #ansible_python_interpreter: env python
+        ansible_ssh_common_args: >-
+          {{ ansible_ssh_extra_args|d() }}
+          -F {{ output_dir }}/{{ env_type }}_{{ guid }}_ssh_conf
+          -o ControlPath=/tmp/{{ guid }}-%r-%h-%p
+
+    - name: Run infra-generic-wait_for_linux_hosts Role
+      import_role:
+        name: infra-generic-wait_for_linux_hosts

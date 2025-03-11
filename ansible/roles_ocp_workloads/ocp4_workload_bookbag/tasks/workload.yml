@@ -1,0 +1,85 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Get current context
+  shell: |
+    oc config current-context
+  register: r_current_context
+  ignore_errors: true
+
+- name: Preserving use-context
+  debug:
+    msg: "Context: {{ r_current_context.stdout }}"
+
+- name: Create bookbag {{ ocp4_workload_bookbag_name }}
+  block:
+    - name: Switch context and create project
+      shell: |
+        oc login --token {{ bookbag_openshift_api_token }} --insecure-skip-tls-verify=true {{ bookbag_openshift_api_url }} && \
+        oc new-project {{ ocp4_workload_bookbag_namespace }} || oc project {{ ocp4_workload_bookbag_namespace }}
+
+    - name: Removing bookbag base build template
+      kubernetes.core.k8s:
+        state: absent
+        definition: "{{ lookup('template', item ) | from_yaml }}"
+        namespace: "{{ ocp4_workload_bookbag_namespace }}"
+      loop:
+        - ./templates/bookbag-base-is.yml.j2
+        - ./templates/bookbag-base-bc.yml.j2
+
+    - name: Create bookbag base build template
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', item ) | from_yaml }}"
+        namespace: "{{ ocp4_workload_bookbag_namespace }}"
+      loop:
+        - ./templates/bookbag-base-is.yml.j2
+        - ./templates/bookbag-base-bc.yml.j2
+
+    - name: Wait for workshop image {{ ocp4_workload_bookbag_name }}-base:latest
+      kubernetes.core.k8s_info:
+        api_version: image.openshift.io/v1
+        kind: ImageStream
+        name: "{{ ocp4_workload_bookbag_name }}-base"
+        namespace: "{{ ocp4_workload_bookbag_namespace }}"
+      until:
+        - r_image_stream.resources is defined
+        - r_image_stream.resources | length > 0
+        - r_image_stream.resources[0].status is defined
+        - r_image_stream.resources[0].status.tags is defined
+        - r_image_stream.resources[0].status.tags | length > 0
+      delay: 5
+      retries: 60
+      register: r_image_stream
+      ignore_errors: true
+
+    - name: Create bookbag workshop
+      block:
+        - name: Create bookbag
+          include_role:
+            name: ocp4_workload_bookbag_user
+          vars:
+            ocp4_workload_bookbag_user_project: "{{ ocp4_workload_bookbag_name }}-bookbag-{{ guid }}"
+            ocp4_workload_bookbag_user_project_display: "Bookbag for user {{ ocp_username }}"
+            ocp4_workload_bookbag_user_deployment_name: "{{ ocp4_workload_bookbag_name }}"
+            ocp4_workload_bookbag_user_image_namespace: "{{ ocp4_workload_bookbag_namespace }}"
+            ocp4_workload_bookbag_user_image_name: >-
+              image-registry.openshift-image-registry.svc:5000/{{ ocp4_workload_bookbag_namespace }}/{{ ocp4_workload_bookbag_name }}-base
+            ocp4_workload_bookbag_user_image_tag: latest
+            ocp4_workload_bookbag_user_console_image_override: "quay.io/openshift/origin-console:4.9"
+            ocp4_workload_bookbag_user_auth_username: "{{ ocp4_workload_bookbag_auth_username }}"
+            ocp4_workload_bookbag_user_auth_password: "{{ ocp4_workload_bookbag_auth_password }}"
+            ocp4_workload_bookbag_user_console_deploy: "{{ ocp4_workload_bookbag_console_deploy | bool }}"
+  always:
+    - name: Restore context if defined
+      when: (r_current_context is defined) and (r_current_context.stdout | length > 0)
+      block:
+        - name: Restore context {{ r_current_context.stdout }}
+          shell: |
+            oc config use-context {{ r_current_context.stdout }}
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent

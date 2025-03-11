@@ -1,0 +1,272 @@
+{% for __user in users %}
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: camel-k-pipeline
+  namespace: '{{ __user }}-{{ camel_ns_suffix }}'
+spec:
+  description: CICD pipeline for Camel K
+  params:
+    - description: The git repo URL to clone from.
+      name: repo-url
+      type: string
+      default: https://gitea.{{ route_subdomain }}/{{ __user }}/workshop_camel_workspace.git
+    - description: The git repo branch.
+      name: repo-branch
+      type: string
+      default: main
+    - description: The name of the integration file.
+      name: filename
+      type: string
+    - description: Camel K Traits
+      name: traits
+      type: string
+      default: -t prometheus.enabled=true -t prometheus.pod-monitor-labels='workshop=camel' -t jolokia.enabled=true
+    - description: Camel K dependencies
+      name: dependencies
+      type: string
+      default: " " 
+  tasks:
+    - name: fetch-source
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.repo-branch)
+      taskRef:
+        kind: ClusterTask
+        name: git-clone
+      workspaces:
+        - name: output
+          workspace: shared-data
+    - name: kamel-run
+      params:
+        - name: filename
+          value: $(params.filename)
+        - name: namespace
+          value: {{ __user }}-{{ camel_ns_suffix }}
+        - name: dependencies
+          value: $(params.dependencies)
+        - name: traits
+          value: $(params.traits)
+      runAfter:
+        - fetch-source
+      taskRef:
+        kind: ClusterTask
+        name: kamel-run
+      workspaces:
+        - name: source
+          workspace: shared-data
+  workspaces:
+    - description: 'This workspace contains the cloned repo files, so they can be read by the next task.'
+      name: shared-data
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: camel-java-pipeline
+  namespace: '{{ __user }}-{{ camel_ns_suffix }}'
+spec:
+  params:
+    - name: git-url
+      default: https://gitea.{{ route_subdomain }}/{{ __user }}/workshop_camel_workspace.git
+      description: Your Git repo
+      type: string
+    - name: module-name
+      default: 'module-04'
+      description: 'Module directory Name (defaults to module-04)'      
+      type: string
+    - name: service-name
+      default: 'customer-connector'
+      description: 'Service Name (maven project directory, one of: customer-service | customer-connector | order-connector)'      
+      type: string
+    - name: registry-repo
+      default: '{{ __user }}-camel'
+      description: Registry Repository name (if using quay.io it should be your username, if using Openshift it should be the project/namespace name)
+      type: string
+    - name: maven-mirror-url
+      #default: https://repo1.maven.org/maven2/
+      default: https://nexus-shared-maven-mirror.{{ route_subdomain }}/repository/maven-public/
+      description: Maven Mirror Repo URL
+      type: string
+    - name: clone-subdir
+      default: code-repo
+      description: sub-directory where the repo will be cloned into
+      type: string
+    - name: git-revision
+      default: main
+      description: 'branch, tag, revision'
+      type: string
+    - name: registry-url
+      default: image-registry.openshift-image-registry.svc.cluster.local:5000
+      description: Container Image Registry URL (default to Openshift internal registry)
+      type: string
+  tasks:
+    - name: git-clone
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+        - name: submodules
+          value: 'true'
+        - name: depth
+          value: '1'
+        - name: sslVerify
+          value: 'true'
+        - name: crtFileName
+          value: ca-bundle.crt
+        - name: subdirectory
+          value: $(params.clone-subdir)
+        - name: deleteExisting
+          value: 'true'
+        - name: verbose
+          value: 'true'
+        - name: userHome
+          value: /tekton/home
+      taskRef:
+        kind: ClusterTask
+        name: git-clone
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+    - name: maven-package
+      params:
+        - name: MAVEN_IMAGE
+          value: >-
+            image-registry.openshift-image-registry.svc:5000/openshift/java:latest
+        - name: GOALS
+          value:
+            - clean
+            - package
+            - '-DskipTests'
+            - '-e'
+            - '-B'
+            - '-Dmaven.repo.local=$(workspaces.source.path)/.m2'
+            - '-Dquarkus.openshift.namespace={{ __user }}-camel'
+            - '-Dquarkus.openshift.name=$(params.service-name)'
+            - '-Dquarkus.container-image.tag=$(tasks.git-clone.results.commit)'
+            - '-Dquarkus.kubernetes.deploy=false'
+            - '-Dquarkus.container-image.build=false'
+            - '-Dquarkus.container-image.group={{ __user }}-camel'
+            - '-Dquarkus.container-image.builder=openshift'
+            - '-Dquarkus.openshift.deployment-kind=deployment'
+            - '-Dquarkus.openshift.replicas=1'
+            - '-Dquarkus.openshift.part-of=$(params.service-name)'
+            - '-Dquarkus.openshift.route.expose=true'
+            - '-Dquarkus.openshift.route.target-port=https'
+            - '-Dquarkus.openshift.route.tls.termination=passthrough'
+            - '-Dquarkus.openshift.route.tls.insecure-edge-termination-policy=None'
+            - '-Dquarkus.openshift.labels."app.openshift.io/runtime"=quarkus'
+            - '-Dquarkus.openshift.annotations."app.openshift.io/vcs-url"=$(params.git-url)'
+            - '-Dquarkus.openshift.annotations."app.openshift.io/vcs-ref"=main'
+            - '-Dquarkus.openshift.annotations."prometheus.io/scrape"="true"'
+            - '-Dquarkus.openshift.annotations."prometheus.io/path"=/q/metrics'
+            - '-Dquarkus.openshift.annotations."prometheus.io/port"="8080"'
+            - '-Dquarkus.openshift.annotations."prometheus.io/scheme"=http'
+            - '-Dquarkus.openshift.resources.requests.cpu=0.5'
+            - '-Dquarkus.openshift.resources.requests.memory=256Mi'
+            - '-Dquarkus.openshift.resources.limits.cpu=2'
+            - '-Dquarkus.openshift.resources.limits.memory=1Gi'
+        - name: CONTEXT_DIR
+          value: $(params.clone-subdir)/$(params.module-name)/$(params.service-name)
+        - name: MAVEN_MIRROR_URL
+          value: $(params.maven-mirror-url)
+      runAfter:
+        - git-clone
+      taskRef:
+        kind: ClusterTask
+        name: maven
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+        - name: maven-settings
+          workspace: maven-settings
+    - name: image-build
+      params:
+        - name: IMAGE
+          value: >-
+            $(params.registry-url)/$(params.registry-repo)/$(params.service-name):$(tasks.git-clone.results.commit)
+        # - name: BUILDER_IMAGE
+        #   value: >-
+        #     registry.redhat.io/rhel8/buildah
+        - name: STORAGE_DRIVER
+          value: vfs
+        - name: DOCKERFILE
+          value: ./src/main/docker/Dockerfile.jvm
+        - name: CONTEXT
+          value: $(params.clone-subdir)/$(params.module-name)/$(params.service-name)
+        - name: TLSVERIFY
+          value: 'true'
+        - name: FORMAT
+          value: oci
+        - name: SKIP_PUSH
+          value: 'false'
+      runAfter:
+        - maven-package
+      taskRef:
+        kind: ClusterTask
+        name: buildah
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: image-tag
+      params:
+        - name: srcImageURL
+          value: >-
+            docker://$(params.registry-url)/$(params.registry-repo)/$(params.service-name):$(tasks.git-clone.results.commit)
+        - name: destImageURL
+          value: >-
+            docker://$(params.registry-url)/$(params.registry-repo)/$(params.service-name):latest
+      runAfter:
+        - image-build
+      taskRef:
+        kind: ClusterTask
+        name: skopeo-copy
+      workspaces:
+        - name: images-url
+          workspace: image-urls-cm
+
+    - name: deploy-app
+      params:
+        - name: SCRIPT
+          value: |
+            ls -la $(params.clone-subdir)/$(params.module-name)/$(params.service-name)/target/kubernetes/
+            oc apply -f $(params.clone-subdir)/$(params.module-name)/$(params.service-name)/target/kubernetes/kubernetes.yml
+
+            if ! oc get route $(params.service-name) 2> /dev/null; then
+              echo "creating service route for $(params.service-name)"
+              #oc expose svc $(params.service-name)
+              oc create route edge --service=$(params.service-name)
+            fi
+      runAfter:
+        - image-tag
+      taskRef:
+        kind: ClusterTask
+        name: openshift-client
+      workspaces:
+        - name: manifest-dir
+          workspace: shared-workspace
+
+  workspaces:
+    - name: shared-workspace
+    - name: maven-settings
+    - name: image-urls-cm
+
+---
+
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: source-code
+  namespace: '{{ __user }}-{{ camel_ns_suffix }}'
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  volumeMode: Filesystem
+
+{% endfor %}      

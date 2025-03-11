@@ -1,0 +1,235 @@
+---
+- name: Setting up workload for user
+  ansible.builtin.debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+#####################################################################
+# Check old variables
+#####################################################################
+# The variables to migrate repositories had the wrong name (they were
+# missing the 'operator' in the name)
+# This has been fixed since 1.14. Time to enforce.
+- name: Check and fail if old variables are defined
+  ansible.builtin.assert:
+    that:
+    - ocp4_workload_gitea_migrate_repositories is not defined
+    - ocp4_workload_gitea_repositories_list is not defined
+    quiet: true
+    fail_msg: >-
+      Variable names have changed. Please use
+      ocp4_workload_gitea_operator_migrate_repositories and
+      ocp4_workload_gitea_operator_repositories_list instead of
+      ocp4_workload_gitea_migrate_repositories or ocp4_workload_gitea_repositories_list!
+
+#####################################################################
+# Sanity Checks
+#####################################################################
+
+- name: Check Gitea tag
+  ansible.builtin.assert:
+    that:
+    - ocp4_workload_gitea_operator_gitea_image_tag is not match('latest')
+    - ocp4_workload_gitea_operator_gitea_image_tag is version_compare('1.20.0', '>=')
+    quiet: true
+    fail_msg: >-
+      Gitea image tag must not be set to 'latest' and must be no older than 1.20.0.
+      Please specify the image version explicitely.
+
+- name: Check Gitea catalog image tag
+  ansible.builtin.assert:
+    that:
+    - ocp4_workload_gitea_operator_catalog_image_tag is not match('latest')
+    - ocp4_workload_gitea_operator_catalog_image_tag is version_compare('v2.0.1', '>=')
+    quiet: true
+    fail_msg: >-
+      Gitea catalog image tag must not be set to 'latest' and must be no older than v2.0.1.
+      Please specify the image catalog version explicitely.
+
+- name: Check that users are created when repositories are to be migrated
+  when: ocp4_workload_gitea_operator_migrate_repositories | bool
+  ansible.builtin.assert:
+    that:
+    - ocp4_workload_gitea_operator_create_users | bool
+    - ocp4_workload_gitea_operator_user_number | int | default(0) > 0
+    quiet: true
+    fail_msg: >-
+      Migrating repositories requires at least one user to be created.
+
+#####################################################################
+# Install Gitea Operator
+#####################################################################
+
+- name: Install Gitea operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: gitea-operator
+    install_operator_namespace: gitea-operator
+    install_operator_channel: "{{ ocp4_workload_gitea_operator_channel }}"
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_gitea_operator_automatic_install_plan_approval | default(true) }}"
+    install_operator_starting_csv: "{{ ocp4_workload_gitea_operator_starting_csv }}"
+    install_operator_catalogsource_setup: true
+    install_operator_catalogsource_name: gitea-operator-catalogsource
+    install_operator_catalogsource_namespace: gitea-operator
+    install_operator_catalogsource_image: "{{ ocp4_workload_gitea_operator_catalog_image }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_gitea_operator_catalog_image_tag }}"
+
+#####################################################################
+# Deploy Gitea
+#####################################################################
+
+- name: Deploy default Gitea instance
+  when: ocp4_workload_gitea_operator_deploy_gitea_instance | bool
+  block:
+  - name: Ensure Gitea namespace exists
+    kubernetes.core.k8s:
+      state: present
+      api_version: v1
+      kind: Namespace
+      name: "{{ ocp4_workload_gitea_operator_project }}"
+
+  - name: Set Gitea hostname
+    when: ocp4_workload_gitea_operator_gitea_hostname | default("") | length > 0
+    block:
+    - name: Determine Wildcard Domain
+      kubernetes.core.k8s_info:
+        api_version: operator.openshift.io/v1
+        kind: IngressController
+        name: default
+        namespace: openshift-ingress-operator
+      register: r_ingress_controller
+
+    - name: Set Gitea hostname variable
+      ansible.builtin.set_fact:
+        _ocp4_workload_gitea_operator_gitea_hostname: >-
+          {{ ocp4_workload_gitea_operator_gitea_hostname }}.{{
+             r_ingress_controller.resources[0].status.domain }}
+
+  - name: Create Gitea instance
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'gitea.yaml.j2') | from_yaml }}"
+
+  - name: Wait for Gitea route to be available
+    kubernetes.core.k8s_info:
+      api_version: "{{ ocp4_workload_gitea_operator_api_version }}"
+      kind: Gitea
+      name: "{{ ocp4_workload_gitea_operator_name }}"
+      namespace: "{{ ocp4_workload_gitea_operator_project }}"
+    register: r_gitea
+    until: r_gitea.resources[0].status.giteaRoute is defined
+    retries: 90
+    delay: 10
+
+  - name: Set gitea route variable
+    ansible.builtin.set_fact:
+      _ocp4_workload_gitea_operator_gitea_route: "{{ r_gitea.resources[0].status.giteaRoute }}"
+
+  - name: Print the Gitea route
+    agnosticd_user_info:
+      msg: "You can access Gitea via the URL {{ _ocp4_workload_gitea_operator_gitea_route }}"
+      data:
+        gitea_console_url: "{{ _ocp4_workload_gitea_operator_gitea_route }}"
+
+  - name: Wait for Gitea admin password to be set
+    when: ocp4_workload_gitea_operator_create_admin | bool
+    block:
+    - name: Wait for Gitea admin password to be set
+      kubernetes.core.k8s_info:
+        api_version: "{{ ocp4_workload_gitea_operator_api_version }}"
+        kind: Gitea
+        name: "{{ ocp4_workload_gitea_operator_name }}"
+        namespace: "{{ ocp4_workload_gitea_operator_project }}"
+      register: r_gitea_admin_password
+      until:
+      - r_gitea_admin_password.resources[0].status.adminSetupComplete is defined
+      - r_gitea_admin_password.resources[0].status.adminSetupComplete | bool
+      retries: 90
+      delay: 10
+
+    - name: Print admin credentials if admin was created
+      when: ocp4_workload_gitea_operator_create_admin | bool
+      agnosticd_user_info:
+        msg: "{{ item }}"
+        data:
+          gitea_admin_username: "{{ ocp4_workload_gitea_operator_admin_user }}"
+          gitea_admin_password: "{{ r_gitea_admin_password.resources[0].status.adminPassword }}"
+      loop:
+      - "The Gitea admin username is '{{ ocp4_workload_gitea_operator_admin_user }}'."
+      - "The Gitea admin password is '{{ r_gitea_admin_password.resources[0].status.adminPassword }}'."
+
+  - name: Wait for Gitea user setup to be complete
+    when: ocp4_workload_gitea_operator_create_users | bool
+    block:
+    - name: Wait for Gitea users to be set up
+      kubernetes.core.k8s_info:
+        api_version: "{{ ocp4_workload_gitea_operator_api_version }}"
+        kind: Gitea
+        name: "{{ ocp4_workload_gitea_operator_name }}"
+        namespace: "{{ ocp4_workload_gitea_operator_project }}"
+      register: r_gitea_user_setup_complete
+      until:
+      - r_gitea_user_setup_complete.resources[0].status.userSetupComplete is defined
+      - r_gitea_user_setup_complete.resources[0].status.userSetupComplete | bool
+      retries: 130
+      delay: 30
+
+    - name: Print the user details if multiple users were created
+      when: ocp4_workload_gitea_operator_user_number | int > 1
+      agnosticd_user_info:
+        msg: >-
+          Gitea users were created, from {{ ocp4_workload_gitea_operator_generate_user_format | format(1) }} to
+          {{ ocp4_workload_gitea_operator_generate_user_format | format(ocp4_workload_gitea_operator_user_number | int) }} with the password
+          '{{ r_gitea_user_setup_complete.resources[0].status.userPassword }}'
+
+    - name: Print the user details if a single user was created
+      when: ocp4_workload_gitea_operator_user_number | int == 1
+      agnosticd_user_info:
+        data:
+          gitea_user: "{{ ocp4_workload_gitea_operator_generate_user_format }}"
+          gitea_password: "{{ r_gitea_user_setup_complete.resources[0].status.userPassword }}"
+        msg: >-
+          A Gitea user '{{ ocp4_workload_gitea_operator_generate_user_format }}' was created, with the password
+          '{{ r_gitea_user_setup_complete.resources[0].status.userPassword }}'
+
+    - name: Print user details per created user
+      when: ocp4_workload_gitea_operator_user_number | int > 1
+      agnosticd_user_info:
+        user: "{{ ocp4_workload_gitea_operator_generate_user_format | format(n) }}"
+        data:
+          gitea_user: "{{ ocp4_workload_gitea_operator_generate_user_format | format(n) }}"
+          gitea_password: "{{ ocp4_workload_gitea_operator_user_password }}"
+          gitea_console_url: "{{ _ocp4_workload_gitea_operator_gitea_route }}"
+      loop: "{{ range(1, 1 + ocp4_workload_gitea_operator_user_number | int) | list }}"
+      loop_control:
+        loop_var: n
+
+    - name: Wait for repository migration to be complete
+      when: ocp4_workload_gitea_operator_migrate_repositories | bool
+      block:
+      - name: Wait for Gitea repository migration to be complete
+        kubernetes.core.k8s_info:
+          api_version: "{{ ocp4_workload_gitea_operator_api_version }}"
+          kind: Gitea
+          name: "{{ ocp4_workload_gitea_operator_name }}"
+          namespace: "{{ ocp4_workload_gitea_operator_project }}"
+        register: r_gitea_repo_setup_complete
+        until:
+        - r_gitea_repo_setup_complete.resources[0].status.repoMigrationComplete is defined
+        - r_gitea_repo_setup_complete.resources[0].status.repoMigrationComplete | bool
+        retries: 120
+        delay: 10
+
+      - name: Print the repositories that were migrated
+        agnosticd_user_info:
+          msg: "{{ item }}"
+        loop:
+        - "The following repositories were migrated for the created users:"
+        - "{{ ocp4_workload_gitea_operator_repositories_list | join(', ', attribute='repo') }}"
+
+# Leave this as the last task in the playbook.
+- name: Workload tasks complete
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

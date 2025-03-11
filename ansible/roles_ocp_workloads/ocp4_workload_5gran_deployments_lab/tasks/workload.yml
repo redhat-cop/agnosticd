@@ -1,0 +1,574 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Ensure hub cluster is deployed via kcli
+  ansible.builtin.shell:
+    cmd: kcli create cluster openshift --pf hub.yml -P force=true
+  args:
+    chdir: /root/
+  async: 3600
+  poll: 0
+
+- name: Ensure kubernetes manifests are downloaded
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.destination }}"
+    mode: "{{ item.mode }}"
+  # yamllint disable rule:line-length
+  with_items:
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hub-cluster/argocd-patch.json", destination: "/tmp/argocd-openshift-gitops-patch.json", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hub-cluster/hub-operators-argoapps.yaml", destination: "/tmp/hub-operators-argoapps.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hub-cluster/sno1-argoapp.yaml", destination: "/tmp/sno1-argoapp.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hub-cluster/argocd-clusterrolebinding.yaml", destination: "/tmp/argocd-clusterrolebinding.yaml", mode: "0644"}
+  # yamllint enable rule:line-length
+
+- name: Wait for hub cluster to be deployed via kcli
+  ansible.builtin.shell:
+    cmd: oc login https://{{ lab_api_host }} -u admin -p {{ strong_admin_password }}  --insecure-skip-tls-verify=true > /dev/null
+  register: result
+  until: result.rc == 0
+  retries: 120
+  delay: 60
+
+- name: Ensure we have the kubeconfig file for the hub cluster copied in the bastion
+  ansible.builtin.copy:
+    src: /root/.kcli/clusters/hub/auth/kubeconfig
+    dest: /root/hub-kubeconfig
+    remote_src: true
+
+- name: Remove kubeadmin user
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Secret
+    namespace: kube-system
+    name: kubeadmin
+
+- name: Ensure ArgoCD instance is patched for ZTP support
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: argoproj.io/v1alpha1
+    kind: ArgoCD
+    name: openshift-gitops
+    namespace: openshift-gitops
+    state: patched
+    src: /tmp/argocd-openshift-gitops-patch.json
+    merge_type: merge
+  register: result
+  until: result.failed != true
+  retries: 5
+  delay: 60
+
+- name: Apply ArgoCD ClusterRoleBinding manifest to the cluster
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    state: present
+    src: /tmp/argocd-clusterrolebinding.yaml
+  register: result
+  until: result.failed != true
+  retries: 5
+  delay: 60
+
+- name: Wait until ArgoCD Pods are ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    kind: Pod
+    namespace: openshift-gitops
+    label_selectors:
+      - app.kubernetes.io/name = openshift-gitops-repo-server
+  register: result
+  until:
+    - result.resources[0].status.phase == "Running"
+    - result.resources[0].status.containerStatuses[0].ready == true
+  retries: 25
+  delay: 5
+
+- name: Apply HUB Cluster Operators APPs
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    state: present
+    src: /tmp/hub-operators-argoapps.yaml
+  register: result
+  until: result.failed != true
+  retries: 5
+  delay: 60
+
+- name: Wait until LVMCluster is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: lvm.topolvm.io/v1alpha1
+    kind: LVMCluster
+    name: lvmcluster
+    namespace: openshift-storage
+  register: lvmcluster
+  retries: 60
+  delay: 10
+  until:
+    - lvmcluster is defined
+    - lvmcluster.resources | length > 0
+    - lvmcluster.resources[0].status.state == "Ready"
+
+- name: Ensure LVMCLuster storageclass is set as default
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    state: patched
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    name: lvms-vg1
+    definition:
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+  register: result
+  until: result.failed != true
+  retries: 5
+  delay: 60
+
+- name: Wait until ArgoCD APP for HUB Cluster Operators deployment is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    name: hub-operators-deployment
+    namespace: openshift-gitops
+  register: argocd_app_hub_operators
+  retries: 100
+  delay: 10
+  until:
+    - argocd_app_hub_operators is defined
+    - argocd_app_hub_operators.resources | length > 0
+    - argocd_app_hub_operators.resources[0].status is defined
+    - argocd_app_hub_operators.resources[0].status.health.status == "Healthy"
+    - argocd_app_hub_operators.resources[0].status.sync.status == "Synced"
+
+- name: Wait until ArgoCD APP for HUB Cluster Operators config is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    name: hub-operators-config
+    namespace: openshift-gitops
+  register: argocd_app_hub_operators
+  retries: 100
+  delay: 10
+  until:
+    - argocd_app_hub_operators is defined
+    - argocd_app_hub_operators.resources | length > 0
+    - argocd_app_hub_operators.resources[0].status is defined
+    - argocd_app_hub_operators.resources[0].status.health.status == "Healthy"
+    - argocd_app_hub_operators.resources[0].status.sync.status == "Synced"
+
+- name: Wait until MultiClusterHub is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: operator.open-cluster-management.io/v1
+    kind: MultiClusterHub
+    name: multiclusterhub
+    namespace: open-cluster-management
+  register: rhacm_multiclusterhub
+  retries: 100
+  delay: 10
+  until:
+    - rhacm_multiclusterhub is defined
+    - rhacm_multiclusterhub.resources | length > 0
+    - rhacm_multiclusterhub.resources[0].status is defined
+    - rhacm_multiclusterhub.resources[0].status.phase is defined
+    - rhacm_multiclusterhub.resources[0].status.phase == "Running"
+
+- name: Wait until MultiClusterEngine is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: multicluster.openshift.io/v1
+    kind: MultiClusterEngine
+    name: multiclusterengine
+    namespace: multicluster-engine
+  register: mce_multiclusterengine
+  retries: 60
+  delay: 10
+  until:
+    - mce_multiclusterengine is defined
+    - mce_multiclusterengine.resources | length > 0
+    - mce_multiclusterengine.resources[0].status is defined
+    - mce_multiclusterengine.resources[0].status.phase is defined
+    - mce_multiclusterengine.resources[0].status.phase == "Available"
+
+- name: Wait until AutomationController is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: automationcontroller.ansible.com/v1beta1
+    kind: AutomationController
+    name: automation
+    namespace: aap
+  register: aap_automationcontroller
+  retries: 60
+  delay: 10
+  until:
+    - aap_automationcontroller is defined
+    - aap_automationcontroller.resources | length > 0
+    - aap_automationcontroller.resources[0].status is defined
+    - aap_automationcontroller.resources[0].status.conditions is defined
+    # yamllint disable rule:line-length
+    - aap_automationcontroller.resources[0].status.conditions | community.general.json_query("[?type=='Running'].status | [0]") == "True"
+    # yamllint enable rule:line-length
+
+- name: Get AutomationController admin password
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: v1
+    kind: Secret
+    name: automation-admin-password
+    namespace: aap
+  register: aap_automationctrlpwd
+  retries: 20
+  delay: 10
+  until:
+    - aap_automationctrlpwd is defined
+    - aap_automationctrlpwd.resources | length > 0
+    - aap_automationctrlpwd.resources[0].data is defined
+    - aap_automationctrlpwd.resources[0].data.password is defined
+
+- block:
+    - name: Set fact for public automation controller
+      ansible.builtin.set_fact:
+        # yamllint disable rule:line-length
+        aap2_automationactrl_url_pub: "https://hypervisor.{{ guid }}.{{ cluster_dns_zone }}"
+        # yamllint enable rule:line-length
+
+    - name: Ensure automationcontroller public route is created
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: route.openshift.io/v1
+          kind: Route
+          metadata:
+            name: automation-custom
+            namespace: aap
+          spec:
+            host: "hypervisor.{{ guid }}.{{ cluster_dns_zone }}"
+            port:
+              targetPort: http
+            tls:
+              insecureEdgeTerminationPolicy: Redirect
+              termination: edge
+            to:
+              kind: Service
+              name: automation-service
+              weight: 100
+            wildcardPolicy: None
+
+    - name: Set fact for public automation controller
+      ansible.builtin.set_fact:
+        aap2_automationactrl_url_created: true
+
+  rescue:
+    - name: Set fact for public automation controller
+      ansible.builtin.set_fact:
+        aap2_automationactrl_url_pub: "{{ aap2_automationactrl_url }}"
+        aap2_automationactrl_url_created: false
+
+- name: Ensure SNO ssh key is downloaded
+  ansible.builtin.get_url:
+    # yamllint disable rule:line-length
+    url: "http://infra.5g-deployment.lab:3000/student/5g-ran-deployments-on-ocp-lab/raw/branch/{{ lab_version }}/lab-materials/lab-env-data/hypervisor/ssh-key"
+    # yamllint enable rule:line-length
+    dest: "/root/.ssh/snokey"
+    mode: "0400"
+
+- name: Apply SNO1 Cluster Deployment APPs
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    state: present
+    src: /tmp/sno1-argoapp.yaml
+  register: result
+  until: result.failed != true
+  retries: 5
+  delay: 60
+
+- name: Wait until ArgoCD APP for SNO1 Cluster deployment is ready
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    name: sno1-deployment
+    namespace: openshift-gitops
+  register: argocd_app_sno1_deployment
+  retries: 60
+  delay: 10
+  until:
+    - argocd_app_sno1_deployment is defined
+    - argocd_app_sno1_deployment.resources | length > 0
+    - argocd_app_sno1_deployment.resources[0].status is defined
+    - argocd_app_sno1_deployment.resources[0].status.health.status == "Healthy"
+    - argocd_app_sno1_deployment.resources[0].status.sync.status == "Synced"
+
+# HAproxy was installed in pre_workload
+- name: Ensure HAProxy can listen on port 6443
+  community.general.seport:
+    ports: 6443
+    proto: tcp
+    setype: http_port_t
+    state: present
+
+- name: Ensure HAProxy config is downloaded
+  ansible.builtin.get_url:
+    # yamllint disable rule:line-length
+    url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/haproxy/haproxy.cfg"
+    dest: "/etc/haproxy/haproxy.cfg"
+    mode: "0644"
+    # yamllint enable rule:line-length
+
+- name: Ensure HAProxy service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: haproxy
+
+- name: Wait for SNO1 cluster to start deploying
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: extensions.hive.openshift.io/v1beta1
+    kind: AgentClusterInstall
+    name: sno1
+    namespace: sno1
+  register: sno1_agentclusterinstall
+  retries: 20
+  delay: 60
+  until:
+    - sno1_agentclusterinstall is defined
+    - sno1_agentclusterinstall.resources | length > 0
+    - sno1_agentclusterinstall.resources[0].status is defined
+    # yamllint disable rule:line-length
+    - sno1_agentclusterinstall.resources[0].status.debugInfo.state == "preparing-for-installation" or sno1_agentclusterinstall.resources[0].status.debugInfo.state == "adding-hosts"
+    # yamllint enable rule:line-length
+
+# Configure AAP2 while SNO1 gets installed
+
+- name: Download manifest file
+  delegate_to: localhost
+  ansible.builtin.get_url:
+    url: "{{ controller_manifest.url }}"
+    dest: /tmp/aap_manifest.zip
+
+- name: Wait for AAP Controller to come up
+  ansible.builtin.uri:
+    url: "{{ aap2_automationactrl_url }}/api/v2/ping/"
+    status_code: 200
+    validate_certs: false
+  register: result
+  until:
+    - result.json is defined
+    - result.json.instances[0].heartbeat is defined
+    - result.json.instances[0].node_type == "control"
+  retries: 10
+  delay: 30
+  ignore_errors: true
+
+- name: Ensure Controller License is loaded
+  ansible.builtin.include_role:
+    name: infra.controller_configuration.license
+    apply:
+      delegate_to: localhost
+  vars:
+    controller_license:
+      manifest_file: /tmp/aap_manifest.zip
+    controller_validate_certs: false
+    controller_hostname: "{{ aap2_automationactrl_url_pub }}"
+    controller_username: "{{ aap2_webconsole_user }}"
+    # yamllint disable rule:line-length
+    controller_password: "{{ aap_automationctrlpwd.resources[0].data.password | ansible.builtin.b64decode }}"
+    # yamllint enable rule:line-length
+
+- name: Ensure manifest file is deleted
+  delegate_to: localhost
+  ansible.builtin.file:
+    path: /tmp/aap_manifest.zip
+    state: absent
+
+- name: Ensure folder for AutomationController configs exists
+  delegate_to: localhost
+  ansible.builtin.file:
+    path: /tmp/aap2configs/{{ item }}
+    state: directory
+    mode: 0755
+  with_items:
+    - "Lab"
+    - "Lab/credentials"
+    - "Lab/inventories"
+    - "Lab/inventories/Lab Inventory"
+    - "Lab/inventories/ZTP Done Clusters"
+    - "Lab/job_templates"
+    - "Lab/projects"
+    - "Lab/users"
+    - "user_roles"
+
+- name: Ensure AutomationController configs are downloaded
+  delegate_to: localhost
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.destination }}"
+    mode: "{{ item.mode }}"
+  # yamllint disable rule:line-length
+  retries: 5
+  delay: 10
+  with_items:
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/current_credential_types.yaml", destination: "/tmp/aap2configs/", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/current_execution_environments.yaml", destination: "/tmp/aap2configs/", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/user_roles/current_roles_student.yaml", destination: "/tmp/aap2configs/user_roles", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/Lab/current_organization.yaml", destination: "/tmp/aap2configs/Lab/", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/Lab/users/student.yaml", destination: "/tmp/aap2configs/Lab/users/student.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/Lab/projects/8_5G%20RAN%20Lab%20Project.yaml", destination: "/tmp/aap2configs/Lab/projects/8_5G RAN Lab Project.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/Lab/job_templates/10_ZTP%20Done%20Automation.yaml", destination: "/tmp/aap2configs/Lab/job_templates/10_ZTP Done Automation.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/Lab/inventories/Lab%20Inventory/2_Lab%20Inventory.yaml", destination: "/tmp/aap2configs/Lab/inventories/Lab Inventory/2_Lab Inventory.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/Lab/inventories/Lab%20Inventory/current_inventory_sources.yaml", destination: "/tmp/aap2configs/Lab/inventories/Lab Inventory/current_inventory_sources.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/Lab/inventories/ZTP%20Done%20Clusters/3_ZTP%20Done%20Clusters.yaml", destination: "/tmp/aap2configs/Lab/inventories/ZTP Done Clusters/3_ZTP Done Clusters.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/Lab/inventories/ZTP%20Done%20Clusters/current_inventory_sources.yaml", destination: "/tmp/aap2configs/Lab/inventories/ZTP Done Clusters/current_inventory_sources.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/Lab/credentials/3_Gitea%20Credentials.yaml", destination: "/tmp/aap2configs/Lab/credentials/3_Gitea Credentials.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/Lab/credentials/6_HUB%20Cluster%20Kubeconfig.yaml", destination: "/tmp/aap2configs/Lab/credentials/6_HUB Cluster Kubeconfig.yaml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/aap2/config-files/Lab/credentials/8_Lab%20Disconnected%20Registry.yaml", destination: "/tmp/aap2configs/Lab/credentials/8_Lab Disconnected Registry.yaml", mode: "0644"}
+  # yamllint enable rule:line-length
+
+- name: Read Hub Kubeconfig file
+  ansible.builtin.slurp:
+    src: /root/hub-kubeconfig
+  register: hub_kubeconfig_file
+
+- name: Ensure Controller configs are read
+  ansible.builtin.include_role:
+    name: infra.controller_configuration.filetree_read
+    apply:
+      delegate_to: localhost
+  vars:
+    filetree_controller_settings: "/tmp/aap2configs"
+    filetree_controller_organizations: "/tmp/aap2configs"
+    filetree_controller_labels: "/tmp/aap2configs"
+    filetree_controller_user_accounts: "/tmp/aap2configs"
+    filetree_controller_teams: "/tmp/aap2configs"
+    filetree_controller_credential_types: "/tmp/aap2configs"
+    filetree_controller_credentials: "/tmp/aap2configs"
+    filetree_controller_credential_input_sources: "/tmp/aap2configs"
+    filetree_controller_notifications: "/tmp/aap2configs"
+    filetree_controller_projects: "/tmp/aap2configs"
+    filetree_controller_execution_environments: "/tmp/aap2configs"
+    filetree_controller_applications: "/tmp/aap2configs"
+    filetree_controller_inventories: "/tmp/aap2configs"
+    filetree_controller_inventory_sources: "/tmp/aap2configs"
+    filetree_controller_instance_groups: "/tmp/aap2configs"
+    filetree_controller_hosts: "/tmp/aap2configs"
+    filetree_controller_groups: "/tmp/aap2configs"
+    filetree_controller_templates: "/tmp/aap2configs"
+    filetree_controller_workflow_job_templates: "/tmp/aap2configs"
+    filetree_controller_schedules: "/tmp/aap2configs"
+    filetree_controller_roles: "/tmp/aap2configs"
+    gitea_user: "student"
+    gitea_pwd: "student"
+    hub_kubeconfig_file_content: "{{ hub_kubeconfig_file.content | b64decode }}"
+    disconnected_registry_host: "{{ lab_registry_host }}"
+    disconnected_registry_user: "admin"
+    disconnected_registry_pwd: "r3dh4t1!"
+    inventory_source_path: "inventories/cluster-inventory-example.yml"
+    playbook_source_path: "playbooks/cluster_mgmt_example_playbook.yml"
+    aap_repository_url: "http://infra.5g-deployment.lab:3000/student/aap-integration-tools.git"
+    student_aap_pwd: "{{ strong_dev_password }}"
+    execution_environment_img: "infra.5g-deployment.lab:8443/rhsysdeseng/5granlab-ee:lab"
+    controller_validate_certs: false
+    controller_hostname: "{{ aap2_automationactrl_url_pub }}"
+    controller_username: "{{ aap2_webconsole_user }}"
+    # yamllint disable rule:line-length
+    controller_password: "{{ aap_automationctrlpwd.resources[0].data.password | ansible.builtin.b64decode }}"
+    # yamllint enable rule:line-length
+
+- name: Ensure AAP Controller is up
+  ansible.builtin.uri:
+    url: "{{ aap2_automationactrl_url }}/api/v2/ping/"
+    status_code: 200
+    validate_certs: false
+  register: result
+  until:
+    - result.json is defined
+    - result.json.instances[0].heartbeat is defined
+    - result.json.instances[0].node_type == "control"
+  retries: 10
+  delay: 30
+  ignore_errors: true
+
+# Until the controller_configuration dispatch collection gets updated to properly manage
+# constructed inventories we need to run multiples times the role.
+
+- name: Ensure Controller configs are loaded
+  ansible.builtin.include_role:
+    name: infra.controller_configuration.dispatch
+    apply:
+      delegate_to: localhost
+      ignore_errors: "{{ item }}"
+  vars:
+    controller_configuration_projects_async_retries: 120
+    controller_configuration_projects_async_delay: 2
+    controller_validate_certs: false
+    controller_configuration_async_dir: "/tmp"
+    controller_hostname: "{{ aap2_automationactrl_url_pub }}"
+    controller_username: "{{ aap2_webconsole_user }}"
+    # yamllint disable rule:line-length
+    controller_password: "{{ aap_automationctrlpwd.resources[0].data.password | ansible.builtin.b64decode }}"
+    # yamllint enable rule:line-length
+  with_items:
+    - true
+    - true
+    - true
+    - true
+    - false
+
+- name: Ensure AutomationController admin password is deleted
+  kubernetes.core.k8s:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: v1
+    kind: Secret
+    name: automation-admin-password
+    namespace: aap
+    state: absent
+  retries: 20
+  delay: 10
+
+- name: Ensure folder for AutomationController configs is deleted
+  delegate_to: localhost
+  ansible.builtin.file:
+    path: /tmp/aap2configs/
+    state: absent
+
+- name: Ensure automationcontroller public route is deleted
+  kubernetes.core.k8s:
+    state: absent
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: aap
+    name: automation-custom
+  when: aap2_automationactrl_url_created
+
+- name: Wait for SNO1 cluster to be deployed
+  kubernetes.core.k8s_info:
+    kubeconfig: /root/hub-kubeconfig
+    api_version: extensions.hive.openshift.io/v1beta1
+    kind: AgentClusterInstall
+    name: sno1
+    namespace: sno1
+  register: sno1_agentclusterinstall
+  retries: 120
+  delay: 60
+  until:
+    - sno1_agentclusterinstall is defined
+    - sno1_agentclusterinstall.resources | length > 0
+    - sno1_agentclusterinstall.resources[0].status is defined
+    - sno1_agentclusterinstall.resources[0].status.debugInfo.state == "adding-hosts"
+
+- name: Extract SNO1 kubeconfig
+  ansible.builtin.shell:
+    cmd: oc --kubeconfig /root/hub-kubeconfig -n sno1 extract secret/sno1-admin-kubeconfig --to=- > /root/sno1kubeconfig
+  register: result
+  retries: 3
+  delay: 10
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

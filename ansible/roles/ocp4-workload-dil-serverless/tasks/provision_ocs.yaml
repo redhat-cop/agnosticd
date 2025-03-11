@@ -1,0 +1,97 @@
+---
+- name: Evaluate {{ ocs_project }} namespace if not exists 
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ ocs_project }}'
+    resource_definition:
+      labels:
+        openshift.io/cluster-monitoring: 'true'    
+    state: present
+
+- name: Evaluate OCS OperatorGroup
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'ocs-operatorgroup.yaml.j2') }}"
+
+- name: Evaluate OCS Subscription
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'ocs-subscription.yaml.j2') }}"
+
+- name: "Wait for NooBaa operator to be ready"
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: "{{ ocs_project }}"
+    name: "noobaa-operator"
+  register: r_noobaa_operator_deployment
+  retries: 20
+  delay: 10
+  until:
+    - r_noobaa_operator_deployment.resources is defined
+    - r_noobaa_operator_deployment.resources | length | int > 0
+    - r_noobaa_operator_deployment.resources[0].status.availableReplicas is defined
+    - r_noobaa_operator_deployment.resources[0].status.availableReplicas | int == r_noobaa_operator_deployment.resources[0].spec.replicas | int
+
+- name: "Create NooBaa custom resource"
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'noobaa.yaml.j2') }}"
+
+- name: "Wait until NooBaa is active"
+  k8s_info:
+    api_version: noobaa.io/v1alpha1
+    kind: noobaa
+    namespace: "{{ ocs_project }}"
+    name: noobaa
+  register: r_noobaa
+  retries: 100
+  delay: 10
+  until:
+   - r_noobaa.resources is defined
+   - r_noobaa.resources | length | int > 0
+   - r_noobaa.resources[0].status.phase is defined
+   - r_noobaa.resources[0].status.phase == "Ready"
+
+- name: "Create s3 storage account"
+  k8s:
+    state: present
+    namespace: "{{ ocs_project }}"
+    resource_definition: "{{ lookup('template', 'ocs-noobaaaccount.yaml.j2') }}"
+
+- name: "Wait until Account is active"
+  k8s_info:
+    api_version: noobaa.io/v1alpha1
+    kind: NooBaaAccount
+    namespace: "{{ ocs_project }}"
+    name: s3-account
+  register: r_noobaa_account
+  retries: 100
+  delay: 10
+  until:
+   - r_noobaa_account.resources is defined
+   - r_noobaa_account.resources | length | int > 0
+   - r_noobaa_account.resources[0].status.phase is defined
+   - r_noobaa_account.resources[0].status.phase == "Ready"
+
+- name: Retrieve Nooobaa Account Secret
+  k8s_info:
+    kind: Secret
+    name: noobaa-account-s3-account
+    namespace: "{{ ocs_project }}"
+  register: r_nooobaa_secret
+
+- name: Retrieve AWS S3 credentials
+  set_fact:
+    aws_s3_credentials: "{{ r_nooobaa_secret.resources | json_query('[0].data')}}"
+
+- name: debug
+  debug:
+    msg: "AWS S3 Credentials: AWS_ACCESS_KEY_ID = [{{ aws_s3_credentials.AWS_ACCESS_KEY_ID | b64decode }}] AWS_SECRET_ACCESS_KEY = [{{ aws_s3_credentials.AWS_SECRET_ACCESS_KEY | b64decode }}]"
+
+
+- name: "Create cluster-admins OpenShift group"
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'ocs-group.yaml.j2') }}"

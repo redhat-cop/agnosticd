@@ -1,0 +1,570 @@
+---
+- name: Step 005 Environment specific Software
+  hosts: localhost
+  gather_facts: False
+  become: false
+  tasks:
+    - debug:
+        msg: "Software tasks Started"
+
+# Install Code Ready Containers
+- name: Setup Code Ready Containers
+  hosts: stfcrcs
+  become: false
+  tags:
+    - install-crc
+  tasks:
+    - name: "Lock the standalone host to Red Hat Enterprise Linux 8.2"
+      shell: subscription-manager release --set=8.2
+      become: yes
+    - name: Update all Packages and Reboot STC CRC VM
+      become: yes
+      block:
+        - name: Update all packages
+          yum:
+            name: '*'
+            state: latest
+          register: r_yum
+          retries: 3
+          until: r_yum is succeeded
+
+        - name: Determine if reboot is needed
+          command: needs-restarting -r
+          register: needs_restarting
+          failed_when: false
+          changed_when: false
+
+        - name: Reboot STF CRC VM after updating to the latest release
+          when: needs_restarting.rc == 1
+          block:
+            - name: Reboot STC CRC VM
+              reboot:
+                connect_timeout: 300
+                msg: "RHEL updates installing. Rebooting now."
+                pre_reboot_delay: 60
+                post_reboot_delay: 20
+    - name: Setup CRC
+      include_role:
+        name: codeready_containers_hacks
+    - name: Disable SELinux
+      become: yes
+      selinux:
+        state: disabled
+    - name: Template Systemd Service File for CRC
+      become: yes
+      template:
+        src: "crc.service.j2"
+        dest: "/etc/systemd/system/crc.service"
+        group: root
+        owner: root
+        mode: 0644
+
+    - name: enable crc service
+      become: yes
+      service:
+        name: crc
+        enabled: yes
+
+# We will be attacking k8s/OCP directly to the Code Ready Containers instance
+- name: Install kubernetes and openshift python module
+  hosts: stfcrcs
+  become: yes
+  tasks:
+    - name: Ensure python3-pip is installed
+      yum:
+        name: python3-pip
+        state: present
+      register: result
+      until: result.rc == 0
+      retries: 5
+      delay: 20
+
+    - name: "Install kubernetes python module"
+      pip:
+        name: kubernetes==11.0.0
+
+    - name: "Install openshift python module"
+      pip:
+        name: openshift==0.11.0
+
+- name: Install Service Telemetry Framework
+  hosts: stfcrcs
+  tags:
+    - install-stf-workload
+  tasks:
+    - name: Get crc url credentials
+      command: /usr/local/bin/crc console --credentials
+      register: crc_console_credentials
+
+    - debug:
+        msg:
+          - "OC LOGIN executed"
+          - "{{ crc_console_credentials.stdout[crc_console_credentials.stdout.rfind('oc'):-1] }} --insecure-skip-tls-verify=true"
+
+    - name: "Send the oc login command"
+      command: "{{ crc_console_credentials.stdout[crc_console_credentials.stdout.rfind('oc'):-1] }} --insecure-skip-tls-verify=true"
+      register: crc_console_reusing_credentials
+      retries: 5
+      delay: 20
+      until: crc_console_reusing_credentials.rc == 0
+
+    - name: Create project for STF
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'project.yaml') }}"
+
+    - name: Create operator group for STF
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'operatorgroup.yaml') }}"
+
+    - name: Wait for operator group to be present
+      k8s_info:
+        api_version: operators.coreos.com/v1
+        kind: OperatorGroup
+        name: service-telemetry-operator-group
+        namespace: service-telemetry
+      register: result
+      until:
+        - "result.resources | length > 0"
+
+    - name: Create catalog source to provide access to the resources on the OperatorHub.io Community Catalog Source
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'operatorhubiocatalogsource.yaml') }}"
+
+    - name: Create catalog source to provide access to the resources Service Telemetry Operator and the Smart Gateway Operator
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'catalogsource.yaml') }}"
+
+    - name: Create subscription for AMQ Certificate Manager Operator
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'amqsubscription.yaml') }}"
+
+    - name: Get Installed AMQ Certificate Manager CSV
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: amq7-cert-manager-operator
+        namespace: openshift-operators
+      register: r_subscription_amq_certificate_manager
+      retries: 100
+      delay: 30
+      until:
+        - r_subscription_amq_certificate_manager.resources[0].status.currentCSV is defined
+        - r_subscription_amq_certificate_manager.resources[0].status.currentCSV | length > 0
+
+    - name: Wait until AMQ Certificate Manager CSV is installed
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ r_subscription_amq_certificate_manager.resources[0].status.currentCSV }}"
+        namespace: openshift-operators
+      register: r_csv_amq_certificate_manager
+      retries: 50
+      delay: 20
+      until:
+        - r_csv_amq_certificate_manager.resources[0].status.phase is defined
+        - r_csv_amq_certificate_manager.resources[0].status.phase | length > 0
+        - r_csv_amq_certificate_manager.resources[0].status.phase == "Succeeded"
+
+    - name: Create subscription for Elastic Cloud on Kubernetes Operator
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'elasticcloudsubscription.yaml') }}"
+
+    - name: Get Installed Elastic Cloud CSV
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: elastic-cloud-eck
+        namespace: service-telemetry
+      register: r_subscription_elastic_cloud
+      retries: 50
+      delay: 20
+      until:
+        - r_subscription_elastic_cloud.resources[0].status.currentCSV is defined
+        - r_subscription_elastic_cloud.resources[0].status.currentCSV | length > 0
+
+    - name: Wait until Elastic Cloud CSV is installed
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ r_subscription_elastic_cloud.resources[0].status.currentCSV }}"
+        namespace: service-telemetry
+      register: r_csv_elastic_cloud
+      retries: 50
+      delay: 20
+      until:
+        - r_csv_elastic_cloud.resources[0].status.phase is defined
+        - r_csv_elastic_cloud.resources[0].status.phase | length > 0
+        - r_csv_elastic_cloud.resources[0].status.phase == "Succeeded"
+
+    - name: Create subscription for Service Telemetry Operator
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'servicetelemetrysubscription.yaml') }}"
+
+    - name: Get Installed Service Telemetry CSV
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: service-telemetry-operator
+        namespace: service-telemetry
+      register: r_subscription_service_telemetry
+      retries: 50
+      delay: 20
+      until:
+        - r_subscription_service_telemetry.resources[0].status.currentCSV is defined
+        - r_subscription_service_telemetry.resources[0].status.currentCSV | length > 0
+
+    - name: Wait until Service Telemetry CSV is installed
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ r_subscription_service_telemetry.resources[0].status.currentCSV }}"
+        namespace: service-telemetry
+      register: r_csv_service_telemetry
+      retries: 50
+      delay: 20
+      until:
+        - r_csv_service_telemetry.resources[0].status.phase is defined
+        - r_csv_service_telemetry.resources[0].status.phase | length > 0
+        - r_csv_service_telemetry.resources[0].status.phase == "Succeeded"
+
+    - name: Creating a ServiceTelemetry object in OCP
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'servicetelemetryobject.yaml') }}"
+
+    - name: Wait until Service Telemetry is ready
+      k8s_info:
+        api_version: infra.watch/v1alpha1
+        kind: ServiceTelemetry
+        name: stf-default
+        namespace: service-telemetry
+      register: servicetelemetry_result
+      retries: 30
+      delay: 20
+      until:
+        - servicetelemetry_result.resources[0].status.conditions[0].status is defined
+        - servicetelemetry_result.resources[0].status.conditions[0].status == "True"
+
+    - name: Project scope to service-telemetry
+      shell: oc project service-telemetry
+
+    - name: sleep for 120 seconds for STF
+      wait_for:
+        timeout: 120
+      delegate_to: localhost
+
+    - name: Get AMQ Interconnect route address
+      shell: >-
+        oc get routes
+        -ogo-template='{% raw %}{{ range .items }}{{ printf "%s\n" .spec.host }}{{ end }}{% endraw %}'
+        | grep "\-5671"
+      register: routeamqinterconnect
+      ignore_errors: yes
+
+    - name: Register crc host with ip
+      add_host:
+        name: "crc_with_stf_installed"
+        crc_ip: " {{ ansible_default_ipv4.address }}"
+        crc_routeamqpinterconnect: "{{ routeamqinterconnect.stdout | default ('stf-default-interconnect-5671-service-telemetry.apps-crc.testing') }} "
+        crc_console_credentials_stdout: "{{ crc_console_credentials.stdout }}"
+
+# Install Grafana dashboards
+- name: Install Grafana operators and dashboards
+  hosts: stfcrcs
+  tags:
+    - install-grafana-dashboards
+  tasks:
+    - name: Create subscription for grafana Operator
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'grafanasubscription.yaml') }}"
+
+    - name: Get Installed Grafana CSV
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: grafana-operator
+        namespace: service-telemetry
+      register: r_subscription_grafana
+      retries: 50
+      delay: 20
+      until:
+        - r_subscription_grafana.resources[0].status.currentCSV is defined
+        - r_subscription_grafana.resources[0].status.currentCSV | length > 0
+
+    - name: Wait until grafana CSV is installed
+      k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ r_subscription_grafana.resources[0].status.currentCSV }}"
+        namespace: service-telemetry
+      register: r_csv_grafana
+      retries: 100
+      delay: 30
+      until:
+        - r_csv_grafana.resources[0].status.phase is defined
+        - r_csv_grafana.resources[0].status.phase | length > 0
+        - r_csv_grafana.resources[0].status.phase == "Succeeded"
+
+    - name: Enable grafana in the ServiceTelemetry object in OCP
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'servicetelemetryobjectwithgrafana.yaml') }}"
+
+    - name: Create Infrastructure Node View Dashboard
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'rhos-dashboard.yaml') }}"
+
+    - name: Create Cloud View Dashboard
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'rhos-cloud-dashboard.yaml') }}"
+
+    - name: Create Grafaha Dashboard route
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'dashboardroute.yaml') }}"
+    
+    - name: Get grafana route
+      k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: dashboards
+        namespace: service-telemetry
+      register: r_grafana_route
+      retries: 50
+      delay: 5
+      until: r_grafana_route.resources[0].spec.host != ''
+
+    - name: Register crc host with ip
+      add_host:
+        name: "crc_with_grafana"
+        crc_ip: " {{ ansible_default_ipv4.address }}"
+        crc_grafana_route: "{{r_grafana_route.resources[0].spec.host}} "
+
+# Load OpenStack alerts
+- name: Load OpenStack related alerts
+  hosts: stfcrcs
+  tags:
+    - load-openstack-alerts
+  tasks:
+    - name: Load OSP Alers
+      k8s:
+        state: present
+        definition: "{{ lookup('file', 'alerts.yaml') }}"
+
+- name: Setup bastion with acces to CRC
+  hosts: bastions
+  become: false
+  tags:
+    - setup-bastion
+  tasks:
+    - name: Add AMQ Interconnect IP to /etc/hosts
+      lineinfile: dest=/etc/hosts backup=yes insertbefore=EOF line="{{ hostvars['crc_with_stf_installed']['crc_ip'] }} console-openshift-console.apps-crc.testing api.crc.testing oauth-openshift.apps-crc.testing console-openshift-console.apps-crc.testing default-route-openshift-image-registry.apps-crc.testing dashboards-service-telemetry.apps-crc.testing"
+      become: yes
+
+# Install OSP all in one
+
+- name: Setup OSP
+  hosts: osps
+  become: false
+  tags:
+    - install-osp
+  tasks:
+    - name: Setting hostname for the all in one host
+      hostname: 
+        name: "{{ ansible_hostname }}.{{ domain }}"
+      become: yes
+
+    - name: Create stack user
+      user: 
+        name: stack
+        comment: "Director Installation User"
+        shell: /bin/bash
+      become: yes
+
+    - name: Ensure that .ssh directory exist in stack user home
+      file: 
+        path: /home/stack/.ssh
+        state: directory
+        owner: stack
+        group: stack
+        mode: 0700
+      become: yes
+
+    - name: Set sudo permissions for stack user
+      lineinfile: 
+        dest: /etc/sudoers.d/stack
+        line: "stack ALL=(root) NOPASSWD:ALL"
+        state: present
+        create: yes
+        mode: 0450
+        owner: root
+        group: root
+      become: yes
+
+    - name: Add hostname to /etc/hosts
+      lineinfile: 
+        dest: /etc/hosts
+        backup: yes
+        insertbefore: BOF
+        line: "127.0.0.1    {{ ansible_hostname }} {{ ansible_nodename }} localhost localhost.localdomain localhost4 localhost4.localdomain4"
+      become: yes
+
+    - name: Add AMQ Interconnect IP to /etc/hosts
+      lineinfile: 
+        dest: /etc/hosts
+        backup: yes
+        insertbefore: EOF 
+        line: "{{ hostvars['crc_with_stf_installed']['crc_ip']}} {{ hostvars['crc_with_stf_installed']['crc_routeamqpinterconnect'] }}"
+      become: yes
+
+    - name: Delete old hosts entry...
+      lineinfile: 
+        dest: /etc/hosts
+        backup: no
+        line: "127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4" 
+        state: absent
+      become: yes
+
+    - name: "Lock the standalone host to Red Hat Enterprise Linux 8.2"
+      shell: subscription-manager release --set=8.2
+      become: yes
+
+    - name: "Disable containers tools rhel8"
+      shell: dnf module disable -y container-tools:rhel8
+      become: yes
+
+    - name: "Enable containers tools 2.0"
+      shell: dnf module enable -y container-tools:2.0
+      become: yes
+
+    - name: "Disable virt tools rhel"
+      shell: dnf module disable -y virt:rhel
+      become: yes
+
+    - name: "Enable virt tools 8.2"
+      shell: dnf module enable -y virt:8.2
+      become: yes
+
+    - name: Update all Packages and Reboot OSP standlone VM
+      become: yes
+      block:
+        - name: Update all packages
+          yum:
+            name: '*'
+            state: latest
+          register: r_yum
+          retries: 3
+          until: r_yum is succeeded
+
+        - name: Determine if reboot is needed
+          command: needs-restarting -r
+          register: needs_restarting
+          failed_when: false
+          changed_when: false
+
+        - name: Reboot all VMs after updating to the latest release
+          when: needs_restarting.rc == 1
+          block:
+            - name: Reboot all VMs
+              reboot:
+                connect_timeout: 300
+                msg: "RHEL updates installing. Rebooting now."
+                pre_reboot_delay: 60
+                post_reboot_delay: 20
+
+    - name: Ensure python3-tripleoclient is installed
+      yum:
+        name: python3-tripleoclient
+        state: present
+      register: result
+      until: result.rc == 0
+      retries: 5
+      delay: 20
+      become: yes
+
+    - name: Create standalone environment from the template
+      template: src=standalone_parameters.yaml.j2 dest=/home/stack/standalone_parameters.yaml mode=0644
+      become: yes
+      become_user: stack
+
+    - name: Adding Standalone tripleo additional services installation (in this example HEAT)
+      copy:
+        dest: /home/stack/standalone-tripleo-additional-services.yaml
+        src: standalone-tripleo-additional-services.yaml
+        owner: stack
+        group: stack
+        mode: 0644
+      become: yes
+      become_user: stack
+
+    - name: Create standalone STF from the template
+      template: src=stf-connectors.yaml.j2 dest=/home/stack/stf-connectors.yaml mode=0644
+      become: yes
+      become_user: stack
+
+    - name: "Ensure the container image preparation file exist."
+      shell: >
+          openstack tripleo container image prepare default
+          --output-env-file /home/stack/containers-prepare-parameters.yaml
+      args:
+        creates: /home/stack/containers-prepare-parameters.yaml
+      become: yes
+      become_user: stack
+
+    - name: "Read content of containers-prepare-parameter.yaml"
+      slurp:
+        path: /home/stack/containers-prepare-parameters.yaml
+      register: r_containers_prepare_parameter
+      become: yes
+      become_user: stack
+
+    - set_fact:
+        containers_prepare_parameter: "{{ r_containers_prepare_parameter['content'] | b64decode | from_yaml }}"
+
+    - name: "Ensure env file with registry credentials is up to date."
+      template:
+        src: containers-prepare-parameters.yaml.j2
+        dest: /home/stack/containers-prepare-parameters.yaml
+      become: yes
+      become_user: stack
+
+    - name: Install all in one
+      vars:
+        net_mask: "{{ ansible_default_ipv4.network }}/{{ ansible_default_ipv4.netmask }}"
+      command: >-
+        openstack tripleo deploy
+        --templates
+        --local-ip={{ ansible_default_ipv4.address }}/{{ net_mask | ipaddr('prefix') }}
+        -e /usr/share/openstack-tripleo-heat-templates/environments/standalone/standalone-tripleo.yaml
+        -r /usr/share/openstack-tripleo-heat-templates/roles/Standalone.yaml
+        -e /home/stack/containers-prepare-parameters.yaml
+        -e /home/stack/standalone-tripleo-additional-services.yaml
+        -e /usr/share/openstack-tripleo-heat-templates/environments/metrics/ceilometer-write-qdr.yaml
+        -e /usr/share/openstack-tripleo-heat-templates/environments/enable-stf.yaml
+        -e /home/stack/stf-connectors.yaml
+        -e /home/stack/standalone_parameters.yaml
+        -e /usr/share/openstack-tripleo-heat-templates/environments/services/neutron-ovs.yaml
+        --output-dir /home/stack/
+        --standalone
+      become: yes
+
+- name: Software flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Software checks completed successfully"

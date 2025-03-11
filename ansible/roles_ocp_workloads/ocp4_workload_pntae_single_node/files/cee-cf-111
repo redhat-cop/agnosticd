@@ -1,0 +1,348 @@
+#!/bin/bash
+#
+# kc-XXX	Knowledge Checkpoint break script for XXXX
+#
+# description: This utility will make local system changes  \
+#              that reproduce XXXX issues.  The broken system \
+#	       can then be used by GSS support engineers and \
+#	       Red Hat support partners along with self-paced \
+#	       training modules to grow XXXX troubleshooting knowledge.
+#
+# processname: kc-XXXX
+#
+#
+# Last Modified:
+#	xxxxxxx <xxxx@redhat.com> xx/xx/2014
+#
+# Usage: ./kc-XXXX <KCID>
+# <KCID> can be one of the following:
+# break1 - used to reproduce a system that has issue XXXX
+# grade1 - used to grade a system after resolving the XXXX issue
+#
+# Error exit codes:
+# 0: exited successfully
+# 1: wrong hostname
+# 2: syntax command usage
+# 3: need to run as root user
+
+bold=`tput bold`
+normal=`tput sgr0`
+black=`tput setaf 0`
+red=`tput setaf 1`
+green=`tput setaf 2`
+yellow=`tput setaf 3`
+blue=`tput setaf 4`
+magenta=`tput setaf 5`
+cyan=`tput setaf 6`
+white=`tput setaf 7`
+
+
+MYHOSTNAME=`hostname`
+MYNAME=`whoami`
+
+if [[ ! "$MYNAME" == "user1" ]]
+then
+	echo "${cyan}$0 needs to be run by the user1.${normal}"
+	exit 3
+fi
+
+# startup
+logger -p local0.notice "Initiating $0 with option(s) $@"
+echo "Initiating $0 with option(s) $@"
+
+
+get_creds() {
+
+
+        #check to see if login is working
+        export GUID=`hostname | awk -F. '{print $2}'`
+	myrelativekube=`find . | grep kubeconfig | head -1`
+	mykube=`readlink -f $myrelativekube`
+        if [[ -f ${mykube} ]]; then
+                echo "Using ${mykube}"
+                export KUBECONFIG=${mykube}
+        else
+                echo "Couldn't locate kubeconfig, tried ${mykube}"
+                read -p "Enter the absolute path to the kubeconfig to use: " KUBECONFIG
+                if [[ -f $KUBECONFIG ]]; then
+                        export KUBECONFIG=$KUBECONFIG
+                else
+                        echo "Couldn't locate kubeconfig $KUBECONFIG"
+                        exit 7
+                fi
+        fi
+
+        # determining kubeadmin password from install log
+
+        myrelativeinstall=`find . | grep openshift_install.log | head -1`
+        myinstall=`readlink -f $myrelativeinstall`
+
+
+        if [[ -f ${myinstall} ]]; then
+                echo "Inspecting $myinstall"
+                KUBEPASS=`grep "kubeadmin, password:" $myinstall | awk '{print substr($NF,1,length($NF)-1)}'`
+        else
+                echo "Couldn't locate openshift_install.log, tried $myinstall"
+                read -p "Enter the full path to the openshift_install.log: " INSTALL_LOG
+                if [[ -f "${INSTALL_LOG}" ]]; then
+                        KUBEPASS=`grep "kubeadmin, password:" $INSTALL_LOG | awk '{print substr($NF,1,length($NF)-1)}'`
+                else
+                        echo "Couldn't locate openshift_install.log, tried ${INSTALL_LOG}"
+                        read -p "Enter the kubeadmin password to use: " KUBEPASS
+                fi
+        fi
+
+
+}
+
+
+
+setup() {
+	# insert your break code here
+INSTALLER_VERSION=v0.16.1
+OC_CLI_VERSION=4.0.22
+
+	echo "Ravello environment not detected."
+	echo "Unable to setup."
+
+}
+
+
+break() {
+        mkdir -p /var/tmp/cee-cf-111
+        # trying oc login else fail
+        echo -ne "Trying to login..\t\t"
+	get_creds &>/dev/null
+
+	oc login -u system:admin >/dev/null 2>failed-login
+	if [[ $? -eq 0 ]]; then
+                echo "${green}SUCCESS${normal}"
+        else
+                echo "${red}FAILED${normal}"
+                echo "Make sure your cluster was successfully installed and available."
+		echo "Tried to run oc login -u kubeadmin -p ${KUBEPASS} but got:"
+		cat failed-login 2>/dev/null
+		rm -f failed-login
+                exit 7
+	fi
+
+	echo -n "Deploying application."
+
+	# create the fishbone project, deploy app, and make sure its working
+        #git clone https://github.com/openshift-katacoda/blog-django-py.git &>/dev/null
+        oc new-project fishbone --display-name="Fishbone" &>/dev/null
+        echo -n "." && sleep 1
+        oc project fishbone &>/dev/null
+        echo -n "." && sleep 1
+        oc new-app /home/user1/blog-django-py --strategy=docker -n fishbone &>/dev/null
+        echo -n "." && sleep 1
+	oc expose service/blog-django-py -n fishbone &>/dev/null
+
+	echo -ne ".\t"
+	oc get project | grep -i fishbone | grep -i active &>/dev/null
+	if [[ $? -eq 0 ]]; then
+		echo "${green}SUCCESS${normal}"
+	else
+		echo "${red}FAILED${normal}"
+		echo "Unable to successfully deploy project."
+		echo "Check to make sure your cluster is functioning, or re-provision"
+		exit 1
+	fi
+
+	# add crd with a finalizer
+	echo -ne "Applying break..\t\t"
+
+cat << EOF > /tmp/fishbone-crd.yaml
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: fishbones.samplecontroller.k8s.io
+spec:
+  group: samplecontroller.k8s.io
+  version: v1alpha1
+  names:
+    kind: FishBone
+    plural: fishbones
+  scope: Namespaced
+  validation:
+    openAPIV3Schema:
+      required: ["spec"]
+      properties:
+        spec:
+          required: ["fishSpec"]
+          properties:
+            fishSpec:
+              type: string
+              minimum: 1
+EOF
+
+cat << EOF > /tmp/fishbone.yaml
+apiVersion: "samplecontroller.k8s.io/v1alpha1"
+kind: FishBone
+metadata:
+  name: fishbone-object
+  finalizers:
+  - finalizer.samplecontroller.k8s.io
+spec:
+  fishSpec: salmon
+EOF
+	oc create -f /tmp/fishbone-crd.yaml &> /dev/null
+	oc create -f /tmp/fishbone.yaml -n fishbone &>/dev/null
+
+	FISH_OBJECT=`oc describe fishbone`
+	if [[ "$FISH_OBJECT" =~ finalizer.samplecontroller ]]; then
+                echo "${green}SUCCESS${normal}"
+        else
+                echo "${red}FAILED${normal}"
+                echo "Unable to properly create the break activity."
+                echo "Check to make sure your cluster is functioning, or re-provision"
+                exit 1
+        fi
+
+	# if you make it here then it worked, mark break and clean up
+	touch /var/tmp/cee-cf-111/.break_ceecf111
+	rm -f /tmp/fishbone.yaml
+	rm -f /tmp/fishbone-crd.yaml
+}
+
+grade() {
+        STATUS="success"
+        echo "Grading.  Please wait."
+
+	if  ! [ -f  /var/tmp/cee-cf-111/.break_ceecf111 ]
+	then
+		echo "It seems like break was not run successfully.  Run $0 break first."
+		exit 7
+	fi
+
+
+        # insert your grade code here and set STATUS="success" if the lesson criteria is met.
+        echo -ne "Testing login using oc..\t\t"
+
+	get_creds &>/dev/null
+
+        oc login -u kubeadmin -p $KUBEPASS &>/dev/null
+        if [[ $? -eq 0 ]]; then
+                echo "${green}SUCCESS${normal}"
+	else
+                echo "${red}FAILED${normal}"
+                echo "Unable to login using oc login -u kubeadmin -p $KUBEPASS"
+		exit 1
+        fi
+
+        echo -ne "Verifying fishbone project was removed.\t"
+
+        oc get project | grep -i fishbone  &>/dev/null
+        if [[ $? -eq 0 ]]; then
+                # fishbone project still present, so unable to fix/clean
+                echo "${red}FAILED${normal}"
+		STATUS="failed"
+        else
+                # fishbone project missing so fixed
+                echo "${green}SUCCESS${normal}"
+        fi
+
+        # end your grading code here
+
+        if [[ $STATUS == "success" ]]
+        then
+                echo "Success."
+                echo "${bold}COMPLETION CODE: AMUSE82LADDER${normal}"
+        else
+                echo "Sorry.  There still seems to be a problem"
+        fi
+}
+
+
+fix() {
+
+	get_creds &>/dev/null
+
+        # trying oc login else fail
+        echo -ne "Trying to login.\t\t"
+        oc login -u system:admin >/dev/null 2>failed-login
+        if [[ $? -eq 0 ]]; then
+                echo "${green}SUCCESS${normal}"
+        else
+                echo "${red}FAILED${normal}"
+                echo "Make sure your cluster was successfully installed and available."
+                echo "Tried to run oc login -u kubeadmin -p ${KUBEPASS} but got:"
+                cat failed-login 2>/dev/null
+                exit 7
+        fi
+
+	echo -ne "Removing break.\t\t\t"
+	# modify the fishbone crd that has a finalizer configured for it
+
+	oc patch fishbone/fishbone-object --type=merge -p '{"metadata": {"finalizers":null}}' &>/dev/null
+	echo "${green}DONE${normal}"
+
+
+	# now try to delete the fishbone project
+	nohup oc delete project fishbone >/dev/null 2>&1
+
+
+
+	# wait a few seconds
+	sleep 3
+
+	# check to make sure project is deleted
+	echo -n "Verifying fishbone project was removed."
+	COUNT=0
+	project_status=`oc get project | grep -i fishbone`
+        while [[ ! -z "$project_status" && "$COUNT" -lt 9 ]]
+        do
+		project_status=`oc get project | grep -i fishbone`
+                COUNT=$((COUNT+1))
+                sleep 5
+                echo -n "."
+        done
+	echo -ne ".\t"
+	oc get project | grep -i fishbone
+	if [[ $? -eq 0 ]]; then
+		# fishbone project still present, so unable to fix/clean
+		echo "${red}FAILED${normal}"
+		exit 1
+	else
+		# fishbone project missing so fixed
+		echo "${green}SUCCESS${normal}"
+	fi
+
+
+	# cleanup
+	rm -f /var/tmp/cee-cf-111/.break_ceecf111
+}
+
+case "$1" in
+	setup)
+                if [[ -f /etc/ravello/vm.json ]]; then
+                        echo "Ravello-based learning environment detected."
+                else
+                        setup
+                fi
+		;;
+        break)
+                break
+		;;
+	fix)
+                echo "This will revert the changes made by break."
+                read -p "Are you sure you want to continue (y/n)? " ANSWER
+                if [[ "$ANSWER" == "y" ]]; then
+                        fix
+                else
+                        echo "Exiting without making a change."
+                fi
+                ;;
+	grade)
+		grade
+		;;
+	*)
+		echo $"Usage: $0 {setup|break|fix|grade}"
+		exit 2
+esac
+
+
+# ending
+logger -p local0.notice "Completed $0 with option(s) $@ successfully"
+echo "Completed $0 with option(s) $@ successfully"
+exit 0

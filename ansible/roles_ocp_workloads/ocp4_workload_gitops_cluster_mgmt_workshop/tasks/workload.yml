@@ -1,0 +1,123 @@
+---
+# Implement your Workload deployment tasks here
+# deploy individual argo instances for users
+- name: Install DevWorkspace Operator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: devworkspace-operator
+    install_operator_channel: "fast"
+    install_operator_catalog: redhat-operators
+    install_operator_use_catalog_snapshot: false
+
+- name: Wait for DevWorkspaceTemplate CRD to exist
+  kubernetes.core.k8s_info:
+    api_version: "apiextensions.k8s.io/v1"
+    kind: CustomResourceDefinition
+    name: devworkspacetemplates.workspace.devfile.io
+    wait: true
+    wait_condition:
+      reason: InitialNamesAccepted
+      status: 'True'
+      type: Established
+    wait_sleep: 20
+    wait_timeout: 180
+
+- name: Install OpenShift GitOps operator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: openshift-gitops-operator
+    install_operator_channel: "stable"
+    install_operator_catalog: redhat-operators
+    install_operator_use_catalog_snapshot: false
+
+- name: Wait for ArgoCD CRD to exist
+  kubernetes.core.k8s_info:
+    api_version: "argoproj.io/v1alpha1"
+    kind: CustomResourceDefinition
+    name: ArgoCD
+    wait: true
+    wait_condition:
+      reason: InitialNamesAccepted
+      status: 'True'
+      type: Established
+    wait_sleep: 20
+    wait_timeout: 180
+
+- name: Install Web Terminal Operator
+  include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: web-terminal
+    install_operator_channel: "fast"
+    install_operator_catalog: redhat-operators
+    install_operator_use_catalog_snapshot: false
+
+- name: Pause for 5 minutes to let the web terminal operator installation settle
+  ansible.builtin.pause:
+    minutes: 5
+
+# modify the custom web terminal operator image
+# only needed until the image with kustomize goes GA
+- name: Modify the web terminal DevWorkspaceTemplate with a custom tools image
+  kubernetes.core.k8s:
+    definition: "{{ lookup('file', 'devworkspacetemplate.yaml' ) | from_yaml }}"
+    state: present
+  retries: 10
+  delay: 30
+
+- name: Wait for web-terminal-exec CR to exist
+  kubernetes.core.k8s_info:
+    kind: DevWorkspaceTemplate
+    namespace: openshift-operators
+    name: web-terminal-exec
+    api_version: workspace.devfile.io/v1alpha2
+  register: r_web_exec_cr
+  retries: 10
+  delay: 30
+  until: r_web_exec_cr.resources | length > 0
+
+- name: Modify the web terminal timeout
+  kubernetes.core.k8s_json_patch:
+    kind: DevWorkspaceTemplate
+    namespace: openshift-operators
+    name: web-terminal-exec
+    api_version: workspace.devfile.io/v1alpha2
+    patch:
+    - op: replace
+      path: /spec/components/0/container/env/0/value
+      value: "6h"
+
+- name: Create the lab-guide Argo CD Application
+  kubernetes.core.k8s:
+    definition: "{{ lookup('file', 'argo-application.lab-guide.yaml' ) | from_yaml }}"
+    state: present
+  retries: 10
+  delay: 30
+
+- name: Create new htpasswd Secret with additional users
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: htpasswd-additional-users-secret
+        namespace: openshift-config
+      data:
+        htpasswd: "{{ lookup('file', 'users.htpasswd' ) | b64encode }}"
+
+- name: Patch the cluster OAuth with extra users
+  kubernetes.core.k8s_json_patch:
+    kind: OAuth
+    namespace: openshift-config
+    name: cluster
+    patch:
+    - op: add
+      path: /spec/identityProviders/-
+      value: "{{ lookup('file', 'oauth.patch.json' ) }}"

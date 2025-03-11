@@ -1,0 +1,203 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  ansible.builtin.debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Install Operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: rhacs-operator
+    install_operator_namespace: "{{ ocp4_workload_rhacs_install_operator_namespace }}"
+    install_operator_channel: "{{ ocp4_workload_rhacs_install_operator_channel | default('') }}"
+    # ignored install_operator_catalog: redhat-operators
+    install_operator_use_catalog_snapshot: "{{ ocp4_workload_rhacs_install_operator_use_catalog_snapshot }}"
+    # unknown install_operator_catalogsource_name: "{{ ocp4_workload_rhacs_install_operator_channel | default('') }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_rhacs_install_operator_catalog_source_tag | default('') }}"
+
+# install Central
+
+- name: Create Central Namespace
+  kubernetes.core.k8s:
+    state: present
+    api_version: v1
+    kind: Namespace
+    name: stackrox
+
+- name: Generate random password for Central admin
+  ansible.builtin.set_fact:
+    ocp4_workload_rhacs_central_admin_password: >-
+        {{ lookup('password', '/dev/null chars=ascii_letters,digits '
+           ~ 'length=18'
+        ) }}
+
+- name: Create Secret for Central admin password
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: acs-password
+        namespace: stackrox
+      data:
+        password: "{{ ocp4_workload_rhacs_central_admin_password | b64encode }}"
+      type: Opaque
+
+- name: Create Central via CR
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'central.yaml.j2') | from_yaml }}"
+
+- name: Get Central route
+  kubernetes.core.k8s_info:
+    kind: Route
+    api_version: route.openshift.io/v1
+    namespace: stackrox
+    name: central
+  register: r_stackrox_central_route
+  retries: 10
+  delay: 20
+  until:
+    - r_stackrox_central_route.resources[0].spec.host is defined
+
+- name: Store central route as a fact
+  ansible.builtin.set_fact:
+    # yamllint disable-line rule:line-length
+    f_stackrox_central_addr: "{{ r_stackrox_central_route.resources[0].spec.host }}"
+
+- name: Wait for Central availability
+  ansible.builtin.uri:
+    url: "https://{{ f_stackrox_central_addr }}/v1/ping"
+    method: GET
+    user: admin
+    password: "{{ ocp4_workload_rhacs_central_admin_password }}"
+    force_basic_auth: true
+    validate_certs: false
+  register: result
+  until: result.status == 200
+  retries: 30
+  delay: 20
+
+# ACS Secured Cluster Installation
+- name: Get cluster init bundle
+  ansible.builtin.uri:
+    url: "https://{{ f_stackrox_central_addr }}/v1/cluster-init/init-bundles"
+    # random name for init-bundle
+    body: "{ \"name\": \"prod-{{ lookup('password', '/dev/null chars=ascii_lowercase,digits length=8') }}\"}"
+    method: POST
+    user: admin
+    password: "{{ ocp4_workload_rhacs_central_admin_password }}"
+    body_format: json
+    force_basic_auth: true
+    validate_certs: false
+  register: r_stackrox_cluster_init_response
+
+- name: Store cluster init bundle as a fact
+  ansible.builtin.set_fact:
+    f_stackrox_bundle: "{{ r_stackrox_cluster_init_response.json.kubectlBundle | b64decode }}"
+
+- name: Create init-bundle secrets
+  kubernetes.core.k8s:
+    namespace: stackrox
+    state: present
+    definition: "{{ f_stackrox_bundle }}"
+
+- name: Install Sensor on OpenShift Container Platform
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: platform.stackrox.io/v1alpha1
+      kind: SecuredCluster
+      metadata:
+        namespace: stackrox
+        name: stackrox-secured-cluster-services
+      spec:
+        clusterName: production
+        admissionControl:
+          listenOnCreates: true
+          listenOnEvents: true
+          listenOnUpdates: true
+          bypass: BreakGlassAnnotation
+          timeoutSeconds: 3
+          contactImageScanners: ScanIfMissing
+        perNode:
+          collector:
+            collection: EBPF
+            imageFlavor: Regular
+          taintToleration: TolerateTaints
+
+- name: Wait for ready sensor
+  kubernetes.core.k8s_info:
+    name: sensor
+    kind: Deployment
+    api_version: apps/v1
+    namespace: stackrox
+  register: r_stackrox_sensor_deployment
+  until:
+    - r_stackrox_sensor_deployment.resources[0].status.readyReplicas is defined
+    - r_stackrox_sensor_deployment.resources[0].status.readyReplicas | int >= 1
+  delay: 20
+  retries: 15
+
+- name: For fun, create a link in the OpenShift Console
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: console.openshift.io/v1
+      kind: ConsoleLink
+      metadata:
+        name: acs-console-link
+      spec:
+        applicationMenu:
+          imageURL: 'https://upload.wikimedia.org/wikipedia/commons/3/3a/OpenShift-LogoType.svg'
+          section: Red Hat Applications
+        href: 'https://{{ f_stackrox_central_addr }}'
+        location: ApplicationMenu
+        text: Red Hat Advanced Cluster Security for Kubernetes
+
+- name: Get roxctl
+  become: true
+  ansible.builtin.get_url:
+    url: https://mirror.openshift.com/pub/rhacs/assets/latest/bin/Linux/roxctl
+    dest: /usr/local/bin/roxctl
+    mode: '0755'
+
+- name: Create API token of role Admin
+  ansible.builtin.uri:
+    url: "https://{{ f_stackrox_central_addr }}/v1/apitokens/generate"
+    body: '{"name":"pipelines-ci-token","role":null,"roles":["Admin"]}'
+    method: POST
+    user: admin
+    password: "{{ ocp4_workload_rhacs_central_admin_password  }}"
+    body_format: json
+    force_basic_auth: true
+    validate_certs: false
+  register: r_ci_token_json
+
+- name: Get API token from response
+  ansible.builtin.set_fact:
+    f_rox_api_token: "{{ r_ci_token_json.json.token }}"
+
+- name: Write API token to bastion environment
+  become: true
+  ansible.builtin.lineinfile:
+    path: "/home/{{ student_name }}/.bashrc"
+    regexp: "^export ROX_API_TOKEN="
+    line: "export ROX_API_TOKEN={{ f_rox_api_token }}"
+
+- name: Write Rox Central API address to bastion env
+  become: true
+  ansible.builtin.lineinfile:
+    path: "/home/{{ student_name }}/.bashrc"
+    regexp: "^export ROX_CENTRAL_ADDRESS="
+    line: "export ROX_CENTRAL_ADDRESS={{ f_stackrox_central_addr }}"
+
+# Leave this as the last task in the playbook.
+- name: Workload tasks complete
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent|bool

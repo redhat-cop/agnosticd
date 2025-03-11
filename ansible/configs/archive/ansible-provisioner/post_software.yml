@@ -1,0 +1,236 @@
+---
+#vim: set ft=ansible:
+
+- name: Step 000 post software dummy
+  hosts: localhost
+  connection: local
+  become: false
+  tags:
+    - step005
+  tasks:
+    - debug:
+        msg: "Step 000 post software - Dummy action"
+
+- name: Configure Provisioner for CF integration
+  hosts: provisioners
+  become: true
+  gather_facts: false
+  tags:
+    - env-specific
+    - cf_integration
+  tasks:
+    - name: Import mgr_users.yml vars
+      include_vars:
+        file: mgr_users.yml
+
+    - name: Configure IPA
+      import_role:
+        name: bastion-opentlc-ipa
+      when: install_ipa_client|bool
+      vars:
+        bastion_public_dns_chomped: "{{ inventory_hostname }}"
+
+    - name: Import opentlc-integration role
+      import_role:
+        name: opentlc-integration
+      when: install_opentlc_integration | bool
+      vars:
+        install_opentlc_smtp: true
+      no_log: true
+
+    - name: Install vim
+      yum:
+        name: vim
+
+    - name: Copy SSH private key to provisioner for users
+      copy:
+        src: "~/.ssh/{{ item.private_key }}.pem"
+        dest: "{{ item.home }}/.ssh/{{ item.private_key }}.pem"
+        mode: 0400
+        owner: "{{ item.name }}"
+      when: item.private_key is defined
+      with_items: "{{ mgr_users }}"
+      no_log: true
+
+    - name: Install EPEL (for python-pip and ansible)
+      package:
+        name: "http://d3s3zqyaz8cp2d.cloudfront.net/repos/epel/Packages/e/epel-release-7-11.noarch.rpm"
+        use: yum
+        state: installed
+
+    - name: install python-pip
+      yum:
+        name: python2-pip
+
+    - name: install ansible
+      yum:
+        name: ansible
+
+    - name: install boto3
+      command: pip install boto3
+
+    - name: Install awscli
+      pip:
+        name: awscli
+
+    - name: test awscli
+      command: aws --version
+
+    - name: Create ~/.aws for users
+      file:
+        path: "{{ item.home }}/.aws"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        mode: 0700
+        state: directory
+      when: item.aws_access_key_id is defined
+      with_items: "{{ mgr_users }}"
+      no_log: true
+
+    - name: Insert awscli credentials
+      copy:
+        dest: "{{ item.home }}/.aws/credentials"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        content: |
+          [default]
+          aws_access_key_id = {{ item.aws_access_key_id }}
+          aws_secret_access_key = {{ item.aws_secret_access_key }}
+      when:
+        - item.aws_access_key_id is defined
+        - item.aws_secret_access_key is defined
+      with_items: "{{ mgr_users }}"
+      no_log: true
+
+    - name: Insert awscli credentials (list version)
+      blockinfile:
+        dest: "{{ item.home }}/.aws/credentials"
+        owner: "{{ item.name }}"
+        group: "{{ item.name }}"
+        content: |
+          [{{item.name}}]
+          aws_access_key_id = {{ item.aws_access_key_id }}
+          aws_secret_access_key = {{ item.aws_secret_access_key }}
+      when:
+        - item.aws_credentials is defined
+        - item.aws_credentials.aws_access_key_id is defined
+        - item.aws_credentials.aws_secret_access_key is defined
+      with_items: "{{ mgr_users }}"
+      no_log: true
+
+    - name: Copy Sync_Repositories.sh file to /root
+      copy:
+        src: "./files/Sync_Repositories.sh"
+        dest: /root/
+
+    - name: install lvm2
+      yum:
+        name: lvm2
+
+    # if we created the volume from a snapshot, do not run lvm commands
+    - when: srv_snapshot_id is not defined
+      block:
+        - lvg:
+            vg: "{{ storage_vg }}"
+            pvs: "{{ storage_pvs }}"
+          ignore_errors: true
+
+        - lvol:
+            vg: "{{ storage_vg }}"
+            lv: storagelv
+            size: 100%FREE
+          ignore_errors: true
+
+        - filesystem:
+            fstype: ext4
+            dev: "/dev/{{ storage_vg }}/storagelv"
+          ignore_errors: true
+
+        - file:
+            path: "{{ storage_mount_path }}"
+            state: directory
+            mode: 0777
+
+    - name: Activate LVM Volume Group
+      command: vgchange -ay
+      when: srv_snapshot_id is defined
+
+    - selinux:
+        policy: targeted
+        state: permissive
+
+    - file:
+        path: "{{ storage_mount_path }}"
+        state: directory
+
+    - name: Mount and create fstab
+      mount:
+        path: "{{ storage_mount_path }}"
+        src: "/dev/{{ storage_vg }}/storagelv"
+        fstype: ext4
+        state: mounted
+
+    - name: Install mosh
+      become: true
+      yum:
+        name: https://gpte-public.s3.amazonaws.com/mosh-1.3.2-1.el7.x86_64.rpm
+      ignore_errors: true
+
+    - copy:
+        dest: /etc/yum.repos.d/azure-cli.repo
+        content: |
+          [azure-cli]
+          name=Azure CLI
+          baseurl=https://packages.microsoft.com/yumrepos/azure-cli
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://packages.microsoft.com/keys/microsoft.asc
+
+    - name: Install azure-cli
+      yum:
+        name: azure-cli
+
+    - name: install python azure module
+      pip:
+        name: ansible[azure]
+
+    - name: install httpd
+      yum:
+        name: "{{ item }}"
+      with_items:
+        - httpd
+        - mod_ssl
+      tags: httpd
+
+    - name: Generate a Self Signed OpenSSL certificate
+      command: >-
+        openssl req -x509 -nodes -days 3650
+        -newkey rsa:2048 -keyout {{ httpd_ssl_key }}
+        -out {{ httpd_ssl_cert }}
+        -subj '/CN={{provisioner_public_dns}}/O=Red Hat/C=US'
+      args:
+        creates: /etc/pki/tls/certs/admin.pem
+      tags: httpd
+
+    - name: add httpd repos.conf
+      template:
+        src: files/repos.conf.j2
+        dest: /etc/httpd/conf.d/repos.conf
+      tags: httpd
+
+    - name: Enable and start httpd
+      service:
+        name: httpd
+        enabled: true
+        state: started
+      tags: httpd
+
+- name: Zabbix
+  hosts: provisioners
+  gather_facts: true
+  become: true
+  roles:
+    - role: zabbix-client
+  tags:
+    - env-specific
+    - install_zabbix

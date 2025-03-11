@@ -1,0 +1,117 @@
+---
+
+- name: Ensure yum/dnf pre-requisites in place
+  ansible.builtin.package:
+    name: "{{ deploy_automationcontroller_dnf_packages }}"
+    state: present
+
+- name: Install 2.11 or greater installation venv for running automation controller installer
+  ansible.builtin.include_tasks: automationcontroller_installer_venv.yml
+
+- name: Download Ansible controller installer tar.gz
+  ansible.builtin.get_url:                                    # TODO: Add retries
+    url: "{{ deploy_automationcontroller_installer_url }}"
+    dest: /tmp/automationcontroller.tar.gz
+
+- name: Create installer directory for automation controller
+  ansible.builtin.file:
+    path: /tmp/automationcontroller_installer
+    state: directory
+
+- name: Extract automation controller installer tar.gz
+  ansible.builtin.unarchive:
+    src: /tmp/automationcontroller.tar.gz
+    dest: /tmp/automationcontroller_installer
+    remote_src: true
+    extra_opts:
+      - '--strip-components=1'
+      - '--show-stored-names'
+
+- name: Create template based inventory file for automation controller install
+  ansible.builtin.template:
+    src: automationcontroller_inventory.j2
+    dest: /tmp/automationcontroller_installer/inventory
+
+- name: Run the automation controller installer
+  ansible.builtin.shell: "source /opt/venvs/venv_automationcontroller_install/bin/activate; ./setup.sh"
+  args:
+    chdir: /tmp/automationcontroller_installer
+  async: 6000
+  poll: 15
+  tags:
+    - deploy_automationcontroller_installer
+
+- name: Wait for Ansible controller to be up
+  ansible.builtin.uri:
+    url: "https://{{ groups['automationcontroller'][0] }}/api/v2/ping/"
+    method: GET
+    user: "{{ deploy_automationcontroller_admin_user }}"
+    password: "{{ deploy_automationcontroller_admin_password }}"
+    validate_certs: false
+  register: r_automationcontroller_ping
+  until:
+    - r_automationcontroller_ping.json is defined
+    - r_automationcontroller_ping.json.instances[0].capacity > 0
+    - r_automationcontroller_ping.json.instance_groups[0].capacity > 0
+  retries: 60
+  delay: 10
+
+- name: Display automation controller /api/v2/ping results
+  ansible.builtin.debug:
+    msg: '{{ r_automationcontroller_ping.json }}'
+
+- name: Subscribe automation controller via manifest block
+  when: deploy_automationcontroller_subscribe | default(true) | bool
+  block:
+
+    - name: Fetch remote automation controller manifest
+      when:
+        - deploy_automationcontroller_manifest_url is defined
+        - deploy_automationcontroller_manifest_url | length > 0
+        - deploy_automationcontroller_manifest_path is not defined
+      block:
+
+        - name: Fetch automation controller manifest
+          ansible.builtin.get_url:
+            url: "{{ deploy_automationcontroller_manifest_url }}"
+            dest: /tmp/automationcontroller_manifest.zip
+
+        - name: Load automation controller manifest into register for injection
+          ansible.builtin.slurp:
+            src: /tmp/automationcontroller_manifest.zip
+          register: r_automationcontroller_manifest_remote
+
+        - name: Remove automation controller manifest from installer host
+          ansible.builtin.file:
+            path: /tmp/automationcontroller_manifest.zip
+            state: absent
+
+    - name: Fetch local automation controller manifest
+      when:
+        - deploy_automationcontroller_manifest_path is defined
+        - deploy_automationcontroller_manifest_path | length > 0
+      local_action:
+        module: slurp
+        src: "{{ deploy_automationcontroller_manifest_path }}"
+      register: r_automationcontroller_manifest_local
+      become: false
+
+    - name: Inject automation controller license via manifest
+      ansible.builtin.uri:
+        url: "https://{{ groups['automationcontroller'][0] }}/api/v2/config/"
+        method: POST
+        user: "{{ controller_admin_user | default(deploy_automationcontroller_admin_user) | default('admin') }}"
+        password: "{{ controller_admin_password | default(deploy_automationcontroller_admin_password) }}"
+        body: >
+          {
+            "eula_accepted": true,
+            "manifest": "{{
+              r_automationcontroller_manifest_local['content'] |
+              default(r_automationcontroller_manifest_remote['content'])
+            }}"
+          }
+        body_format: json
+        validate_certs: false
+        force_basic_auth: true
+
+...

@@ -1,0 +1,115 @@
+---
+- name: Evaluate {{ odf_project }} namespace if not exists 
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ odf_project }}'
+    resource_definition:
+      labels:
+        openshift.io/cluster-monitoring: 'true'
+    state: present
+
+- name: Evaluate ODF OperatorGroup
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'odf-operatorgroup.yaml.j2') }}"
+
+- name: Evaluate ODF Subscription
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'odf-subscription.yaml.j2') }}"
+
+- name: "Wait for NooBaa operator to be ready"
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    namespace: "{{ odf_project }}"
+    name: "noobaa-operator"
+  register: r_noobaa_operator_deployment
+  retries: 20
+  delay: 10
+  until:
+    - r_noobaa_operator_deployment.resources is defined
+    - r_noobaa_operator_deployment.resources | length | int > 0
+    - r_noobaa_operator_deployment.resources[0].status.availableReplicas is defined
+    - r_noobaa_operator_deployment.resources[0].status.availableReplicas | int == r_noobaa_operator_deployment.resources[0].spec.replicas | int
+
+
+
+
+
+- name: "Create NooBaa custom resource"
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'odf-noobaa.yaml.j2') }}"
+
+- name: "Wait until NooBaa is active"
+  k8s_info:
+    api_version: noobaa.io/v1alpha1
+    kind: noobaa
+    namespace: "{{ odf_project }}"
+    name: noobaa
+  register: r_noobaa
+  retries: 100
+  delay: 10
+  until:
+   - r_noobaa.resources is defined
+   - r_noobaa.resources | length | int > 0
+   - r_noobaa.resources[0].status.phase is defined
+   - r_noobaa.resources[0].status.phase == "Ready"
+
+- name: "Create cluster-admins OpenShift group"
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'odf-group.yaml.j2') }}"
+
+
+- name: Get ODF Admin access key
+  shell: 
+    cmd: >
+      oc get secret noobaa-admin -n {{ odf_project }}
+      --template={{ '{{' }}.data.AWS_ACCESS_KEY_ID{{ '}}' }} | base64 -d
+  register: odf_admin_access_key
+
+- name: Get ODF Admin secret key
+  shell: 
+    cmd: >
+      oc get secret noobaa-admin -n {{ odf_project }}
+      --template={{ '{{' }}.data.AWS_SECRET_ACCESS_KEY{{ '}}' }} | base64 -d
+  register: odf_admin_secret_key
+
+# - name: Show S3 admin credentials
+#   debug:
+#     msg: "{{ odf_admin_access_key.stdout }}:{{odf_admin_secret_key.stdout}}"
+
+- name: RocketChat Admin Login
+  shell: 
+    cmd: >
+      HOST=rocketchat-rocketchat.{{ route_subdomain }} &&
+      curl -X POST
+      -H 'Content-Type: application/json' 
+      https://$HOST/api/v1/login 
+      -d '{"user":"rcadmin", "password":"camel"}'
+  register: admin_login
+
+# - name: Show RocketChat Admin Token
+#   debug:
+#     msg: "{{ admin_login }}"
+
+- name: Publis S3 Credentials to RocketChat
+  shell: 
+    cmd: >
+      HOST=rocketchat-rocketchat.{{ route_subdomain }} && 
+      ADMIN={{admin_login.stdout|from_json|json_query('data.userId')}} && 
+      TOKEN={{admin_login.stdout|from_json|json_query('data.authToken')}} && 
+      curl -X POST 
+      -H "X-Auth-Token: $TOKEN" 
+      -H "X-User-Id: $ADMIN" 
+      -H 'Content-Type: application/json' 
+      https://$HOST/api/v1/chat.postMessage 
+      -d '{ "channel": "#general", "text": "(Lab-5 Storage Credentials)\n*S3 Access Key:* {{odf_admin_access_key.stdout}} \n*S3 Secret Key:* {{odf_admin_secret_key.stdout}}" }'
+  register: publish_creds
+
+# - name: Show RocketChat publish credentials
+#   debug:
+#     msg: "{{ publish_creds }}"

@@ -1,0 +1,62 @@
+---
+- name: get ingress controler
+  kubernetes.core.k8s_info:
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: r_ingress
+
+- name: get openshift api url
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: r_infra
+
+- name: set _ocp4_workload_gitops_bootstrap_deployer_values
+  ansible.builtin.set_fact:
+    _ocp4_workload_gitops_bootstrap_deployer_values:
+      deployer:
+        domain: "{{ r_ingress.resources[0].status.domain }}"
+        apiUrl: "{{ r_infra.resources[0].status.apiServerURL }}"
+
+- name: print _ocp4_workload_gitops_bootstrap_deployer_values
+  ansible.builtin.debug:
+    msg: "{{ _ocp4_workload_gitops_bootstrap_deployer_values | to_yaml }}"
+
+- name: create bootstrap argocd application
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'application.yaml.j2') | from_yaml }}"
+
+- name: wait bootstrap argocd application is healthy and synced
+  kubernetes.core.k8s_info:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    name: bootstrap
+    namespace: openshift-gitops
+  register: argocd_bootstrap
+  retries: 90
+  delay: 10
+  until:
+  - argocd_bootstrap is defined
+  - argocd_bootstrap.resources is defined
+  - argocd_bootstrap.resources | length > 0
+  - argocd_bootstrap.resources[0].status is defined
+  - argocd_bootstrap.resources[0].status.health.status == "Healthy"
+  - argocd_bootstrap.resources[0].status.sync.status == "Synced"
+  ignore_errors: true
+
+- name: retrieve configmaps with the demo.redhat.com/userinfo label
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    label_selectors:
+    - "demo.redhat.com/userinfo"
+  register: cm_userinfo
+
+- name: save configmap userinfo in agnosticd_user_info
+  agnosticd_user_info:
+    data: >-
+      {{ item.data | from_yaml }}
+  loop: "{{ cm_userinfo.resources }}"

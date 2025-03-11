@@ -1,0 +1,87 @@
+---
+- name: set namespace
+  set_fact:
+    _namespace: "gitea"
+
+- name: Create namespace for {{ _namespace }}
+  k8s:
+    state: present
+    definition: "{{ lookup('template', role_path ~ '/templates/namespace-without-requester.j2' ) | from_yaml }}"
+  vars:
+    _description: "Gitea"
+
+- name: Create OperatorGroup for the operators
+  k8s:
+    state: present
+    definition: "{{ lookup('template', role_path ~ '/templates/olm-operatorgroup/single-namespace.j2' ) | from_yaml }}"
+
+- name: Create operator
+  k8s:
+    state: present
+    namespace: "{{ _namespace }}"
+    definition: "{{ lookup('template', role_path ~ '/templates/gitea/operator.j2' ) | from_yaml }}"
+
+- name: Create Gitea deployment
+  k8s:
+    state: present
+    namespace: "{{ _namespace }}"
+    definition: "{{ lookup('file', role_path ~ '/files/gitea/server.yml' ) | from_yaml }}"
+
+- name: Wait until gitea-server has Running condition
+  command: >
+    oc get Gitea/gitea-server -o jsonpath='{.status.conditions[?(@.type=="Running")].status}' -n "{{ _namespace }}"
+  register: gitea
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: gitea.stdout == "True"
+
+- name: Check gitea deployment is created
+  command: >
+    oc get Deployment/mygitea -o jsonpath='{.metadata.name}' -n "{{ _namespace }}"
+  register: gitea_deployment
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: gitea_deployment.stdout == "mygitea"
+
+- name: Check Gitea is running
+  command: >
+    oc rollout status Deployment/mygitea --watch=true -n "{{ _namespace }}"
+
+- name: Get gitea pod name
+  command: >
+    oc get pods -l app=mygitea -o jsonpath='{.items[0].metadata.name}' -n "{{ _namespace }}"
+  register: gitea_podname
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: gitea_podname.stdout != ""
+
+- name: Get gitea route host
+  command: >
+    oc get route/mygitea -o jsonpath='{.spec.host}' -n "{{ _namespace }}"
+  register: gitea_route
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: gitea_route.stdout != ""
+
+- name: Wait for gitea route to respond with 200
+  uri:
+    url: "https://{{ gitea_route.stdout }}"
+    method: GET
+    validate_certs: false
+  register: result
+  retries: "{{ _retry }}"
+  delay: "{{ _delay }}"
+  until: result.status == 200
+
+- name: Check if gitea admin user already exists (note; error can be ignored)
+  uri:
+    url: "https://{{ gitea_route.stdout }}/api/v1/users/{{ _gitea_admin_name }}"
+    method: GET
+    validate_certs: false
+  register: giteaadmin_user
+  ignore_errors: true
+
+- name: Create admin user in gitea
+  command: >
+    oc exec {{ gitea_podname.stdout }} -n "{{ _namespace }}" -- /home/gitea/gitea admin create-user --username {{ _gitea_admin_name }} --password {{ _account_password }} --email {{ _gitea_admin_name }}@workshop.com --must-change-password=false --admin -c /home/gitea/conf/app.ini
+  when: giteaadmin_user.status == 404

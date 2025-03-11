@@ -1,0 +1,49 @@
+---
+- name: Check for {{ _bookbag_instance_name }} DeploymentConfig
+  k8s_info:
+    api_version: apps.openshift.io/v1
+    kind: DeploymentConfig
+    kubeconfig: "{{ _bookbag_kubeconfig | default(omit) }}"
+    name: "{{ _bookbag_instance_name }}"
+    namespace: "{{ bookbag_namespace }}"
+  register: r_get_deploymentconfig
+  until: r_get_deploymentconfig is successful
+  retries: 5
+  delay: 10
+
+- name: Wait for deployment of {{ _bookbag_instance_name }}
+  when: r_get_deploymentconfig.resources | length == 1
+  block:
+  - name: Wait for {{ _bookbag_instance_name }} DeploymentConfig to deploy
+    k8s_info:
+      api_version: apps.openshift.io/v1
+      kind: DeploymentConfig
+      kubeconfig: "{{ _bookbag_kubeconfig | default(omit) }}"
+      name: "{{ _bookbag_instance_name }}"
+      namespace: "{{ bookbag_namespace }}"
+    register: r_get_deploymentconfig
+    failed_when: r_get_deploymentconfig.resources[0].status.readyReplicas | default(0) | int != 1
+    until: >-
+      r_get_deploymentconfig is successful or
+      r_get_deploymentconfig.resources[0].status.conditions | json_query("[?type=='Progressing']|[0]") == "False"
+    retries: 60
+    delay: 5
+
+  rescue:
+  - name: Retry deployment of {{ _bookbag_instance_name }}
+    command: >-
+      oc {% if _bookbag_kubeconfig is defined %}--kubeconfig={{ _bookbag_kubeconfig }}{% endif %}
+      -n {{ bookbag_namespace }} rollout latest dc/{{ _bookbag_instance_name }}
+    register: r_oc_rollout
+    until: r_oc_rollout is successful
+    retries: 30
+    delay: 15
+
+  - name: Set bookbag deploy retry count
+    set_fact:
+      __bookbag_deploy_retry_count: "{{ __bookbag_deploy_retry_count | default(0) | int + 1}}"
+
+  - name: Retry wait for {{ _bookbag_instance_name }}
+    when: __bookbag_deploy_retry_count | int <= bookbag_deployment_retries | int
+    include_tasks:
+      file: wait-for-bookbag-deployment.yml
