@@ -1,0 +1,80 @@
+
+
+- name: Retrieve AWS credentials to setup sub domain 
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: aws-creds
+    namespace: "kube-system"
+  register: _aws_access
+
+- debug: msg="_aws_access::{{ _aws_access}}"
+
+- debug: msg="aws_access_key_id::{{ _aws_access.resources[0].data.aws_access_key_id | b64decode | from_yaml | default([], true)}}"
+- debug: msg="aws_secret_access_key::{{ _aws_access.resources[0].data.aws_secret_access_key | b64decode | from_yaml | default([], true)}}"
+
+- name: Set ocp4_workload_app_connectivity_workshop_aws_access_key
+  ansible.builtin.set_fact:
+    ocp4_workload_app_connectivity_workshop_aws_access_key: "{{ _aws_access.resources[0].data.aws_access_key_id | b64decode | from_yaml | default([], true)}}"
+  
+- name: Set ocp4_workload_app_connectivity_workshop_aws_secret_access_key
+  ansible.builtin.set_fact:
+    ocp4_workload_app_connectivity_workshop_aws_secret_access_key: "{{ _aws_access.resources[0].data.aws_secret_access_key | b64decode | from_yaml | default([], true) }}"
+  
+- name: Set subdomain
+  ansible.builtin.set_fact:
+    subdomain: "{{ ocp4_workload_app_connectivity_workshop_sub_domain_name }}.{{ ocp4_workload_app_connectivity_workshop_main_domain }}"
+  
+
+- name: AWS Access Policy block
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ ocp4_workload_app_connectivity_workshop_aws_access_key }}"
+    AWS_SECRET_ACCESS_KEY: "{{ ocp4_workload_app_connectivity_workshop_aws_secret_access_key }}"
+    AWS_REGION: "{{ ocp4_workload_app_connectivity_workshop_aws_managed_zone_region }}"
+  block:
+    - name: Create Route 53 hosted zone for the subdomain
+      amazon.aws.route53_zone:
+        zone: "{{ ocp4_workload_app_connectivity_workshop_sub_domain_name }}.{{ ocp4_workload_app_connectivity_workshop_main_domain }}"
+      register: subdomain_zone
+
+    - debug: msg="subdomain_zone:{{ subdomain_zone }}"
+    
+    - name: Set ocp4_workload_app_connectivity_workshop_aws_managed_zone_id
+      ansible.builtin.set_fact:
+        ocp4_workload_app_connectivity_workshop_aws_managed_zone_id: "{{ subdomain_zone.zone_id }}"
+    
+    - debug: msg="Managed Zone Domain Name:{{ ocp4_workload_app_connectivity_workshop_sub_domain_name }}.{{ ocp4_workload_app_connectivity_workshop_main_domain }}"
+    - debug: msg="Managed Zone ID:{{ ocp4_workload_app_connectivity_workshop_aws_managed_zone_id }}"
+
+    
+    - name: List the first 20 resource record sets in a given hosted zone
+      amazon.aws.route53_info:
+        query: record_sets
+        hosted_zone_id: "{{ ocp4_workload_app_connectivity_workshop_aws_managed_zone_id }}"
+        max_items: 20
+      register: subdomain_record_sets
+      vars:
+        query: "json.ResourceRecordSets[?contains(Type,'NS')].ResourceRecords"
+
+    # - debug: msg="{{ subdomain_record_sets }}"
+
+    - name: Get the name servers for the subdomain
+      ansible.builtin.set_fact:
+        _nameservers: "{{ subdomain_record_sets.list[0].ResourceRecords }}"
+
+    # - debug: msg="{{ _nameservers }}"
+
+    - name: Update main domain with subdomain NS records
+      amazon.aws.route53:
+        state: present
+        zone: "{{ ocp4_workload_app_connectivity_workshop_main_domain }}"
+        record: "{{ ocp4_workload_app_connectivity_workshop_sub_domain_name }}.{{ ocp4_workload_app_connectivity_workshop_main_domain }}"
+        value: 
+          - "{{ _nameservers[0].Value }}"
+          - "{{ _nameservers[1].Value }}"
+          - "{{ _nameservers[2].Value }}"
+          - "{{ _nameservers[3].Value }}"
+        type: "NS"
+        wait: true
+    
+    - debug: msg="Name servers for {{ ocp4_workload_app_connectivity_workshop_sub_domain_name }}.{{ ocp4_workload_app_connectivity_workshop_main_domain }} has been setup"
