@@ -9,13 +9,12 @@
     fail_msg: ocp4_pull_secret variable must be defined
     success_msg: ocp4_pull_secret variable is defined
 
-#- name: Fail if tower-license-manifest var is empty
-#  ansible.builtin.assert:
-#    that:
-#      - controller_manifest.url is defined
-#      - controller_manifest.url | default("") | length > 0
-#    fail_msg: controller_manifest.url variable must be defined
-#    success_msg: controller_manifest.url variable is defined
+- name: Define public hostname fact
+  ansible.builtin.set_fact:
+    bastion_public_hostname: "{{ hostvars[groups['bastions'][0]]['public_dns_name'] }}"
+    bastion_ssh_password: "{{ student_password }}"
+    bastion_ssh_user_name: "{{ student_name }}"
+
 
 - name: Find an extra disk for libvirt folder
   ansible.builtin.set_fact:
@@ -91,28 +90,6 @@
   ansible.builtin.dnf:
     name: "{{ kcli_rpm }}"
     disable_gpg_check: true
-
-#- name: Add CentOS Stream 9 repository to upgrade QEMU KVM
-#  ansible.builtin.yum_repository:
-#    name: centos-stream-9-appstream
-#    description: CentOS Stream 9 AppStream
-#    baseurl: https://mirror.stream.centos.org/9-stream/AppStream/x86_64/os/
-#    gpgcheck: false
-#    enabled: true
-#
-#- name: Upgrade QEMU from BETA for SR-IOV support
-#  ansible.builtin.dnf:
-#    name:
-#      - qemu-kvm
-#    state: latest
-#    update_only: true
-#
-#- name: Remove the CentOS Stream 9 repo
-#  ansible.builtin.yum_repository:
-#    name: centos-stream-9-appstream
-#    enabled: false
-#    state: absent
-#    gpgcheck: false
 
 - name: Ensure libvirtd service is enabled and running
   ansible.builtin.systemd:
@@ -536,6 +513,7 @@
   ansible.builtin.set_fact:
     strong_admin_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
     strong_dev_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
+    strong_lab_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
 
 - name: Set password to hub admin user
   ansible.builtin.replace:
@@ -585,6 +563,185 @@
     method: GET
     status_code: 200
     validate_certs: false
+
+# Showroom 
+
+- name: Ensure lab-user exists and it is part of libvirt group
+  ansible.builtin.user:
+    name: lab-user
+    groups: libvirt
+
+- name: Ensure showroom folder exists
+  ansible.builtin.file:
+    path: /opt/showroom
+    state: directory
+    mode: "0755"
+
+- name: Ensure lab-content folder exists
+  ansible.builtin.file:
+    path: /opt/showroom/lab-content
+    state: directory
+    mode: "0755"
+
+- name: Generate lab-content on the hypervisor host - Clone repo
+  ansible.builtin.git:
+    repo: "{{ lab_repo }}"
+    dest: /opt/showroom/lab-repo/
+    single_branch: yes
+    version: "{{ lab_version }}"
+
+- name: Generate lab-content on the hypervisor host - Clone repo
+  ansible.builtin.git:
+    repo: "{{ lab_repo }}"
+    dest: /opt/showroom/lab-repo/
+    single_branch: yes
+    version: "{{ lab_version }}"
+
+- name: Generate lab-content on the hypervisor host - Modify required files
+  ansible.builtin.replace:
+    path: "/opt/showroom/lab-repo/documentation/modules/ROOT/pages/_attributes.adoc"
+    regexp: '{{ item.regexp }}'
+    replace: "'{{ item.value }}'"
+  with_items:
+    - {regexp: "demo_environment_here", value: "true"}
+    - {regexp: "admin_password_here", value: "{{ strong_admin_password }}"}
+
+- name: Generate lab-content on the hypervisor host - Run Antora 
+  containers.podman.podman_container:
+    name: antora_build
+    image: quay.io/rhsysdeseng/showroom:antora-v3.0.0
+    state: started
+    detach: no
+    remove: yes
+    volumes:
+      - "/opt/showroom/lab-repo:/antora:z"
+    command: "site.yml"
+
+- name: Generate lab-content on the hypervisor host - Copy generated files
+  ansible.builtin.copy:
+    src: /opt/showroom/lab-repo/gh-pages/
+    dest: /opt/showroom/lab-content/
+    remote_src: yes
+    directory_mode: yes
+
+- name: Generate lab-content on the hypervisor host - Download showroom html files
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.destination }}"
+    mode: "{{ item.mode }}"
+  # yamllint disable rule:line-length
+  retries: 5
+  delay: 10
+  with_items:
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/index.html", destination: "/opt/showroom/lab-content/index.html", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/split.css", destination: "/opt/showroom/lab-content/split.css", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/tabs.css", destination: "/opt/showroom/lab-content/tabs.css", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/tabs.js", destination: "/opt/showroom/lab-content/tabs.js", mode: "0644"}    
+  # yamllint enable rule:line-length
+
+- name: Generate lab-content on the hypervisor host - Modify showroom html files
+  ansible.builtin.replace:
+    path: "/opt/showroom/lab-content/index.html"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  with_items:
+    - {regexp: "<CHANGEME_LAB_VERSION>", value: "{{ lab_release }}"}
+    - {regexp: "<CHANGEME_HYPERVISOR_PUBLIC_HOSTNAME>", value: "{{ bastion_public_hostname }}"}
+
+- name: Configure showroom - Download showroom services and configurations
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.destination }}"
+    mode: "{{ item.mode }}"
+  # yamllint disable rule:line-length
+  retries: 5
+  delay: 10
+  with_items:
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-apache.service", destination: "/etc/systemd/system/podman-showroom-apache.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-wetty.service", destination: "/etc/systemd/system/podman-showroom-wetty.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-firefox.service", destination: "/etc/systemd/system/podman-showroom-firefox.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/firefox-config.tar.gz", destination: "/tmp/firefox-config.tar.gz", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-traefik.service", destination: "/etc/systemd/system/podman-showroom-traefik.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/traefik-config.tar.gz", destination: "/tmp/traefik-config.tar.gz", mode: "0644"}
+  # yamllint enable rule:line-length
+
+- name: Configure showroom - Ensure content apache is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-apache
+  
+- name: Configure showroom - Configure wetty
+  ansible.builtin.replace:
+    path: "/etc/systemd/system/podman-showroom-wetty.service"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  with_items:
+    - {regexp: "<CHANGEME_LAB_USER>", value: "{{ bastion_ssh_user_name }}"}
+    - {regexp: "<CHANGEME_LAB_USER_PWD>", value: "{{ bastion_ssh_password }}"}
+
+- name: Configure showroom - Ensure wetty is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-wetty
+
+- name: Configure showroom - Configure Firefox 1/2
+  ansible.builtin.unarchive:
+    src: /tmp/firefox-config.tar.gz
+    dest: /opt/showroom/
+    remote_src: yes
+
+- name: Configure showroom - Configure Firefox 2/2
+  ansible.builtin.replace:
+    path: "/etc/systemd/system/podman-showroom-firefox.service"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  with_items:
+    - {regexp: "<CHANGEME_LAB_USER>", value: "{{ bastion_ssh_user_name }}"}
+    - {regexp: "<CHANGEME_LAB_USER_PWD>", value: "{{ strong_lab_password }}"}
+
+- name: Configure showroom - Ensure Firefox is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-firefox
+
+- name: Ensure traefik folder exists
+  ansible.builtin.file:
+    path: /opt/showroom/traefik
+    state: directory
+    mode: "0755"
+
+- name: Create htpasswd entry
+  ansible.builtin.shell: echo "{{ strong_lab_password }}" | htpasswd -i -n "{{ bastion_ssh_user_name }}"
+  register: lab_htpass_user
+  changed_when: false
+
+- name: Configure showroom - Configure Traefik 1/2
+  ansible.builtin.unarchive:
+    src: /tmp/traefik-config.tar.gz
+    dest: /opt/showroom/traefik
+    remote_src: yes
+
+- name: Configure showroom - Configure Traefik 2/2
+  ansible.builtin.replace:
+    path: "/opt/showroom/traefik/config/traefik/dynamic_config.yml"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  with_items:
+    - {regexp: "<CHANGEME_HTPASS_USER>", value: "{{ lab_htpass_user.stdout }}"}
+    - {regexp: "<CHANGEME_HYPERVISOR_PUBLIC_HOSTNAME>", value: "{{ bastion_public_hostname }}"}
+
+- name: Configure showroom - Ensure Traefik is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-traefik
 
 - name: Async check download live and rootfs images
   block:
