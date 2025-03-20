@@ -1,0 +1,119 @@
+---
+- name: Set Ansible Python interpreter to k8s virtualenv
+  ansible.builtin.set_fact:
+    ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+
+- name: Set URLs for OpenShift GA releases (specific version)
+  when:
+    - (ocp4_installer_version | string).split('.') | length >= 3
+  ansible.builtin.set_fact:
+    ocp4_client_url: >-
+      {{ '{0}/ocp/{1}/openshift-client-linux-{1}.tar.gz'.format(
+        ocp4_installer_root_url | default("https://mirror.openshift.com/pub/openshift-v4/clients"),
+        ocp4_installer_version
+      ) }}
+
+- name: Set URLs for OpenShift GA releases (latest stable)
+  when:
+    - (ocp4_installer_version | string).split('.') | length == 2
+  set_fact:
+    ocp4_client_url: >-
+      {{ '{0}/ocp/stable-{1}/openshift-client-linux.tar.gz'.format(
+        ocp4_installer_root_url | default("https://mirror.openshift.com/pub/openshift-v4/clients"),
+        ocp4_installer_version
+      ) }}
+
+- name: Get the OpenShift CLI
+  become: true
+  ansible.builtin.unarchive:
+    src: "{{ ocp4_client_url }}"
+    remote_src: true
+    dest: /usr/bin
+    mode: 0775
+    owner: root
+    group: root
+  register: r_client
+  until: r_client is success
+  retries: 10
+  delay: 30
+
+- name: Identify Resource Group info
+  register: resource_group_info
+  ibm.cloudcollection.ibm_resource_group_info:
+    name: "{{ ibmcloud_resource_group_name }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+
+- name: Create VPC
+  register: vpc_info
+  ibm.cloudcollection.ibm_is_vpc:
+    name: "{{ vpc_name }}"
+    resource_group: "{{ resource_group_info.resource.id }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+
+- name: Create Subnet
+  register: subnet_info
+  ibm.cloudcollection.ibm_is_subnet:
+    name: "{{ subnet_name }}"
+    resource_group: "{{ resource_group_info.resource.id }}"
+    vpc: "{{ vpc_info.resource.id }}"
+    zone: "{{ region }}-1"
+    total_ipv4_address_count: 256
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+
+- name: Create Public Gateway
+  register: public_gateway_info
+  ibm.cloudcollection.ibm_is_public_gateway:
+    name: "{{ subnet_name }}-pgw"
+    resource_group: "{{ resource_group_info.resource.id }}"
+    vpc: "{{ vpc_info.resource.id }}"
+    zone: "{{ region }}-1"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+
+- name: Set Public Gateway for Subnet
+  ibm.cloudcollection.ibm_is_subnet:
+    id: "{{ subnet_info.resource.id }}"
+    public_gateway: "{{ public_gateway_info.resource.id }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+
+- name: Create Object Storage instance
+  register: cos_instance_info
+  ibm.cloudcollection.ibm_resource_instance:
+    name: "{{ cos_instance_name }}"
+    service: "cloud-object-storage"
+    plan: "{{ cos_plan }}"
+    location: "global"
+    resource_group_id: "{{ resource_group_info.resource.id }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+
+- name: Create Red Hat OpenShift Managed-Service cluster with VPC networking
+  ibm.cloudcollection.ibm_container_vpc_cluster:
+    name: "{{ cluster_name }}"
+    resource_group_id: "{{ resource_group_info.resource.id }}"
+    kube_version: "{{ kube_version }}"
+    flavor: "{{ worker_profile }}"
+    worker_count: "{{ worker_count }}"
+    operating_system: "RHCOS"
+    cos_instance_crn: "{{ cos_instance_info.resource.crn }}"
+    vpc_id: "{{ vpc_info.resource.id }}"
+    zones:
+      - name: "{{ subnet_info.resource.zone }}"
+        subnet_id: "{{ subnet_info.resource.id }}"
+    disable_outbound_traffic_protection: false
+    disable_public_service_endpoint: false
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+  register: cluster_create_output
+
+- name: Save Cluster config file
+  ibm.cloudcollection.ibm_container_cluster_config_info:
+    cluster_name_id: "{{ cluster_create_output.resource.id }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+  register: config_output
+
+- name: Print Cluster info
+  ansible.builtin.debug:
+    msg: "cluster : {{ cluster_create_output.resource }}"
+
+- name: Print Cluster config file path
+  ansible.builtin.debug:
+    msg: "cluster config file path : {{ config_output.resource.config_file_path }}"
+  when: config_output.rc == 0
