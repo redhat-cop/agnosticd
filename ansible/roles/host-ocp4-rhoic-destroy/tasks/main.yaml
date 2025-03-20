@@ -1,80 +1,84 @@
 ---
-- name: Log in (obtain access token)
-  community.okd.openshift_auth:
-    username: "{{ sandbox_openshift_username }}"
-    password: "{{ sandbox_openshift_password }}"
-    host: "{{ sandbox_openshift_api_url }}"
-  register: k8s_auth_results
-  when: sandbox_openshift_username | default(false)
+- name: Identify Resource Group info
+  register: resource_group_info
+  ibm.cloudcollection.ibm_resource_group_info:
+    name: "{{ ibmcloud_resource_group_name }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
 
-- name: Destroy OCP using Assisted Installed
-  module_defaults:
-    group/k8s:
-      host: "{{ sandbox_openshift_api_url }}"
-      api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
-      validate_certs: false
 
-  block:
-    - name: Create a job to cleanup Ceph
-      kubernetes.core.k8s:
-        definition: "{{ lookup('ansible.builtin.template', 'templates/cleanup-ceph.yaml.j2') }}"
-        wait: true
-        wait_timeout: 300
-      register: r_cleanup
-      retries: 6
-      delay: 30
-      ignore_errors: true
+- name: Identify VPC info
+  register: vpc_info
+  ibm.cloudcollection.ibm_is_vpc_info:
+    name: "{{ vpc_name }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
 
-    - name: Delete dns records
-      when: cluster_dns_server is defined
-      ansible.builtin.nsupdate:
-        server: >-
-          {{ cluster_dns_server
-          | ipaddr
-          | ternary(cluster_dns_server, lookup('dig', cluster_dns_server))
-          }}
-        zone: "{{ cluster_dns_zone }}"
-        record: "{{ item }}.{{ cluster_name}}"
-        type: A
-        ttl: 30
-        port: "{{ cluster_dns_port | d('53') }}"
-        key_name: "{{ ddns_key_name }}"
-        key_secret: "{{ ddns_key_secret }}"
-        state: absent
-      loop:
-        - "api"
-        - "*.apps"
+- name: Identify VPC Subnet info
+  register: vpc_subnet_info
+  ibm.cloudcollection.ibm_is_subnet_info:
+    name: "{{ subnet_name }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
 
-    - name: DNS entry ({{ _dns_state | default('present') }})
-      when: route53_aws_zone_id is defined
-      amazon.aws.route53:
-        state: absent
-        aws_access_key_id: "{{ route53_aws_access_key_id }}"
-        aws_secret_access_key: "{{ route53_aws_secret_access_key }}"
-        hosted_zone_id: "{{ route53_aws_zone_id }}"
-        record: "{{ item }}.{{ cluster_name }}.{{ cluster_dns_zone }}"
-        zone: "{{ cluster_dns_zone  }}"
-        type: A
-      loop:
-        - "api"
-        - "*.apps"
 
-    - name: Get a list of clusters
-      rhpds.assisted_installer.list_clusters:
-        offline_token: "{{ ai_offline_token }}"
-        owner: true
-      register: listclusters
+- name: Check is cluster exists
+  ibm.cloudcollection.ibm_container_vpc_cluster_info:
+    name: "{{ cluster_name }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+  failed_when:
+    - cluster_output.rc != 0
+    - '"cluster could not be found" not in cluster_output.stderr'
+  register: cluster_output
 
-    - name: Filter the created clusters
-      ansible.builtin.set_fact:
-        cluster_id: "{{ item.id }}"
-      when: item.name == cluster_name
-      loop: "{{ listclusters.result }}"
-      loop_control:
-        label: "{{ item.name }}"
+- name: Delete Red Hat OpenShift Managed-Service cluster with VPC networking
+  when: cluster_output.resource.id | default(False)
+  ibm.cloudcollection.ibm_container_vpc_cluster:
+    state: absent
+    id: "{{ cluster_output.resource.id }}"
+    resource_group_id: "{{ resource_group_info.resource.id }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+    flavor: "{{ worker_profile }}"
+    # vpc_id: "{{ vpc_info.resource.id }}"
+    zones:
+      - name: "{{ vpc_subnet_info.resource.zone }}"
+        subnet_id: "{{ vpc_subnet_info.resource.id }}"
+  register: cluster_create_output
 
-    - name: Remove Assisted Installer Cluster
-      rhpds.assisted_installer.delete_cluster:
-        cluster_id: "{{ cluster_id }}"
-        offline_token: "{{ ai_offline_token }}"
-      when: cluster_id |default(false)
+
+- name: Delete Object Storage instance
+  register: cos_instance_info
+  ibm.cloudcollection.ibm_resource_instance:
+    name: "{{ cos_instance_name }}"
+    service: "cloud-object-storage"
+    plan: "{{ cos_plan }}"
+    location: "global"
+    resource_group_id: "{{ resource_group_info.resource.id }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+    state: absent
+
+- name: Delete Public Gateway
+  register: public_gateway_info
+  ibm.cloudcollection.ibm_is_public_gateway:
+    state: absent
+    name: "{{ subnet_name }}-pgw"
+    vpc: "{{ vpc_info.resource.id }}"
+    resource_group: "{{ resource_group_info.resource.id }}"
+    zone: "{{ region }}-1"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+
+- name: Delete Subnet
+  register: subnet_info
+  ibm.cloudcollection.ibm_is_subnet:
+    state: absent
+    name: "{{ subnet_name }}"
+    vpc: "{{ vpc_info.resource.id }}"
+    resource_group: "{{ resource_group_info.resource.id }}"
+    zone: "{{ region }}-1"
+    total_ipv4_address_count: 256
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+
+- name: Delete VPC
+  register: vpc_info
+  ibm.cloudcollection.ibm_is_vpc:
+    state: absent
+    name: "{{ vpc_name }}"
+    resource_group: "{{ resource_group_info.resource.id }}"
+    ibmcloud_api_key: "{{ ibmcloud_api_key }}"
