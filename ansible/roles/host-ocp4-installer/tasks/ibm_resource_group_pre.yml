@@ -1,0 +1,68 @@
+---
+- name: Install ibmcloud cli
+  ansible.builtin.shell: curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+
+- name: Login to ibmcloud using api key
+  ansible.builtin.shell: ibmcloud login --apikey "{{ ibmcloud_api_key }}" -r us-south -g "{{ ibmcloud_resource_group_name }}"
+
+- name: Install cis plugin
+  ansible.builtin.shell: ibmcloud plugin install cis -f
+
+- name: Create the CIS instance
+  ansible.builtin.shell: ibmcloud cis instance-create ocp{{ guid }} standard-next
+
+- name: Set the context instance for CIS
+  ansible.builtin.shell: ibmcloud cis instance-set ocp{{ guid }}
+
+- name: Add the domain for CIS
+  ansible.builtin.shell: ibmcloud cis domain-add ocp.{{ base_domain }}  --output json
+  register: r_domain_cis
+
+- name: Print required name_servers
+  ansible.builtin.debug:
+    msg: "{{ (r_domain_cis.stdout | from_json).name_servers }}"
+
+- name: Get RELEASE_IMAGE
+  ansible.builtin.shell: openshift-install version | awk '/release image/ {print $3}'
+  register: r_release_image
+
+- name: Generate /tmp/pull-secret.txt
+  ansible.builtin.copy:
+    content: "{{ ocp4_pull_secret | to_json if ocp4_pull_secret is mapping else ocp4_pull_secret }}"
+    dest: /tmp/pull-secret.txt
+
+- name: Get CCO_IMAGE
+  ansible.builtin.shell: oc adm release info --image-for='cloud-credential-operator' {{ r_release_image.stdout }} -a /tmp/pull-secret.txt
+  register: r_cco_image
+
+- name: Extract ccoctl tool
+  ansible.builtin.shell: |
+    oc image extract {{ r_cco_image.stdout }} \
+    --file="/usr/bin/ccoctl.rhel9" \
+    -a /tmp/pull-secret.txt
+
+- name: Copy ccoctl tool
+  ansible.builtin.copy:
+    remote_src: true
+    src: ccoctl.rhel9
+    dest: /home/{{ ansible_user }}/ccoctl
+    mode: 0755
+
+- name: Extract credentials
+  ansible.builtin.shell: |
+    oc adm release extract \
+      --from={{ r_release_image.stdout }} \
+      --credentials-requests \
+      --included \
+      --install-config=/home/{{ ansible_user }}/{{ cluster_name }}/install-config.yaml.bak \
+      --to=/home/{{ ansible_user }}/{{ cluster_name }}/credentials/
+
+- name: Create IBMMService IDs
+  environment:
+    IBMCLOUD_API_KEY: "{{ ibmcloud_api_key }}"
+  ansible.builtin.shell: |
+    /home/{{ ansible_user }}/ccoctl ibmcloud create-service-id \
+      --credentials-requests-dir=/home/{{ ansible_user }}/{{ cluster_name }}/credentials/ \
+      --name={{ cluster_name }} \
+      --output-dir=/home/{{ ansible_user }}/{{ cluster_name }}/ \
+      --resource-group-name={{ ibmcloud_resource_group_name }}
