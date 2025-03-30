@@ -1,0 +1,86 @@
+---
+- name: Authenticate to IBM Cloud and get an access token
+  ansible.builtin.uri:
+    url: "https://iam.cloud.ibm.com/identity/token"
+    method: POST
+    headers:
+      Content-Type: "application/x-www-form-urlencoded"
+    body: "grant_type=urn:ibm:params:oauth:grant-type:apikey&apikey={{ ibmcloud_api_key }}"
+    body_format: form-urlencoded
+    status_code: 200
+  register: auth_response
+
+- name: Set authentication token
+  ansible.builtin.set_fact:
+    ibmcloud_auth_token: "Bearer {{ auth_response.json.access_token }}"
+
+- name: Create CIS instance
+  ansible.builtin.uri:
+    url: "https://resource-controller.cloud.ibm.com/v2/resource_instances"
+    method: POST
+    headers:
+      Authorization: "{{ ibmcloud_auth_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "ocp{{ guid }}"
+      resource_plan_id: "58d7216c-af92-4e7d-baec-ce13a4dd61c0"
+      resource_group: "{{ hostvars.localhost.r_ibmcloud_resource_group_id }}"
+      target: "crn:v1:bluemix:public:globalcatalog::::deployment:58d7216c-af92-4e7d-baec-ce13a4dd61c0%3Aglobal89753"
+    status_code: 201
+  register: cis_instance
+
+- name: Extract CIS instance ID
+  ansible.builtin.set_fact:
+    cis_instance_id: "{{ cis_instance.json.id }}"
+
+- name: Add domain to CIS instance
+  ansible.builtin.uri:
+    url: "https://api.cis.cloud.ibm.com/v1/{{ cis_instance_id }}/zones"
+    method: POST
+    headers:
+      Authorization: "{{ ibmcloud_auth_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "ocp.{{ base_domain }}"
+      type: "full"
+    status_code: 200
+  register: r_domain_cis
+
+- debug:
+    msg: "{{ r_domain_cis.json.result.name_servers }}"
+
+- name: Add NS record to Route53
+  delegate_to: localhost
+  amazon.aws.route53:
+    aws_access_key: "{{ route53_aws_access_key_id }}"
+    aws_secret_key: "{{ route53_aws_secret_access_key }}"
+    hosted_zone_id: "{{ route53_aws_zone_id }}"
+    zone: "{{ base_domain }}"
+    record: "ocp.{{ base_domain }}"
+    type: "NS"
+    ttl: 300
+    value: "{{ r_domain_cis.json.result.name_servers }}"
+    state: "present"
+
+- name: Wait till the DNS is propagated and IBM detect it
+  register: r_check_nameservers
+  until: r_check_nameservers.json.result.status | default("")  == "active"
+  retries: 10
+  delay: 30
+  ansible.builtin.uri:
+    url: "https://api.cis.cloud.ibm.com/v1/{{ cis_instance_id }}/zones/{{ r_domain_cis.json.result.id }}"
+    method: GET
+    headers:
+      Authorization: "{{ ibmcloud_auth_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    status_code: 200
+
+- name: Download OCP install (TODO)
+  become: true
+  ansible.builtin.get_url:
+    url: https://lab.oforte.net/openshift-install
+    dest: /usr/bin/openshift-install
+    mode: 0755
