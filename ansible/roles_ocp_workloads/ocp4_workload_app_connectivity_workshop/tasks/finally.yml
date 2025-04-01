@@ -1,0 +1,84 @@
+---
+
+- name: Get current console configuration
+  k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: Console
+    name: cluster
+  register: console_info
+  retries: 10
+  delay: 30
+  ignore_errors: true
+  until:
+  - console_info is not failed
+  - console_info.resources[0].spec.plugins is defined
+  - console_info.resources[0].spec.plugins | length > 0
+
+- name: Print console_info from the previous task
+  ansible.builtin.debug:
+    var: console_info
+
+- name: Set fact for combined plugins
+  set_fact:
+    combined_plugins: "{{ (console_info.resources[0].spec.plugins | default([])) + ['kuadrant-console-plugin', 'openshift-site-plugin'] | unique }}"
+
+- name: Update console with combined plugins
+  k8s:
+    state: present
+    api_version: operator.openshift.io/v1
+    kind: Console
+    name: cluster
+    merge_type: merge
+    definition:
+      spec:
+        plugins: "{{ combined_plugins }}"
+      retries: 10
+  delay: 30
+  ignore_errors: true
+  register: console_update_result
+  until: console_update_result is not failed
+
+
+- name: Get showroom config
+  kubernetes.core.k8s_info:
+    api_version: "v1"
+    kind: ConfigMap
+    name: showroom-index
+    namespace: showroom
+  register: r_showroom_index_cm
+  until:
+    - r_showroom_index_cm is defined
+    - r_showroom_index_cm.resources is defined
+    - r_showroom_index_cm.resources | length == 1
+    - r_showroom_index_cm is not failed
+  retries: 10
+  delay: 30
+  ignore_errors: true
+
+
+- name: Print r_showroom_index_cm from the previous task
+  ansible.builtin.debug:
+    var: r_showroom_index_cm
+
+- name: Update showroom split sizing
+  when: r_showroom_index_cm is not failed
+  block:
+    - name: Replace [45,55] with [60,40]
+      set_fact:
+        updated_configmap: "{{ r_showroom_index_cm.resources[0] | regex_replace('\\[45,55\\]', '[60,40]') | regex_replace('\\[65,35\\]', '[50,50]') }}"
+
+    - name: Apply the updated ConfigMap
+      copy:
+        content: "{{ updated_configmap }}"
+        dest: "/tmp/updated_configmap.yaml"
+
+    - name: Apply the updated ConfigMap to OpenShift
+      command: oc apply -f /tmp/updated_configmap.yaml
+      retries: 3
+      delay: 30
+      ignore_errors: true
+
+    - name: "restart showroom deployment after configmap"
+      command: >-
+        oc rollout restart deployment/showroom -n  showroom
+  ignore_errors: true
