@@ -17,6 +17,7 @@ The approvers and mergers shouldn't have to interpret and guess by jumping right
 - Feature Pull Request
 - New config Pull Request
 - New role Pull Request
+- EE Pull Request
 
 ##### COMPONENT NAME
 <!--- Write the short name of the config, roles, task or feature below -->
