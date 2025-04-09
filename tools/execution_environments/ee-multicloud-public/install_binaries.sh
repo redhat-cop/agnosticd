@@ -54,3 +54,7 @@ chmod 700 get_helm.sh
 
 # IBM Cloud binary
 curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+
+if [ $ARCH = "amd64" ]; then
+    ibmcloud plugin install --all
+fi
