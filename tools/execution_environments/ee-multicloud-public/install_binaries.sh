@@ -103,4 +103,6 @@ if [ $ARCH = "amd64" ]; then
         cloud-logs \
         ilab \
         backup-recovery
+
+    #software-defined-storage   # skip because it causes issues.
 fi
