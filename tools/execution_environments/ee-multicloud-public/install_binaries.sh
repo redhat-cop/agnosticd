@@ -54,3 +54,5 @@ chmod 700 get_helm.sh
 
 # IBM Cloud binary
 curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+
+ibmcloud plugin install --all
