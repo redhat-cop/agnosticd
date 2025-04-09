@@ -58,8 +58,7 @@ chmod 700 get_helm.sh
 # IBM Cloud binary
 curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
 
-if [ $ARCH = "amd64" ]; then
-    ibmcloud plugin install \
+ibmcloud plugin install \
         container-registry \
         container-service \
         cloud-internet-services \
@@ -103,6 +102,4 @@ if [ $ARCH = "amd64" ]; then
         cloud-logs \
         ilab \
         backup-recovery
-
-    #software-defined-storage   # skip because it causes issues.
-fi
+#software-defined-storage   # skip because it causes issues.
