@@ -43,7 +43,7 @@ rm bw bw.zip
 aws_version=2.4.23
 curl -s -L "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m)-${aws_version}.zip" \
     -o "awscliv2.zip"
-unzip awscliv2.zip
+unzip -q awscliv2.zip
 ./aws/install
 
 rm awscliv2.zip
@@ -59,5 +59,48 @@ chmod 700 get_helm.sh
 curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
 
 if [ $ARCH = "amd64" ]; then
-    ibmcloud plugin install --all
+    ibmcloud plugin install \
+        container-registry \
+        container-service \
+        cloud-internet-services \
+        cloud-databases \
+        key-protect \
+        doi \
+        tke \
+        cloud-object-storage \
+        event-streams \
+        power-iaas \
+        vpc-infrastructure \
+        schematics \
+        cloud-dns-services \
+        dl-cli \
+        watson \
+        catalogs-management \
+        tg-cli \
+        code-engine \
+        hpvs \
+        secrets-manager \
+        app-configuration \
+        monitoring \
+        logging \
+        cloudant \
+        hpcs-cert-mgr \
+        atracker \
+        analytics-engine-v3 \
+        cra \
+        event-notifications \
+        dvaas \
+        hpnet \
+        hpcs \
+        cbr \
+        privileged-access-gateway \
+        project \
+        metrics-router \
+        openpages \
+        sl \
+        security-compliance \
+        data-product-hub \
+        cloud-logs \
+        ilab \
+        backup-recovery
 fi
