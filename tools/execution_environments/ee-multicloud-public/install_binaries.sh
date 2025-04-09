@@ -3,6 +3,7 @@ set -ue
 
 cd /tmp
 
+
 # initArch discovers the architecture for this system.
 ARCH=$(uname -m)
 case $ARCH in
@@ -15,6 +16,8 @@ case $ARCH in
     i686) ARCH="386";;
     i386) ARCH="386";;
 esac
+
+echo "Detected architecture: ${ARCH}"
 
 # OC
 # Install rhel8 version of oc
