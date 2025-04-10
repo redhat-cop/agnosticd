@@ -9,17 +9,23 @@
     fail_msg: ocp4_pull_secret variable must be defined
     success_msg: ocp4_pull_secret variable is defined
 
+- name: Define public hostname fact
+  ansible.builtin.set_fact:
+    bastion_public_hostname: "{{ hostvars[groups['bastions'][0]]['public_dns_name'] | default('') }}"
+    bastion_ssh_password: "{{ student_password }}"
+    bastion_ssh_user_name: "{{ student_name }}"
+
 - name: Ensure ansible module requirements are installed
   ansible.builtin.pip:
     name: kubernetes, passlib
 
 - name: Find an extra disk for libvirt folder
-  set_fact:
+  ansible.builtin.set_fact:
     _disks: "{{ _disks|default([]) + [ item ] }}"
     _diskname: "{{ '/dev/' + item.key }}"
   when:
     - not item.value.partitions
-    - item.key is search ("nvme*")
+    - item.key is search ("nvme*") or item.key is search ("vd*")
     - min_value|int <= item.value.sectors|int * item.value.sectorsize|int
     - extra_disk_libvirt_images is true
   vars:
@@ -42,6 +48,12 @@
     resizefs: true
   when:
     - _diskname is defined
+
+- name: Create /var/lib/libvirt directory if it does not exist
+  ansible.builtin.file:
+    path: /var/lib/libvirt
+    state: directory
+    mode: '0755'
 
 - name: Mount up device in /var/lib/libvirt
   ansible.posix.mount:
@@ -79,7 +91,6 @@
       - policycoreutils-python-utils
       - podman
       - httpd-tools
-      - haproxy
       - chrony
     state: present
 
@@ -161,13 +172,23 @@
 
 - name: Ensure DNSMasq lease file has the proper SELinux context
   community.general.sefcontext:
-    target: "/opt/dnsmasq/hosts.leases"
+    target: '/opt/dnsmasq/(.*)?\.leases'
     setype: dnsmasq_lease_t
     state: present
 
+- name: Ensure DNSMasq config files has the proper SELinux context
+  community.general.sefcontext:
+    target: "{{ item }}"
+    setype: dnsmasq_etc_t
+    state: present
+  with_items:
+    - '/opt/dnsmasq/include.d(/.*)?'
+    - '/opt/dnsmasq/(.*)?\.conf'
+    - '/opt/dnsmasq'
+
 - name: Ensure DNSMasq file applies the proper SELinux context
-  ansible.builtin.shell:
-    cmd: restorecon /opt/dnsmasq/hosts.leases
+  ansible.builtin.command:
+    cmd: restorecon -rv /opt/dnsmasq/
 
 - name: Ensure DNSMasq service is enabled and running
   ansible.builtin.systemd:
@@ -261,7 +282,6 @@
   community.crypto.openssh_keypair:
     path: /root/.ssh/id_rsa
 
-
 - name: Ensure ksushy is listening for redfish connections
   ansible.builtin.uri:
     url: https://infra.{{ lab_network_domain }}:9000/redfish/v1/Systems/local/hosted-worker0
@@ -271,6 +291,191 @@
     method: GET
     status_code: 200
     validate_certs: false
+
+# Showroom
+
+- name: Ensure lab-user exists and it is part of libvirt group
+  ansible.builtin.user:
+    name: lab-user
+    groups: libvirt
+
+- name: Ensure Git settings are configured for lab-user
+  community.general.git_config:
+    name: "{{ item.parameter }}"
+    value: "{{ item.value }}"
+    scope: global
+  with_items:
+    - {parameter: "user.email", value: "student@5g-deployment.lab"}
+    - {parameter: "user.name", value: "Student"}
+  become: true
+  become_user: lab-user
+
+- name: Ensure showroom folder exists
+  ansible.builtin.file:
+    path: /opt/showroom
+    state: directory
+    mode: "0755"
+
+- name: Ensure lab-content folder exists
+  ansible.builtin.file:
+    path: /opt/showroom/lab-content
+    state: directory
+    mode: "0755"
+
+- name: Generate lab-content on the hypervisor host - Clone repo
+  ansible.builtin.git:
+    repo: "{{ lab_repo }}"
+    dest: /opt/showroom/lab-repo/
+    single_branch: true
+    version: "{{ lab_version }}"
+
+- name: Generate lab-content on the hypervisor host - Modify required files
+  ansible.builtin.replace:
+    path: "{{ item.file }}"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  with_items:
+  # yamllint disable rule:line-length
+    - {regexp: "demo_environment_here", value: "true", file: "/opt/showroom/lab-repo/site.yml"}
+    - {regexp: "admin_password_here", value: "{{ strong_admin_password }}", file: "/opt/showroom/lab-repo/documentation/modules/ROOT/pages/_attributes.adoc"}
+  # yamllint enable rule:line-length
+
+- name: Generate lab-content on the hypervisor host - Run Antora
+  containers.podman.podman_container:
+    name: antora_build
+    image: quay.io/rhsysdeseng/showroom:antora-v3.0.0
+    state: started
+    detach: false
+    remove: true
+    volumes:
+      - "/opt/showroom/lab-repo:/antora:z"
+    command: "site.yml"
+
+- name: Generate lab-content on the hypervisor host - Copy generated files
+  ansible.builtin.copy:
+    src: /opt/showroom/lab-repo/gh-pages/
+    dest: /opt/showroom/lab-content/
+    remote_src: true
+    directory_mode: true
+
+- name: Generate lab-content on the hypervisor host - Download showroom html files
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.destination }}"
+    mode: "{{ item.mode }}"
+  # yamllint disable rule:line-length
+  retries: 5
+  delay: 10
+  with_items:
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/hypershift-baremetal-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/index.html", destination: "/opt/showroom/lab-content/index.html", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/hypershift-baremetal-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/split.css", destination: "/opt/showroom/lab-content/split.css", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/hypershift-baremetal-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/tabs.css", destination: "/opt/showroom/lab-content/tabs.css", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/hypershift-baremetal-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/tabs.js", destination: "/opt/showroom/lab-content/tabs.js", mode: "0644"}
+  # yamllint enable rule:line-length
+
+- name: Generate lab-content on the hypervisor host - Modify showroom html files
+  ansible.builtin.replace:
+    path: "/opt/showroom/lab-content/index.html"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  with_items:
+    - {regexp: "<CHANGEME_LAB_VERSION>", value: "{{ lab_release }}"}
+    - {regexp: "<CHANGEME_HYPERVISOR_PUBLIC_HOSTNAME>", value: "{{ bastion_public_hostname }}"}
+
+- name: Configure showroom - Download showroom services and configurations
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.destination }}"
+    mode: "{{ item.mode }}"
+  # yamllint disable rule:line-length
+  retries: 5
+  delay: 10
+  with_items:
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/hypershift-baremetal-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-apache.service", destination: "/etc/systemd/system/podman-showroom-apache.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/hypershift-baremetal-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-wetty.service", destination: "/etc/systemd/system/podman-showroom-wetty.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/hypershift-baremetal-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-firefox.service", destination: "/etc/systemd/system/podman-showroom-firefox.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/hypershift-baremetal-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/firefox-config.tar.gz", destination: "/tmp/firefox-config.tar.gz", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/hypershift-baremetal-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-traefik.service", destination: "/etc/systemd/system/podman-showroom-traefik.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/hypershift-baremetal-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/traefik-config.tar.gz", destination: "/tmp/traefik-config.tar.gz", mode: "0644"}
+  # yamllint enable rule:line-length
+
+- name: Configure showroom - Ensure content apache is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-apache
+
+- name: Configure showroom - Configure wetty
+  ansible.builtin.replace:
+    path: "/etc/systemd/system/podman-showroom-wetty.service"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  with_items:
+    - {regexp: "<CHANGEME_LAB_USER>", value: "{{ bastion_ssh_user_name }}"}
+    - {regexp: "<CHANGEME_LAB_USER_PWD>", value: "{{ bastion_ssh_password }}"}
+
+- name: Configure showroom - Ensure wetty is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-wetty
+
+- name: Configure showroom - Configure Firefox 1/2
+  ansible.builtin.unarchive:
+    src: /tmp/firefox-config.tar.gz
+    dest: /opt/showroom/
+    remote_src: true
+
+- name: Configure showroom - Configure Firefox 2/2
+  ansible.builtin.replace:
+    path: "/etc/systemd/system/podman-showroom-firefox.service"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  with_items:
+    - {regexp: "<CHANGEME_LAB_USER>", value: "{{ bastion_ssh_user_name }}"}
+    - {regexp: "<CHANGEME_LAB_USER_PWD>", value: "{{ strong_lab_password }}"}
+
+- name: Configure showroom - Ensure Firefox is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-firefox
+
+- name: Ensure traefik folder exists
+  ansible.builtin.file:
+    path: /opt/showroom/traefik
+    state: directory
+    mode: "0755"
+
+- name: Create htpasswd entry
+  ansible.builtin.shell: echo "{{ strong_lab_password }}" | htpasswd -i -n "{{ bastion_ssh_user_name }}"
+  register: lab_htpass_user
+  changed_when: false
+
+- name: Configure showroom - Configure Traefik 1/2
+  ansible.builtin.unarchive:
+    src: /tmp/traefik-config.tar.gz
+    dest: /opt/showroom/traefik
+    remote_src: true
+
+- name: Configure showroom - Configure Traefik 2/2
+  ansible.builtin.replace:
+    path: "/opt/showroom/traefik/config/traefik/dynamic_config.yml"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  with_items:
+    - {regexp: "<CHANGEME_HTPASS_USER>", value: "{{ lab_htpass_user.stdout }}"}
+    - {regexp: "<CHANGEME_HYPERVISOR_PUBLIC_HOSTNAME>", value: "{{ bastion_public_hostname }}"}
+
+- name: Configure showroom - Ensure Traefik is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-traefik
 
 # Leave this as the last task in the playbook.
 - name: pre_workload tasks complete
