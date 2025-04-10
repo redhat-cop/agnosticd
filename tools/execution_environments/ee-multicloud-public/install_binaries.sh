@@ -59,4 +59,6 @@ chmod 700 get_helm.sh
 curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
 
 # Install all plugins, best effort
+export IBMCLOUD_HOME=/opt/ibmcloud
+mkdir -p /opt/ibmcloud
 ibmcloud plugin install --all || true
