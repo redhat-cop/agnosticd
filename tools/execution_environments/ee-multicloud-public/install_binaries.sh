@@ -58,7 +58,10 @@ chmod 700 get_helm.sh
 # IBM Cloud binary
 curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
 
-ibmcloud plugin install \
+# AMD 64
+# software-defined-storage   # skip because it doesn't install
+if [ "${ARCH}" = "amd64" ]; then
+    ibmcloud plugin install \
         container-registry \
         container-service \
         cloud-internet-services \
@@ -102,4 +105,55 @@ ibmcloud plugin install \
         cloud-logs \
         ilab \
         backup-recovery
-#software-defined-storage   # skip because it causes issues.
+fi
+
+
+# ARM 64
+# Install all execpt those plugins, because binaries are not available:
+# Could not find compatible binary to install for plug-in watson.
+# Could not find compatible binary to install for plug-in dvaas[watson-query].
+# Could not find compatible binary to install for plug-in hpnet.
+
+if [ "${ARCH}" = "arm64" ]; then
+    ibmcloud plugin install \
+        container-registry \
+        container-service \
+        cloud-internet-services \
+        cloud-databases \
+        key-protect \
+        doi \
+        tke \
+        cloud-object-storage \
+        event-streams \
+        power-iaas \
+        vpc-infrastructure \
+        schematics \
+        cloud-dns-services \
+        dl-cli \
+        catalogs-management \
+        tg-cli \
+        code-engine \
+        hpvs \
+        secrets-manager \
+        app-configuration \
+        monitoring \
+        logging \
+        cloudant \
+        hpcs-cert-mgr \
+        atracker \
+        analytics-engine-v3 \
+        cra \
+        event-notifications \
+        hpcs \
+        cbr \
+        privileged-access-gateway \
+        project \
+        metrics-router \
+        openpages \
+        sl \
+        security-compliance \
+        data-product-hub \
+        cloud-logs \
+        ilab \
+        backup-recovery
+fi
