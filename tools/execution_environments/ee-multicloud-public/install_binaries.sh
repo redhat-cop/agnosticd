@@ -62,3 +62,4 @@ curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
 export IBMCLOUD_HOME=/opt/ibmcloud
 mkdir -p /opt/ibmcloud
 ibmcloud plugin install --all || true
+ibmcloud config --check-version=false
