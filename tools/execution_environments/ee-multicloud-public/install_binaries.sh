@@ -58,3 +58,4 @@ curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
 if [ $ARCH = "amd64" ]; then
     ibmcloud plugin install --all
 fi
+ibmcloud config --check-version=false
