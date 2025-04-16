@@ -212,6 +212,11 @@
   ansible.builtin.command: >-
     aws fsx update-file-system --file-system-id {{ (fsxn2.stdout | from_json).FileSystemId }} --ontap-configuration AutomaticBackupRetentionDays=0
 
+- name: Get mgmt IP of prod SVM
+  ansible.builtin.command: >-
+    aws fsx describe-storage-virtual-machines --query "StorageVirtualMachines[?Name=='{{ ocp4_workload_lb2739_fsx_storage_vm_name1 }}']"
+  register: prod_svm
+
 - name: Get ROSA 1 Cluster access credentials
   ansible.builtin.set_fact:
     _rosa_openshift_api_url: "{{ lookup('agnosticd_user_data', 'rosa_openshift_api_url') }}"
@@ -235,7 +240,7 @@
     - openshift_auth_results.k8s_auth.api_key is defined
 
   - name: Deploy Trident Operator
-    community.okd.k8s:
+    kubernetes.core.k8s:
       host: "{{ _rosa_openshift_api_url }}"
       api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
       state: present
@@ -263,6 +268,237 @@
     until: kubectl_get_trident_pod | json_query('resources[*].status.phase') | unique == ["Running"]
     retries: 30
     delay: 20
+
+  - name: Deploy Trident Orchestrator
+    kubernetes.core.k8s:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      state: present
+      definition:
+        apiVersion: trident.netapp.io/v1
+        kind: TridentOrchestrator
+        metadata:
+          name: trident
+          namespace: openshift-operators
+        spec:
+          IPv6: false
+          debug: false
+          nodePrep: [iscsi]
+          imagePullSecrets: []
+          imageRegistry: ''
+          k8sTimeout: 30
+          kubeletDir: /var/lib/kubelet
+          namespace: trident
+          silenceAutosupport: false
+
+  - name: Wait for Trident Controller to be up and running
+    kubernetes.core.k8s_info:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      kind: Pod
+      namespace: trident
+      label_selectors:
+      - app=controller.csi.trident.netapp.io
+    register: kubectl_get_trident_controller
+    until: kubectl_get_trident_controller | json_query('resources[*].status.phase') | unique == ["Running"]
+    retries: 30
+    delay: 20
+
+  - name: Create Secret for FSxN backends
+    kubernetes.core.k8s:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: prod-backend-fsxn-secret
+          namespace: trident
+        type: Opaque
+        stringData:
+          username: vsadmin
+          password: "{{ _ocp4_workload_lb2739_svm_admin_password }}"
+
+  - name: Create Trident Backend for NFS
+    kubernetes.core.k8s:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      state: present
+      definition:
+        apiVersion: trident.netapp.io/v1
+        kind: TridentBackendConfig
+        metadata:
+          name: prod-backend-fsxn-nfs
+          namespace: trident
+        spec:
+          version: 1
+          backendName: prod-fsxn-nfs
+          storageDriverName: ontap-nas
+          managementLIF: "{{ (prod_svm.stdout | from_json)[0].Endpoints.Management.IpAddresses[0] }}"
+          nasType: nfs
+          storagePrefix: prod
+          credentials:
+            name: prod-backend-fsxn-secret
+
+  - name: Create Trident Backend for iSCSI
+    kubernetes.core.k8s:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      state: present
+      definition:
+        apiVersion: trident.netapp.io/v1
+        kind: TridentBackendConfig
+        metadata:
+          name: prod-backend-fsxn-iscsi
+          namespace: trident
+        spec:
+          version: 1
+          backendName: prod-fsxn-iscsi
+          storageDriverName: ontap-san
+          managementLIF: "{{ (prod_svm.stdout | from_json)[0].Endpoints.Management.IpAddresses[0] }}"
+          sanType: iscsi
+          storagePrefix: prod
+          credentials:
+            name: prod-backend-fsxn-secret
+
+  - name: Create Storage Class for iSCSI
+    kubernetes.core.k8s:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      state: present
+      definition:
+        apiVersion: storage.k8s.io/v1
+        kind: StorageClass
+        metadata:
+          name: storage-class-iscsi
+          annotations:
+            storageclass.kubevirt.io/is-default-virt-class: 'true'
+        provisioner: csi.trident.netapp.io
+        parameters:
+          backendType: "ontap-san"
+          sanType: "iscsi"
+        mountOptions:
+        - discard
+        allowVolumeExpansion: true
+
+  - name: Create Storage Class for NFS
+    kubernetes.core.k8s:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      state: present
+      definition:
+        apiVersion: storage.k8s.io/v1
+        kind: StorageClass
+        metadata:
+          name: storage-class-nfs
+        provisioner: csi.trident.netapp.io
+        parameters:
+          backendType: "ontap-nas"
+          nasType: "nfs"
+        allowVolumeExpansion: true
+
+  - name: Create VolumeSnapshotClass
+    kubernetes.core.k8s:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      state: present
+      definition:
+        apiVersion: snapshot.storage.k8s.io/v1
+        kind: VolumeSnapshotClass
+        metadata:
+          name: csi-trident-vsc
+        driver: csi.trident.netapp.io
+        deletionPolicy: Delete
+
+  - name: Create Namespace for Trident protect
+    kubernetes.core.k8s:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: trident-protect
+
+  - name: Add Trident protect Helm repo
+    kubernetes.core.helm_repository:
+      name: netapp-trident-protect
+      repo_url: "https://netapp.github.io/trident-protect-helm-chart/"
+
+  - name: Deploy Trident protect CRD Helm chart
+    kubernetes.core.helm:
+      name: trident-protect-crds
+      chart_ref: netapp-trident-protect/trident-protect-crds
+      release_namespace: trident-protect
+
+  - name: Deploy Trident protect Helm chart
+    kubernetes.core.helm:
+      name: trident-protect
+      chart_ref: netapp-trident-protect/trident-protect
+      release_namespace: trident-protect
+      values:
+        clusterName=prod
+
+  - name: Create Secret for Appvault bucket
+    kubernetes.core.k8s:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: aws-s3-keys
+          namespace: trident-protect
+        type: Opaque
+        data:
+          accessKeyID: "{{ aws_access_key_id | b64encode }}"
+          secretAccessKey: "{{ aws_secret_access_key | b64encode }}"
+
+  - name: Create Secret for Kopia encryption
+    kubernetes.core.k8s:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      state: present
+      definition:
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: appvault-secret
+          namespace: trident-protect
+        type: Opaque
+        data:
+          KOPIA_PASSWORD: "{{ 'mypassword' | b64encode }}"
+
+  - name: Create Appvault
+    kubernetes.core.k8s:
+      host: "{{ _rosa_openshift_api_url }}"
+      api_key: "{{ openshift_auth_results.openshift_auth.api_key }}"
+      state: present
+      definition:
+        apiVersion: protect.trident.netapp.io/v1
+        kind: AppVault
+        metadata:
+          name: lab-vault
+          namespace: trident-protect
+        spec:
+          dataMoverPasswordSecretRef: appvault-secret
+          providerType: AWS
+          providerConfig:
+            s3:
+              bucketName: "{{ ocp4_workload_lb2739_s3_bucket_name }}"
+              endpoint: s3.us-east-2.amazonaws.com
+          providerCredentials:
+            accessKeyID:
+              valueFromSecret:
+                key: accessKeyID
+                name: aws-s3-keys
+            secretAccessKey:
+              valueFromSecret:
+                key: secretAccessKey
+                name: aws-s3-keys
 
   always:
   - name: If login succeeded, try to log out (revoke access token)
