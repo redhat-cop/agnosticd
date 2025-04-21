@@ -35,20 +35,55 @@
   retries: 10
   delay: 30
 
-- name: Get list of OpenShift images from Quay.io
-  uri:
-    url: "{{ hcp_quay_api_url }}"
-    return_content: true
-  register: r_quay_response
+- name: Check if x.y.z version exists
+  when: hcp_cluster_version is match("^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  block:
+    - name: Check if exists
+      register: r_check_image_set
+      kubernetes.core.k8s_info:
+        api_version: hive.openshift.io/v1
+        kind: ClusterImageSet
+        name: img{{ hcp_cluster_version }}-x86-64-appsub
 
-- name: Find the latest OpenShift image for the specified version
-  set_fact:
-    _ocp_latest_image: "{{ r_quay_response.json.tags | first | replace('multi-','') }}"
+    - name: Fail if version not available
+      fail:
+        msg: "Version {{ hcp_cluster_version }} not available"
+      when:
+        - r_check_image_set.resources | default([]) | length == 0 
 
-- name: Show the latest OpenShift image
-  debug:
-    msg: "The latest OpenShift image for version {{ hcp_cluster_version }} is: {{ _ocp_latest_image.name }}"
+    - name: Set releaseImage
+      set_fact:
+        ocp_release_image: "{{ r_check_image_set.resources[0].spec.releaseImage }}"
 
+- name: Select the latest image when x.y is specified
+  when: hcp_cluster_version is match("^[0-9]+\\.[0-9]+$")
+  block:
+    - name: "Get available ClusterImageSets"
+      kubernetes.core.k8s_info:
+        api_version: hive.openshift.io/v1
+        kind: ClusterImageSet
+      register: cis_list
+
+    - name: "Filter ClusterImageSets matching version {{ hcp_cluster_version }}"
+      set_fact:
+        filtered_image: >-
+          {{
+            cis_list.resources
+            | selectattr('metadata.name', 'match', "img" + hcp_cluster_version|string + "\.\d+-x86-64-appsub")
+            | sort(attribute='metadata.name', reverse=True)
+            | first | default(None)
+          }}
+
+    - name: Fail if version not available
+      fail:
+        msg: "Version {{ hcp_cluster_version }} not available"
+      when: filtered_image == ""
+
+    - name: Set releaseImage
+      set_fact:
+        ocp_release_image: "{{ filtered_image.spec.releaseImage }}"
+- debug: 
+    msg: "Selected HCP version {{ ocp_release_image }}"
 
 - name: Log in (obtain access token)
   community.okd.openshift_auth:
