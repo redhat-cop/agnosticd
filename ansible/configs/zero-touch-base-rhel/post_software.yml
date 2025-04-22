@@ -31,6 +31,43 @@
       when: instructlab_zt_setup | default(false) | bool
       include_tasks: instructlab_setup.yml
 
+
+- name: showroom deployer
+  hosts: localhost
+  gather_facts: true
+  become: true
+  tags:
+    - showroom
+  module_defaults:
+    group/k8s:
+      host: "{{ sandbox_openshift_api_url }}"
+      api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+      validate_certs: false
+  environment:
+    k8s_auth_api_key: "{{ sandbox_openshift_api_key  | default('') }}"
+    k8s_auth_host: "{{ sandbox_openshift_api_url | default('') }}"
+  tasks:
+    - name: Deploy Showroom as pods on the namespace (cnv)
+      when:
+        - cloud_provider == "openshift_cnv"
+        - ocp4_workload_showroom_content_git_repo is defined
+      include_role:
+        name: ocp4_workload_showroom
+      vars:
+        ocp4_workload_showroom_namespace: "{{ sandbox_openshift_namespace }}"
+
+    - name: Wait for showroom pod to be ready
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ sandbox_openshift_namespace }}"
+        label_selectors:
+          - "app.kubernetes.io/name=showroom"
+        wait: true
+        wait_condition:
+          type: Ready
+          status: "True"
+        wait_timeout: 300
+
 - name: Deploy user setup
   hosts: localhost
   gather_facts: false
@@ -43,6 +80,7 @@
     - name: Report Access Information for CNV
       when:
         - cloud_provider == "openshift_cnv"
+        - "'bastions' in groups"
       vars:
         _bastion_inventory_name: "{{ groups['bastions'][0] }}"
         _bastion_ssh_password: "{{ hostvars[bastion_hostname]['zero_touch_rhel_user_user_password'] }}"
@@ -60,7 +98,11 @@
           agnosticd_user_info:
             data:
               cloud_provider: "{{ cloud_provider }}"
-              ssh_command: "sh {{ zero_touch_rhel_user_user_name }}@{{ openshift_cnv_ssh_address }} -p {{ hostvars[groups['bastions'][0]].bastion_ssh_port }}"
+              bastion_public_hostname: "{{ openshift_cnv_ssh_address }}"
+              bastion_ssh_user_name: "{{ zero_touch_rhel_user_user_name }}"
+              bastion_ssh_password: "{{ zero_touch_rhel_user_user_password }}"
+              bastion_ssh_port: "{{ hostvars[groups['bastions'][0]].bastion_ssh_port  }}"
+              ssh_command: "ssh {{ zero_touch_rhel_user_user_name }}@{{ openshift_cnv_ssh_address }} -p {{ hostvars[groups['bastions'][0]].bastion_ssh_port }}"
               ssh_password: "{{ zero_touch_rhel_user_user_password }}"
               ssh_username: "{{ zero_touch_rhel_user_user_name }}"
               guid: "{{ guid }}"
@@ -98,13 +140,13 @@
               subdomain_internal: "{{ chomped_zone_internal_dns | default('') }}"
           register: r_user_data
 
-- name: Showroom deployer
+
+- name: cockpit deployer
   hosts: bastions[0]
   gather_facts: true
   become: true
   tags:
-    - showroom
-
+    - cockpit
   tasks:
 
     - name: Deploy Cockpit
@@ -137,11 +179,6 @@
               cockpit_user_name: "{{ student_name }}"
               cockpit_user_password: "{{ student_password }}"
 
-    - name: Deploy Showroom Web Interface
-      when: showroom_git_repo is defined
-      ansible.builtin.include_role:
-        name: showroom
-
     - name: Disconnect eth1 connection
       when: ec2_expand_network | default(false) | bool
       community.general.nmcli:
@@ -163,13 +200,22 @@
   gather_facts: false
   become: false
   environment:
-    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
-    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
-    AWS_DEFAULT_REGION: "{{ aws_region_final | default(aws_region) }}"
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id | default('') }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key | default('') }}"
+    AWS_DEFAULT_REGION: "{{ aws_region_final | default(aws_region) | default('') }}"
   tasks:
-    - name: Lock Bastion Security Group
-      when: lock_bastion_security_group | default(false) | bool
+    - name: Lock Bastion Security Group (EC2)
+      when:
+        - lock_bastion_security_group | default(false) | bool
+        - cloud_provider == "ec2"
       ansible.builtin.include_tasks: lock_bastion_security_group.yml
+
+    - name: Lock Bastion Security Group (CNV)
+      when:
+        - lock_bastion_security_group | default(false) | bool
+        - cloud_provider == "openshift_cnv"
+      ansible.builtin.include_tasks: lock_bastion_security_group_openshift_cnv.yml
+
 
 - name: PostSoftware flight-check
   hosts: localhost
