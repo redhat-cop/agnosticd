@@ -1,7 +1,3 @@
-#  agnosticd.ai
+# Ansible Collection - agnosticd.ai
 
-Collection for automating ai specfic configurations
-
-
-
-
+Documentation for the collection.

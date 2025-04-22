@@ -6,17 +6,142 @@ cloud_provider: openshift_cnv
 # configuring from the admin/control host
 ansible_user: cloud-user
 remote_user: cloud-user
+zero_touch_rhel_user_enable_sudoers: true
 
 ### Networking and DNS (CNV)
 subdomain_base_short: "{{ guid }}"
 subdomain_base_suffix: ".{{ sandbox_openshift_apps_domain }}"
 subdomain_base: "{{ subdomain_base_short }}{{ subdomain_base_suffix }}"
 
-bastion_instance_image: rhel-labs-9.2
+openshift_cnv_namespace: "{{ sandbox_openshift_namespace | default(env_type + '-' + guid) }}"
+
+### Random Password for each deployment
+common_password: >-
+      {{
+        lookup('password', output_dir ~ '/common_password length=12 chars=ascii_letters,digits')
+      }}
+
+# -------------------------------------------------------------------
+# Role: set-repositories
+# -------------------------------------------------------------------
+
+repo_method: satellite
+use_content_view: true
+update_packages: false
+
+# -------------------------------------------------------------------
+# Role: zero_touch_rhel_user
+# -------------------------------------------------------------------
+install_student_user: true
+student_name: rhel
+student_password: "{{ common_password }}"
+
+zero_touch_rhel_user_user_name: "{{ student_name }}"
+zero_touch_rhel_user_user_password: "{{ common_password }}"
+
+#
+# Network Configuration (lock_bastion_security_group_opebshift_cnv.yml)
+#
+# Default Ingress Rules (used if zero_touch_ingress_lockdown_rules is not provided)
+default_ingress_rules:
+  - from:
+      - ipBlock:
+          cidr: "0.0.0.0/0"
+          except: []
+    ports:
+      - protocol: TCP
+        port: 80
+      - protocol: TCP
+        port: 443
+      - protocol: TCP # FIXME: only for showroom
+        port: 8080
+
+  - ports:
+      - protocol: TCP
+        port: 22
+    from:
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/name: showroom
+
+# Default Egress Rules (used if zero_touch_egress_lockdown_rules is not provided)
+default_egress_rules:
+  - ports:
+      - protocol: UDP
+        port: 5353
+      - protocol: TCP
+        port: 5353
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: openshift-dns
+  - ports:
+      - protocol: TCP
+        port: 22
+    to:
+      - podSelector:
+          matchLabels:
+            kubevirt.io: virt-launcher
+
+#
+# Lockdown rules added to the defaults as required
+#
+# zero_touch_ingress_lockdown_rules:
+#   - from:
+#       - ipBlock:
+#           cidr: "0.0.0.0/0"
+#           except: []
+#     ports:
+#       - protocol: TCP
+#         port: 443
+#       - protocol: TCP # FIXME: only for showroom
+#         port: 8080
+
+# zero_touch_egress_lockdown_rules:
+#   - ports:
+#       - protocol: UDP
+#         port: 5353
+#       - protocol: TCP
+#         port: 5353
+#     to:
+#       - namespaceSelector:
+#           matchLabels:
+#             kubernetes.io/metadata.name: openshift-dns
+#   - ports:
+#       - protocol: TCP
+#         port: 22
+#     to:
+#       - podSelector:
+#           matchLabels:
+#             kubevirt.io: virt-launcher
 
 #
 # Instances to deploy
 #
+# Bastion Defaults
+bastion_default_image: rhel-9.5
+bastion_default_memory: 8G
+bastion_default_cores: 1
+bastion_default_image_size: 40
+bastion_default_service:
+  - name: bastion
+    ports:
+      - port: 443
+        protocol: TCP
+        targetPort: 443
+        name: bastion-https
+
+bastion_default_routes:
+  - name: bastion-https
+    host: bastion
+    service: bastion
+    targetPort: 443
+    tls: true
+
+bastion_networks:
+  - default
+
+bastion_default_userdata: ""
 
 instances:
   - name: "{{ bastion_hostname | default('bastion') }}"
@@ -25,28 +150,53 @@ instances:
     public_dns: false
     dns_loadbalancer: true
     floating_ip: false
-    image: "{{ bastion_instance_image | default(default_instance_image) }}"
-    memory: 8G
-    cores: 4
-    image_size: 100Gi
+    image: "{{ bastion_instance_image | default(bastion_default_image) }}"
+    memory: "{{ bastion_instance_memory | default(bastion_default_memory) }}"
+    cores: "{{ bastion_instance_cores | default(bastion_default_cores) }}"
+    image_size: "{{ bastion_instance_image_size | default(bastion_default_image_size) }}"
     tags:
       - key: "AnsibleGroup"
         value: "bastions,showroom"
       - key: "ostype"
         value: "linux"
-    networks:
-      - default
-    services:
-      - name: bastion
-        ports:
-          - port: 443
-            protocol: TCP
-            targetPort: 443
-            name: bastion-https
-    routes:
-      - name: bastion-https
-        host: bastion
-        service: bastion
-        targetPort: 443
-        tls: true
+    networks: "{{ bastion_networks }}"
+    services: "{{ bastion_instance_service | default(bastion_default_service) }}"
+    routes: "{{ bastion_instance_routes | default(bastion_default_routes) }}"
+    userdata: "{{ bastion_instance_userdata | default(bastion_default_userdata) }}"
+
+# -------------------------------------------------------------------
+# Role: OCP4 Showroom
+# -------------------------------------------------------------------
+showroom_deploy_shared_cluster_enable: false
+
+ocp4_workload_showroom_chart_package_url: https://agonzalezrh.github.io/showroom-deployer
+ocp4_workload_showroom_deployer_chart_name: showroom-single-pod
+ocp4_workload_showroom_deployer_chart_version: "1.3.9"
+ocp4_workload_showroom_zero_touch_bundle: "https://github.com/rhpds/nookbag/releases/download/nookbag-v0.0.4/nookbag-v0.0.4.zip"
+ocp4_workload_showroom_zero_touch_ui_enabled: "true"
+
+ocp4_workload_showroom_content_only: false
+ocp4_workload_showroom_content_antora_playbook: zero-touch-site.yml
+ocp4_workload_showroom_terminal_type: wetty
+ocp4_workload_showroom_wetty_image: quay.io/rhpds/wetty
+ocp4_workload_showroom_wetty_ssh_bastion_login: true
+ocp4_workload_showroom_content_image: ghcr.io/agonzalezrh/showroom-content:main
+
+bastion_prefix: "{{ groups['bastions'][0] | regex_replace('\\..*$') }}"
+
+bastion_ssh_command: "ssh {{ ansible_service_account_user_name }}@{{ groups['bastions'][0]  }}"
+bastion_ssh_user_name: "{{ ansible_service_account_user_name }}"
+bastion_ssh_password: "{{ ansible_service_account_user_password }}"
+bastion_public_hostname: "{{ bastion_prefix }}"
+bastion_ssh_port: 22
+
+_showroom_user_data:
+  bastion_ssh_command: "ssh {{ ansible_service_account_user_name }}@{{ groups['bastions'][0]  }}"
+  bastion_ssh_user_name: "{{ ansible_service_account_user_name }}"
+  bastion_ssh_password: "{{ ansible_service_account_user_password }}"
+  bastion_public_hostname: "{{ bastion_prefix }}"
+  bastion_ssh_port: 22
+
+ansible_service_account_user_name: "{{ student_name }}"
+ansible_service_account_user_password: "{{ common_password }}"
 ...

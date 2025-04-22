@@ -1,0 +1,105 @@
+---
+- name: Log into OpenShift
+  community.okd.openshift_auth:
+    username: cluster-admin
+    password: "{{ _ocp4_workload_lb2739_second_rosa_cluster_admin_password }}"
+    host: "{{ _ocp4_workload_lb2739_second_rosa_openshift_api_url }}"
+    validate_certs: false
+  register: r_kube_auth
+  retries: 60
+  delay: 30
+  until:
+  - r_kube_auth is defined
+  - r_kube_auth.k8s_auth is defined
+  - r_kube_auth.k8s_auth.api_key is defined
+
+- name: Save API token
+  ansible.builtin.set_fact:
+    _ocp4_workload_lb2739_second_rosa_cluster_admin_token: "{{ r_kube_auth.openshift_auth.api_key }}"
+
+- name: Deploy Kubevirt
+  module_defaults:
+    group/k8s:
+      host: "{{ _ocp4_workload_lb2739_second_rosa_openshift_api_url }}"
+      api_key: "{{ _ocp4_workload_lb2739_second_rosa_cluster_admin_token }}"
+      validate_certs: false
+  block:
+
+  - name: Create openshift-cnv namespace
+    kubernetes.core.k8s:
+      state: present
+      api_version: v1
+      kind: Namespace
+      name: openshift-cnv
+
+  - name: Create kubevirt operator group
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: operators.coreos.com/v1
+        kind: OperatorGroup
+        metadata:
+          name: openshift-cnv-og
+          namespace: openshift-cnv
+        spec:
+          targetNamespaces:
+          - openshift-cnv
+          upgradeStrategy: Default
+
+  - name: Create kubevirt subscription
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: operators.coreos.com/v1alpha1
+        kind: Subscription
+        metadata:
+          name: kubevirt-hyperconverged
+          namespace: openshift-cnv
+        spec:
+          channel: stable
+          config:
+            env:
+            - name: KVM_EMULATION
+              value: "true"
+          installPlanApproval: Automatic
+          name: kubevirt-hyperconverged
+          source: redhat-operators
+          sourceNamespace: openshift-marketplace
+
+  - name: Get Installed CSV
+    kubernetes.core.k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: Subscription
+      name: kubevirt-hyperconverged
+      namespace: openshift-cnv
+    register: r_subscription
+    retries: 30
+    delay: 10
+    until:
+    - r_subscription.resources[0].status.currentCSV is defined
+    - r_subscription.resources[0].status.currentCSV | length > 0
+
+  - name: Wait until CSV is installed
+    kubernetes.core.k8s_info:
+      api_version: operators.coreos.com/v1alpha1
+      kind: ClusterServiceVersion
+      name: "{{ r_subscription.resources[0].status.currentCSV }}"
+      namespace: openshift-cnv
+    register: r_csv
+    retries: 10
+    delay: 30
+    until:
+    - r_csv.resources[0].status.phase is defined
+    - r_csv.resources[0].status.phase | length > 0
+    - r_csv.resources[0].status.phase == "Succeeded"
+
+  - name: Deploy Hyperconverged
+    kubernetes.core.k8s:
+      state: present
+      definition:
+        apiVersion: hco.kubevirt.io/v1beta1
+        kind: HyperConverged
+        metadata:
+          name: kubevirt-hyperconverged
+          namespace: openshift-cnv
+        spec:
