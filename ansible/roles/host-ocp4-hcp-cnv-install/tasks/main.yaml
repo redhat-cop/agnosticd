@@ -35,21 +35,6 @@
   retries: 10
   delay: 30
 
-- name: Get list of OpenShift images from Quay.io
-  uri:
-    url: "{{ hcp_quay_api_url }}"
-    return_content: true
-  register: r_quay_response
-
-- name: Find the latest OpenShift image for the specified version
-  set_fact:
-    _ocp_latest_image: "{{ r_quay_response.json.tags | first | replace('multi-','') }}"
-
-- name: Show the latest OpenShift image
-  debug:
-    msg: "The latest OpenShift image for version {{ hcp_cluster_version }} is: {{ _ocp_latest_image.name }}"
-
-
 - name: Log in (obtain access token)
   community.okd.openshift_auth:
     username: "{{ sandbox_openshift_username }}"
@@ -61,39 +46,124 @@
 - name: Install OCP using HCP
   module_defaults:
     group/k8s:
-      host: "{{ sandbox_openshift_api_url }}"
-      api_key: "{{ k8s_auth_results.k8s_auth.api_key | default(sandbox_openshift_api_key) }}"
+      host: "{{ sandbox_hcp.sandbox_openshift_api_url }}"
+      api_key: "{{ k8s_auth_results.k8s_auth.api_key | default(sandbox_hcp.sandbox_openshift_api_key) }}"
       validate_certs: false
 
   block:
+    - name: Check if x.y.z version exists
+      when: hcp_cluster_version is match("^[0-9]+\\.[0-9]+\\.[0-9]+$")
+      block:
+        - name: Check if exists
+          register: r_check_image_set
+          kubernetes.core.k8s_info:
+            api_version: hive.openshift.io/v1
+            kind: ClusterImageSet
+            name: img{{ hcp_cluster_version }}-x86-64-appsub
+
+        - name: Fail if version not available
+          fail:
+            msg: "Version {{ hcp_cluster_version }} not available"
+          when:
+            - r_check_image_set.resources | default([]) | length == 0 
+
+        - name: Set releaseImage
+          set_fact:
+            ocp_release_image: "{{ r_check_image_set.resources[0].spec.releaseImage }}"
+
+    - name: Select the latest image when x.y is specified
+      when: hcp_cluster_version is match("^[0-9]+\\.[0-9]+$")
+      block:
+        - name: "Get available ClusterImageSets"
+          kubernetes.core.k8s_info:
+            api_version: hive.openshift.io/v1
+            kind: ClusterImageSet
+          register: cis_list
+
+        - name: "Filter ClusterImageSets matching version {{ hcp_cluster_version }}"
+          set_fact:
+            filtered_image: >-
+              {{
+                cis_list.resources
+                | selectattr('metadata.name', 'match', "img" + hcp_cluster_version|string + "\.\d+-x86-64-appsub")
+                | sort(attribute='metadata.name', reverse=True)
+                | first | default(None)
+              }}
+    
+        - name: Fail if version not available
+          fail:
+            msg: "Version {{ hcp_cluster_version }} not available"
+          when: filtered_image == ""
+
+        - name: Set releaseImage
+          set_fact:
+            ocp_release_image: "{{ filtered_image.spec.releaseImage }}"
+    - debug: 
+        msg: "Selected HCP version {{ ocp_release_image }}"
+        
     - name: Add the certificate definition for OAuth service
       kubernetes.core.k8s:
         definition: "{{ lookup('ansible.builtin.template', 'certificate.yaml') }}"
         wait: true
         wait_timeout: 300
       vars:
-        namespace: "{{ hcp_ocp_namespace }}"
+        namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
 
     - name: Wait until Oauth Certificate is ready
+      ignore_errors: true
+      register: r_oauth
       kubernetes.core.k8s_info:
         api_version: cert-manager.io/v1
         kind: Certificate
         name: oauth-{{ guid }}
-        namespace: "{{ hcp_ocp_namespace }}"
+        namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
         wait: true
         wait_sleep: 5
         wait_timeout: 800
         wait_condition:
           type: "Ready"
           status: "True"
-
+          
+    - name: Restart OAuth request if it fails
+      when: r_oauth is failed
+      block:
+        - name: Delete failed OAuth Certificate
+          kubernetes.core.k8s:
+            api_version: cert-manager.io/v1
+            kind: Certificate
+            name: oauth-{{ guid }}
+            namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
+            state: absent
+            
+        - name: Add the certificate definition for OAuth service
+          kubernetes.core.k8s:
+            definition: "{{ lookup('ansible.builtin.template', 'certificate.yaml') }}"
+            wait: true
+            wait_timeout: 300
+          vars:
+            namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
+    
+        - name: Wait until Oauth Certificate is ready
+          kubernetes.core.k8s_info:
+            api_version: cert-manager.io/v1
+            kind: Certificate
+            name: oauth-{{ guid }}
+            namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
+            register: r_oauth
+            wait: true
+            wait_sleep: 5
+            wait_timeout: 800
+            wait_condition:
+              type: "Ready"
+              status: "True"   
+    
     - name: Add the pull secret
       kubernetes.core.k8s:
         definition: "{{ lookup('ansible.builtin.template', 'pullsecret.yaml') }}"
         wait: true
         wait_timeout: 300
       vars:
-        namespace: "{{ hcp_ocp_namespace }}"
+        namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
 
     - name: Set variable for kubeconfig
       set_fact:
@@ -107,7 +177,7 @@
         wait: true
         wait_timeout: 300
       vars:
-        namespace: "{{ hcp_ocp_namespace }}"
+        namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
 
     - name: Create htpasswd secret for admin and userX
       include_tasks: setup_htpasswd_authentication.yml
@@ -118,7 +188,8 @@
         wait: true
         wait_timeout: 300
       vars:
-        namespace: "{{ hcp_ocp_namespace }}"
+        namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
+        target_namespace: "{{ sandbox_openshift_namespace }}"
 
     - name: Create the NodePool
       kubernetes.core.k8s:
@@ -126,14 +197,14 @@
         wait: true
         wait_timeout: 300
       vars:
-        namespace: "{{ hcp_ocp_namespace }}"
+        namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
 
     - name: Get HostedCluster
       kubernetes.core.k8s_info:
         api_version: hypershift.openshift.io/v1beta1
         kind: HostedCluster
         name: "hcp-{{ guid }}"
-        namespace: "{{ hcp_ocp_namespace }}"
+        namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
       register: r_hosted_cluster
       retries: 120
       delay: 10
@@ -147,7 +218,7 @@
         api_version: v1
         kind: Secret
         name: hcp-{{ guid }}-admin-kubeconfig
-        namespace: "{{ hcp_ocp_namespace }}"
+        namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
       register: kubeadmin_secret_result
 
     - name: Get the OpenShift secret
@@ -156,22 +227,22 @@
         api_version: v1
         kind: Secret
         name: hcp-{{ guid }}-kubeadmin-password
-        namespace: "{{ hcp_ocp_namespace }}"
+        namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
       register: password_secret_result
 
     - name: Decode the kubeconfig secret
       set_fact:
         kubeconfig_decoded: "{{ kubeadmin_secret_result.resources[0].data.kubeconfig | b64decode }}"
-
+        
     - name: Decode the kubeadmin password secret
       when: hcp_authentication | default('') != 'htpasswd'
       set_fact:
         kubeadmin_password: "{{ password_secret_result.resources[0].data.password | b64decode }}"
 
-    - name: Generate /tmp/kubeconfig
-      copy:
-        dest: /tmp/kubeconfig
-        content: "{{ kubeconfig_decoded }}"
+- name: Generate /tmp/kubeconfig
+  copy:
+    dest: /tmp/kubeconfig
+    content: "{{ kubeconfig_decoded }}"
 
 - name: Get information about the router-nodeport-default service
   kubernetes.core.k8s_info:
@@ -209,7 +280,7 @@
         wait: true
         wait_timeout: 300
       vars:
-        namespace: "{{ hcp_ocp_namespace }}"
+        namespace: "{{ sandbox_openshift_namespace }}"
 
     - name: Wait for the LoadBalancer value - workers
       register: svc_apps
@@ -217,7 +288,7 @@
         api_version: v1
         kind: Service
         name: "svc-{{ guid }}-apps"
-        namespace: "{{ hcp_ocp_namespace }}"
+        namespace: "{{ sandbox_openshift_namespace }}"
       until: svc_apps.resources[0].status.loadBalancer.ingress[0].ip | default('') != ''
       retries: 10
       delay: 2
