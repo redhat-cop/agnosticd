@@ -24,10 +24,10 @@ param workerSubnetCidr string = '10.100.70.0/23'
 param masterSubnetCidr string = '10.100.76.0/24'
 
 @description('Master Node VM Type')
-param masterVmSize string = 'Standard_D8s_v3'
+param masterVmSize string = 'Standard_D32s_v3'
 
 @description('Worker Node VM Type')
-param workerVmSize string = 'Standard_D4s_v3'
+param workerVmSize string = 'Standard_D16s_v3'
 
 @description('Worker Node Disk Size in GB')
 @minValue(128)
@@ -395,7 +395,7 @@ resource cluster 'Microsoft.RedHatOpenShift/openShiftClusters@2024-08-12-preview
        }
        workerProfiles: [{
            name: 'worker'
-           count: 3
+           count: 5
            diskSizeGB: workerVmDiskSize
            vmSize: workerVmSize
            subnetId: workerSubnetId
