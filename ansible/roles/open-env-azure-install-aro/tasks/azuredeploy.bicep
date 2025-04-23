@@ -24,14 +24,14 @@ param workerSubnetCidr string = '10.100.70.0/23'
 param masterSubnetCidr string = '10.100.76.0/24'
 
 @description('Master Node VM Type')
-param masterVmSize string = '"{{ open_env_azure_install_aro_master_vm_size }}"'
+param masterVmSize string = 'Standard_D8s_v3'
 
 @description('Worker Node VM Type')
-param workerVmSize string = '"{{ open_env_azure_install_aro_worker_vm_size }}"'
+param workerVmSize string = 'Standard_D4s_v3'
 
 @description('Worker Node Disk Size in GB')
 @minValue(128)
-param workerVmDiskSize int = "{{ open_env_azure_install_aro_worker_vm_disk_size }}"
+param workerVmDiskSize int = 128
 
 @description('Cidr for Pods')
 param podCidr string = '10.128.0.0/14'
@@ -395,7 +395,7 @@ resource cluster 'Microsoft.RedHatOpenShift/openShiftClusters@2024-08-12-preview
        }
        workerProfiles: [{
            name: 'worker'
-           count: "{{ open_env_azure_install_aro_worker_count }}"
+           count: 3
            diskSizeGB: workerVmDiskSize
            vmSize: workerVmSize
            subnetId: workerSubnetId
