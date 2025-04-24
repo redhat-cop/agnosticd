@@ -1,0 +1,84 @@
+---
+- name: Set variables
+  ansible.builtin.set_fact:
+    RESOURCEGROUP: "{{ azure_resource_group }}"
+    USER_ASSIGNED_IDENTITY_NAME: "{{ RESOURCEGROUP }}-identity"
+    FEDERATED_IDENTITY_CREDENTIAL_NAME: "{{ RESOURCEGROUP }}-federated-identity"
+    SERVICE_ACCOUNT_NAMESPACE: "{{ open-env-azure-aro-ai-search-sa-namespace | default('user') }}"
+    SERVICE_ACCOUNT_NAME: "{{ open-env-azure-aro-ai-search-sa-name | default('user') }}"
+    AI_SUBSCRIPTION: "{{ open-env-azure-aro-ai-search-user-ai-sub }}"
+    AI_RESOURCEGROUP: "{{ open-env-azure-aro-ai-search-user-ai-rg }}"
+    AI_SEARCH_NAME: "{{ open-env-azure-aro-ai-search-user-ai-search-name }}"
+    AI_NAME: "{{ open-env-azure-aro-ai-search-user-ai-name }}"
+    OCP4_WORKLOAD_USER_COUNT: "{{ ocp4_workload_user_count | default(1) }}"
+    
+- name: Verify required variables are set
+  assert:
+    that:
+      - RESOURCEGROUP is defined
+      - AI_SUBSCRIPTION is defined
+    fail_msg: "Required variables (RESOURCEGROUP, AI_SUBSCRIPTION) are not defined"
+
+- name: Set AI scope variables
+  set_fact:
+    AI_SEARCH_SCOPE: "/subscriptions/{{ AI_SUBSCRIPTION }}/resourceGroups/{{ AI_RESOURCEGROUP }}/providers/Microsoft.Search/searchServices/{{ AI_SEARCH_NAME }}"
+    AI_SCOPE: "/subscriptions/{{ AI_SUBSCRIPTION }}/resourceGroups/{{ AI_RESOURCEGROUP }}/providers/Microsoft.CognitiveServices/accounts/{{ AI_NAME }}"
+
+- name: Get ARO OIDC Issuer URL
+  shell: |
+    oc get authentication cluster -o jsonpath='{.spec.serviceAccountIssuer}'
+  register: aro_oidc_issuer
+  changed_when: false
+
+- name: Set ARO_OIDC_ISSUER fact
+  set_fact:
+    ARO_OIDC_ISSUER: "{{ aro_oidc_issuer.stdout }}"
+
+- name: Create user-assigned identity
+  shell: |
+    az identity create --name "{{ USER_ASSIGNED_IDENTITY_NAME }}" --resource-group "{{ RESOURCEGROUP }}" --location "{{ LOCATION }}"
+  register: create_identity
+
+- name: Get identity object ID
+  shell: |
+    az identity show --name "{{ USER_ASSIGNED_IDENTITY_NAME }}" --resource-group "{{ RESOURCEGROUP }}" --query 'principalId' -otsv
+  register: identity_object_id
+  changed_when: false
+
+- name: Get identity client ID
+  shell: |
+    az identity show --name "{{ USER_ASSIGNED_IDENTITY_NAME }}" --resource-group "{{ RESOURCEGROUP }}" --query 'clientId' -otsv
+  register: identity_client_id
+  changed_when: false
+
+- name: Assign Reader role for AI Search
+  shell: |
+    az role assignment create --assignee-object-id "{{ identity_object_id.stdout }}" \
+      --role "Reader" \
+      --scope "{{ AI_SEARCH_SCOPE }}" \
+      --assignee-principal-type ServicePrincipal
+
+- name: Assign Search Index Data Reader role
+  shell: |
+    az role assignment create --assignee-object-id "{{ identity_object_id.stdout }}" \
+      --role "Search Index Data Reader" \
+      --scope "{{ AI_SEARCH_SCOPE }}" \
+      --assignee-principal-type ServicePrincipal
+
+- name: Assign Cognitive Services OpenAI User role
+  shell: |
+    az role assignment create --assignee-object-id "{{ identity_object_id.stdout }}" \
+      --role "Cognitive Services OpenAI User" \
+      --scope "{{ AI_SCOPE }}" \
+      --assignee-principal-type ServicePrincipal
+
+- name: Create federated identity credentials for each user
+  shell: |
+    az identity federated-credential create \
+      --name "{{ FEDERATED_IDENTITY_CREDENTIAL_NAME_PREFIX }}-{{ item }}" \
+      --identity-name "{{ USER_ASSIGNED_IDENTITY_NAME }}" \
+      --resource-group "{{ RESOURCEGROUP }}" \
+      --issuer "{{ ARO_OIDC_ISSUER }}" \
+      --subject "system:serviceaccount:{{ SERVICE_ACCOUNT_BASE_NAMESPACE }}{{ item }}:{{ SERVICE_ACCOUNT_BASE_NAME }}{{ item }}"
+  loop: "{{ range(1, {{ ocp4_workload_user_count }}|int + 1)|list }}"
+  when: "{{ ocp4_workload_user_count }}"|int > 0
