@@ -40,51 +40,71 @@
   set_fact:
     ARO_OIDC_ISSUER: "{{ aro_oidc_issuer.stdout }}"
 
-- name: Create user-assigned identity
-  shell: |
-    az identity create --name "{{ USER_ASSIGNED_IDENTITY_NAME }}" --resource-group "{{ RESOURCEGROUP }}" --location "{{ LOCATION }}"
-  register: create_identity
+- name: Create identities and configure access for each user
+  block:
+    - name: Create user-assigned identity
+      shell: |
+        az identity create \
+          --name "{{ RESOURCEGROUP }}-user{{ item }}-identity" \
+          --resource-group "{{ RESOURCEGROUP }}" \
+          --location "{{ LOCATION }}"
+      register: create_identity
+      loop: "{{ range(1, OCP4_WORKLOAD_USER_COUNT|int + 1)|list }}"
+      when: OCP4_WORKLOAD_USER_COUNT|int > 0
 
-- name: Get identity object ID
-  shell: |
-    az identity show --name "{{ USER_ASSIGNED_IDENTITY_NAME }}" --resource-group "{{ RESOURCEGROUP }}" --query 'principalId' -otsv
-  register: identity_object_id
-  changed_when: false
+    - name: Get identity object IDs
+      shell: |
+        az identity show \
+          --name "{{ RESOURCEGROUP }}-user{{ item }}-identity" \
+          --resource-group "{{ RESOURCEGROUP }}" \
+          --query 'principalId' -otsv
+      register: identity_object_ids
+      loop: "{{ range(1, OCP4_WORKLOAD_USER_COUNT|int + 1)|list }}"
+      when: OCP4_WORKLOAD_USER_COUNT|int > 0
 
-- name: Get identity client ID
-  shell: |
-    az identity show --name "{{ USER_ASSIGNED_IDENTITY_NAME }}" --resource-group "{{ RESOURCEGROUP }}" --query 'clientId' -otsv
-  register: identity_client_id
-  changed_when: false
+    - name: Get identity client IDs
+      shell: |
+        az identity show \
+          --name "{{ RESOURCEGROUP }}-user{{ item }}-identity" \
+          --resource-group "{{ RESOURCEGROUP }}" \
+          --query 'clientId' -otsv
+      register: identity_client_ids
+      loop: "{{ range(1, OCP4_WORKLOAD_USER_COUNT|int + 1)|list }}"
+      when: OCP4_WORKLOAD_USER_COUNT|int > 0
 
-- name: Assign Reader role for AI Search
-  shell: |
-    az role assignment create --assignee-object-id "{{ identity_object_id.stdout }}" \
-      --role "Reader" \
-      --scope "{{ AI_SEARCH_SCOPE }}" \
-      --assignee-principal-type ServicePrincipal
+    - name: Assign Search Index Data Reader role for each identity
+      shell: |
+        az role assignment create \
+          --assignee-object-id "{{ identity_object_ids.results[item.0|int - 1].stdout }}" \
+          --role "Search Index Data Reader" \
+          --scope "{{ AI_SEARCH_SCOPE }}" \
+          --assignee-principal-type ServicePrincipal
+      loop: "{{ range(0, OCP4_WORKLOAD_USER_COUNT|int)|list }}"
+      when: OCP4_WORKLOAD_USER_COUNT|int > 0
 
-- name: Assign Search Index Data Reader role
-  shell: |
-    az role assignment create --assignee-object-id "{{ identity_object_id.stdout }}" \
-      --role "Search Index Data Reader" \
-      --scope "{{ AI_SEARCH_SCOPE }}" \
-      --assignee-principal-type ServicePrincipal
+    - name: Assign Cognitive Services OpenAI User role for each identity
+      shell: |
+        az role assignment create \
+          --assignee-object-id "{{ identity_object_ids.results[item|int - 1].stdout }}" \
+          --role "Cognitive Services OpenAI User" \
+          --scope "{{ AI_SCOPE }}" \
+          --assignee-principal-type ServicePrincipal
+      loop: "{{ range(1, OCP4_WORKLOAD_USER_COUNT|int + 1)|list }}"
+      when: OCP4_WORKLOAD_USER_COUNT|int > 0
 
-- name: Assign Cognitive Services OpenAI User role
-  shell: |
-    az role assignment create --assignee-object-id "{{ identity_object_id.stdout }}" \
-      --role "Cognitive Services OpenAI User" \
-      --scope "{{ AI_SCOPE }}" \
-      --assignee-principal-type ServicePrincipal
+    - name: Create federated identity credentials for each user
+      shell: |
+        az identity federated-credential create \
+          --name "{{ RESOURCEGROUP }}-user{{ item }}-federated-identity" \
+          --identity-name "{{ RESOURCEGROUP }}-user{{ item }}-identity" \
+          --resource-group "{{ RESOURCEGROUP }}" \
+          --issuer "{{ ARO_OIDC_ISSUER }}" \
+          --subject "system:serviceaccount:user{{ item }}:{{ SERVICE_ACCOUNT_NAME }}"
+      loop: "{{ range(1, OCP4_WORKLOAD_USER_COUNT|int + 1)|list }}"
+      when: OCP4_WORKLOAD_USER_COUNT|int > 0
 
-- name: Create federated identity credentials for each user
-  shell: |
-    az identity federated-credential create \
-      --name "{{ FEDERATED_IDENTITY_CREDENTIAL_NAME_PREFIX }}-{{ item }}" \
-      --identity-name "{{ USER_ASSIGNED_IDENTITY_NAME }}" \
-      --resource-group "{{ RESOURCEGROUP }}" \
-      --issuer "{{ ARO_OIDC_ISSUER }}" \
-      --subject "system:serviceaccount:{{ SERVICE_ACCOUNT_BASE_NAMESPACE }}{{ item }}:{{ SERVICE_ACCOUNT_BASE_NAME }}{{ item }}"
-  loop: "{{ range(1, OCP4_WORKLOAD_USER_COUNT|int + 1)|list }}"
-  when: OCP4_WORKLOAD_USER_COUNT|int > 0
+- name: Save user info with clean output
+  agnosticd_user_info:
+    data:
+      user_assigned_identity_object_ids: "{{ identity_object_ids.results | map(attribute='stdout') | list }}"
+      user_assigned_identity_client_ids: "{{ identity_client_ids.results | map(attribute='stdout') | list }}"
