@@ -1,4 +1,43 @@
 ---
+- name: Log into Azure CLI
+  no_log: True
+  command: >
+    az login --service-principal -u {{ azure_service_principal }}
+    -p {{ azure_password }} --tenant {{ azure_tenant }}
+
+- name: Check if email is Red Hat associate
+  set_fact:
+    internal_user: True
+  when:
+    - '"@redhat.com" in requester_email'
+    - agnosticd_open_environment | default(false) | bool
+
+- name: Check if email is not a Red Hat associate
+  set_fact:
+    internal_user: False
+  when:
+    - '"@redhat.com" not in requester_email'
+
+- name: Checking if user is in Active Directory
+  when:
+    - internal_user | default(false) | bool
+  azure.azcollection.azure_rm_aduser_info:
+    auth_source: env
+    user_principal_name: "{{ requester_email }}"
+    tenant: "{{ azure_tenant }}"
+  register: azuser
+
+- name: Remove user from group
+  when:
+    - internal_user | default(false) | bool
+  azure.azcollection.azure_rm_adgroup:
+    auth_source: env
+    tenant: "{{ azure_tenant }}"
+    object_id: "{{ azure_group_id }}"
+    state: 'present'
+    absent_members:
+      - "{{ azuser.ad_users[0].object_id }}"
+
 - name: Retrieve which Pool ID is allocated for this user from the database
   ansible.builtin.uri:
     return_content: yes
@@ -10,17 +49,11 @@
   debug:
     msg: "{{ poolid.content }}"
 
-- name: Purge pool assignment
+- name: Purge azure services and pool assignment
   when:
     - poolid.content
     - poolid.status == 200
   block:
-    - name: Log into Azure CLI
-      no_log: True
-      command: >
-        az login --service-principal -u {{ azure_service_principal }}
-        -p {{ azure_password }} --tenant {{ azure_tenant }}
-
     - name: Get facts for the subscription by name
       azure.azcollection.azure_rm_subscription_info:
         auth_source: env
@@ -34,6 +67,10 @@
     - name: Get subscription ID
       set_fact:
         pool_subscription_id: "{{ assignedsubscription.subscriptions[0].subscription_id }}"
+
+    - name: Switch Subscriptions
+      ansible.builtin.command: >
+        az account set -s "{{ pool_subscription_id }}"
 
     - name: Clean up DNS zone
       command: >
@@ -53,6 +90,25 @@
         zone_name: "{{ azure_root_dns_zone }}"
         state: absent
 
+    - name: Get all resource groups in the subscription
+      environment:
+        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+      azure.azcollection.azure_rm_resourcegroup_info:
+        auth_source: env
+        tenant: "{{ azure_tenant }}"
+      register: allresourcegroups
+
+    - name: Write out all resource groups
+      debug:
+        msg: "{{ allresourcegroups }}"
+
+    - name: Empty Resource Group
+      when: allresourcegroups.resourcegroups|length>0
+      include_tasks: empty_resource_group.yml
+      vars:
+        az_resource_group: "{{ item.name }}"
+      loop: "{{ allresourcegroups.resourcegroups }}"
+
     - name: Get list of locks in the subscription
       environment:
         AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
@@ -65,24 +121,21 @@
       when: r_subscription_locks.locks|length>0
       environment:
         AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_lock:
-        auth_source: env
-        name: "{{ item.name }}"
-        managed_resource_id: "/subscriptions/{{ pool_subscription_id }}"
-        state: absent
+      ansible.builtin.command: >
+        az lock delete --name {{ item.name }} --ids {{ item.id }}
       loop: "{{ r_subscription_locks.locks }}"
 
-    - name: Get all resource groups in the subscription
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_resourcegroup_info:
-        auth_source: env
-        tenant: "{{ azure_tenant }}"
-      register: allresourcegroups
-
-    - name: Write out all resource groups
-      debug:
-        msg: "{{ allresourcegroups }}"
+    # Leave here until azure fixes the collection
+    #- name: Delete all locks in the subscription
+    #  when: r_subscription_locks.locks|length>0
+    #  environment:
+    #    AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+    #  azure.azcollection.azure_rm_lock:
+    #    auth_source: env
+    #    name: "{{ item.name }}"
+    #    managed_resource_id: "{{ item.id }}"
+    #    state: absent
+    #  loop: "{{ r_subscription_locks.locks }}"
 
     - name: Delete all resource groups owned by the subscription (RG's created by the lab user)
       when: allresourcegroups.resourcegroups|length>0
@@ -100,22 +153,15 @@
       set_fact:
         subscriptionfqid: "{{ assignedsubscription.subscriptions[0].fqid }}"
 
-    - name: Clean up all Tags on the Subscription
+    - name: Initialize all tags we care about on the Subscription
       command: >
-        az tag delete --resource-id {{ subscriptionfqid }} --yes
+        az tag create --resource-id {{ subscriptionfqid }} --tags GUID="" EMAIL="" cost-center="{{ cost_center }}"
 
     - name: Get facts for management subscription by pool ID
       azure.azcollection.azure_rm_subscription_info:
         auth_source: env
         id: "{{ azure_subscription_id }}"
       register: management_subscription
-
-    - name: Get the user's object from Active Directory
-      azure.azcollection.azure_rm_aduser_info:
-        auth_source: env
-        user_principal_name: "{{ requester_email }}"
-        tenant: "{{ azure_tenant }}"
-      register: azuser
 
     - name: Get all direct role assignments for the subscription
       environment:
@@ -136,7 +182,7 @@
         state: absent
       loop: "{{ role_assignments.roleassignments }}"
 
-    - name: Get all azure applications
+    - name: Get all azure applications in the subscription
       azure.azcollection.azure_rm_adapplication_info:
         auth_source: cli
         tenant: "{{ azure_tenant }}"

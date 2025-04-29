@@ -25,12 +25,14 @@
 - name: sat | Unregister the system just in case
   include_tasks: "unregister.yml"
 
-- name: sat | Copy satellite CA certificate to /etc/pki/ca-trust/source/anchors/{{ set_repositories_satellite_hostname }}.ca.crt
-  copy:
-    content: "{{ set_repositories_satellite_ca_cert }}"
+- name: sat | Install CA certificate from satellite server
+  ansible.builtin.get_url:
+    url: "https://{{ set_repositories_satellite_hostname }}/pub/katello-server-ca.crt"
     dest: /etc/pki/ca-trust/source/anchors/{{ set_repositories_satellite_hostname }}.ca.crt
     mode: u=rw,go=r
-  register: r_copy_satellite_ca_cert
+    validate_certs: false
+  retries: 10
+  delay: 10
 
 - name: sat | Update CA Trust Bundle
   command: update-ca-trust
@@ -93,6 +95,11 @@
     gather_subset: min
   when: ansible_date_time is not defined
 
+- name: Generate UUID for dmi.system.uuid if cloud provider is Equinix Metal
+  ansible.builtin.set_fact:
+    dmi_system_uuid: "{{ 999999999 | random | to_uuid }}"
+  when: cloud_provider == 'equinix_metal'
+
 - name: sat | Set set_repositories_subscription_hostname with randomization
   when: set_repositories_subscription_hostname is not defined
   set_fact:
@@ -108,8 +115,11 @@
     dest: /etc/rhsm/facts/katello.facts
     content: "{{ __content | to_json }}"
   vars:
-    __content:
-      network.fqdn: "{{ set_repositories_subscription_hostname }}"
+    __content: >-
+      {{
+        {"network.fqdn": set_repositories_subscription_hostname}
+        | combine({"dmi.system.uuid": dmi_system_uuid} if cloud_provider == 'equinix_metal' else {})
+      }}
 
 - name: sat | Register with activation-key
   when: set_repositories_satellite_ha is not defined or set_repositories_satellite_ha|bool == False
@@ -119,6 +129,7 @@
     server_hostname: "{{ set_repositories_satellite_hostname }}"
     activationkey: "{{ set_repositories_satellite_activationkey }}"
     org_id: "{{ set_repositories_satellite_org | default(satellite_org) }}"
+    pool: "{{ set_repositories_satellite_pool | default(omit) }}"
 
 - name: sat | Register with activation-key with HA
   when: set_repositories_satellite_ha is defined and set_repositories_satellite_ha|bool == True
@@ -126,7 +137,7 @@
     state: present
     consumer_name: "{{ set_repositories_subscription_hostname }}"
     server_hostname: "{{ set_repositories_satellite_hostname }}"
-    server_port: "8443"
+    server_port: "443"
     server_prefix: /rhsm
     rhsm_baseurl: "https://{{ set_repositories_satellite_hostname }}/pulp/repos"
     activationkey: "{{ set_repositories_satellite_activationkey }}"

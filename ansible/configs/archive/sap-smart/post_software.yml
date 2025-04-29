@@ -1,0 +1,268 @@
+- name: Make Ansible Tower License file available
+  hosts: localhost
+  gather_facts: False
+  become: false
+  tasks:
+
+    - debug:
+        msg: "Post-Software tasks Started"
+
+    - name: downloading tower manifest from OpenTLC
+      get_url:
+        url: "{{ tower_manifest.url }}"
+        dest: "{{ ansible_tower.install.manifest_file }}"
+        username: "{{ tower_manifest.username | default(omit) }}"
+        password: "{{ tower_manifest.password | default(omit) }}"
+
+- name: Configure Ansible Tower
+  hosts: towers
+  gather_facts: False
+  become: yes
+  tasks:
+
+    - name: Configure tower
+      when: tower_instance_count > 0
+      block:
+      - name: Ensure dependencies for tower-cli are installed
+        yum:
+          name: python3-pip
+          state: latest
+
+      - name: Ensure tower-cli is installed
+        pip:
+          name: ansible-tower-cli
+          state: latest
+          executable: pip3
+
+      - name: Dump tower-cli config
+        copy:
+          content: "{{ tower_cli_config }}"
+          dest: /etc/tower/tower_cli.cfg
+
+      - name: Dump Ansible Tower Workflow Schema to a file
+        copy:
+          content: "{{ workflow_schema }}"
+          dest: /tmp/schema.yml
+
+      - name: Create symlink to support internal infra-ansible role includes
+        file:
+          src: infra-ansible/roles/ansible
+          dest: "{{ __agnosticd_roles_install_path }}/ansible"
+          state: link
+        delegate_to: localhost
+        become: false
+        run_once: true
+        vars:
+          __agnosticd_roles_install_path: >-
+            {%- if requirements_content is defined and requirements_content | length > 0 -%}
+            {{ playbook_dir }}/dynamic-roles
+            {%- else -%}
+            {{ ANSIBLE_REPO_PATH | default(playbook_dir) }}/roles
+            {%- endif -%}
+
+      - name: Ensure Tower License is configured
+        include_role:
+          name: infra-ansible/roles/ansible/tower/config-ansible-tower-subscription-manifest
+
+      - name: Ensure required Credentials are added to Tower
+        include_role:
+          name: infra-ansible/roles/ansible/tower/manage-credentials
+
+      - name: Ensure required inventories are added to Tower
+        include_role:
+          name: infra-ansible/roles/ansible/tower/manage-inventories
+
+      - name: Ensure required Projects are added to Tower
+        include_role:
+          name: infra-ansible/roles/ansible/tower/manage-projects
+
+      - name: Ensure required Job Templates are added to Tower
+        include_role:
+          name: infra-ansible/roles/ansible/tower/manage-job-templates
+
+      - name: Ensure required WorkFlow Templates are added to Tower
+        shell: /usr/local/bin/tower-cli workflow create --name="SAP HANA and S/4HANA E2E deployment"
+
+      - name: Populate new WorkFlow with specified schema
+        shell: /usr/local/bin/tower-cli workflow schema "SAP HANA and S/4HANA E2E deployment" @/tmp/schema.yml
+
+- name: UnRegister and Register HANA and S4HANA hosts into Satellite and install katello agent
+  hosts: hanas:s4hanas
+  serial: 1
+  become: True
+  gather_facts: True
+  tasks:
+    - name: unregister from GPTE Satellite
+      redhat_subscription:
+        state: absent
+
+    - name: remove GPTE katello Certificate 
+      yum:
+        name: katello-ca-consumer*
+        state: absent
+        
+    - name: Register nodes to Lab Satellite
+      block:
+        - get_url:
+           url: "https://sat-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}/pub/katello-ca-consumer-latest.noarch.rpm"
+           dest: /tmp
+           validate_certs: no
+
+        - name: subscription manager clean
+          command: subscription-manager clean
+
+        - name: install katello-ca-consumer package
+          yum:
+            name: /tmp/katello-ca-consumer-latest.noarch.rpm
+            state: present
+            disable_gpg_check: true
+
+        - name: register system and attach subs
+          redhat_subscription:
+            state: present
+            username: admin
+            password: "{{ satellite_password }}"
+            auto_attach: true
+
+        - name: Enable repositories
+          rhsm_repository:
+            name: '*'
+            state: enabled
+
+        - name: Lock RHEL release
+          command: subscription-manager release --set={{ hana_shanas_rhel8_release }}
+          register: lock_result
+          until: lock_result is succeeded
+          retries: 15
+          delay: 10
+
+        - name: updating all packages
+          yum:
+           name: '*'
+           state: latest
+
+    - name: Reboot instances
+      reboot:
+
+    - name: Install katello-agent and compliance packages
+      yum:
+        name:
+          - katello-agent
+          # Leaving these 3 commented for future testing in case I finally
+          # add the compliance piece to the workshop
+          # - scap-security-guide-0.1.42-11.el8
+          # - openscap-scanner
+          # - openscap
+        state: present
+        update_cache: yes
+      retries: 30
+      delay: 30
+      register: result
+      until: result.rc == 0
+      # We have seen deployments in PROD taking a very long time to get 
+      # Satellite repos to sync. Adding instructions to the lab to check if this
+      # package has been installed, otherwise install it manually
+      ignore_errors: yes
+
+- name: Enable Satellite for remote execution over registered Hosts - pull
+  hosts: sats
+  become: yes
+  tasks:
+
+    - name: Pull SSH public KEY from Satellite Host
+      fetch:
+        src: /usr/share/foreman-proxy/.ssh/id_rsa_foreman_proxy.pub
+        dest: "{{ output_dir }}/"
+        flat: yes
+
+- name: Enable Satellite for remote execution over registered Hosts - push
+  hosts: hanas:s4hanas
+  become: yes
+  tasks:
+
+    - name: Push SSH public KEY to registered SAP Hosts
+      copy:
+        src: "{{ output_dir }}/id_rsa_foreman_proxy.pub"
+        dest: "/root/.ssh/authorized_keys"
+        owner: "root"
+        group: root
+        mode: '0600'
+        force: yes
+
+- name: Prevent Pulp 500 error
+  hosts: sats
+  become: yes
+  tasks:
+
+    - name: Restore SElinux context
+      shell: restorecon -R /
+
+    - name: Reboot Satellite server
+      reboot:
+
+- name: Deploy SAP HANA and SAP S/4HANA
+  hosts: towers
+  gather_facts: False
+  become: yes
+  tasks:
+
+    - name: Run the end to end pipeline for HANA and S/4HANA
+      shell: /usr/local/bin/tower-cli workflow_job launch -W "SAP HANA and S/4HANA E2E deployment"
+
+- name: Print out information for the user to consume the lab
+  hosts: localhost
+  gather_facts: False
+  become: false
+  tasks:
+    - name: Print Student Information
+      when: install_student_user | bool
+      block:
+      - name: Store bastion hostname as a fact
+        set_fact:
+          bastion_hostname: "{{groups['bastions'].0 }}"
+      - name: Report user info
+        agnosticd_user_info:
+          msg: "{{ item }}"
+        loop:
+        - "You can access your bastion via SSH:"
+        - "ssh {{ student_name }}@bastion-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}"
+        - ""
+        - "Make sure you use the username '{{ student_name }}' and the password '{{ hostvars[bastion_hostname]['student_password'] }}' when prompted."
+        - ""
+        - "You can access your Tower:"
+        - "https://tower-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}"
+        - "Make sure you are using the following credentials:"
+        - ""
+        - "Username: admin"
+        - "Password: {{ tower_password }}"
+        - "You can access your Satellite instance via HTTPS:"
+        - "https://sat-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}"
+        - "Make sure you are using the following credentials:"
+        - "Username: admin"
+        - "Password: {{ satellite_password }}"
+        
+    - name: Set agnosticd user info data for tower
+      when: tower_instance_count > 0
+      agnosticd_user_info:
+        data:
+          tower_url: "https://tower-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}"
+          tower_username: "admin"
+          tower_password: "{{ tower_password }}"
+
+    - name: Set agnosticd user info data for Satellite
+      agnosticd_user_info:
+        data:
+          sat_url: "https://sat-{{ guid }}.{{ guid }}.{{ osp_cluster_dns_zone }}"
+          sat_username: "admin"
+          sat_password: "{{ satellite_password }}"
+
+- name: PostSoftware flight-check
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - post_flight_check
+  tasks:
+    - debug:
+        msg: "Post-Software checks completed successfully"

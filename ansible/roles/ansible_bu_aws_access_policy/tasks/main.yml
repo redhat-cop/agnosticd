@@ -1,0 +1,84 @@
+---
+- name: AWS Access Policy block
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_REGION: "{{ aws_region }}"
+  block:
+    - name: Grab Route53 Zone ID
+      route53_zone:
+        zone: "{{ sandbox_zone }}"
+      register: AWSINFO
+
+    - name: Grab aws user info
+      amazon.aws.aws_caller_info:
+      register: whoami
+
+    - name: Save username of AWS user
+      set_fact:
+        aws_user: '{{ whoami.arn.split("/")[-1] }}'
+
+    - name: Save account id of AWS user
+      set_fact:
+        aws_account: '{{ whoami.account }}'
+
+    - name: Grab ec2 instances info
+      amazon.aws.ec2_instance_info:
+        # filters:
+        #   "tag:AnsibleGroup": ["bastions", "satellites", "nodes", "centos_nodes"]
+      register: r_instances
+
+    - name: Save aws vpc id
+      set_fact:
+        ec2_vpc_id: "{{ _control_.vpc_id }}"
+        control_instance_id: "{{ _control_.instance_id }}"
+      vars:
+        _query: "[?tags.AnsibleGroup == 'bastions']"
+      loop: "{{ r_instances.instances | to_json |from_json |json_query(_query) | list }}"
+      loop_control:
+        loop_var: _control_
+
+    - name: Create VPC Lock Down role
+      community.aws.iam_role:
+        name: "VPCLockDown_{{ guid }}"
+        assume_role_policy_document: "{{ lookup('file','AssumeRole_policy.json') }}"
+        create_instance_profile: true
+        description: VPC Lockdown role for  {{ guid }} workshop
+
+    - name: Create control node instance role
+      community.aws.iam_role:
+        name: "ControlNode_{{ guid }}"
+        assume_role_policy_document: "{{ lookup('file','AssumeRole_policy.json') }}"
+        create_instance_profile: true
+        description: Control node instance role for "{{ guid }}" workshop
+
+    - name: Generate IAM policy for control node IAM instance role
+      community.aws.iam_policy:
+        iam_type: role
+        iam_name: "ControlNode_{{ guid }}"
+        policy_name: "IAMPolicy_{{ guid }}"
+        state: present
+        policy_json: "{{ lookup( 'template', 'iam_vpc_lockdown_policy.json.j2') }}"
+          
+    - name: Associate IAM instance profile with control node
+      amazon.aws.ec2_instance:
+        instance_ids: "{{ control_instance_id }}"
+        instance_role: "ControlNode_{{ guid }}"
+        state: running
+        wait: true
+      register: associate_iam_instance_profile
+      until: associate_iam_instance_profile is not failed
+      retries: 12
+      delay: 10
+
+    - name: Check associate_iam_instance_profile
+      debug:
+        msg: "{{ associate_iam_instance_profile }}"
+
+    - name: Associate IAM instance profile and Retag instances
+      when: ansible_bu_aws_access_policy_ec2_instances_tags is defined
+      include_tasks: instances.yml
+      loop: "{{ ansible_bu_aws_access_policy_ec2_instances_tags }}"
+      loop_control:
+        loop_var: _node_
+        index_var: _node_index_

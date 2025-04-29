@@ -1,0 +1,286 @@
+---
+- name: Step 002 Post Infrastructure
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - debug:
+        msg: "Step 002 Post Infrastructure Start"
+
+    - name: Record sandbox information as user data
+      agnosticd_user_info:
+        data:
+          aws_access_key_id: "{{ admin_access_key_id }}"
+          aws_secret_access_key: "{{ admin_secret_access_key }}"
+          aws_default_region: "{{ aws_region }}"
+          aws_route53_domain: "{{ subdomain_base_suffix }}"
+
+    - name: Record sandbox web console access as user data
+      agnosticd_user_info:
+        data:
+          aws_web_console_url: https://{{ sandbox_account_id }}.signin.aws.amazon.com/console
+          aws_web_console_user_name: "{{ admin_console_user_name }}"
+          aws_web_console_password: "{{ admin_console_password }}"
+
+    - set_fact:
+        user_password: "{{ lookup('community.general.random_string',
+          length=12, min_lower=1, min_upper=1, special=false, min_numeric=1) }}"
+
+    - name: Record user password as user data
+      agnosticd_user_info:
+        data:
+          user_password: "{{ user_password }}"
+
+- name: Deploy our disconnected Cloudformation
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - environment:
+        AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+        AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
+      block:
+        - set_fact:
+            cloudformation_template: "{{output_dir}}/{{ env_type }}.{{ guid }}.ocp4-disconnected_cloudformation"
+
+        - name: Fetch Cloudformation template
+          ansible.builtin.get_url:
+            url: "https://raw.githubusercontent.com/naps-product-sa/ocp4-disconnected-workshop/{{ workshop_cloudformation_tag }}/cloudformation.yaml"
+            dest: "{{ cloudformation_template }}"
+            mode: '0644'
+
+        - name: Get user name
+          command: aws iam get-user
+          register: rget_user
+          ignore_errors: true
+
+        # Bucket name must be globally unique. Use the userID to define the bucketname.
+        # Otherwise when we use the code in another account it fails because the bucket
+        # already exists.
+        - set_fact:
+            aws_account_user: "{{ rget_user.stdout | from_json | json_query('User.UserId') }}"
+          ignore_errors: true
+
+        - set_fact:
+            bucket_templates: "ocp4-disconnected-cloudformation-{{ aws_account_user | default('user') | lower }}"
+
+        - name: Create bucket
+          amazon.aws.s3_bucket:
+            name: "{{ bucket_templates }}"
+          retries: 5
+          delay: 20
+
+        - name: Copy Template to S3
+          amazon.aws.s3_object:
+            bucket: "{{ bucket_templates }}"
+            object: "{{ env_type }}.{{ guid }}.ocp4-disconnected_cloudformation"
+            src: "{{ cloudformation_template }}"
+            mode: put
+
+        # yamllint disable rule:line-length
+        - set_fact:
+            s3_cloudformation_url: "https://{{ bucket_templates }}.s3.{{ aws_region }}.amazonaws.com/{{ env_type }}.{{ guid }}.ocp4-disconnected_cloudformation"
+        # yamllint enable rule:line-length
+
+        ######################### Validate CF Template
+        # - name: validate cloudformation template
+        #   assert:
+        #     that: >
+        #       lookup('file', cloudformation_template) | from_yaml is succeeded
+        #       or lookup('file', cloudformation_template) | from_json is succeeded
+        #     success_msg: Cloudformation template is syntactically valid
+
+        - name: validate cloudformation template with validate-template (S3)
+          environment:
+            AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+            AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+            AWS_DEFAULT_REGION: "{{ aws_region }}"
+          command: >-
+            aws cloudformation validate-template
+            --region {{ aws_region }}
+            --template-url {{ s3_cloudformation_url }}
+          changed_when: false
+          register: cloudformation_validation
+          until: cloudformation_validation is succeeded
+          retries: 5
+          delay: 20
+
+        - name: Launch CloudFormation template
+          cloudformation:
+            aws_access_key: "{{ aws_access_key_id }}"
+            aws_secret_key: "{{ aws_secret_access_key }}"
+            stack_name: "{{ project_tag }}"
+            state: "present"
+            region: "{{ aws_region }}"
+            # rollback is unreliable, it can make this task hang forever.
+            disable_rollback: true
+            tags: "{{ cloud_tags_final }}"
+            template_url: "{{ s3_cloudformation_url }}"
+            template_parameters:
+              Password: "{{ user_password }}"
+              AccessKey: "{{ aws_access_key_id }}"
+              SecretKey: "{{ aws_secret_access_key }}"
+              PullSecret: "{{ ocp4_pull_secret | b64encode }}"
+          register: cloudformation_out
+          until: >-
+            cloudformation_out is succeeded
+            and (
+              'output' in cloudformation_out
+              and cloudformation_out.output in ["Stack CREATE complete", "Stack is already up-to-date."]
+            )
+          retries: "{{ cloudformation_retries | default(3) }}"
+          delay: "{{ cloudformation_retry_delay | default(30) }}"
+          ignore_errors: true
+
+        - name: debug cloudformation
+          debug:
+            var: cloudformation_out
+          when: not cloudformation_out is succeeded
+
+        - name: Record cloudformation output as user data
+          agnosticd_user_info:
+            data: "{{ cloudformation_out.stack_outputs }}"
+
+
+        - name: Gather EC2 info
+          amazon.aws.ec2_instance_info:
+            filters:
+              "tag:guid": "{{ guid }}"
+          register: ec2_info
+
+        - name: debug ec2 instances
+          debug:
+            var: ec2_info
+
+        - add_host:
+            name: "{{ item.public_ip_address | default(item.private_dns_name) }}"
+            groups: "{{ item.tags.AnsibleGroup | default('nodes') }}"
+
+            remote_user: lab-user
+            ansible_user: lab-user
+            ansible_ssh_pass: "{{ user_password }}"
+            ansible_sudo_pass: "{{ user_password }}"
+            ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+          with_items: "{{ ec2_info['instances'] }}"
+          when:
+            - item.state.name != 'terminated'
+            - item.tags.AnsibleGroup is defined
+            - item.tags.AnsibleGroup == "bastions"
+          loop_control:
+            label: "{{ item.tags.Name | default(item.private_dns_name) }}"
+
+        - add_host:
+            name: "{{ item.private_ip_address | default(item.private_dns_name) }}"
+            groups: "{{ item.tags.AnsibleGroup | default('nodes') }}"
+
+            remote_user: lab-user
+            ansible_user: lab-user
+            ansible_ssh_pass: "{{ user_password }}"
+            ansible_sudo_pass: "{{ user_password }}"
+            ansible_ssh_extra_args: "-o StrictHostKeyChecking=no"
+            ansible_ssh_common_args: '-o ProxyCommand="sshpass -p {{ user_password }} ssh lab-user@{{ cloudformation_out.stack_outputs.JumpInstancePublicIp }} -W {{ item.private_ip_address | default(item.private_dns_name) }}:22"'
+          with_items: "{{ ec2_info['instances'] }}"
+          when:
+            - item.state.name != 'terminated'
+            - item.tags.AnsibleGroup is defined
+            - item.tags.AnsibleGroup != "bastions"
+          loop_control:
+            label: "{{ item.tags.Name | default(item.private_dns_name) }}"
+
+- name: Configure jump host
+  hosts: bastions
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Generate keypair
+      command: /usr/bin/ssh-keygen -C 'Lab Environment Jump Host Key' -q -N '' -f /home/lab-user/.ssh/id_rsa
+
+    - name: Get public key
+      ansible.builtin.slurp:
+        src: /home/lab-user/.ssh/id_rsa.pub
+      register: pubkey
+
+    - name: Save pub keypair
+      set_fact:
+        ssh_pubkey: "{{ pubkey['content'] | b64decode }}"
+
+    - name: Add to /etc/hosts
+      become: true
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: "{{ item.private_ip_address }} {{ item.tags.DnsName }}"
+      with_items: "{{ hostvars.localhost.ec2_info['instances'] }}"
+      retries: 5 # need to retry in case userdata hasn't been set yet
+      delay: 10
+
+- name: Configure all nodes
+  hosts: all:!bastions
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Add to /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: "{{ item.private_ip_address }} {{ item.tags.DnsName }}"
+      with_items: "{{ hostvars.localhost.ec2_info['instances'] }}"
+      retries: 5 # need to retry in case userdata hasn't been set yet
+      delay: 10
+
+    - name: Set authorized key
+      ansible.posix.authorized_key:
+        user: lab-user
+        state: present
+        key: "{{ hostvars[hostvars.localhost.cloudformation_out.stack_outputs.JumpInstancePublicIp].ssh_pubkey }}"
+
+- name: Configure highside node
+  hosts: highside
+  become: false
+  gather_facts: false
+  tasks:
+    - name: Make AWS credentials directory
+      ansible.builtin.file:
+        path: /home/lab-user/.aws
+        mode: "0700"
+        owner: lab-user
+        group: lab-user
+        state: directory
+
+    - name: Place AWS config
+      ansible.builtin.copy:
+        dest: /home/lab-user/.aws/config
+        mode: "0600"
+        owner: lab-user
+        group: lab-user
+        content: |
+          [default]
+          region={{ hostvars.localhost.aws_region }}
+          output=table
+
+    - name: Place AWS credentials
+      ansible.builtin.copy:
+        dest: /home/lab-user/.aws/credentials
+        mode: "0600"
+        owner: lab-user
+        group: lab-user
+        content: |
+          [default]
+          aws_access_key_id={{ hostvars.localhost.admin_access_key_id }}
+          aws_secret_access_key={{ hostvars.localhost.admin_secret_access_key }}
+
+- name: Finish up post infrastructure tasks
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Provide installed bastion data
+      agnosticd_user_info:
+        data:
+          bastion_ssh_command: "ssh lab-user@{{ cloudformation_out.stack_outputs.JumpInstancePublicIp }}"
+          bastion_public_hostname: "{{ cloudformation_out.stack_outputs.JumpInstancePublicIp }}"
+          bastion_ssh_user_name: "lab-user"
+          bastion_ssh_password: "{{ user_password }}"
+
+          # for sidebar in showroom
+          page-ssh-command: "ssh lab-user@{{ cloudformation_out.stack_outputs.JumpInstancePublicIp }}"
+          page-ssh-password: "{{ user_password }}"

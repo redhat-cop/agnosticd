@@ -1,0 +1,102 @@
+---
+- name: Get openshift-console console route
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: console-public
+    namespace: openshift-config-managed
+  register: r_openshift_console_config
+  until: r_openshift_console_config is successful
+  retries: 60
+  delay: 10
+
+- name: Set fact for openshift_console_url
+  ansible.builtin.set_fact:
+    openshift_console_url: >-
+      {{ r_openshift_console_config.resources[0].data.consoleURL }}
+
+- name: Try to get the cluster ingress config
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: r_cluster_ingress_config
+  failed_when: false
+
+- name: Set facts from cluster ingress config
+  when: r_cluster_ingress_config.resources | default([]) | length > 0
+  vars:
+    __cluster_ingress_config: "{{ r_cluster_ingress_config.resources[0] }}"
+  ansible.builtin.set_fact:
+    openshift_cluster_ingress_domain: >-
+      {{ __cluster_ingress_config.spec.domain }}
+    openshift_cluster_ingress_apps_domain: >-
+      {{ __cluster_ingress_config.spec.appsDomain | default(omit) }}
+
+- name: Fallback to best guess for openshift_cluster_ingress_domain
+  when: r_cluster_ingress_config.resources | default([]) | length == 0
+  ansible.builtin.set_fact:
+    openshift_cluster_ingress_domain: >-
+      {{ openshift_console_url | regex_replace('^https://console-openshift-console\.') }}
+
+- name: Set openshift_route_default_domain
+  ansible.builtin.set_fact:
+    openshift_route_default_domain: >-
+      {{ openshift_cluster_ingress_apps_domain | default(openshift_cluster_ingress_domain) }}
+
+- name: Try to get api URL with oc command
+  ansible.builtin.command: oc whoami --show-server
+  changed_when: false
+  ignore_errors: true
+  register: r_oc_show_server
+
+- name: Set openshift_api_url if oc command succeeded
+  when: r_oc_show_server is successful
+  ansible.builtin.set_fact:
+    openshift_api_url: >-
+      {{ r_oc_show_server.stdout | trim }}
+
+- name: Fallback to best guess for openshift_api_url
+  when: r_oc_show_server is failed
+  ansible.builtin.set_fact:
+    openshift_api_url: >-
+      https://api.{{ openshift_cluster_ingress_domain | regex_replace('^apps\.') }}:6443
+
+- name: Get current OpenShift user
+  kubernetes.core.k8s_info:
+    api_version: user.openshift.io/v1
+    kind: User
+    name: '~'
+  register: r_openshift_user
+  failed_when: r_openshift_user.resources | length != 1
+  until: r_openshift_user is successful
+  retries: 10
+  delay: 3
+
+- name: Set ocp_username
+  ansible.builtin.set_fact:
+    ocp_username: >-
+      {{ r_openshift_user.resources[0].metadata.name }}
+
+- name: Set user data for OpenShift cluster
+  when: host_ocp4_set_facts_set_user_data | bool
+  agnosticd_user_info:
+    data:
+      openshift_api_url: "{{ openshift_api_url }}"
+      openshift_console_url: "{{ openshift_console_url }}"
+      openshift_cluster_ingress_domain: "{{ openshift_cluster_ingress_domain }}"
+
+- name: Set facts for cluster name
+  when: host_ocp4_set_facts_cluster_name
+  ansible.builtin.set_fact:
+    openshift_cluster_facts: >-
+      {{
+        openshift_cluster_facts | default({}) | combine({
+          host_ocp4_set_facts_cluster_name: {
+            "api_url": openshift_api_url,
+            "cluster_ingress_domain": openshift_cluster_ingress_domain,
+            "console_url": openshift_console_url,
+            "username": ocp_username,
+          }
+        })
+      }}

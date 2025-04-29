@@ -1,0 +1,146 @@
+---
+- name: Use Sandbox AWS credentials
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ hostvars.localhost.rosa_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ hostvars.localhost.rosa_secret_access_key }}"
+  block:
+  - name: Get AWS caller information
+    amazon.aws.aws_caller_info:
+    register: r_caller_info
+
+  - name: Print Account ID
+    ansible.builtin.debug:
+      msg: "{{ item }}"
+    loop:
+    - "Amazon Account ID: {{ r_caller_info.account }}"
+    - "ARN: {{ r_caller_info.arn }}"
+    - "Account Alias: {{ r_caller_info.account_alias }}"
+    - "User ID: {{ r_caller_info.user_id }}"
+
+  - name: Ensure AWS user does not exist
+    amazon.aws.iam_user:
+      state: absent
+      name: "{{ ocp4_workload_rosa_policies_aws_user_name }}"
+
+  - name: Create AWS user
+    amazon.aws.iam_user:
+      state: present
+      name: "{{ ocp4_workload_rosa_policies_aws_user_name }}"
+      managed_policies: []
+    register: r_user
+
+  - name: Debug user
+    ansible.builtin.debug:
+      msg: "{{ item }}"
+    loop:
+    - "User: {{ r_user.user.user_name }}"
+    - "ARN: {{ r_user.user.arn }}"
+    - "ID: {{ r_user.user.user_id }}"
+    - "Account ID: {{ (r_user.user.arn | split(':'))[4] }}"
+
+  - name: Set Student Account ID
+    ansible.builtin.set_fact:
+      student_aws_account_id: "{{ (r_user.user.arn | split(':'))[4] }}"
+
+  - name: Create access key
+    community.aws.iam_access_key:
+      user_name: "{{ ocp4_workload_rosa_policies_aws_user_name }}"
+      state: present
+    register: r_access_key
+
+  - name: Debug access key and secret
+    ansible.builtin.debug:
+      msg: "{{ item }}"
+    loop:
+    - "Access Key ID: {{ r_access_key.access_key_id }}"
+    - "Secret Access Key: {{ r_access_key.secret_access_key }}"
+
+  - name: Set Student Access Credentials
+    ansible.builtin.set_fact:
+      student_aws_access_key_id: "{{ r_access_key.access_key_id }}"
+      student_aws_access_secret_access_key: "{{ r_access_key.secret_access_key }}"
+
+  - name: Check if OIDC ID is already defined (HCP)
+    when: rosa_oidc_id | default("") | length > 0
+    ansible.builtin.set_fact:
+      oidc_endpoint: "rh-oidc.s3.us-east-1.amazonaws.com/{{ rosa_oidc_id }}"
+
+  - name: Otherwise get it from the Authentication Object
+    when: rosa_oidc_id | default("") | length == 0
+    block:
+    - name: Get Authentication Object
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: Authentication
+        name: cluster
+      register: r_authentication
+      until: r_authentication is successful
+      retries: 30
+      delay: 10
+
+    - name: Set OIDC endpoint
+      ansible.builtin.set_fact:
+        oidc_endpoint: "{{ r_authentication.resources[0].spec.serviceAccountIssuer | replace('https://', '') }}"
+
+  - name: Debug OIDC endpoint
+    ansible.builtin.debug:
+      msg: "OIDC Endpoint: {{ oidc_endpoint }}"
+
+  - name: Clone policies repo
+    ansible.builtin.git:
+      accept_hostkey: true
+      repo: "{{ ocp4_workload_rosa_policies_repo }}"
+      dest: "~{{ ansible_user }}/rosa-policies"
+      version: "{{ ocp4_workload_rosa_policies_repo_branch }}"
+
+  - name: Apply policies
+    when: ocp4_workload_rosa_policies_to_apply | default("") | length > 0
+    environment:
+      POLICIES_DIR: "/tmp"
+      GUID: "{{ guid }}"
+      AWS_USER_NAME: "{{ ocp4_workload_rosa_policies_aws_user_name }}"
+      AWS_ACCOUNT_ID: "{{ student_aws_account_id }}"
+      OIDC_ENDPOINT: "{{ oidc_endpoint }}"
+    ansible.builtin.command:
+      cmd: "{% if item.run_as_root | bool %}sudo --preserve-env {% endif %}~{{ ansible_user }}/rosa-policies/{{ item.name }}.sh"
+    loop: "{{ ocp4_workload_rosa_policies_to_apply }}"
+    ignore_errors: true
+
+- name: Remove full AWS credentials
+  become: true
+  ansible.builtin.file:
+    state: absent
+    path: "/home/{{ ocp4_workload_rosa_policies_rhel_user_name }}/.aws/credentials"
+
+- name: Setup restricted AWS credentials
+  become: true
+  ansible.builtin.blockinfile:
+    path: "/home/{{ ocp4_workload_rosa_policies_rhel_user_name }}/.aws/credentials"
+    create: true
+    owner: "{{ ocp4_workload_rosa_policies_rhel_user_name }}"
+    mode: "0600"
+    block: |-
+      [default]
+      aws_access_key_id={{ student_aws_access_key_id }}
+      aws_secret_access_key={{ student_aws_access_secret_access_key }}
+      region={{ aws_region }}
+
+- name: Save user data for student user
+  agnosticd_user_info:
+    data:
+      rosa_aws_student_user: "{{ ocp4_workload_rosa_policies_aws_user_name }}"
+      rosa_aws_student_user_account_id: "{{ student_aws_account_id }}"
+      rosa_aws_student_user_access_key_id: "{{ student_aws_access_key_id }}"
+      rosa_aws_student_user_secret_access_key: "{{ student_aws_access_secret_access_key }}"
+      rosa_aws_oidc_endpoint: "{{ oidc_endpoint }}"
+
+- name: Print ROSA user data for student user
+  when: print_agnosticd_user_info | default(true) | bool
+  agnosticd_user_info:
+    msg: |
+
+      == AWS Student User (pre-configured for lab instructions):
+      * AWS Username: {{ ocp4_workload_rosa_policies_aws_user_name }}
+      * AWS Account ID: {{ student_aws_account_id }}
+      * AWS Access Key ID: {{ student_aws_access_key_id }}
+      * AWS Secret Access Key: {{ student_aws_access_secret_access_key }}

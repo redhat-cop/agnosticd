@@ -7,7 +7,8 @@
     - step001
     - software
   tasks:
-    - debug:
+    - name: "Software tasks Started"
+      ansible.builtin.debug:
         msg: "Software tasks Started"
 
 - name: Software deployment
@@ -20,11 +21,11 @@
   tasks:
     ## Authenticating
     - name: Authorizing with IBM CLoud using Sandbox credentials
-      include_tasks: auth_sandbox.yml
+      ansible.builtin.include_tasks: auth_sandbox.yml
 
     ## Getting Exact OpenShift version to deploy
     - name: Get full OpenShift version
-      uri:
+      ansible.builtin.uri:
         url: "{{ ibm_cloud_api_openshift_version_url }}"
         method: GET
         status_code: 200
@@ -35,26 +36,60 @@
       delay: 6
 
     - name: Displaying the JSON output of the API call if verbosity 2+
-      debug:
+      ansible.builtin.debug:
         var: r_openshift_version_list.json.openshift
         verbosity: 2
-      tags: get-versions
 
-    - name: Set fact for RHOIC patch version
-      set_fact:
-        rhoic_openshift_version_patch: "{{  r_openshift_version_list.json.openshift | json_query(jmesquery) }}"
+    - name: Does the requested version exist?
+      ansible.builtin.set_fact:
+        rhoic_desired_version_exists: >-
+          {{ r_openshift_version_list.json.openshift | json_query(jmesquery) }}
       vars:
-        jmesquery: "[?major==`{{ rhoic_openshift_version_major }}` && minor==`{{ rhoic_openshift_version_minor }}`].patch"
-      tags: get-versions
+        jmesquery: >-
+          [?major==`{{ rhoic_openshift_version_major }}`
+            && minor==`{{ rhoic_openshift_version_minor }}`]
 
-    - name: Set fact for RHOIC version
-      set_fact:
-        rhoic_openshift_version: "{{ rhoic_openshift_version_major }}.{{ rhoic_openshift_version_minor }}.{{ rhoic_openshift_version_patch[0] }}_openshift"
-      tags: get-versions
+    - name: If requested version DOES NOT exist, use default
+      when: rhoic_desired_version_exists | length == 0
+      block:
 
-    - debug:
+        - name: Set fact for RHOIC version = Default, step 1
+          ansible.builtin.set_fact:
+            rhoic_openshift_version_list: >-
+              {{ r_openshift_version_list.json.openshift
+                  | json_query(jmesquery)
+                  | join('') }}
+          vars:
+            jmesquery: "[?default == `true`].[major, minor, patch]"
+
+        - name: Set fact for RHOIC version = Default, step 2
+          ansible.builtin.set_fact:
+            rhoic_openshift_version: >-
+              {{ rhoic_openshift_version_list | join('.') }}_openshift
+
+    - name: If requested version DOES exist, use it
+      when: rhoic_desired_version_exists | length > 0
+      block:
+
+        - name: Set fact for RHOIC patch version = Desired, step 1
+          ansible.builtin.set_fact:
+            rhoic_openshift_version_patch: >-
+              {{ r_openshift_version_list.json.openshift
+                  | json_query(jmesquery) }}
+          vars:
+            jmesquery: >-
+              [?major==`{{ rhoic_openshift_version_major }}`
+                && minor==`{{ rhoic_openshift_version_minor }}`].patch
+
+        - name: Set fact for RHOIC version = Desired, step 2
+          ansible.builtin.set_fact:
+            rhoic_openshift_version: >-
+              {{ rhoic_openshift_version_major }}.{{
+                 rhoic_openshift_version_minor }}.{{
+                 rhoic_openshift_version_patch[0] }}_openshift
+
+    - ansible.builtin.debug:
         var: rhoic_openshift_version
-      tags: get-versions
 
 - name: Building the Cloud Object Storage and RHOIC Cluster
   hosts: localhost
@@ -67,7 +102,7 @@
     # Authenticated from last section in this playbook
     # Create Workspace to support RHOIC
     - name: Create a new workspace
-      uri:
+      ansible.builtin.uri:
         url: "{{ ibm_cloud_schematics_url }}"
         method: POST
         status_code: 201
@@ -77,7 +112,7 @@
         body:
           name: "rhpds-rhoic"
           type:
-            - terraform_v0.14
+            - "{{ terraform_version }}"
           location: "us-east"
           description: "Creating Cloud Object Storage and the RHOIC cluster"
           tags: []
@@ -85,7 +120,7 @@
             url: "{{ terraform_rhoic }}"
           template_data:
             - folder: "."
-              type: terraform_v0.14
+              type: "{{ terraform_version }}"
               variablestore:
                 - name: ibmcloud_api_key
                   value: "{{ sandbox_master_api_key }}"
@@ -105,7 +140,7 @@
       delay: 10
 
     - name: Get a list of workspaces
-      uri:
+      ansible.builtin.uri:
         url: "{{ ibm_cloud_schematics_url }}"
         method: GET
         status_code: 200
@@ -118,17 +153,17 @@
       delay: 10
 
     - name: Setting the rhoic_ws_id variable
-      set_fact:
+      ansible.builtin.set_fact:
         rhoic_ws_id: "{{ item.id }}"
       with_items: "{{ r_ws_list.json.workspaces }}"
       when: item.name == "rhpds-rhoic"
 
     - name: Pausing for 60 seconds for lock to be released
-      pause:
+      ansible.builtin.pause:
         seconds: 60
 
     - name: Making the plan that IBM Schematics will run
-      uri:
+      ansible.builtin.uri:
         url: "{{ ibm_cloud_schematics_url }}/{{ rhoic_ws_id }}/plan"
         method: POST
         status_code: 202
@@ -142,7 +177,7 @@
       delay: 30
 
     - name: Waiting for the plan to finish creating
-      uri:
+      ansible.builtin.uri:
         url: "{{ ibm_cloud_schematics_url }}/{{ rhoic_ws_id }}"
         method: GET
         status_code: 200
@@ -150,16 +185,18 @@
           Authorization: "Bearer {{ ibm_access_token }}"
       register: r_ws_detail
       tags: retrieve-ws
-      until: r_ws_detail.json.status is defined and r_ws_detail.json.status != "INPROGRESS"
+      until: >-
+        r_ws_detail.json.status is defined
+        and r_ws_detail.json.status != "INPROGRESS"
       retries: 30
       delay: 30
 
     - name: Pausing for 30 seconds for lock to be released
-      pause:
+      ansible.builtin.pause:
         seconds: 30
 
     - name: Applying the plan
-      uri:
+      ansible.builtin.uri:
         url: "{{ ibm_cloud_schematics_url }}/{{ rhoic_ws_id }}/apply"
         method: PUT
         status_code: 202
@@ -172,19 +209,20 @@
       retries: 30
       delay: 10
 
+      # TODO: is there no way to check for the RHOIC cluster build?
     - name: Pausing for 45 minutes to allow the RHOIC cluster to build
-      pause:
+      ansible.builtin.pause:
         minutes: 45
 
     # Re-Authenticating because token only good for 60 minutes
     # and we don't want it to expire
     - name: Authorizing with IBM CLoud using Sandbox credentials
-      include_tasks: auth_sandbox.yml
+      ansible.builtin.include_tasks: auth_sandbox.yml
 
     # Waiting for the control plane to finish building
     # IBM Cloud Schematics times out at 90 minutes so this is a hard limit
     - name: Waiting for the plan to be active
-      uri:
+      ansible.builtin.uri:
         url: "{{ ibm_cloud_schematics_url }}/{{ rhoic_ws_id }}"
         method: GET
         status_code: 200
@@ -192,27 +230,33 @@
           Authorization: "Bearer {{ ibm_access_token }}"
       register: r_ws_detail
       tags: retrieve-ws
-      until: r_ws_detail.json.status is defined and r_ws_detail.json.status == "ACTIVE"
+      until: >-
+        r_ws_detail.json.status is defined
+        and r_ws_detail.json.status == "ACTIVE"
       retries: 45
       delay: 60
 
     # Re-Authenticating because token only good for 60 minutes
     # and we don't want it to expire
     - name: Authorizing with IBM CLoud using Sandbox credentials
-      include_tasks: auth_sandbox.yml
+      ansible.builtin.include_tasks: auth_sandbox.yml
 
     # First loop waiting for a finishes cluster
     # it finishes in this timeframe 80% of the time
     - name: Gathering RHOIC Cluster information
-      uri:
-        url: "{{ ibm_cloud_api_container_v2_url }}/getCluster?cluster={{ rhoic_cluster_name }}"
+      ansible.builtin.uri:
+        url: >-
+          {{ ibm_cloud_api_container_v2_url }}/getCluster?cluster={{
+             rhoic_cluster_name }}
         method: GET
         status_code: 200
         headers:
           Authorization: Bearer {{ ibm_access_token }}
       register: r_existing_rhoic
       tags: retrieve-rhoic
-      until: r_existing_rhoic.json.state is defined and r_existing_rhoic.json.state == "normal"
+      until: >-
+        r_existing_rhoic.json.state is defined
+        and r_existing_rhoic.json.state == "normal"
       retries: 55
       delay: 60
       ignore_errors: true
@@ -220,41 +264,59 @@
     # Re-Authenticating because token only good for 60 minutes
     # and we don't want it to expire
     - name: Authorizing with IBM CLoud using Sandbox credentials
-      include_tasks: auth_sandbox.yml
+      ansible.builtin.include_tasks: auth_sandbox.yml
 
     # Second loop waiting for a finishes cluster
     # it finishes in this timeframe 99% of the time
     - name: Gathering RHOIC Cluster information
-      uri:
-        url: "{{ ibm_cloud_api_container_v2_url }}/getCluster?cluster={{ rhoic_cluster_name }}"
+      ansible.builtin.uri:
+        url: >-
+          {{ ibm_cloud_api_container_v2_url }}/getCluster?cluster={{
+             rhoic_cluster_name }}
         method: GET
         status_code: 200
         headers:
           Authorization: Bearer {{ ibm_access_token }}
       register: r_existing_rhoic
       tags: retrieve-rhoic
-      until: r_existing_rhoic.json.state is defined and r_existing_rhoic.json.state == "normal"
+      until: >-
+        r_existing_rhoic.json.state is defined
+        and r_existing_rhoic.json.state == "normal"
       retries: 45
       delay: 60
 
     - name: Displaying RHOIC cluster details if verbosity 2+
-      debug:
+      ansible.builtin.debug:
         var: r_existing_rhoic
         verbosity: 2
 
     - name: Setting the email variable if it is not defined so user.info won't fail
-      set_fact:
+      ansible.builtin.set_fact:
         email: "no-valid-email-set"
       when:
         - email is not defined
         - requester_email is not defined
 
     - name: Creating Cloud URL
-      set_fact:
-        rhoic_console_url: "{{ ibm_cloud_kubernetes_console_url }}/{{ r_existing_rhoic.json.id }}/overview?platformType=openshift&region={{ r_existing_rhoic.json.region }}&resourceGroup={{ r_existing_rhoic.json.resourceGroup }}"
+      ansible.builtin.set_fact:
+        rhoic_console_url: >-
+          {{ ibm_cloud_kubernetes_console_url }}/{{
+             r_existing_rhoic.json.id }}/overview?platformType=openshift&region={{
+             r_existing_rhoic.json.region }}&resourceGroup={{
+             r_existing_rhoic.json.resourceGroup }}
 
-    ## Sending details of the cluster to the client
-    - name: Passing along the cluster info
+    - name: Passing user_data
+      agnosticd_user_info:
+        data:
+          rhoic_sandbox_account_name: "{{ sandbox_account_name }}"
+          rhoic_console_url: "{{ rhoic_console_url }}"
+          rhoic_openshift_version: "{{ rhoic_openshift_version }}"
+          sandbox_sid_apikey: "{{ sandbox_sid_apikey }}"
+          email: "{{ requester_email | default( email ) }}"
+          sandbox_account_id: "{{ sandbox_account_id }}"
+          sandbox_account_name: "{{ sandbox_account_name }}"
+
+    - name: Passing user_info
       agnosticd_user_info:
         msg: "{{ item }}"
       loop:
@@ -264,7 +326,7 @@
         - "IBM Cloud Console: https://cloud.ibm.com/"
         - "OpenShift Cluster Info (IBM Cloud): {{ rhoic_console_url }}"
         - "   - This link requires you to have already accepted the IBM Cloud invitation"
-        - "     which is in your inbox. You also must have switched to the correct sandbox."
+        - "     which is in your email inbox. You also must have switched to the correct sandbox."
         - "RHOIC RHPDS Lab Guide (README IMPORTANT!): https://red.ht/RHOICRHPDS"
 
 - name: Software flight-check
@@ -275,5 +337,5 @@
   tags:
     - post_flight_check
   tasks:
-    - debug:
+    - ansible.builtin.debug:
         msg: "Software checks completed successfully"

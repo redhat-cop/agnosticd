@@ -4,12 +4,12 @@
 
 FROM registry.redhat.io/devspaces/udi-rhel8:latest
 
-ENV MANDREL_VERSION=22.3.1.0-Final
-ENV QUARKUS_VERSION=2.13.7.Final-redhat-00003
-ENV OC_VERSION=4.13
-ENV MVN_VERSION=3.8.4
-ENV KN_VERSION=1.7.1
-ENV TKN_VERSION=1.10.0
+ENV MANDREL_VERSION=22.3.3.1-Final
+ENV QUARKUS_VERSION=3.2.6.Final-redhat-00002
+ENV OC_VERSION=4.14
+ENV MVN_VERSION=3.9.5
+ENV KN_VERSION=1.9.2-3
+ENV TKN_VERSION=1.11.0
 ENV GRAALVM_HOME="/usr/local/mandrel-java17-${MANDREL_VERSION}"
 ENV PATH="/usr/local/maven/apache-maven-${MVN_VERSION}/bin:${PATH}"
 ENV JAVA_HOME=$JAVA_HOME_17
@@ -38,7 +38,7 @@ COPY settings.xml /home/user/.m2
 
 RUN cd /tmp && mkdir project && cd project && mvn com.redhat.quarkus.platform:quarkus-maven-plugin:${QUARKUS_VERSION}:create -DprojectGroupId=org.acme -DprojectArtifactId=footest -DplatformGroupId=com.redhat.quarkus.platform -DplatformVersion=${QUARKUS_VERSION} -Dextensions="quarkus-resteasy-reactive,quarkus-resteasy-reactive-jackson,quarkus-agroal,quarkus-hibernate-orm,quarkus-hibernate-orm-panache,quarkus-hibernate-reactive-panache,quarkus-jdbc-h2,quarkus-jdbc-postgresql,quarkus-kubernetes,quarkus-scheduler,quarkus-smallrye-fault-tolerance,quarkus-smallrye-health,quarkus-smallrye-opentracing" && mvn -f footest clean compile package -DskipTests && cd / && rm -rf /tmp/project
 
-RUN cd /tmp && mkdir project && cd project && mvn com.redhat.quarkus.platform:quarkus-maven-plugin:${QUARKUS_VERSION}:create -DprojectGroupId=org.acme -DprojectArtifactId=footest -DplatformGroupId=com.redhat.quarkus.platform -DplatformVersion=${QUARKUS_VERSION} -Dextensions="quarkus-smallrye-reactive-messaging,quarkus-smallrye-reactive-messaging-kafka,quarkus-vertx,quarkus-kafka-client,quarkus-micrometer-registry-prometheus,quarkus-smallrye-openapi,quarkus-qute,quarkus-resteasy-reactive-qute,quarkus-opentelemetry,quarkus-opentelemetry-exporter-jaeger" && mvn -f footest clean compile package -Pnative -DskipTests && cd / && rm -rf /tmp/project
+RUN cd /tmp && mkdir project && cd project && mvn com.redhat.quarkus.platform:quarkus-maven-plugin:${QUARKUS_VERSION}:create -DprojectGroupId=org.acme -DprojectArtifactId=footest -DplatformGroupId=com.redhat.quarkus.platform -DplatformVersion=${QUARKUS_VERSION} -Dextensions="quarkus-smallrye-reactive-messaging,quarkus-smallrye-reactive-messaging-kafka,quarkus-vertx,quarkus-kafka-client,quarkus-micrometer-registry-prometheus,quarkus-smallrye-openapi,quarkus-qute,quarkus-resteasy-reactive-qute,quarkus-opentelemetry" && mvn -f footest clean compile package -Pnative -DskipTests && cd / && rm -rf /tmp/project
 
 RUN cd /tmp && git clone https://github.com/RedHat-Middleware-Workshops/cloud-native-workshop-v2-labs-solutions && cd cloud-native-workshop-v2-labs-solutions && git checkout ocp-${OC_VERSION} && cd m4 && for proj in *-service ; do mvn -fn -f ./$proj dependency:resolve-plugins dependency:resolve dependency:go-offline clean compile -DskipTests ; done && cd /tmp && rm -rf /tmp/cloud-native-workshop-v2-labs-solutions
 

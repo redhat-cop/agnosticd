@@ -1,0 +1,343 @@
+---
+# Create rhv VM from existing rhv template
+# Needs ovirt collection https://github.com/ovirt/ovirt-ansible-collection
+#   ansible-galaxy collection install ovirt.ovirt # Version 1.6.6
+# New Virtualenv:
+#   virtualenv -p $(which python3) ~/virtualenvs/ovirt
+#   source ~/virtualenvs/ovirt/bin/activate
+#
+#   export PYCURL_SSL_LIBRARY=openssl
+#   export LDFLAGS=-L/usr/local/opt/openssl/lib
+#   export CPPFLAGS=-I/usr/local/opt/openssl/include
+#   pip install pycurl --compile --no-cache-dir
+#   pip install -U pip ovirt-engine-sdk-python netaddr jmespath ansible==2.9.27
+
+# Requirements:
+# ansible==2.9.27
+# cffi==1.15.0
+# cryptography==36.0.1
+# Jinja2==3.0.3
+# jmespath==0.10.0
+# MarkupSafe==2.0.1
+# netaddr==0.8.0
+# ovirt-engine-sdk-python==4.5.0
+# pycparser==2.21
+# pycurl==7.44.1
+# PyYAML==6.0
+# six==1.16.0
+
+# Setup:
+# Clone Template rhel85-empty to create the VM
+# That template contains a user rhv-user with opentlc_admin_backdoor key
+# Create a new user, lab-user, with password as specified
+
+# To set up AgnosticV with all prereqs use the following variables:
+# -----------------------------------------------------------------
+# requirements_content:
+#   collections:
+#   - name: kubernetes.core
+#     version: 2.3.2
+#   - name: amazon.aws
+#     version: 2.3.0
+#   - name: community.general
+#     version: 5.3.0
+#   - name: ansible.posix
+#     version: 1.4.0
+#   - name: ovirt.ovirt
+#     version: 2.2.0
+
+# host_virtualenv_package_prereqs:
+# - gcc
+# - python3
+# - python3-devel
+# - python3-libselinux
+# - python3-pip
+# - libcurl-devel
+# - openssl-devel
+# - libxml2-devel
+
+# host_virtualenv_requirements_override:
+# - ovirt-engine-sdk-python==4.5.0
+# - passlib==1.7.4
+
+- name: Determine cluster wildcard domain
+  kubernetes.core.k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: r_ingress_controller
+
+- name: Save cluster apps domain variable
+  ansible.builtin.set_fact:
+    _ocp4_workload_mad_roadshow_apps_domain: "{{ r_ingress_controller.resources[0].status.domain }}"
+
+- name: Get Gitea instance
+  kubernetes.core.k8s_info:
+    api_version: pfe.rhpds.com/v1
+    kind: Gitea
+    name: "{{ ocp4_workload_mad_roadshow_gitea_instance }}"
+    namespace: "{{ ocp4_workload_mad_roadshow_gitea_project }}"
+  register: r_gitea
+
+- name: Set up GitOps environment
+  when: ocp4_workload_mad_roadshow_gitops_setup | bool
+  block:
+  - name: Create demo namespaces for all users
+    vars:
+      _ocp4_workload_mad_roadshow_namespace: >-
+        {{ ocp4_workload_mad_roadshow_demo_namespace_prefix }}{{
+           ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'apps/namespace.yaml.j2' ) | from_yaml }}"
+    loop: "{{ range(1, ocp4_workload_mad_roadshow_gitea_user_count | int + 1) | list }}"
+    loop_control:
+      loop_var: n
+      label: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+
+  # - name: Create cicd namespaces for all users
+  #   vars:
+  #     _ocp4_workload_mad_roadshow_namespace: >-
+  #       {{ ocp4_workload_mad_roadshow_pipeline_namespace_prefix }}{{
+  #          ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}
+  #   kubernetes.core.k8s:
+  #     state: present
+  #     definition: "{{ lookup('template', 'apps/namespace.yaml.j2' ) | from_yaml }}"
+  #   loop: "{{ range(1, ocp4_workload_mad_roadshow_gitea_user_count | int + 1) | list }}"
+  #   loop_control:
+  #     loop_var: n
+  #     label: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+
+  # - name: Create ArgoCD and Tekton environment for all users
+  #   kubernetes.core.k8s:
+  #     state: present
+  #     definition: "{{ lookup('template', 'cicd/applicationset.yaml.j2' ) | from_yaml }}"
+
+  - name: Create PostgreSQL database 'orders' for all users
+    vars:
+      _ocp4_workload_mad_roadshow_db_app_name: "{{ ocp4_workload_mad_roadshow_orders_db_app_name }}"
+      _ocp4_workload_mad_roadshow_db_name: "{{ ocp4_workload_mad_roadshow_orders_db_name }}"
+      _ocp4_workload_mad_roadshow_db_user: "{{ ocp4_workload_mad_roadshow_orders_db_user }}"
+      _ocp4_workload_mad_roadshow_db_password: "{{ ocp4_workload_mad_roadshow_orders_db_password }}"
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'postgresql/applicationset.yaml.j2' ) | from_yaml }}"
+
+  - name: Create PostgreSQL database 'inventory' for all users
+    vars:
+      _ocp4_workload_mad_roadshow_db_app_name: "{{ ocp4_workload_mad_roadshow_inventory_db_app_name }}"
+      _ocp4_workload_mad_roadshow_db_name: "{{ ocp4_workload_mad_roadshow_inventory_db_name }}"
+      _ocp4_workload_mad_roadshow_db_user: "{{ ocp4_workload_mad_roadshow_inventory_db_user }}"
+      _ocp4_workload_mad_roadshow_db_password: "{{ ocp4_workload_mad_roadshow_inventory_db_password }}"
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'postgresql/applicationset.yaml.j2' ) | from_yaml }}"
+
+  - name: Import database image and deploy VM for all users
+    when: ocp4_workload_mad_roadshow_kubevirt_vm_deploy | bool
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', item ) | from_yaml_all | list }}"
+    loop:
+    # Database image
+    - kubevirt/namespace.yaml.j2
+    - kubevirt/datavolume.yaml.j2
+    - kubevirt/clusterrole.yaml.j2
+    # Single shared legacy VM
+    - kubevirt/legacy-namespace.yaml.j2
+    - kubevirt/legacy-postgresql-application.yaml.j2
+    # VMs for all users
+    # - kubevirt/applicationset.yaml.j2
+
+  - name: Look up Legacy PostgreSQL on CNV with ClusterIP
+    kubernetes.core.k8s_info:
+      api_version: v1
+      kind: Service
+      name: postgresql
+      namespace: "{{ ocp4_workload_mad_roadshow_legacy_namespace }}"
+    register: r_postgresql_svc
+    retries: 120
+    delay: 10
+    until:
+    - r_postgresql_svc.resources is defined
+    - r_postgresql_svc.resources | length > 0
+    - r_postgresql_svc.resources[0].spec is defined
+    - r_postgresql_svc.resources[0].spec.clusterIP is defined
+    - r_postgresql_svc.resources[0].spec.clusterIP | length > 0
+
+  - name: Save Legacy PostgreSQL VM's ClusterIP
+    ansible.builtin.set_fact:
+      _ocp4_workload_mad_roadshow_postgresql_ip: >-
+        {{ r_postgresql_svc.resources[0].spec.clusterIP }}
+
+  - name: Print Legacy PostgreSQL VM properties
+    ansible.builtin.debug:
+      msg: |
+        "Legacy PostgreSQL VM IP Address:    {{ _ocp4_workload_mad_roadshow_postgresql_ip }}"
+        "Legacy PostgreSQL VM user name:     {{ ocp4_workload_mad_roadshow_vm_user_name }}"
+        "Legacy PostgreSQL VM user password: {{ ocp4_workload_mad_roadshow_vm_user_password }}"
+
+  - name: Create a legacy tomcat VM
+    when: ocp4_workload_mad_roadshow_kubevirt_vm_deploy | bool
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', item ) | from_yaml_all | list }}"
+    loop:
+    - kubevirt/legacy-tomcat-application.yaml.j2
+
+  - name: Look up Legacy Tomcat on CNV with ClusterIP
+    kubernetes.core.k8s_info:
+      api_version: v1
+      kind: Service
+      name: tomcat
+      namespace: "{{ ocp4_workload_mad_roadshow_legacy_namespace }}"
+    register: r_tomcat_svc
+    retries: 120
+    delay: 10
+    until:
+    - r_tomcat_svc.resources is defined
+    - r_tomcat_svc.resources | length > 0
+    - r_tomcat_svc.resources[0].spec is defined
+    - r_tomcat_svc.resources[0].spec.clusterIP is defined
+    - r_tomcat_svc.resources[0].spec.clusterIP | length > 0
+
+  - name: Save Legacy Tomcat VM's ClusterIP
+    ansible.builtin.set_fact:
+      _ocp4_workload_mad_roadshow_tomcat_ip: >-
+        {{ r_tomcat_svc.resources[0].spec.clusterIP }}
+
+  - name: Print Legacy Tomcat VM properties
+    ansible.builtin.debug:
+      msg: |
+        "Legacy Tomcat VM IP Address:    {{ _ocp4_workload_mad_roadshow_tomcat_ip }}"
+        "Legacy Tomcat VM user name:     {{ ocp4_workload_mad_roadshow_vm_user_name }}"
+        "Legacy Tomcat VM user password: {{ ocp4_workload_mad_roadshow_vm_user_password }}"
+
+  # Don't use ApplicationSet -> users can change their applications
+  - name: Create ArgoCD Applications for all users
+    vars:
+      _ocp4_workload_mad_roadshow_namespace: >-
+        {{ ocp4_workload_mad_roadshow_demo_namespace_prefix }}{{
+           ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}
+      _ocp4_workload_mad_roadshow_user: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+    kubernetes.core.k8s:
+      state: present
+      definition: "{{ lookup('template', 'apps/application.yaml.j2' ) | from_yaml }}"
+    loop: "{{ range(1, ocp4_workload_mad_roadshow_gitea_user_count | int + 1) | list }}"
+    loop_control:
+      loop_var: n
+      label: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+
+# - name: Deploy RedHat OpenShift AI
+#   when: ocp4_workload_mad_roadshow_rhods_setup | bool
+#   include_role:
+#     name: install_operator
+#   vars:
+#     install_operator_action: install
+#     install_operator_name: "{{ ocp4_workload_mad_roadshow_rhods_operator_name }}"
+#     install_operator_namespace: redhat-ods-operator
+#     install_operator_channel: "{{ ocp4_workload_mad_roadshow_rhods_channel }}"
+#     install_operator_automatic_install_plan_approval: "{{ ocp4_workload_mad_roadshow_rhods_automatic_install_plan_approval }}"
+#     install_operator_starting_csv: "{{ ocp4_workload_mad_roadshow_rhods_install_operator_starting_csv }}"
+#     install_operator_manage_namespaces: []
+#     install_operator_catalogsource_setup: "{{ ocp4_workload_mad_roadshow_rhods_use_catalogsource_setup }}"
+#     install_operator_catalogsource_name: "{{ ocp4_workload_mad_roadshow_rhods_catalogsource_name }}"
+#     install_operator_catalogsource_image: "{{ ocp4_workload_mad_roadshow_rhods_catalogsource_image }}"
+#     install_operator_catalogsource_image_tag: "{{ ocp4_workload_mad_roadshow_rhods_catalogsource_image_tag }}"
+
+# - name: Adjust RHODS configuration
+#   when: ocp4_workload_mad_roadshow_rhods_setup | bool
+#   kubernetes.core.k8s:
+#     state: present
+#     definition: "{{ lookup('template', 'rhods/odh-dashboard-config.yaml.j2' ) | from_yaml }}"
+
+- name: Setup Module 7 - RHDH
+  include_tasks:
+    file: ./rhdh-main.yml
+
+- name: Create Coolstore Helm Repository
+  k8s:
+    state: present
+    merge_type:
+    - strategic-merge
+    - merge
+    definition: "{{ lookup('file', item ) | from_yaml }}"
+  loop:
+  - ./files/coolstore-helm-repo.yml
+
+- name: Install Workshop
+  ansible.builtin.include_tasks: workshop.yml
+
+- name: Install Workshop Deployer
+  ansible.builtin.include_tasks: workshop_deployer.yml
+
+- name: Create a nested Podman SCC
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'devspaces/nested-podman-scc.yaml.j2') }}"
+
+# -------------------
+# AgnosticD User Info
+# -------------------
+
+- name: Save AgnosticD information (Legacy PostgreSQL VM)
+  when: ocp4_workload_mad_roadshow_postgresql_vm_setup | bool
+  agnosticd_user_info:
+    data:
+      legacy_postgresql_vm_name: "{{ ocp4_workload_mad_roadshow_postgresql_vm_name }}"
+      legacy_postgresql_vm_ip: "{{ _ocp4_workload_mad_roadshow_postgresql_ip }}"
+      legacy_postgresql_vm_user: "{{ ocp4_workload_mad_roadshow_vm_postgresql_user_name }}"
+      legacy_postgresql_vm_password: "{{ ocp4_workload_mad_roadshow_vm_postgresql_password }}"
+
+- name: Save AgnosticD information (Legacy Tomcat VM)
+  when: ocp4_workload_mad_roadshow_tomcat_vm_setup | bool
+  agnosticd_user_info:
+    data:
+      legacy_tomcat_vm_name: "{{ ocp4_workload_mad_roadshow_tomcat_vm_name }}"
+      legacy_tomcat_vm_ip: "{{ _ocp4_workload_mad_roadshow_tomcat_ip }}"
+      legacy_tomcat_vm_user: "{{ ocp4_workload_mad_roadshow_vm_user_name }}"
+      legacy_tomcat_vm_password: "{{ ocp4_workload_mad_roadshow_vm_tomcat_password }}"
+
+- name: Save AgnosticD information for all users
+  when: ocp4_workload_mad_roadshow_gitops_setup | bool
+  agnosticd_user_info:
+    user: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+    data:
+      user: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+      gitea_url: >-
+        {{ r_gitea.resources[0].spec.giteaSsl | bool | ternary( 'https', 'http' ) }}://{{
+           r_gitea.resources[0].status.giteaHostname }}/{{
+           ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}
+      retail_namespace: "{{ ocp4_workload_mad_roadshow_demo_namespace_prefix }}{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+      cicd_namespace: "{{ ocp4_workload_mad_roadshow_pipeline_namespace_prefix }}{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+  loop: "{{ range(1, ocp4_workload_mad_roadshow_gitea_user_count | int + 1) | list }}"
+  loop_control:
+    loop_var: n
+    label: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+
+- name: Save AgnosticD information for all users (Tomcat IP)
+  when: ocp4_workload_mad_roadshow_tomcat_vm_setup | bool
+  agnosticd_user_info:
+    user: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+    data:
+      tomcat_ip: "{{ _ocp4_workload_mad_roadshow_tomcat_ip }}"
+  loop: "{{ range(1, ocp4_workload_mad_roadshow_gitea_user_count | int + 1) | list }}"
+  loop_control:
+    loop_var: n
+    label: "{{ ocp4_workload_mad_roadshow_gitea_user_prefix }}{{ n }}"
+
+- name: Create JBoss Web Server 5.6 ImageStream
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'imagestream-jboss-webserver56.yaml' ) | from_yaml }}"
+
+- name: Install Showroom
+  ansible.builtin.include_tasks: showroom.yml
+
+# Cleanup Private Key
+- name: Remove private key
+  delegate_to: localhost
+  ansible.builtin.file:
+    state: absent
+    path: /tmp/rhv.pem

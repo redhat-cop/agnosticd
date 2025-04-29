@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: default
+  name: post-startup-fixes
+spec:
+  selector:
+    matchLabels:
+      app: post-startup-fixes
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: post-startup-fixes
+    spec:
+      containers:
+      - name: post-startup-fixes
+        image: registry.redhat.io/openshift4/ose-tools-rhel9@sha256:8037187950e7374a9c9bec4996033c9b24ce374920ef29047d4f63b4c20f3e6b
+        command:
+        - /bin/bash
+        args:
+        - '-ec'
+        - >-
+          while true; do
+            TRIGGERS=$(oc get deployment tekton-triggers-core-interceptors -n {{ ocp4_workload_trusted_application_pipeline_pipelines_namespace }} --no-headers --ignore-not-found=true);
+            if [[ ! -z "${TRIGGERS}" ]]; then
+              TRIGGERS_STATUS=$(echo $TRIGGERS | awk '{print $2}');
+              if [[ "${TRIGGERS_STATUS}" == "1/1" ]]; then
+                echo "Found tekton-triggers-core-interceptors deployment";
+                oc delete pod -l app=tekton-triggers-core-interceptors -n {{ ocp4_workload_trusted_application_pipeline_pipelines_namespace }} --ignore-not-found=true;
+                break;
+              fi
+            fi
+            sleep 5;
+          done
+
+          while true; do
+            STATUS_CODE=$(curl -sk -o /dev/null -w "%{http_code}" {{ ocp4_workload_trusted_application_pipeline_central_host }}/v1/ping || true);
+            echo Central Status Code: $STATUS_CODE;
+            if [[ "${STATUS_CODE}" == "200" ]]; then
+              echo "Central up!";
+              break;
+            fi
+            sleep 5;
+          done
+
+          oc delete secret admission-control-tls -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
+          oc delete secret collector-tls -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
+          oc delete secret sensor-tls -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
+
+          INIT_BUNDLES=$(curl -k -u admin:{{ ocp4_workload_trusted_application_pipeline_common_password }} {{ ocp4_workload_trusted_application_pipeline_central_host }}/v1/cluster-init/init-bundles);
+          INIT_BUNDLES_LENGTH=$(echo $INIT_BUNDLES | jq '.items | length');
+          INIT_BUNDLE_NAME=prod-{{ lookup('password', '/dev/null chars=ascii_lowercase,digits length=8') }};
+
+          if [[ "${INIT_BUNDLES_LENGTH}" == "1" ]]; then
+            INIT_BUNDLE_ID=$(echo $INIT_BUNDLES | jq -r '.items[0].id');
+            CLUSTER_ID=$(echo $INIT_BUNDLES | jq -r '.items[0].impactedClusters[0].id');
+            curl -u admin:{{ ocp4_workload_trusted_application_pipeline_common_password }} -kv -X PATCH {{ ocp4_workload_trusted_application_pipeline_central_host }}/v1/cluster-init/init-bundles/revoke --data '{"ids": ["'"$INIT_BUNDLE_ID"'"], "confirmImpactedClustersIds": ["'"$CLUSTER_ID"'"]}';
+          fi
+
+          curl -u admin:{{ ocp4_workload_trusted_application_pipeline_common_password }} -k -X POST {{ ocp4_workload_trusted_application_pipeline_central_host }}/v1/cluster-init/init-bundles --data '{"name": "'"$INIT_BUNDLE_NAME"'"}' -o bundle-output.json;
+          cat bundle-output.json | jq -r '.kubectlBundle' | base64 --decode > bundle.yaml;
+          oc apply -f bundle.yaml -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }};
+
+          oc delete pod -l app=admission-control -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
+          oc delete pod -l app=collector -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
+          oc delete pod -l app=sensor -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
+
+          while true; do
+            SCANNER=$(oc get pod -l app=scanner -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true);
+            SCANNER_DB=$(oc get pod -l app=scanner-db -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true);
+            if [[ ! -z "${SCANNER}" ]] && [[ ! -z "${SCANNER_DB}" ]]; then
+              oc delete secret scanner-tls -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
+              oc delete secret scanner-db-tls -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true;
+              SCANNER_TLS=$(oc get secret scanner-tls -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true);
+              SCANNER_DB_TLS=$(oc get secret scanner-db-tls -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }} --ignore-not-found=true);
+              if [[ ! -z "${SCANNER}" ]] && [[ ! -z "${SCANNER_DB}" ]]; then
+                oc delete pod -l app=scanner -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }};
+                oc delete pod -l app=scanner-db -n {{ ocp4_workload_trusted_application_pipeline_stackrox_namespace }};
+                break;
+              fi
+            fi
+            sleep 5;
+          done
+
+          echo 'Post startup fixes complete!'
+
+          trap : TERM INT; sleep infinity & wait;
+      serviceAccount: default
+  strategy:
+    type: Recreate

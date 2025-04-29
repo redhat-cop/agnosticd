@@ -48,10 +48,6 @@ The pool id for the subscription to attach. By default `auto_attach` is false.
 Hostname of satellite server.
 Required, but may be set as `set_repositories_satellite_url` or `satellite_url` for compatibility with previous versions.
 
-`set_repositories_satellite_ca_cert` -
-CA certificate used to validate satellite server TLS.
-Required unless `set_repositories_satellite_hostname` is `labsat.opentlc.com`.
-
 `set_repositories_satellite_ca_rpm_url` -
 URL used to download the Katello/Satellite CA certificate configuration RPM.
 Default `https://{{ set_repositories_satellite_hostname }}/pub/katello-ca-consumer-latest.noarch.rpm`

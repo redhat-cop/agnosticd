@@ -1,0 +1,263 @@
+---
+
+- name: Create project for artifact downloads
+  k8s:
+    state: present
+    kind: Project
+    api_version: project.openshift.io/v1
+    definition:
+      metadata:
+        name: artifacts
+        annotations:
+          openshift.io/description: ""
+          openshift.io/display-name: "Project to host artifacts for workshop"
+
+- name: Search for download-server resources
+  k8s_info:
+    kind: DeploymentConfig
+    name: download-server
+    namespace: artifacts
+  register: artifacts_dc
+
+- name: Create image stream for download-server
+  when: artifacts_dc.resources | list | length == 0
+  k8s:
+    state: present
+    kind: ImageStream
+    api_version: image.openshift.io/v1
+    definition:
+      metadata:
+        name: download-server
+        namespace: artifacts
+      spec:
+        lookupPolicy:
+          local: false
+
+
+- name: Create build config for download-server
+  when: artifacts_dc.resources | list | length == 0
+  k8s:
+    state: present
+    kind: BuildConfig
+    api_version: build.openshift.io/v1
+    definition:
+      metadata:
+        name: download-server
+        namespace: artifacts
+        labels:
+          app: artifacts
+          app.kubernetes.io/component: artifacts
+          app.kubernetes.io/instance: artifacts
+          app.kubernetes.io/name: artifacts
+          app.kubernetes.io/part-of: artifacts
+          app.openshift.io/runtime: httpd
+          app.openshift.io/runtime-version: 2.4-el7
+      spec:
+        nodeSelector: null
+        output:
+          to:
+            kind: ImageStreamTag
+            name: 'download-server:latest'
+        resources: {}
+        successfulBuildsHistoryLimit: 5
+        failedBuildsHistoryLimit: 5
+        strategy:
+          type: Source
+          sourceStrategy:
+            from:
+              kind: ImageStreamTag
+              namespace: openshift
+              name: 'httpd:2.4-el8'
+        postCommit: {}
+        source:
+          type: Git
+          git:
+            uri: 'https://github.com/sclorg/httpd-ex.git'
+        triggers:
+          - type: ImageChange
+            imageChange: {}
+          - type: ConfigChange
+        runPolicy: Serial
+
+- name: Create persistent volume claim for download-server
+  when: artifacts_dc.resources | list | length == 0
+  k8s:
+    state: present
+    kind: PersistentVolumeClaim
+    definition:
+      metadata:
+        name: artifacts-pv-claim
+        namespace: artifacts
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 5Gi
+        volumeMode: Filesystem
+
+- name: Create deployment config for download-server
+  when: artifacts_dc.resources | list | length == 0
+  k8s:
+    state: present
+    kind: DeploymentConfig
+    api_version: apps.openshift.io/v1
+    definition:
+      metadata:
+        name: download-server
+        namespace: artifacts
+        labels:
+          app: artifacts
+      spec:
+        strategy:
+          type: Rolling
+          rollingParams:
+            updatePeriodSeconds: 1
+            intervalSeconds: 1
+            timeoutSeconds: 600
+            maxUnavailable: 25%
+            maxSurge: 25%
+          resources: {}
+          activeDeadlineSeconds: 21600
+        triggers:
+          - type: ImageChange
+            imageChangeParams:
+              automatic: true
+              containerNames:
+                - httpd
+              from:
+                kind: ImageStreamTag
+                namespace: artifacts
+                name: 'download-server:latest'
+          - type: ConfigChange
+        replicas: 1
+        revisionHistoryLimit: 10
+        test: false
+        selector:
+          name: download-server
+        template:
+          metadata:
+            name: download-server
+            creationTimestamp: null
+            labels:
+              name: download-server
+          spec:
+            volumes:
+              - name: artifacts-pv-storage
+                persistentVolumeClaim:
+                  claimName: artifacts-pv-claim
+            containers:
+              - resources:
+                  limits:
+                    memory: 512Mi
+                readinessProbe:
+                  httpGet:
+                    path: /
+                    port: 8080
+                    scheme: HTTP
+                  initialDelaySeconds: 3
+                  timeoutSeconds: 3
+                  periodSeconds: 10
+                  successThreshold: 1
+                  failureThreshold: 3
+                terminationMessagePath: /dev/termination-log
+                name: httpd
+                livenessProbe:
+                  httpGet:
+                    path: /
+                    port: 8080
+                    scheme: HTTP
+                  initialDelaySeconds: 30
+                  timeoutSeconds: 3
+                  periodSeconds: 10
+                  successThreshold: 1
+                  failureThreshold: 3
+                ports:
+                  - containerPort: 8080
+                    protocol: TCP
+                imagePullPolicy: IfNotPresent
+                terminationMessagePolicy: File
+                volumeMounts:
+                  - mountPath: "/opt/app-root/src/upload"
+                    name: artifacts-pv-storage
+            restartPolicy: Always
+            terminationGracePeriodSeconds: 30
+            dnsPolicy: ClusterFirst
+            securityContext: {}
+            schedulerName: default-scheduler
+
+- name: Create service for download-server
+  when: artifacts_dc.resources | list | length == 0
+  k8s:
+    state: present
+    kind: Service
+    api_version: v1
+    definition:
+      metadata:
+        name: download-server
+        namespace: artifacts
+        labels:
+          app: artifacts
+        annotations:
+          description: Exposes and load balances the application pods
+      spec:
+        ipFamilies:
+          - IPv4
+        ports:
+          - name: web
+            protocol: TCP
+            port: 8080
+            targetPort: 8080
+        internalTrafficPolicy: Cluster
+        type: ClusterIP
+        ipFamilyPolicy: SingleStack
+        sessionAffinity: None
+        selector:
+          name: download-server
+
+- name: Search for download-server deployment
+  k8s_info:
+    kind: DeploymentConfig
+    name: download-server
+    namespace: artifacts
+  register: artifacts_dc
+
+
+- name: Wait for download server pods to be ready
+  k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: artifacts
+    label_selectors:
+      - name=download-server
+      - deploymentconfig=download-server
+    field_selectors:
+      - status.phase=Running
+  register: artifact_pod
+  retries: 120
+  delay: 10
+  until: artifact_pod.resources | list | length == 1
+
+
+- set_fact:
+    artifact_pod_name: "{{ artifact_pod.resources[0].metadata.name }}"
+
+
+- name: Create upload directory if it does not exist
+  ansible.builtin.file:
+    path: upload
+    state: directory
+    mode: '0755'
+
+- name: Download artifacts locally
+  get_url:
+    url: "{{ HTTP_URL }}/{{ item }}"
+    dest: "upload"
+    username: "{{ HTTP_USERNAME }}"
+    password: "{{ HTTP_PASSWORD }}"
+    force_basic_auth: yes
+  with_items:
+  - "{{ filelist }}"
+
+- name: Upload artifacts to download-server
+  shell: "oc rsync  --no-perms ./upload {{ artifact_pod_name }}:/opt/app-root/src -n artifacts"

@@ -16,13 +16,28 @@
 - name: Deploy some operators
   hosts: bastion-vm
   tasks:
-    - name: Approve certificates
-      shell: /usr/bin/oc get csr|grep Pending|awk '{print $1}'|xargs -i /usr/bin/oc adm certificate approve {}
-      retries: 5
-      delay: 10
+
+    - name: Copy Approve CSR script
+      copy:
+        src: "approve_csr.sh"
+        dest: "/tmp/approve_csr.sh"
+        mode: '0755'
+
+    - name: Run approve CSRs script
+      shell: "/tmp/approve_csr.sh"
+      async: 1200
+      poll: 0
+      register: approve_csr
+
+    - name: 'approve csr - check on async task'
+      async_status:
+        jid: "{{ approve_csr.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      retries: 100
+      delay: 30
 
     - name: Post tasks
-      when: not build_lab|bool
       block:
         - name: Make .kube directory
           ansible.builtin.file:
@@ -78,14 +93,42 @@
           shell: >
             oc patch ingresses.config cluster --type merge -p '{"spec":{"appsDomain": "apps.{{ guid }}.{{ cluster_dns_zone }}"}}'
 
+        - name: Install the k9s rpm from a remote repo
+          when: software_install_k9s | default(false) | bool
+          ansible.builtin.yum:
+            name: https://github.com/derailed/k9s/releases/download/v0.32.4/k9s_linux_amd64.rpm
+            state: present
+            disable_gpg_check: true
+
     #- name: Execute script to change the domain
     #  ansible.builtin.shell: "sh -x /root/renameDomain.sh"
     #  when: not build_lab|bool
 
     - name: Setting up Openshift Virtualisation Lab
+      when: ocp4_aio_deploy_cnvlab | default(true) | bool
       include_role:
         name: ocp4_aio_workload_cnvlab
-      when: not build_lab|bool
+
+- name: Update motd on bastions
+  hosts: hypervisor,bastion-vm
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Remove register for insights motd
+      when: bastion_remove_insights_motd | bool
+      ansible.builtin.file:
+        state: absent
+        path: /etc/motd.d/insights-client
+
+    - name: Add a custom motd to the bastion
+      when: bastion_custom_motd | default("") | length > 0
+      ansible.builtin.copy:
+        dest: /etc/motd.d/agnosticd
+        owner: root
+        group: root
+        mode: "o=rw,g=rw,o=r"
+        content: "{{ bastion_custom_motd }}"
+
 
 - name: Prepare Hypervisor for proxypass
   hosts: hypervisor
@@ -113,7 +156,7 @@
       service:
         name: httpd
         state: started
-        enabled: yes
+        enabled: true
 
     - name: Fill /etc/hosts with internal names
       blockinfile:
@@ -128,6 +171,12 @@
   tasks:
     - name: Print Bastion Connection Information
       agnosticd_user_info:
+        data:
+          hypervisor_ip: "{{ hostvars['hypervisor']['public_ip_address'] }}"
+          ssh_user: "{{ student_name }}"
+          ssh_password: "{{ hostvars['hypervisor']['student_password'] }}"
+          ocp_console_url: "https://console-openshift-console.apps.{{ guid }}.{{ cluster_dns_zone }}"
+          ocp_admin_password: "{{ hostvars['localhost']['openshift_admin_password'] }}"
         msg: "{{ item }}"
       loop:
         - "Host you will be using for lab : {{ hostvars['hypervisor']['public_ip_address'] }}"
@@ -136,7 +185,7 @@
 #        - "OpenShift web console : https://console-openshift-console.apps.{{ guid }}.{{ cluster_dns_zone }}"
 #        - "kubeadmin user Password : {{ hostvars['kube_holder']['kubeadmin_password'] }}"
 
-    - when: ocp4_aio_deploy_cnvlab and not build_lab|bool
+    - when: ocp4_aio_deploy_cnvlab
       name: Print Openshift Virtualization lab infos
       agnosticd_user_info:
         msg: "{{ item }}"
@@ -153,7 +202,6 @@
         - "If you'd like CLI access, the bastion host will have already been setup - `ssh root@192.168.123.100` and password `redhat`"
         - "You should then automatically have oc/kubectl access to the cluster. Check out ~/ocp-install/auth/."
 
-
 - name: PostSoftware flight-check
   hosts: localhost
   connection: local
@@ -162,5 +210,11 @@
   tags:
     - post_flight_check
   tasks:
+
+    - name: Deploy Showroom on shared cluster
+      when: showroom_deploy_shared_cluster_enable | default(false) | bool
+      include_role:
+        name: ocp4_workload_showroom
+
     - debug:
         msg: "Post-Software checks completed successfully"

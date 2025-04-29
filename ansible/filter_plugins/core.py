@@ -328,6 +328,35 @@ def agnosticd_filter_out_installed_collections(requirements, installed_collectio
     return requirements
 
 
+def agnosticd_instances_to_odcr(instances, agnosticd_images):
+    '''Convert agnosticd instances list to on demand capacity reservations'''
+
+    result = []
+
+    for instance in instances:
+
+        instance_type = instance.get('flavor', {}).get('ec2', None)
+        if not instance_type:
+            raise AnsibleFilterError(
+                'instance_type or flavor.ec2 is required in instance definition'
+            )
+
+        if instance['name'] in agnosticd_images:
+            instance['instance_platform'] = instance.get(
+                'instance_platform',
+                agnosticd_images.get(instance['name'], {}).get('platform_details', 'Linux/UNIX'))
+            if instance['instance_platform'] == 'Red Hat BYOL Linux':
+                # Red Hat BYOL Linux is not supported by ODCR, use Linux/UNIX
+                instance['instance_platform'] = 'Linux/UNIX'
+
+        result.append({
+            'instance_count': instance.get('count', 1),
+            'instance_type': instance_type,
+            'instance_platform': instance.get('instance_platform', 'Linux/UNIX'),
+        })
+
+    return result
+
 class FilterModule(object):
     ''' AgnosticD core jinja2 filters '''
 
@@ -340,4 +369,5 @@ class FilterModule(object):
             'image_to_ec2_filters': image_to_ec2_filters,
             'agnosticd_get_all_images': agnosticd_get_all_images,
             'agnosticd_filter_out_installed_collections': agnosticd_filter_out_installed_collections,
+            'agnosticd_instances_to_odcr': agnosticd_instances_to_odcr,
         }

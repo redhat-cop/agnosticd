@@ -1,0 +1,188 @@
+---
+# Workloads are being run on bastion.
+# This enables using the k8s module in the workload.
+# openshift python module is installed for Python3
+- name: Install workloads
+  hosts: bastions
+  gather_facts: false
+  run_once: true
+  become: false
+  tasks:
+  - name: Set Ansible Python interpreter to k8s virtualenv
+    set_fact:
+      ansible_python_interpreter: /opt/virtualenvs/k8s/bin/python
+
+  - name: Generate cluster api
+    set_fact:
+      rosa_api_server_url: "https://api{{ rosa_console_url.stdout | regex_search('(?<=\\.apps).*') }}:6443"
+
+  - name: Run authentication
+    k8s_auth:
+      host: "{{ rosa_api_server_url }}"
+      username: cluster-admin
+      password: "{{ rosa_admin_result.stdout }}"
+      validate_certs: false
+    register: _r_kube_auth
+    retries: 30
+    delay: 120
+    until:
+    - _r_kube_auth is defined
+    - _r_kube_auth.k8s_auth is defined
+    - _r_kube_auth.k8s_auth.api_key is defined
+
+  - name: Create a directory if it does not exist
+    ansible.builtin.file:
+      path: ~/.kube
+      state: directory
+      mode: '0755'
+
+  - name: generate kubeconfig
+    template:
+      src: templates/kubeconfig.j2
+      dest: ~/.kube/config
+
+  # Deploy Workloads
+  - name: Deploy demo operator
+    k8s:
+      state: present
+      definition: "{{ lookup('template', item ) | from_yaml }}"
+      validate_certs: false
+    loop:
+    - templates/demo-operator-namespace.yaml
+    - templates/demo-operator-catalog-source.yaml
+    - templates/demo-operator-operator-group.yaml
+    - templates/demo-operator-subscription.yaml
+    register: r_operator_install
+    retries: 240
+    delay: 10
+    until:
+    - r_operator_install is defined
+    - r_operator_install is not failed
+
+  - name: Pause for 2 minutes for demo operator to install
+    ansible.builtin.pause:
+      minutes: 2
+
+  - name: Deploy demo
+    k8s:
+      state: present
+      definition: "{{ lookup('template', 'templates/demo-workshop-install.yaml.j2' ) | from_yaml }}"
+      validate_certs: false
+    register: r_demo
+    retries: 240
+    delay: 10
+    until:
+    - r_demo is defined
+    - r_demo is not failed
+    vars:
+      scm_ref: "{{ vars['__meta__']['deployer']['scm_ref'] }}"
+
+  - name: Check if demo has completed install
+    k8s_info:
+      api_version: demos.redhat.com/v1
+      kind: Demo
+      name: "{{ demo_instance_name }}"
+      namespace: demo-provisioner-operator-system
+      validate_certs: false
+    register: result_demo_install
+    retries: 480
+    delay: 15
+    until:
+    - result_demo_install is defined
+    - result_demo_install.resources is defined
+    - result_demo_install.resources | length > 0
+    - result_demo_install.resources[0].status is defined
+    - result_demo_install.resources[0].status.phase is defined
+    - result_demo_install.resources[0].status.phase != 'Running'
+
+  - name: Check if demo failed installation
+    ansible.builtin.fail:
+      msg: The demo did not provision successfully.  Please view the logs on the demo pod.
+    when: result_demo_install.resources[0].status.phase == 'Failed'
+
+  - name: Get user data and info
+    shell: |
+      oc login --insecure-skip-tls-verify=true -u cluster-admin -p {{ rosa_admin_result.stdout }} {{ rosa_api_server_url }}
+      POD=$(oc get pod -l app=demo-provisioner -n demo-provisioner-operator-system | grep demo- | awk '{print $1}')
+      oc rsync $POD:/tmp/user-info.yaml /tmp -c demo-playbook -n demo-provisioner-operator-system > /dev/null 2>&1
+      oc rsync $POD:/tmp/user-data.yaml /tmp -c demo-playbook -n demo-provisioner-operator-system > /dev/null 2>&1
+
+  - name: Upload AgnosticD user info
+    block:
+    - name: Fetch user data
+      ansible.builtin.fetch:
+        src: /tmp/user-data.yaml
+        dest: /tmp/
+        flat: yes
+      ignore_errors: true
+
+    - name: Get user-data
+      include_vars:
+        file: "/tmp/user-data.yaml"
+        name: _userdata
+      ignore_errors: true
+
+    - name: Fetch user info
+      ansible.builtin.fetch:
+        src: /tmp/user-info.yaml
+        dest: /tmp/
+        flat: yes
+      ignore_errors: true
+
+    - name: Get user-info
+      set_fact:
+        _userinfo: "{{ lookup('file', '/tmp/user-info.yaml') }}"
+      ignore_errors: true
+
+    - name: Create upload task from template
+      ansible.builtin.template:
+        src: templates/agnosticd_user_info_upload.yaml.j2
+        dest: /tmp/agnosticd_user_info_upload.yaml
+      ignore_errors: true
+
+    - name: Fetch upload task
+      ansible.builtin.fetch:
+        src: /tmp/agnosticd_user_info_upload.yaml
+        dest: /tmp/
+        flat: yes
+      ignore_errors: true
+
+    - name: Run upload task
+      include_tasks: /tmp/agnosticd_user_info_upload.yaml
+      ignore_errors: true
+
+  - name: Install ocp-student-workloads
+    when:
+    - user_count | default(0) | int > 0
+    - student_workloads | default("") | length > 0
+    tags:
+    - student_workloads
+    block:
+    - name: Check if authentication mechanism is set to htpasswd
+      when: install_idm | default("") != "htpasswd"
+      fail:
+        msg: Authentication Mechanism must be htpasswd
+
+    - name: Generate list of User IDs
+      set_fact:
+        users: "{{ lookup('sequence', 'start=1 end={{ user_count|int }}', wantlist=true) | map('int') | list }}"
+
+    - name: Deploy ocp-student-workloads for each user ID
+      include_role:
+        name: "{{ workload_loop_var[1] }}"
+      vars:
+        ocp_username: "user{{ workload_loop_var[0] }}"
+        become_override: true
+        ACTION: "provision"
+      loop: "{{ users | product(student_workloads) | list }}"
+      loop_control:
+        loop_var: workload_loop_var
+
+  - name: Remmove htpasswd identity provider
+    shell: |
+      oc delete secret htpasswd-secret -n openshift-config
+      oc patch OAuth cluster --type json --patch '[{ "op": "remove", "path": "/spec/identityProviders/1" }]'
+      oc delete deployment oauth-openshift -n openshift-authentication
+      oc delete user cluster-admin
+      rosa delete admin -c rosa-{{ guid }} -y
+    ignore_errors: true

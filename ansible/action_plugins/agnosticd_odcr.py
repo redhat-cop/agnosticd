@@ -602,6 +602,8 @@ class ActionModule(ActionBase):
             if total_canceled > 0:
                 result['changed'] = True
         except Exception as err:
+            display.error(f"Reservations failed in region {region}")
+            result['region'] = region
             result['failed'] = True
             result['error'] = str(err)
             return result
@@ -622,6 +624,8 @@ class ActionModule(ActionBase):
 
                 r_ok, result['reservations'] = odcr.do_region(region, reservations)
             except Exception as err:
+                display.error(f"Reservations failed in region {region}")
+                result['region'] = region
                 result['failed'] = True
                 result['error'] = str(err)
                 break

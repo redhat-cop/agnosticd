@@ -1,0 +1,146 @@
+---
+- name: install service interconnect operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_name: skupper-operator
+    install_operator_channel: "{{ ocp4_workload_eap_camelq_lab_skupper_channel }}"
+    install_operator_starting_csv: "{{ ocp4_workload_eap_camelq_lab_skupper_startingcsv }}"
+    install_operator_catalogsource_setup: true
+    install_operator_catalogsource_image: "{{ ocp4_workload_eap_camelq_lab_catalogsource_image }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_eap_camelq_lab_catalogsource_tag }}"
+
+- name: install eap operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_name: eap
+    install_operator_channel: "{{ ocp4_workload_eap_camelq_lab_eap_channel }}"
+    install_operator_starting_csv: "{{ ocp4_workload_eap_camelq_lab_eap_startingcsv }}"
+    install_operator_catalogsource_setup: true
+    install_operator_catalogsource_image: "{{ ocp4_workload_eap_camelq_lab_catalogsource_image }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_eap_camelq_lab_eap_catalogsource_tag }}"
+
+- name: install amq-broker-rhel8 operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_name: amq-broker-rhel8
+    install_operator_csv_nameprefix: amq-broker-operator
+    install_operator_channel: "{{ ocp4_workload_eap_camelq_lab_amqbroker_channel }}"
+    install_operator_starting_csv: "{{ ocp4_workload_eap_camelq_lab_amqbroker_startingcsv }}"
+    install_operator_catalogsource_setup: true
+    install_operator_catalogsource_image: "{{ ocp4_workload_eap_camelq_lab_catalogsource_image }}"
+    install_operator_catalogsource_image_tag: "{{ ocp4_workload_eap_camelq_lab_catalogsource_tag }}"
+
+- name: install Red Hat Build of Keycloak RHBK
+  ansible.builtin.include_tasks: install_rhbk.yml
+
+- name: set up podman for the user
+  become: true
+  block:
+    - name: copy setup_podman_user_service script to bastion
+      ansible.builtin.copy:
+        src: setup_podman_user_service
+        dest: "/usr/bin/setup_podman_user_service"
+        owner: root
+        group: root
+        mode: 0775
+    - name: set up podman for the user
+      ansible.builtin.blockinfile:
+        dest: "/home/{{ student_name }}/.bashrc"
+        insertafter: EOF
+        marker: "# <!-- {mark} ANSIBLE MANAGED BLOCK (podman) -->"
+        block: |
+          loginctl enable-linger $USER
+          export XDG_RUNTIME_DIR=/run/user/$(id -u)
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+          /usr/bin/setup_podman_user_service
+
+- name: start soap app service with podman
+  become: true
+  become_user: "{{ student_name }}"
+  block:
+    - name: start soap app service with podman
+      containers.podman.podman_container:
+        name: container
+        image: "{{ ocp4_workload_eap_camelq_lab_soap_app_image }}"
+        detach: true
+        ports:
+          - 8080:8080
+    - name: verify soap app with a test request
+      ansible.builtin.uri:
+        url: http://localhost:8080/services/s1
+        method: GET
+        body: |
+          <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+            <soap:Body>
+              <ns2:SubscriberRequest xmlns:ns2="http://www.example.org/s1/">
+                <Id>dummy</Id>
+              </ns2:SubscriberRequest>
+            </soap:Body>
+          </soap:Envelope>
+      register: this
+      until: this.status == 200
+      retries: 3
+      delay: 5
+
+- name: install skupper cli
+  when: ocp4_workload_eap_camelq_lab_skupper_cli_install | bool
+  become: true
+  block:
+    # - name: install skupper cli
+    #   ansible.builtin.include_role:
+    #     name: skupper.network.skupper_cli_install
+    #   vars:
+    #     skupper_cli:
+    #       force: "True"
+    - name: install skupper cli
+      become_user: "{{ student_name }}"
+      ansible.builtin.shell: >-
+        /usr/bin/curl https://raw.githubusercontent.com/RedHat-Middleware-Workshops/service-interconnect-lab-instructions/main/install.sh | sh
+    - name: export skupper bash variable
+      ansible.builtin.blockinfile:
+        path: /etc/profile
+        marker: "# skupper platform variabler"
+        block: "export SKUPPER_PLATFORM=podman"
+    - name: reboot required for podman
+      ansible.builtin.reboot:
+        connect_timeout: 300
+        msg: "Rebooting now.."
+    - name: loginctl enable-linger
+      ansible.builtin.command:
+        argv:
+          - loginctl
+          - enable-linger
+          - "{{ student_name }}"
+    - name: switch skupper platform
+      become_user: "{{ student_name }}"
+      ansible.builtin.command: "/home/{{ student_name }}/.local/bin/skupper switch"
+- name: start postgresql with podman
+  become: true
+  become_user: "{{ student_name }}"
+  block:
+    - name: start postgresql with podman
+      containers.podman.podman_container:
+        name: postgresql
+        image: "{{ ocp4_workload_eap_camelq_lab_postgresql_image }}"
+        detach: true
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: "{{ ocp4_workload_eap_camelq_lab_postgresql_user }}"
+          POSTGRES_PASSWORD: "{{ ocp4_workload_eap_camelq_lab_postgresql_password }}"
+          POSTGRES_DB: "{{ ocp4_workload_eap_camelq_lab_postgresql_db }}"
+    - name: verify postgresql container is running
+      containers.podman.podman_container_info:
+        name: postgresql
+      register: this
+      retries: 3
+      delay: 5
+    - name: Print return information from the previous task
+      assert:
+        that:
+          - "'running' in this.containers.0.State.Status"
+        fail_msg: postgresdb not running
+        success_msg: postgresql is running

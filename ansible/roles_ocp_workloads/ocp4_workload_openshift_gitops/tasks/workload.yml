@@ -1,4 +1,16 @@
 ---
+- name: Get IngressController
+  kubernetes.core.k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+  register: r_ingress_controller
+
+- name: Set _ocp4_workload_openshift_gitops_domain
+  ansible.builtin.set_fact:
+    _ocp4_workload_openshift_gitops_domain: "{{ r_ingress_controller.resources[0].status.domain }}"
+
 - name: Install OpenShift GitOps operator
   ansible.builtin.include_role:
     name: install_operator
@@ -22,22 +34,75 @@
     state: present
     definition: "{{ lookup('file', 'clusterrolebinding.yaml') | from_yaml }}"
 
-- name: Update resources for openshift-gitops ArgoCD instance
-  when: ocp4_workload_openshift_gitops_update_resources | bool
-  block:
-  - name: Wait until openshift-gitops ArgoCD instance has been created
-    kubernetes.core.k8s_info:
-      api_version: argoproj.io/v1alpha1
-      kind: ArgoCD
-      name: openshift-gitops
-      namespace: openshift-gitops
-    register: r_openshift_gitops
-    until:
-    - r_openshift_gitops is defined
-    - r_openshift_gitops.resources is defined
-    - r_openshift_gitops.resources | length == 1
+- name: Set api version to beta for stable channel
+  when: not (ocp4_workload_openshift_gitops_channel == "stable" or ocp4_workload_openshift_gitops_channel is version_compare("gitops-1.13", ">="))
+  ansible.builtin.set_fact:
+    _ocp4_workload_openshift_gitops_api_version: v1alpha1
 
-  - name: Update resources for the openshift-gitops ArgoCD instance
-    kubernetes.core.k8s:
-      state: patched
-      definition: "{{ lookup('template', 'openshift-gitops.yaml.j2') | from_yaml }}"
+- name: Debug version
+  ansible.builtin.debug:
+    msg: "API Version: {{ ocp4_workload_openshift_gitops_api_version }}"
+
+- name: Wait until openshift-gitops ArgoCD instance has been created
+  kubernetes.core.k8s_info:
+    api_version: "argoproj.io/{{ ocp4_workload_openshift_gitops_api_version }}"
+    kind: ArgoCD
+    name: openshift-gitops
+    namespace: openshift-gitops
+  register: r_openshift_gitops
+  retries: 16
+  delay: 60
+  until:
+  - r_openshift_gitops is defined
+  - r_openshift_gitops.resources is defined
+  - r_openshift_gitops.resources | length == 1
+
+- name: Create the kustomize-envvar plugin configmap
+  when: ocp4_workload_openshift_gitops_kustomize_plugin | bool
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'cm-kustomize-envvar.yaml') | from_yaml }}"
+
+- name: Update the openshift-gitops ArgoCD instance
+  kubernetes.core.k8s:
+    state: patched
+    definition: "{{ lookup('template', 'openshift-gitops.yaml.j2') | from_yaml }}"
+
+- name: Attempt to install the ArgoCD CLI to the bastion
+  when: ocp4_workload_openshift_gitops_install_cli | bool
+  block:
+  - name: Get the OpenShift Gitops ArgoCD server route
+    kubernetes.core.k8s_info:
+      api_version: route.openshift.io/v1
+      kind: Route
+      name: openshift-gitops-server
+      namespace: openshift-gitops
+    register: r_openshift_gitops_server_route
+
+  - name: Try to install the ArgoCD CLI
+    become: true
+    ansible.builtin.get_url:
+      url: >-
+        https://{{ r_openshift_gitops_server_route.resources[0].spec.host }}/download/argocd-linux-amd64
+      dest: /usr/bin/argocd
+      validate_certs: false
+      owner: root
+      group: root
+      mode: "0775"
+    retries: 5
+    delay: 5
+    ignore_errors: true
+
+# yamllint disable rule:line-length
+- name: project information
+  block:
+  - name: Print project information
+    agnosticd_user_info:
+      msg: "{{ item }}"
+    loop:
+    - "OpenShift GitOps ArgoCD: https://openshift-gitops-server-openshift-gitops.{{ _ocp4_workload_openshift_gitops_domain }}"
+  - name: Save project information
+    agnosticd_user_info:
+      data:
+        openshift_gitops_server: "https://openshift-gitops-server-openshift-gitops.{{ _ocp4_workload_openshift_gitops_domain }}"
+# yamllint enable rule:line-length

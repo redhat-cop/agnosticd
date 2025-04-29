@@ -1,0 +1,127 @@
+---
+- name: Install Kasten K10 operator
+  ansible.builtin.include_role:
+    name: install_operator
+  vars:
+    install_operator_action: install
+    install_operator_name: "{{ ocp4_workload_kasten_k10_subscription }}"
+    install_operator_namespace: "{{ ocp4_workload_kasten_k10_namespace }}"
+    install_operator_manage_namespaces:
+    - "{{ ocp4_workload_kasten_k10_namespace }}"
+    install_operator_channel: "{{ ocp4_workload_kasten_k10_channel }}"
+    install_operator_catalog: redhat-marketplace
+    install_operator_automatic_install_plan_approval: "{{ ocp4_workload_kasten_k10_automatic_install_plan_approval | default(true) }}"
+    install_operator_starting_csv: "{{ ocp4_workload_kasten_k10_starting_csv }}"
+    install_operator_catalogsource_setup: false
+
+- name: Deploy K10
+  when: ocp4_workload_kasten_k10_deploy_k10 | bool
+  block:
+  - name: Create K10
+    kubernetes.core.k8s:
+      state: present
+      template: k10.yaml.j2
+    register: r_k10
+    until: r_k10 is not failed
+    retries: 50
+    delay: 6
+
+  - name: Wait for K10 deployment to be completed
+    kubernetes.core.k8s_info:
+      api_version: apik10.kasten.io/v1alpha1
+      kind: k10s
+      name: "{{ ocp4_workload_kasten_k10_name }}"
+      namespace: "{{ ocp4_workload_kasten_k10_namespace }}"
+      wait: true
+      wait_sleep: 5
+      wait_timeout: 1200
+      wait_condition:
+        type: "Initialized"
+        status: "True"
+    register: r_k10
+
+  - name: Get Kasten Route
+    kubernetes.core.k8s_info:
+      api_version: route.openshift.io/v1
+      kind: Route
+      name: "{{ ocp4_workload_kasten_k10_name }}-route"
+      namespace: "{{ ocp4_workload_kasten_k10_namespace }}"
+    register: r_kasten_route
+
+  - name: Save access information
+    when: r_kasten_route.resources | length > 0
+    agnosticd_user_info:
+      data:
+        kasten_dashboard: "https://{{ r_kasten_route.resources[0].spec.host }}/k10/"
+        kasten_storageclass: "{{ ocp4_workload_kasten_k10_storageclasses[0] | default('ocs-storagecluster-ceph-rbd-virtualization') }}"
+
+  # Jinja templates handle single/multi-user deployment
+  - name: Set up Demo environment
+    when: ocp4_workload_kasten_k10_setup_demo | bool
+    block:
+    - name: Set up ObjectBucketClaims and permissions
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', resource | from_yaml) }}"
+      loop:
+      - namespace.yaml.j2
+      - objectbucketclaim.yaml.j2
+      - clusterrolebinding.yaml.j2
+      - rolebinding.yaml.j2
+      - rolebinding-namespace.yaml.j2
+      loop_control:
+        loop_var: resource
+
+    - name: Annotate VolumeSnapshotClasses as backup targets
+      when: ocp4_workload_kasten_k10_volumesnapshotclasses | default([]) | length > 0
+      kubernetes.core.k8s:
+        state: patched
+        api_version: snapshot.storage.k8s.io/v1
+        kind: VolumeSnapshotClass
+        name: "{{ volumesnapshotclass }}"
+        definition:
+          metadata:
+            annotations:
+              k10.kasten.io/is-snapshot-class: "true"
+      loop: "{{ ocp4_workload_kasten_k10_volumesnapshotclasses }}"
+      loop_control:
+        loop_var: volumesnapshotclass
+
+    - name: Annotate StorageClasses as block storage
+      when: ocp4_workload_kasten_k10_storageclasses | default([]) | length > 0
+      kubernetes.core.k8s:
+        state: patched
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+        name: "{{ storageclass }}"
+        definition:
+          metadata:
+            annotations:
+              k10.kasten.io/sc-supports-block-mode-exports: "true"
+      loop: "{{ ocp4_workload_kasten_k10_storageclasses }}"
+      loop_control:
+        loop_var: storageclass
+
+    - name: Save AgnosticD user information for single user
+      when: not ocp4_workload_kasten_k10_multi_user | bool
+      agnosticd_user_info:
+        data:
+          kasten_backup_bucket_name: "{{ ocp4_workload_kasten_k10_objectbucket_name }}"
+          kasten_backup_bucket_namespace: "{{ ocp4_workload_kasten_k10_objectbucket_namespace }}"
+          kasten_backup_bucket_host: s3.openshift-storage.svc
+          kasten_backup_bucket_port: 443
+
+    - name: Save AgnosticD user information for multi user
+      when: ocp4_workload_kasten_k10_multi_user | bool
+      agnosticd_user_info:
+        user: "{{ ocp4_workload_kasten_k10_objectbucket_user_base }}{{ user_number }}"
+        data:
+          kasten_dashboard: "https://{{ r_kasten_route.resources[0].spec.host }}/k10/"
+          kasten_storageclass: "{{ ocp4_workload_kasten_k10_storageclasses[0] | default('ocs-storagecluster-ceph-rbd-virtualization') }}"
+          kasten_backup_bucket_name: "{{ ocp4_workload_kasten_k10_objectbucket_name }}"
+          kasten_backup_bucket_namespace: "{{ ocp4_workload_kasten_k10_objectbucket_namespace_base }}{{ user_number }}"
+          kasten_backup_bucket_host: s3.openshift-storage.svc
+          kasten_backup_bucket_port: 443
+      loop: "{{ range(1, ocp4_workload_kasten_k10_num_users | int + 1) | list }}"
+      loop_control:
+        loop_var: user_number

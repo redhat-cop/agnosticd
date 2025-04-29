@@ -10,7 +10,7 @@
 
 - name: Ensure RHACM MultiClusterHub is deployed
   kubernetes.core.k8s_info:
-    api_version: operator.open-cluster-management.io/v1
+    api_version: "operator.open-cluster-management.io/v1"
     kind: MultiClusterHub
     name: multiclusterhub
     namespace: open-cluster-management
@@ -23,8 +23,16 @@
     - r_rhacm_multiclusterhub.resources[0].status.phase is defined
     - r_rhacm_multiclusterhub.resources[0].status is defined
     - r_rhacm_multiclusterhub.resources[0].status.phase == "Running"
+    # quiet: true
     fail_msg: "MultiClusterHub not found on cluster. Can not continue."
     success_msg: "MultiClusterHub found on cluster. Ready to set up Hypershift."
+
+- name: Assert that MultiClusterHub is version 2.9.0 or higher
+  ansible.builtin.assert:
+    that: "r_rhacm_multiclusterhub.resources[0].status.currentVersion is version('2.9.0', '>=')"
+    quiet: true
+    fail_msg: "MultiClusterHub not at version 2.9.0 or higher. Please upgrade your RHACM. Can not continue."
+    success_msg: "MultiClusterHub found on cluster in version 2.9.0 or higher. Ready to set up Hypershift."
 
 #############################################################################
 # AWS S3 bucket setup
@@ -46,6 +54,10 @@
     #   restrict_public_buckets: false
 
 - name: Update s3 bucket
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_REGION: "{{ ocp4_workload_rhacm_hypershift_s3_bucket_region }}"
   ansible.builtin.command:
     cmd: >-
       aws s3api delete-public-access-block
@@ -55,8 +67,13 @@
   ansible.builtin.template:
     src: bucket-policy.json.j2
     dest: /tmp/bucket-policy.json
+    mode: "0664"
 
 - name: Apply bucket policy
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_REGION: "{{ ocp4_workload_rhacm_hypershift_s3_bucket_region }}"
   ansible.builtin.command:
     chdir: /tmp
     cmd: >-
@@ -68,38 +85,6 @@
   ansible.builtin.file:
     state: absent
     path: /tmp/bucket-policy.json
-
-#############################################################################
-# Enable HyperShift Tech Preview
-#############################################################################
-- name: Enable HyperShift Tech Preview
-  kubernetes.core.k8s:
-    state: patched
-    api_version: multicluster.openshift.io/v1
-    kind: MultiClusterEngine
-    name: multiclusterengine
-    definition:
-      spec:
-        overrides:
-          components:
-          - name: hypershift-preview
-            enabled: true
-          - name: hypershift-local-hosting
-            enabled: true
-
-- name: Create ManagedClusterAddon
-  kubernetes.core.k8s:
-    state: present
-    definition: "{{ lookup('file', 'managedclusteraddon.yaml') }}"
-
-#############################################################################
-# Patch Hypershift Images (workaround until S3 patch made it into product)
-#############################################################################
-- name: Patch Hypershift Images
-  when: ocp4_workload_rhacm_hypershift_hcp_operator_patch | bool
-  kubernetes.core.k8s:
-    state: present
-    definition: "{{ lookup('template', 'hypershift-override-images.yaml.j2') }}"
 
 #############################################################################
 # Configure HyperShift
@@ -131,106 +116,79 @@
     definition: "{{ lookup('template', 'secret-aws-credentials.yaml.j2') }}"
 
 #############################################################################
-# Install Hypershift CLI
+# Install HCP CLI
 #############################################################################
 
-- name: Wait until Hypershift CLI download deployment is ready
+- name: Wait until HCP CLI download deployment is ready
   kubernetes.core.k8s_info:
     api_version: v1
     kind: Deployment
     namespace: multicluster-engine
-    name: hypershift-cli-download
-  register: r_hypershift_cli_deployment
+    name: hcp-cli-download
+  register: r_hcp_cli_deployment
   retries: 60
   delay: 30
   until:
-  - r_hypershift_cli_deployment.resources | length | int > 0
-  - r_hypershift_cli_deployment.resources[0].status.readyReplicas is defined
-  - r_hypershift_cli_deployment.resources[0].status.readyReplicas | int == r_hypershift_cli_deployment.resources[0].spec.replicas | int
+  - r_hcp_cli_deployment.resources | length | int > 0
+  - r_hcp_cli_deployment.resources[0].status.readyReplicas is defined
+  - r_hcp_cli_deployment.resources[0].status.readyReplicas | int == r_hcp_cli_deployment.resources[0].spec.replicas | int
 
-- name: Get Hypershift CLI download URl
+- name: Get HCP CLI download URL
   kubernetes.core.k8s_info:
     api_version: console.openshift.io/v1
     kind: ConsoleCLIDownload
-    name: hypershift-cli-download
-  register: r_hypershift_cli_download
+    name: hcp-cli-download
+  register: r_hcp_cli_download
   retries: 20
   delay: 10
-  until: r_hypershift_cli_download.resources | length > 0
+  until: r_hcp_cli_download.resources | length > 0
 
-- name: Set Hypershift CLI download URL
-  when: r_hypershift_cli_download.resources | length > 0
+- name: Set HCP CLI download URL
+  when: r_hcp_cli_download.resources | length > 0
   ansible.builtin.set_fact:
-    _ocp4_workload_rhacm_hypershift_cli_url: >-
-      {{ r_hypershift_cli_download.resources[0] | to_json | from_json
+    _ocp4_workload_rhacm_hcp_cli_url: >-
+      {{ r_hcp_cli_download.resources[0] | to_json | from_json
       | json_query("spec.links[?contains(href,'/linux/amd64')].href") | first }}
 
-- name: Download Hypershift CLI tool
+- name: Download HCP CLI
   ansible.builtin.get_url:
-    url: "{{ _ocp4_workload_rhacm_hypershift_cli_url }}"
+    url: "{{ _ocp4_workload_rhacm_hcp_cli_url }}"
     validate_certs: false
-    dest: /tmp/hypershift.tar.gz
-    mode: 0660
-  register: r_hypershift_cli
-  until: r_hypershift_cli is success
+    dest: /tmp/hcp.tar.gz
+    mode: "0660"
+  register: r_hcp_cli
+  until: r_hcp_cli is success
   retries: 10
   delay: 10
 
-- name: Get currently installed RHACM version
-  kubernetes.core.k8s_info:
-    api_version: operators.coreos.com/v1alpha1
-    kind: ClusterServiceVersion
-    namespace: open-cluster-management
-    label_selectors:
-    - "operators.coreos.com/advanced-cluster-management.open-cluster-management ="
-  register: r_rhacm_csv
-
-# Strip first 5 directories if RHACM is 2.7 or earlier
-# Archive contains `remote-source/app/bin/linux/amd64/hypershift`
-- name: Install Hypershift CLI on bastion (RHACM 2.7 or earlier)
-  when: r_rhacm_csv.resources[0].spec.version is version_compare('2.8.0', '<')
+- name: Install HCP CLI on bastion
   become: true
   ansible.builtin.unarchive:
-    src: /tmp/hypershift.tar.gz
+    src: /tmp/hcp.tar.gz
     remote_src: true
     dest: /usr/bin
-    mode: 0775
-    owner: root
-    group: root
-    extra_opts:
-      --strip-components=5
-  args:
-    creates: /usr/bin/hypershift
-
-# Regular extract if RHACM is 2.8 or newser
-# Archive contains `./hypershift`
-- name: Install Hypershift CLI on bastion (RHACM 2.8 or newer)
-  when: r_rhacm_csv.resources[0].spec.version is version_compare('2.8.0', '>=')
-  become: true
-  ansible.builtin.unarchive:
-    src: /tmp/hypershift.tar.gz
-    remote_src: true
-    dest: /usr/bin
-    mode: 0775
+    mode: "0775"
     owner: root
     group: root
   args:
-    creates: /usr/bin/hypershift
+    creates: /usr/bin/hcp
 
 - name: Remove downloaded file
   ansible.builtin.file:
     state: absent
-    path: /tmp/hypershift.tar.gz
+    path: /tmp/hcp.tar.gz
 
-- name: Setup hypershift bash completion
+- name: Setup HCP CLI bash completion
   become: true
-  ansible.builtin.shell: "/usr/bin/hypershift completion bash >/etc/bash_completion.d/hypershift"
+  ansible.builtin.shell: "/usr/bin/hcp completion bash >/etc/bash_completion.d/hcp"
   args:
-    creates: /etc/bash_completion.d/hypershift
+    creates: /etc/bash_completion.d/hcp
 
 #############################################################################
 # Set up RHDP Configuration
+# Automatically configure newly deployed HCP clusters
 #############################################################################
+
 - name: Set up RHDP Configuration
   when: ocp4_workload_rhacm_hypershift_rhdp_policies_setup | bool
   kubernetes.core.k8s:
@@ -251,6 +209,7 @@
 #############################################################################
 # Set up ManagedClusterSet Policies
 #############################################################################
+
 - name: Set up ManagedClusterSet
   when: ocp4_workload_rhacm_hypershift_managed_cluster_set_setup | bool
   kubernetes.core.k8s:
@@ -260,6 +219,24 @@
   - managedclusterset/namespace-submariner-broker.yaml.j2
   - managedclusterset/managedclusterset.yaml.j2
   - managedclusterset/managedclustersetbinding.yaml.j2
+
+#############################################################################
+# Wait for ConfigMap kube-public/oidc-storage-provider-s3-config to be
+# available before proceeding
+#############################################################################
+
+- name: Wait for ConfigMap kube-public/oidc-storage-provider-s3-config
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: oidc-storage-provider-s3-config
+    namespace: kube-public
+  register: r_oidc_configmap
+  until:
+  - r_oidc_configmap.resources is defined
+  - r_oidc_configmap.resources | length > 0
+  retries: 60
+  delay: 10
 
 #############################################################################
 # Deploy managed HyperShift clusters
@@ -311,7 +288,7 @@
       hypershift_s3_secret_access_key: "{{ aws_secret_access_key }}"
 
 # Leave this as the last task in the playbook.
-- name: workload tasks complete
-  debug:
-    msg: "Workload Tasks completed successfully."
+- name: Workload tasks complete
   when: not silent|bool
+  ansible.builtin.debug:
+    msg: "Workload Tasks completed successfully."
