@@ -395,7 +395,7 @@ resource cluster 'Microsoft.RedHatOpenShift/openShiftClusters@2024-08-12-preview
        }
        workerProfiles: [{
            name: 'worker'
-           count: 5
+           count: 20
            diskSizeGB: workerVmDiskSize
            vmSize: workerVmSize
            subnetId: workerSubnetId
