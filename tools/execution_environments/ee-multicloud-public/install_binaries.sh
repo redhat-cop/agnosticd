@@ -3,6 +3,7 @@ set -ue
 
 cd /tmp
 
+
 # initArch discovers the architecture for this system.
 ARCH=$(uname -m)
 case $ARCH in
@@ -15,6 +16,8 @@ case $ARCH in
     i686) ARCH="386";;
     i386) ARCH="386";;
 esac
+
+echo "Detected architecture: ${ARCH}"
 
 # OC
 # Install rhel8 version of oc
@@ -40,7 +43,7 @@ rm bw bw.zip
 aws_version=2.4.23
 curl -s -L "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m)-${aws_version}.zip" \
     -o "awscliv2.zip"
-unzip awscliv2.zip
+unzip -q awscliv2.zip
 ./aws/install
 
 rm awscliv2.zip
@@ -51,3 +54,12 @@ rm -rf aws
 curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
 chmod 700 get_helm.sh
 ./get_helm.sh
+
+# IBM Cloud binary
+curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+
+# Install all plugins, best effort
+export IBMCLOUD_HOME=/opt/ibmcloud
+mkdir -p /opt/ibmcloud
+ibmcloud plugin install --all || true
+ibmcloud config --check-version=false
