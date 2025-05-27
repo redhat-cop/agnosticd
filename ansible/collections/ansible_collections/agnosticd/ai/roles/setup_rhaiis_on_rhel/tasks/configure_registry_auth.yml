@@ -1,64 +1,95 @@
 ---
-- name: Check if registry credentials are provided
-  ansible.builtin.fail:
-    msg: >
-      Registry authentication is enabled (registry_auth_enabled=true) but no credentials are provided.
-      Please set either registry_username and registry_password, or registry_auth_token.
-  when: >
-    (registry_username | default('') == '' or registry_password | default('') == '') and 
-    registry_auth_token | default('') == ''
+- name: Check registry credentials and configure authentication if enabled
+  block:
+    # This task fails if auth is enabled but neither username/password nor a token is provided.
+    - name: Check if required registry credentials are provided
+      ansible.builtin.fail:
+        msg: >
+          Registry authentication is enabled (setup_rhaiis_on_rhel_registry_auth_enabled=true)
+          but no credentials are provided. Please set either setup_rhaiis_on_rhel_registry_username
+          and setup_rhaiis_on_rhel_registry_password, OR setup_rhaiis_on_rhel_registry_auth_token.
+      when: >
+        (setup_rhaiis_on_rhel_registry_username | default('') == '' or
+         setup_rhaiis_on_rhel_registry_password | default('') == '') and
+         setup_rhaiis_on_rhel_registry_auth_token | default('') == ''
 
-- name: Ensure .config/containers directory exists for root user
-  ansible.builtin.file:
-    path: /root/.config/containers
-    state: directory
-    mode: '0700'
-  become: true
+    - name: Ensure .config/containers directory exists for root user
+      ansible.builtin.file:
+        path: /root/.config/containers
+        state: directory
+        mode: '0700'
+      become: true
 
-- name: Ensure .config/containers directory exists for {{ student_name | default('dev') }} user
-  ansible.builtin.file:
-    path: "{{ '~' + vllm_user }}/.config/containers"
-    state: directory
-    mode: '0700'
-  become: "{{ vllm_user != ansible_user_id }}"
-  become_user: "{{ vllm_user }}"
+    - name: Ensure .config/containers directory exists for {{ student_name | default('dev') }} user
+      ansible.builtin.file:
+        path: "{{ '~' + student_name | default('dev') }}/.config/containers"
+        state: directory
+        mode: '0700'
+      become: "{{ student_name | default('dev') != ansible_user_id }}"
+      become_user: "{{ student_name | default('dev') }}"
 
-- name: Configure registry auth via username/password for root
-  ansible.builtin.shell: |
-    podman login {{ registry_url }} -u {{ registry_username }} -p {{ registry_password }} --authfile /root/.config/containers/auth.json
-  become: true
-  no_log: true
-  when: registry_username != '' and registry_password != ''
-  changed_when: true
+    # Block for username/password authentication method.
+    - name: Configure registry authentication using username and password
+      block:
+        - name: Log in to registry as root using username/password
+          containers.podman.podman_login:
+            username: "{{ setup_rhaiis_on_rhel_registry_username }}"
+            password: "{{ setup_rhaiis_on_rhel_registry_password }}"
+            registry: "{{ setup_rhaiis_on_rhel_registry_url }}"
+            authfile: /root/.config/containers/auth.json
+          become: true
 
-- name: Configure registry auth via username/password for {{ student_name | default('dev') }} user
-  ansible.builtin.shell: |
-    podman login {{ registry_url }} -u {{ registry_username }} -p {{ registry_password }} --authfile {{ '~' + vllm_user }}/.config/containers/auth.json
-  become: "{{ vllm_user != ansible_user_id }}"
-  become_user: "{{ vllm_user }}"
-  no_log: true
-  when: registry_username != '' and registry_password != ''
-  changed_when: true
+        - name: Log in to registry as {{ student_name | default('dev') }} using username/password
+          containers.podman.podman_login:
+            username: "{{ setup_rhaiis_on_rhel_registry_username }}"
+            password: "{{ setup_rhaiis_on_rhel_registry_password }}"
+            registry: "{{ setup_rhaiis_on_rhel_registry_url }}"
+            authfile: "{{ '~' + student_name | default('dev') }}/.config/containers/auth.json"
+          become: "{{ student_name | default('dev') != ansible_user_id }}"
+          become_user: "{{ student_name | default('dev') }}"
+      when: >
+        setup_rhaiis_on_rhel_registry_username | default('') != '' and
+        setup_rhaiis_on_rhel_registry_password | default('') != ''
 
-- name: Configure registry auth via token for root
-  ansible.builtin.shell: |
-    podman login {{ registry_url }} --authfile /root/.config/containers/auth.json --tls-verify=false --auth-token {{ registry_auth_token }}
-  become: true
-  no_log: true
-  when: registry_auth_token != ''
-  changed_when: true
+    # Block for token-based authentication method.
+    - name: Configure registry authentication using auth token
+      block:
+        - name: Create auth.json for root user with token
+          ansible.builtin.copy:
+            content: |
+              {
+                "auths": {
+                  "{{ setup_rhaiis_on_rhel_registry_url }}": {
+                    "auth": "{{ setup_rhaiis_on_rhel_registry_auth_token }}"
+                  }
+                }
+              }
+            dest: /root/.config/containers/auth.json
+            mode: '0600'
+          become: true
+          no_log: true
 
-- name: Configure registry auth via token for service user
-  ansible.builtin.shell: |
-    podman login {{ registry_url }} --authfile {{ '~' + vllm_user }}/.config/containers/auth.json --tls-verify=false --auth-token {{ registry_auth_token }}
-  become: "{{ vllm_user != ansible_user_id }}"
-  become_user: "{{ vllm_user }}"
-  no_log: true
-  when: registry_auth_token != ''
-  changed_when: true
+        - name: Create auth.json for {{ student_name | default('dev') }} user with token
+          ansible.builtin.copy:
+            content: |
+              {
+                "auths": {
+                  "{{ setup_rhaiis_on_rhel_registry_url }}": {
+                    "auth": "{{ setup_rhaiis_on_rhel_registry_auth_token }}"
+                  }
+                }
+              }
+            dest: "{{ '~' + student_name | default('dev') }}/.config/containers/auth.json"
+            mode: '0600'
+          become: "{{ student_name | default('dev') != ansible_user_id }}"
+          become_user: "{{ student_name | default('dev') }}"
+          no_log: true
+      when: setup_rhaiis_on_rhel_registry_auth_token | default('') != ''
+  when: setup_rhaiis_on_rhel_registry_auth_enabled | default(true)
 
+# This task runs after authentication attempts (if enabled) or directly if auth is not enabled.
 - name: Pre-pull container image
   ansible.builtin.command:
-    cmd: podman pull {{ vllm_container_image }}
+    cmd: podman pull {{ setup_rhaiis_on_rhel_vllm_container_image }}
   become: true
   changed_when: true
