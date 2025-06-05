@@ -6,7 +6,7 @@
       api_version: cert-manager.io/v1
       kind: Certificate
       name: cert-manager-api-cert
-      namespace: openshift-api
+      namespace: openshift-config
       wait: true
       wait_sleep: 5
       wait_timeout: 800
@@ -45,6 +45,52 @@
         msg: "Requesting certificate for API servers failed after {{ api_cert_max_retries }} retries."
 
     - name: Fail if requesting certificates failed
-      when: not ocp4_workload_cert_manager_ignore_errors | bool
+      when:
+      - not ocp4_workload_cert_manager_ignore_errors | bool
+      - ocp4_workload_cert_manager_provider_fallback == ""
       ansible.builtin.fail:
         msg: "Requesting certificate for API servers failed after {{ api_cert_max_retries }} retries."
+
+  - name: Try fallback provider if defined
+    when:
+    - ocp4_workload_cert_manager_provider_fallback != ""
+    - r_certificate_api is failed
+    block:
+    - name: Remove existing API Certificate
+      kubernetes.core.k8s:
+        api_version: cert-manager.io/v1
+        kind: Certificate
+        name: cert-manager-api-cert
+        namespace: openshift-config
+        state: absent
+
+    - name: Add certificate requests using fallback provider
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ lookup('template', item) }}"
+      loop:
+      - certificate-api-fallback.yaml.j2
+      register: r_clusterissuer
+      retries: 10
+      delay: 30
+      until: r_clusterissuer is success
+
+    - name: Wait until Ingress Certificate is ready
+      when: not ingress_cert_ready | default(false) | bool
+      kubernetes.core.k8s_info:
+        api_version: cert-manager.io/v1
+        kind: Certificate
+        name: cert-manager-api-cert
+        namespace: openshift-config
+        wait: true
+        wait_sleep: 5
+        wait_timeout: 1200
+        wait_condition:
+          type: "Ready"
+          status: "True"
+      register: r_certificate_ingress
+
+    - name: Mark cert ready
+      when: not r_certificate_ingress is failed
+      ansible.builtin.set_fact:
+        api_cert_ready: true
