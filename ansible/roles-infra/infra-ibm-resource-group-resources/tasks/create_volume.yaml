@@ -1,0 +1,108 @@
+---
+- name: Check correctness of user input
+  ansible.builtin.assert:
+    that:
+      - _volume is defined
+      - _volume.name is defined
+      - _volume.size is defined
+    fail_msg: >-
+      Volume name, size must be defined.
+      Example: _volume: { name: 'my-volume', size: 100}
+
+- name: Create data volume
+  command: >-
+    ibmcloud is volume-create
+    --name disk-{{ guid  ~ '-' ~ _volume.name }}
+    --profile {{ _volume.type | default('general-purpose') }}
+    --capacity {{ _volume.size }}
+    --resource-group-id {{ r_ibmcloud_resource_group_id}}
+    --zone {{ ibmcloud_availability_zone }}
+    --tags {{ guid }}
+    --json
+  register: ibmcloud_volume_create
+  failed_when: >-
+    ibmcloud_volume_create.rc != 0
+    and 'already exists' not in ibmcloud_volume_create.stderr
+
+# It's a more robust and readable way to get the volume's details.
+# rather than parsing the output of the create command (idempotent)
+- name: Get authoritative details for the volume
+  # We run this command regardless of the previous step. This ensures we always
+  # get the definitive, current details of the volume, whether it was just
+  # created or it already existed. The '--output JSON' flag is correct.
+  command: >-
+    ibmcloud is volume disk-{{ guid  ~ '-' ~ _volume.name }} --output JSON
+  register: _volume_details
+
+- debug:
+    verbosity: 2
+    var: _volume_details
+
+- name: Set the _volume_to_attach fact
+  ansible.builtin.set_fact:
+    _volume_to_attach: "{{ _volume_details.stdout | from_json }}"
+
+- name: Attach existing volume to instance
+  command: >-
+    ibmcloud is instance-volume-attachment-add
+    attachment-{{ guid }}-{{ _volume.name }}
+    {{ ibmcloud_vs_instance.resource.name }}
+    {{ _volume_to_attach.id }}
+    --auto-delete {{ _volume.auto_delete | default(true) }}
+    --json
+  register: ibmcloud_volume_attach
+  failed_when: >-
+    ibmcloud_volume_attach.rc != 0
+    and 'already attached' not in ibmcloud_volume_attach.stderr
+    and 'is in use' not in ibmcloud_volume_attach.stderr
+
+- name: Get authoritative details for the volume attachment
+  # This task always runs to get the definitive state of the attachment,
+  # regardless of whether the previous task made a change or was skipped.
+  command: >-
+    ibmcloud is instance-volume-attachment
+    {{ ibmcloud_vs_instance.resource.name }}
+    attachment-{{ guid }}-{{ _volume.name }}
+    --output JSON
+  register: _attachment_details
+
+- name: Save fact for IBM Cloud Volume attachment
+  ansible.builtin.set_fact:
+    _attachment: >-
+      {{ _attachment_details.stdout | from_json }}
+  when: _attachment_details is defined and _attachment_details.stdout != ""
+
+- debug:
+    var: _attachment
+    verbosity: 2
+  when: _attachment is defined
+
+- name: Save fact for IBM Cloud Volume, index by instance name
+  when: >-
+    _attachment is defined
+
+  # Save ID, mount point, size, fstype
+  ansible.builtin.set_fact:
+    ibmcloud_volumes: >-
+      {{
+        ibmcloud_volumes | default({}) | combine(
+          {
+            ibmcloud_vs_instance.resource.name:
+              (ibmcloud_volumes[ibmcloud_vs_instance.resource.name] | default([])) +
+              [{
+                'name': _volume.name,
+                'id': _attachment.device.id,
+                'fstype': _volume.fstype | default(omit),
+                'mount': _volume.mount | default(omit),
+                'mount_opts': _volume.mount_opts | default(omit)
+              }]
+          },
+          recursive=true
+        )
+      }}
+
+- name: DEBUG | Show the final aggregated volumes dictionary
+  ansible.builtin.debug:
+    verbosity: 2
+    var: ibmcloud_volumes
+  when: ibmcloud_volumes is defined
