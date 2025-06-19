@@ -1,0 +1,133 @@
+---
+# - name: Copy global config files to host
+#   ansible.builtin.copy:
+#     src: files/jenkins-global-config.xml
+#     dest: /tmp/jenkins-global-config.xml
+
+# - name: Copy pipeline files to container
+#   shell: |
+#     JENKINS_POD=$(oc get pod -l deployment=jenkins -n {{
+#     ocp4_workload_trusted_application_pipeline_jenkins_namespace }} --no-headers | awk '{ print $1 }')
+#     oc cp /tmp/jenkins-global-config.xml {{ ocp4_workload_trusted_application_pipeline_jenkins_namespace
+#     }}/$JENKINS_POD:/var/lib/jenkins/org.jenkinsci.plugins.configfiles.GlobalConfigFiles.xml -c jenkins
+#     oc delete pod $JENKINS_POD -n {{ ocp4_workload_trusted_application_pipeline_jenkins_namespace
+#     }}
+
+- name: Wait until Jenkins is fully up and running
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    name: jenkins
+    namespace: "{{ ocp4_workload_advanced_developer_suite_jenkins_namespace }}"
+  register: r_jenkins
+  retries: 60
+  delay: 10
+  until:
+  - r_jenkins.resources[0].status is defined
+  - r_jenkins.resources[0].status.readyReplicas is defined
+  - r_jenkins.resources[0].status.readyReplicas == r_jenkins.resources[0].spec.replicas
+
+# - name: Generate Jenkins API Token
+#   uri:
+#     url: "{{ _jenkins_url }}/me/descriptorByName/jenkins.security.ApiTokenProperty/generateNewToken"
+#     user: "{{ ocp4_workload_advanced_developer_suite_jenkins_admin_user }}"
+#     password: "{{ ocp4_workload_advanced_developer_suite_jenkins_admin_password }}"
+#     method: POST
+#     force_basic_auth: true
+#     validate_certs: false
+#     body_format: form-urlencoded
+#     body:
+#       newTokenName: backstage
+#   register: r_jenkins_token
+#   retries: 60
+#   delay: 10
+#   until: r_jenkins_token is not failed
+
+# - name: Set Jenkins Token Fact
+#   set_fact:
+#     _jenkins_token: "{{ r_jenkins_token.json.data.tokenValue }}"
+
+# - name: Create vaulted Jenkins token
+#   kubernetes.core.k8s_exec:
+#     namespace: "{{ ocp4_workload_trusted_application_pipeline_vault_namespace }}"
+#     pod: vault-0
+#     command: |
+#       vault kv put kv/secrets/janusidp/jenkins token={{ ocp4_workload_trusted_application_pipeline_jenkins_token }}
+
+- name: Create Nginx namespace
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ ocp4_workload_advanced_developer_suite_nginx_namespace }}"
+    definition: "{{ lookup('template', 'namespace-nginx.yml.j2') | from_yaml }}"
+
+- name: Deploy Nginx
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ ocp4_workload_advanced_developer_suite_nginx_namespace }}"
+    definition: "{{ lookup('file', item) | from_yaml }}"
+  loop:
+  - pvc-nginx.yml.j2
+  - deployment-nginx.yml.j2
+  - service-nginx.yml.j2
+
+- name: Wait until Nginx is fully up and running
+  k8s_info:
+    api_version: v1
+    kind: Deployment
+    name: nginx
+    namespace: "{{ ocp4_workload_advanced_developer_suite_nginx_namespace }}"
+  register: r_nginx
+  retries: 60
+  delay: 10
+  until:
+  - r_nginx.resources[0].status is defined
+  - r_nginx.resources[0].status.readyReplicas is defined
+  - r_nginx.resources[0].status.readyReplicas == r_nginx.resources[0].spec.replicas
+
+- name: Get Openshift Infrastructure instance
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: r_infra
+
+- name: Get the Openshift API URL
+  ansible.builtin.set_fact:
+    _ocp_api_url: "{{ r_infra.resources[0].status.apiServerURL }}"
+
+- name: Copy Nginx webhook proxy pass config to host
+  ansible.builtin.template:
+    src: templates/nginx-webhook-proxy-pass.conf.j2
+    dest: /tmp/nginx-webhook-proxy-pass.conf
+
+- name: Get Nginx pod and ensure it's running
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ ocp4_workload_advanced_developer_suite_nginx_namespace }}"
+    label_selectors:
+    - app = nginx
+  register: r_nginx_pod
+  retries: 40
+  delay: 5
+  until:
+  - r_nginx_pod.resources is defined
+  - r_nginx_pod.resources | length == 1
+  - r_nginx_pod.resources[0].status is defined
+  - r_nginx_pod.resources[0].status.phase is defined
+  - r_nginx_pod.resources[0].status.phase == "Running"
+
+- name: Copy Nginx webhook proxy pass to container
+  shell: |
+    NGINX_POD={{ r_nginx_pod.resources[0].metadata.name }}
+
+    oc cp /tmp/nginx-webhook-proxy-pass.conf {{ ocp4_workload_advanced_developer_suite_nginx_namespace
+    }}/$NGINX_POD:/opt/app-root/etc/nginx.d/webhook.conf -c nginx
+
+- name: Restart Nginx
+  kubernetes.core.k8s_exec:
+    namespace: "{{ ocp4_workload_advanced_developer_suite_nginx_namespace }}"
+    pod: "{{ r_nginx_pod.resources[0].metadata.name }}"
+    command: >-
+      nginx -s stop
+  ignore_errors: true
