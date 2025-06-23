@@ -357,6 +357,42 @@ def agnosticd_instances_to_odcr(instances, agnosticd_images):
 
     return result
 
+def agnosticd_expand_instances(instances):
+    """Expand instances list to a flat list of instances, using the count field"""
+
+    function_name = "agnosticd_expand_instances"
+
+    if not isinstance(instances, list):
+        raise AnsibleFilterError(
+            '%s: instances should be a list, got %s' %(function_name, type(instances))
+        )
+
+    expanded = []
+    for instance in instances:
+        if not isinstance(instance, dict):
+            raise AnsibleFilterError(
+                '%s: instance should be a dict, got %s' %(function_name, type(instance))
+            )
+
+        count = instance.get('count', 1)
+        if not isinstance(count, integer_types) or count < 1:
+            raise AnsibleFilterError(
+                '%s: count should be a positive integer, got %s' %(function_name, count)
+            )
+
+        if count == 1:
+            # If count is 1, just add the instance as is
+            expanded.append(deepcopy(instance))
+            continue
+
+        for i in range(count):
+            new_instance = deepcopy(instance)
+            new_instance.count = 1  # Reset count to 1 for each instance
+            new_instance.name = f"{instance.get('name')}{i+1}"
+            expanded.append(new_instance)
+
+    return expanded
+
 class FilterModule(object):
     ''' AgnosticD core jinja2 filters '''
 
@@ -370,4 +406,5 @@ class FilterModule(object):
             'agnosticd_get_all_images': agnosticd_get_all_images,
             'agnosticd_filter_out_installed_collections': agnosticd_filter_out_installed_collections,
             'agnosticd_instances_to_odcr': agnosticd_instances_to_odcr,
+            'agnosticd_expand_instances': agnosticd_expand_instances,
         }
