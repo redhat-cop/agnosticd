@@ -387,8 +387,8 @@ def agnosticd_expand_instances(instances):
 
         for i in range(count):
             new_instance = deepcopy(instance)
-            new_instance.count = 1  # Reset count to 1 for each instance
-            new_instance.name = f"{instance.get('name')}{i+1}"
+            new_instance['count'] = 1  # Reset count to 1 for each instance
+            new_instance['name'] = f"{instance.get('name')}{i+1}"
             expanded.append(new_instance)
 
     return expanded
