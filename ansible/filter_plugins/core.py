@@ -56,7 +56,7 @@ def ec2_tags_to_dict(tags):
     return converted
 
 
-def dict_to_equinix_metal_tags(tags):
+def dict_to_equinix_metal_tags(tags, delim='='):
     '''Filter to convert dictionary to Equinix Tags format'''
 
     function_name = "dict_to_equinix_metal_tags"
@@ -84,7 +84,7 @@ def dict_to_equinix_metal_tags(tags):
                     %(function_name, type(tags[key]))
                 )
 
-            converted.append('%s=%s' %(key, tags[key]))
+            converted.append('%s%s%s' %(key,delim, tags[key]))
 
     except Exception as e:
         raise AnsibleFilterError(e)
@@ -146,7 +146,7 @@ def ec2_tags_to_equinix_metal_tags(tags):
 
     return converted
 
-def equinix_metal_tags_to_dict(tags):
+def equinix_metal_tags_to_dict(tags, delim='='):
     '''Convert Equinix Tags to a dict'''
 
     function_name = "equinix_metal_tags_to_dict"
@@ -164,8 +164,8 @@ def equinix_metal_tags_to_dict(tags):
                     '''Invalid type used with %s filter,
                     expect a string, got %s''' %(function_name, type(tag)))
 
-            if '=' in tag:
-                splitted = tag.split("=")
+            if delim in tag:
+                splitted = tag.split(delim, 1)
                 if splitted[0] == "":
                     raise AnsibleFilterError(
                         'Invalid type used with %s filter, key is empty string.'
