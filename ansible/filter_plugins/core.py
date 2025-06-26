@@ -56,7 +56,7 @@ def ec2_tags_to_dict(tags):
     return converted
 
 
-def dict_to_equinix_metal_tags(tags):
+def dict_to_equinix_metal_tags(tags, delim='='):
     '''Filter to convert dictionary to Equinix Tags format'''
 
     function_name = "dict_to_equinix_metal_tags"
@@ -84,7 +84,7 @@ def dict_to_equinix_metal_tags(tags):
                     %(function_name, type(tags[key]))
                 )
 
-            converted.append('%s=%s' %(key, tags[key]))
+            converted.append('%s%s%s' %(key,delim, tags[key]))
 
     except Exception as e:
         raise AnsibleFilterError(e)
@@ -146,7 +146,7 @@ def ec2_tags_to_equinix_metal_tags(tags):
 
     return converted
 
-def equinix_metal_tags_to_dict(tags):
+def equinix_metal_tags_to_dict(tags, delim='='):
     '''Convert Equinix Tags to a dict'''
 
     function_name = "equinix_metal_tags_to_dict"
@@ -164,8 +164,8 @@ def equinix_metal_tags_to_dict(tags):
                     '''Invalid type used with %s filter,
                     expect a string, got %s''' %(function_name, type(tag)))
 
-            if '=' in tag:
-                splitted = tag.split("=")
+            if delim in tag:
+                splitted = tag.split(delim, 1)
                 if splitted[0] == "":
                     raise AnsibleFilterError(
                         'Invalid type used with %s filter, key is empty string.'
@@ -357,6 +357,42 @@ def agnosticd_instances_to_odcr(instances, agnosticd_images):
 
     return result
 
+def agnosticd_expand_instances(instances):
+    """Expand instances list to a flat list of instances, using the count field"""
+
+    function_name = "agnosticd_expand_instances"
+
+    if not isinstance(instances, list):
+        raise AnsibleFilterError(
+            '%s: instances should be a list, got %s' %(function_name, type(instances))
+        )
+
+    expanded = []
+    for instance in instances:
+        if not isinstance(instance, dict):
+            raise AnsibleFilterError(
+                '%s: instance should be a dict, got %s' %(function_name, type(instance))
+            )
+
+        count = instance.get('count', 1)
+        if not isinstance(count, integer_types) or count < 1:
+            raise AnsibleFilterError(
+                '%s: count should be a positive integer, got %s' %(function_name, count)
+            )
+
+        if count == 1:
+            # If count is 1, just add the instance as is
+            expanded.append(deepcopy(instance))
+            continue
+
+        for i in range(count):
+            new_instance = deepcopy(instance)
+            new_instance['count'] = 1  # Reset count to 1 for each instance
+            new_instance['name'] = f"{instance.get('name')}{i+1}"
+            expanded.append(new_instance)
+
+    return expanded
+
 class FilterModule(object):
     ''' AgnosticD core jinja2 filters '''
 
@@ -370,4 +406,5 @@ class FilterModule(object):
             'agnosticd_get_all_images': agnosticd_get_all_images,
             'agnosticd_filter_out_installed_collections': agnosticd_filter_out_installed_collections,
             'agnosticd_instances_to_odcr': agnosticd_instances_to_odcr,
+            'agnosticd_expand_instances': agnosticd_expand_instances,
         }
