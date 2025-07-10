@@ -1,0 +1,145 @@
+---
+# ============================================================================
+# AWS Region Intelligence Role - Elegant workload-aware region validation
+# ============================================================================
+
+- name: Detect workload type and requirements
+  set_fact:
+    workload_type: >-
+      {{
+        'rhelai' if (rhelai_instance_type is defined or
+                     rhelai_instance_image is defined or
+                     (bastion_instance_image | default('')) | regex_search('RHELAI')) else
+        'gpu' if (gpu_instance_type is defined or
+                  single_gpu_instance_type is defined or
+                  multi_gpu_instance_type is defined or
+                  (bastion_instance_type | default('')) | regex_search('g[456]') or
+                  (worker_instance_type | default('')) | regex_search('g[456]') or
+                  (default_instance_type | default('')) | regex_search('g[456]')) else
+        'standard'
+      }}
+    compatible_regions: >-
+      {{
+        aws_regions_rhelai if (rhelai_instance_type is defined or
+                               rhelai_instance_image is defined or
+                               (bastion_instance_image | default('')) | regex_search('RHELAI')) else
+        aws_regions_gpu if (gpu_instance_type is defined or
+                            single_gpu_instance_type is defined or
+                            multi_gpu_instance_type is defined or
+                            (bastion_instance_type | default('')) | regex_search('g[456]') or
+                            (worker_instance_type | default('')) | regex_search('g[456]') or
+                            (default_instance_type | default('')) | regex_search('g[456]')) else
+        aws_regions_standard
+      }}
+
+- name: Generate user-friendly compatibility information
+  set_fact:
+    aws_region_info_message: >-
+      {{
+        "🤖 RHEL AI Workload: Available in " + (compatible_regions | join(', ')) + " (requires RHEL AI AMIs + G6 instances)" if workload_type == 'rhelai' else
+        "🎮 GPU Workload: Available in " + (compatible_regions | join(', ')) + " (requires G4/G5/G6 instances)" if workload_type == 'gpu' else
+        "🏢 Standard Workload: Available in all " + (compatible_regions | length | string) + " regions"
+      }}
+
+- name: Check selected region compatibility
+  set_fact:
+    region_is_compatible: "{{ aws_region in compatible_regions }}"
+    show_all_regions: "{{ aws_region_show_all | default(false) | bool }}"
+
+- name: Display workload analysis
+  debug:
+    msg: |
+      🔍 AWS Region Intelligence Analysis:
+
+      Workload Type: {{ workload_type.upper() }}
+      {{ aws_region_info_message }}
+
+      Selected Region: {{ aws_region }}
+      Compatible: {{ '✅ YES' if region_is_compatible else '❌ NO' }}
+      {% if not region_is_compatible %}
+
+      ⚠️ COMPATIBILITY ISSUE DETECTED:
+      The selected region {{ aws_region }} is not compatible with this {{ workload_type }} workload.
+      {% endif %}
+
+- name: Handle incompatible region selection
+  when:
+    - not region_is_compatible
+    - not show_all_regions
+  block:
+    - name: Fail with clear guidance for incompatible region
+      fail:
+        msg: |
+          ❌ REGION COMPATIBILITY ERROR
+
+          Selected region: {{ aws_region }}
+          Workload type: {{ workload_type.upper() }}
+
+          🚫 This region is not compatible with your workload because:
+          {% if workload_type == 'rhelai' %}
+          - RHEL AI AMIs ({{ rhelai_instance_image | default('RHELAI13') }}) are not available in {{ aws_region }}
+          - G6 GPU instances ({{ rhelai_instance_type | default('g6.2xlarge') }}) may not be available
+          {% elif workload_type == 'gpu' %}
+          - Required GPU instances are not available in {{ aws_region }}
+          {% endif %}
+
+          ✅ COMPATIBLE REGIONS FOR {{ workload_type.upper() }} WORKLOADS:
+          {{ compatible_regions | join(', ') }}
+
+          💡 SOLUTIONS:
+          1. Select one of the compatible regions above
+          2. Enable "Show All Regions" if you need to override (advanced users)
+
+          🎯 RECOMMENDED: {{ compatible_regions[0] }} (optimal performance)
+
+- name: Validate admin override scenario
+  when:
+    - not region_is_compatible
+    - show_all_regions
+  block:
+    - name: Display override warning
+      debug:
+        msg: |
+          ⚠️ ADMIN OVERRIDE ACTIVE
+
+          Region: {{ aws_region }} (NOT COMPATIBLE)
+          Workload: {{ workload_type.upper() }}
+          Override: "Show All Regions" enabled
+
+          🚨 WARNING: This deployment may fail because:
+          {% if workload_type == 'rhelai' %}
+          - RHEL AI AMIs may not be available in {{ aws_region }}
+          - G6 instances may not be available in {{ aws_region }}
+          {% elif workload_type == 'gpu' %}
+          - Required GPU instances may not be available in {{ aws_region }}
+          {% endif %}
+
+          ✅ Compatible regions: {{ compatible_regions | join(', ') }}
+
+          Proceeding with {{ aws_region }} as requested...
+
+- name: Set final region metadata
+  set_fact:
+    aws_region_metadata:
+      workload_type: "{{ workload_type }}"
+      compatible_regions: "{{ compatible_regions }}"
+      selected_region: "{{ aws_region }}"
+      is_compatible: "{{ region_is_compatible }}"
+      show_all_regions: "{{ show_all_regions }}"
+      info_message: "{{ aws_region_info_message }}"
+      validation_passed: "{{ region_is_compatible or show_all_regions }}"
+
+- name: Display final validation result
+  debug:
+    msg: |
+      🎯 AWS Region Validation Complete
+
+      Final Region: {{ aws_region }}
+      Workload Type: {{ workload_type.upper() }}
+      Status: {{ '✅ COMPATIBLE' if region_is_compatible else ('🔧 OVERRIDE ACTIVE' if show_all_regions else '❌ INCOMPATIBLE') }}
+
+      {% if region_is_compatible %}
+      ✅ Excellent choice! This region is optimal for {{ workload_type }} workloads.
+      {% elif show_all_regions %}
+      ⚠️ Proceeding with admin override. Monitor deployment carefully.
+      {% endif %}
