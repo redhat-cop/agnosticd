@@ -1,0 +1,396 @@
+---
+- name: Step 001.1 Deploy Redfish Baremetal Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Validate IBM Cloud server ID is provided
+      ansible.builtin.fail:
+        msg: "ibm_cloud_server_id is required. Please provide it as an extra var: -e ibm_cloud_server_id=YOUR_SERVER_ID"
+      when: ibm_cloud_server_id is not defined or ibm_cloud_server_id == ""
+
+    - name: Validate IBM Cloud API key is provided
+      ansible.builtin.fail:
+        msg: "ibm_cloud_api_key is required. Please provide it as an extra var: -e ibm_cloud_api_key=YOUR_API_KEY"
+      when: ibm_cloud_api_key is not defined or ibm_cloud_api_key == ""
+
+    - name: Check if IBM Cloud CLI is installed
+      ansible.builtin.command: ibmcloud --version
+      register: ibmcloud_version
+      failed_when: false
+      changed_when: false
+
+    - name: Install IBM Cloud CLI if not present
+      block:
+        - name: Download and install IBM Cloud CLI
+          ansible.builtin.shell: |
+            curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+          become: true
+          
+        - name: Verify IBM Cloud CLI installation
+          ansible.builtin.command: ibmcloud --version
+          register: ibmcloud_verify
+          failed_when: ibmcloud_verify.rc != 0
+          changed_when: false
+          
+      when: ibmcloud_version.rc != 0
+
+    - name: Login to IBM Cloud with API key
+      ansible.builtin.command: ibmcloud login --apikey "{{ ibm_cloud_api_key }}"
+      register: ibmcloud_login_result
+      failed_when: false
+      changed_when: false
+      no_log: true
+
+    - name: Check if logged in to IBM Cloud
+      ansible.builtin.command: ibmcloud account show
+      register: ibmcloud_login_status
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if not logged in to IBM Cloud
+      ansible.builtin.fail:
+        msg: "Failed to authenticate with IBM Cloud. Please verify your API key is correct and has appropriate permissions."
+      when: ibmcloud_login_status.rc != 0
+
+    - name: Check if SoftLayer plugin is installed
+      ansible.builtin.command: ibmcloud plugin list
+      register: plugin_list
+      changed_when: false
+
+    - name: Install SoftLayer plugin if not present
+      ansible.builtin.command: ibmcloud plugin install infrastructure-service -f
+      register: plugin_install_result
+      failed_when: false
+      when: "'infrastructure-service' not in plugin_list.stdout and 'sl' not in plugin_list.stdout"
+
+    - name: Install SoftLayer plugin (alternative method) if not present
+      ansible.builtin.command: ibmcloud plugin install sl -f
+      register: plugin_install_result2
+      failed_when: false
+      when: "'sl' not in plugin_list.stdout and (plugin_install_result.rc is not defined or plugin_install_result.rc != 0)"
+
+    - name: Check plugin list after installation
+      ansible.builtin.command: ibmcloud plugin list
+      register: plugin_list_after
+      changed_when: false
+
+    - name: Display plugin installation results
+      ansible.builtin.debug:
+        msg:
+          - "Plugin installation results:"
+          - "infrastructure-service install result: {{ plugin_install_result.rc | default('not run') }}"
+          - "sl install result: {{ plugin_install_result2.rc | default('not run') }}"
+          - "Plugins after installation: {{ plugin_list_after.stdout_lines | default([]) }}"
+
+    - name: Verify SoftLayer plugin installation
+      ansible.builtin.command: ibmcloud sl help
+      register: sl_help_result
+      failed_when: false
+      changed_when: false
+
+    - name: Test SSH key command specifically
+      ansible.builtin.command: ibmcloud sl security sshkey-list --output json
+      register: ssh_key_test_result
+      failed_when: false
+      changed_when: false
+
+    - name: Fail if SoftLayer plugin not working
+      ansible.builtin.fail:
+        msg: |
+          SoftLayer plugin is not working properly. 
+          
+          Plugin installation results:
+          - infrastructure-service install: {{ plugin_install_result.rc | default('not run') }}
+          - sl install: {{ plugin_install_result2.rc | default('not run') }}
+          
+          Plugin verification results:
+          - 'ibmcloud sl help' returned: {{ sl_help_result.rc }}
+          - 'ibmcloud sl security sshkey-list' returned: {{ ssh_key_test_result.rc }}
+          
+          Error details:
+          - sl help error: {{ sl_help_result.stderr | default('None') }}
+          - sshkey-list error: {{ ssh_key_test_result.stderr | default('None') }}
+          
+          Current plugins installed:
+          {{ plugin_list_after.stdout | default('Unable to list plugins') }}
+          
+          Please check plugin installation manually:
+          1. Run: ibmcloud plugin list
+          2. Try: ibmcloud plugin install infrastructure-service --force
+          3. Verify: ibmcloud sl help
+          4. Test: ibmcloud sl security sshkey-list
+      when: sl_help_result.rc != 0 or ssh_key_test_result.rc != 0
+
+    - name: Generate secure password if not provided
+      ansible.builtin.set_fact:
+        generated_password: "{{ lookup('password', '/dev/null length=12 chars=ascii_letters,digits') }}"
+
+    - name: Ensure generated password contains at least one number
+      ansible.builtin.set_fact:
+        generated_password: "{{ generated_password[:-1] + (range(0, 10) | random | string) }}"
+      when: not (generated_password | regex_search('[0-9]'))
+
+    - name: Ensure generated password contains at least one letter
+      ansible.builtin.set_fact:
+        generated_password: "{{ generated_password[:-1] + ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'] | random }}"
+      when: not (generated_password | regex_search('[A-Za-z]'))
+
+    - name: Run baremetal info role
+      ansible.builtin.include_role:
+        name: "infra-ibm-cloud-classic-bm-info"
+      vars:
+        ibm_cloud_server_id: "{{ ibm_cloud_server_id }}"
+        ibm_cloud_api_key: "{{ ibm_cloud_api_key }}"
+        save_to_file: false
+        display_results: true
+
+    - name: Create inventory for managed servers
+      ansible.builtin.include_role:
+        name: "infra-xclarity-create-inventory"
+      vars:
+        bmc_hostname: "{{ bm_server_info.remote_mgmt_ip }}"
+        managed_servers: "{{ xclarity_managed_servers | default([]) }}"
+      when: 
+        - xclarity_managed_servers is defined
+        - xclarity_managed_servers | length > 0
+
+    - name: Create SSH provision key
+      ansible.builtin.include_role:
+        name: "create_ssh_provision_key"
+      when: 
+        - ssh_provision_key_name is undefined
+
+    - name: Locate environment authorized key
+      ansible.builtin.include_role:
+        name: "locate_env_authorized_key"
+
+    - name: Create SSH key in IBM Cloud Classic
+      ansible.builtin.include_role:
+        name: "infra-ibm-cloud-classic-ssh-key"
+      vars:
+        ibm_cloud_classic_api_key: "{{ ibm_cloud_api_key }}"
+
+    - name: Store variables for PXE server setup on bastion
+      ansible.builtin.set_fact:
+        pxe_server_vars:
+          bm_server_info: "{{ bm_server_info }}"
+          rhel_iso_url: "{{ rhel_iso_url }}"
+          rhel_iso_username: "{{ rhel_iso_username | default(omit) }}"
+          rhel_iso_password: "{{ rhel_iso_password | default(omit) }}"
+          generated_password: "{{ generated_password }}"
+          domain_name: "{{ domain_name | default('iaas.rhdp.net') }}"
+          kickstart_ssh_key: "{{ ssh_provision_pubkey_content | default(ansible_ssh_user_public_key | default('')) }}"
+          pxe_server_private_interface: "{{ pxe_server_private_interface | default('eth0') }}"
+          kickstart_satellite_url: "{{ kickstart_satellite_url | default('') }}"
+          kickstart_activation_key: "{{ kickstart_activation_key | default('') }}"
+          kickstart_auth_token: "{{ kickstart_auth_token | default('') }}"
+          bm_server_private_netmask: "{{ bm_server_private_netmask | default('255.255.255.0') }}"
+          bm_server_public_netmask: "{{ bm_server_public_netmask | default('255.255.255.0') }}"
+          bm_server_public_gateway: "{{ bm_server_public_gateway | default('') }}"
+          bm_server_bonded_network: "{{ bm_server_bonded_network | default(false) }}"
+          baremetal_user_name: "{{ baremetal_user_name | default('cloud-user') }}"
+      when: 
+        - setup_pxe_server | default(false)
+        - rhel_iso_url is defined
+        - bm_server_info is defined
+
+    - name: Set instances configuration for bastion host
+      ansible.builtin.set_fact:
+        instances:
+          - name: "bastion-{{ guid }}"
+            datacenter: "{{ bm_server_info.datacenter }}"
+            count: 1
+            cores: 1
+            memory: 2048
+            rootfs_size: 100
+            image: "REDHAT_9_64"
+            public_security_group_rules:
+              - name: "ssh"
+                description: "SSH access from anywhere"
+                rule_type: "ingress"
+                ether_type: "IPv4"
+                from_port: 22
+                to_port: 22
+                protocol: "tcp"
+                cidr: "0.0.0.0/0"
+              - name: "https"
+                description: "HTTPS access from anywhere"
+                rule_type: "ingress"
+                ether_type: "IPv4"
+                from_port: 443
+                to_port: 443
+                protocol: "tcp"
+                cidr: "0.0.0.0/0"
+              - name: "console-access"
+                description: "Console access port"
+                rule_type: "ingress"
+                ether_type: "IPv4"
+                from_port: 3900
+                to_port: 3900
+                protocol: "tcp"
+                cidr: "0.0.0.0/0"
+              - name: "all-egress-tcp"
+                description: "All tcp outbound traffic"
+                rule_type: "egress"
+                ether_type: "IPv4"
+                protocol: "tcp"
+                cidr: "0.0.0.0/0"
+              - name: "all-egress-udp"
+                description: "All udp outbound traffic"
+                rule_type: "egress"
+                ether_type: "IPv4"
+                protocol: "udp"
+                cidr: "0.0.0.0/0"
+            tags:
+              - "ansible_group:bastions"
+              - "guid:{{ guid }}"
+            ssh_key_ids:
+              - "{{ ssh_key_id }}"
+            user_metadata: "{{ guid }}"
+            notes: "Bastion host for {{ guid }}"
+      when: 
+        - bm_server_info.private_vlan_id is defined
+        - bm_server_info.private_vlan_id != ""
+        - ssh_key_id is defined
+
+    - name: Deploy IBM Cloud Classic bastion host
+      ansible.builtin.include_role:
+        name: "infra-ibm-cloud-classic-deploy-vms"
+      vars:
+        ibm_cloud_api_key: "{{ ibm_cloud_api_key }}"
+        private_vlan_id: "{{ bm_server_info.private_vlan_id }}"
+        global_security_groups: "{{ global_security_groups }}"
+        ssh_private_key_path: "{{ ssh_provision_key_path }}"
+      when: 
+        - bm_server_info.private_vlan_id is defined
+        - bm_server_info.private_vlan_id != ""
+        - instances is defined
+        - instances | length > 0
+
+- name: Step 001.1.1 Install packages on deployed VMs
+  hosts: all:!localhost
+  gather_facts: false
+  become: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_ssh_private_key_file: "{{ hostvars['localhost']['ssh_provision_key_path'] }}"
+  tasks:
+    - name: Install common packages on deployed VMs
+      ansible.builtin.dnf:
+        name: "{{ common_packages }}"
+        state: present
+      when: 
+        - common_packages is defined
+        - common_packages | length > 0
+
+    - name: Install common pip packages on deployed VMs
+      ansible.builtin.pip:
+        name: "{{ common_pip_packages }}"
+        executable: pip3
+        state: present
+      when: 
+        - common_pip_packages is defined
+        - common_pip_packages | length > 0
+
+- name: Step 001.2 Configure PXE Server on Bastion Host
+  hosts: bastions
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Set PXE server variables
+      ansible.builtin.set_fact:
+        bm_server_info: "{{ hostvars['localhost']['pxe_server_vars']['bm_server_info'] }}"
+        rhel_iso_url: "{{ hostvars['localhost']['pxe_server_vars']['rhel_iso_url'] }}"
+        rhel_iso_username: "{{ hostvars['localhost']['pxe_server_vars']['rhel_iso_username'] | default(omit) }}"
+        rhel_iso_password: "{{ hostvars['localhost']['pxe_server_vars']['rhel_iso_password'] | default(omit) }}"
+        generated_password: "{{ hostvars['localhost']['pxe_server_vars']['generated_password'] }}"
+        domain_name: "{{ hostvars['localhost']['pxe_server_vars']['domain_name'] | default('iaas.rhdp.net') }}"
+        kickstart_ssh_key: "{{ hostvars['localhost']['pxe_server_vars']['kickstart_ssh_key'] | default('') }}"
+        pxe_server_private_interface: "{{ hostvars['localhost']['pxe_server_vars']['pxe_server_private_interface'] | default('eth0') }}"
+        kickstart_satellite_url: "{{ hostvars['localhost']['pxe_server_vars']['kickstart_satellite_url'] | default('') }}"
+        kickstart_activation_key: "{{ hostvars['localhost']['pxe_server_vars']['kickstart_activation_key'] | default('') }}"
+        kickstart_auth_token: "{{ hostvars['localhost']['pxe_server_vars']['kickstart_auth_token'] | default('') }}"
+        bm_server_private_netmask: "{{ hostvars['localhost']['pxe_server_vars']['bm_server_private_netmask'] | default('255.255.255.0') }}"
+        bm_server_public_netmask: "{{ hostvars['localhost']['pxe_server_vars']['bm_server_public_netmask'] | default('255.255.255.0') }}"
+        bm_server_public_gateway: "{{ hostvars['localhost']['pxe_server_vars']['bm_server_public_gateway'] | default('') }}"
+        bm_server_bonded_network: "{{ hostvars['localhost']['pxe_server_vars']['bm_server_bonded_network'] | default(false) }}"
+        baremetal_user_name: "{{ hostvars['localhost']['pxe_server_vars']['baremetal_user_name'] | default('cloud-user') }}"
+      when: 
+        - hostvars['localhost']['setup_pxe_server'] | default(false)
+        - hostvars['localhost']['pxe_server_vars'] is defined
+        - hostvars['localhost']['pxe_server_vars']['bm_server_info'] is defined
+
+    - name: Setup PXE server on bastion host
+      ansible.builtin.include_role:
+        name: "infra-ibm-cloud-classic-bm-pxe-server"
+      when: 
+        - hostvars['localhost']['setup_pxe_server'] | default(false)
+        - hostvars['localhost']['pxe_server_vars'] is defined
+        - hostvars['localhost']['pxe_server_vars']['bm_server_info'] is defined
+
+- name: Step 001.3 Configure Redfish User Management
+  hosts: bastions[0]
+  gather_facts: false
+  become: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Run Redfish user management role
+      ansible.builtin.include_role:
+        name: "infra-redfish-user-management"
+      vars:
+        # BMC connection parameters - direct to BMC
+        bmc_hostname: "{{ bm_server_info.remote_mgmt_ip }}"
+        bmc_username: "{{ bm_server_info.remote_mgmt_user }}"
+        bmc_password: "{{ bm_server_info.remote_mgmt_password }}"
+        # User management parameters (no recursion)
+        target_username: "console"
+        target_password: "{{ generated_password }}"
+        user_action: "create"
+        user_role: "PowerUser"
+        enable_user: "true"
+      when: 
+        - bm_server_info is defined
+
+- name: Step 001.3.5 Check and optimize boot order
+  hosts: bastions[0]
+  gather_facts: false
+  become: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Run Redfish boot order management
+      ansible.builtin.include_role:
+        name: "infra-redfish-power-management"
+      vars:
+        # BMC connection parameters - direct to BMC
+        bmc_hostname: "{{ bm_server_info.remote_mgmt_ip }}"
+        bmc_username: "{{ bm_server_info.remote_mgmt_user }}"
+        bmc_password: "{{ bm_server_info.remote_mgmt_password }}"
+        power_action: "status"
+        check_boot_order: true
+      when: 
+        - bm_server_info is defined
+
+- name: Step 001.4 Enable PXE boot and reset bare metal host
+  hosts: bastions[0]
+  gather_facts: false
+  become: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Run Redfish power management role
+      ansible.builtin.include_role:
+        name: "infra-redfish-power-management"
+      vars:
+        # BMC connection parameters - direct to BMC
+        bmc_hostname: "{{ bm_server_info.remote_mgmt_ip }}"
+        bmc_username: "{{ bm_server_info.remote_mgmt_user }}"
+        bmc_password: "{{ bm_server_info.remote_mgmt_password }}"
+        power_action: "status"
+        enable_pxe_boot_and_reset: true
+        check_boot_order: false  # Skip boot order check since we already did it
+      when: 
+        - bm_server_info is defined

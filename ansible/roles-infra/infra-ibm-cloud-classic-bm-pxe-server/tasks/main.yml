@@ -1,0 +1,263 @@
+---
+# tasks file for infra-ibm-classic-bm-pxe-server role
+
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - bm_server_info is defined
+      - pxe_server_private_interface is defined
+      - rhel_iso_url is defined
+      - rhel_iso_url | length > 0
+      - generated_password is defined
+      - generated_password | length > 0
+    fail_msg: "Required variables are missing. Please ensure bm_server_info, private network interface, rhel_iso_url, and generated_password are defined."
+
+- name: Validate bm_server_info contains required fields
+  ansible.builtin.assert:
+    that:
+      - bm_server_info.server_id is defined
+      - bm_server_info.server_id | length > 0
+      - bm_server_info.private_mac_address is defined
+      - bm_server_info.private_mac_address | length > 0
+      - bm_server_info.private_ip is defined
+      - bm_server_info.private_ip | length > 0
+      - bm_server_info.public_ip is defined
+      - bm_server_info.public_ip | length > 0
+      - bm_server_info.remote_mgmt_ip is defined
+      - bm_server_info.remote_mgmt_ip | length > 0
+    fail_msg: "bm_server_info is missing required fields: server_id, private_mac_address, private_ip, public_ip, remote_mgmt_ip"
+
+- name: Set server configuration variables
+  ansible.builtin.set_fact:
+    server_name: "{{ bm_server_info.hostname | default(bm_server_info.server_id) }}"
+    server_private_mac: "{{ bm_server_info.private_mac_address }}"
+    server_private_ip: "{{ bm_server_info.private_ip }}"
+    server_private_netmask: "{{ bm_server_private_netmask | default('255.255.255.0') }}"
+    server_public_ip: "{{ bm_server_info.public_ip }}"
+    server_public_netmask: "{{ bm_server_public_netmask | default('255.255.255.0') }}"
+    server_public_gateway: "{{ bm_server_public_gateway | default('') }}"
+    server_bmc_ip: "{{ bm_server_info.remote_mgmt_ip }}"
+    bastion_hostname: "{{ ansible_hostname }}"
+    baremetal_hostname: "{{ bm_server_info.hostname | default(bm_server_info.server_id) }}"
+
+- name: Discover network interfaces using system commands
+  ansible.builtin.shell: |
+    for iface in $(ip -4 addr show | grep -E "^[0-9]+: " | grep -v "lo:" | cut -d: -f2 | tr -d ' '); do
+      ip_addr=$(ip -4 addr show $iface | grep -oP 'inet \K[\d.]+' | head -1)
+      if [ -n "$ip_addr" ]; then
+        echo "$iface:$ip_addr"
+      fi
+    done
+  register: parsed_interfaces
+  when: pxe_server_private_ip is not defined
+
+- name: Create network interfaces from system command output
+  ansible.builtin.set_fact:
+    network_interfaces: "{{ network_interfaces | default([]) + [{'key': 'ansible_' + item.split(':')[0], 'value': {'ipv4': {'address': item.split(':')[1]}}}] }}"
+  loop: "{{ parsed_interfaces.stdout_lines }}"
+  when: 
+    - pxe_server_private_ip is not defined
+    - parsed_interfaces is defined
+    - parsed_interfaces.stdout_lines | length > 0
+
+- name: Identify private and public interfaces by IP address
+  ansible.builtin.set_fact:
+    discovered_private_interface: "{{ (private_interfaces | first).key | regex_replace('^ansible_(.*)$', '\\1') }}"
+    discovered_public_interface: "{{ (public_interfaces | first).key | regex_replace('^ansible_(.*)$', '\\1') if public_interfaces | length > 0 else '' }}"
+  vars:
+    private_interfaces: "{{ network_interfaces | selectattr('value.ipv4.address', 'match', '^(10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.)') | list }}"
+    public_interfaces: "{{ network_interfaces | rejectattr('value.ipv4.address', 'match', '^(10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.)') | list }}"
+  when: 
+    - pxe_server_private_ip is not defined
+    - private_interfaces | length > 0
+
+- name: Get bastion host private IP address for PXE server
+  ansible.builtin.set_fact:
+    pxe_server_private_ip: "{{ (network_interfaces | selectattr('key', 'equalto', 'ansible_' + discovered_private_interface) | first).value.ipv4.address }}"
+    pxe_server_public_ip: "{{ (network_interfaces | selectattr('key', 'equalto', 'ansible_' + discovered_public_interface) | first).value.ipv4.address if discovered_public_interface | length > 0 else '' }}"
+  when: 
+    - pxe_server_private_ip is not defined
+    - discovered_private_interface is defined
+
+- name: Validate bastion host private IP is set
+  ansible.builtin.assert:
+    that:
+      - pxe_server_private_ip is defined
+      - pxe_server_private_ip | length > 0
+      - pxe_server_private_ip | regex_search('^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$')
+    fail_msg: "Unable to determine bastion host private IP address from discovered interface {{ discovered_private_interface | default('unknown') }}"
+
+- name: Install required packages
+  ansible.builtin.dnf:
+    name: "{{ required_packages }}"
+    state: present
+  become: true
+
+- name: Create required directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ iso_storage_path }}"
+    - "{{ iso_mount_path }}"
+    - "{{ tftp_root }}/rhel10"
+    - "{{ kickstart_path }}"
+    - "{{ tftp_root }}/images/RHEL-10"
+  become: true
+
+- name: Check if ISO already exists (faster)
+  ansible.builtin.command: test -f "{{ iso_storage_path }}/{{ rhel_iso_filename }}"
+  register: iso_exists
+  failed_when: false
+  changed_when: false
+
+- name: Download RHEL 10 ISO using curl (more reliable for CloudFront)
+  ansible.builtin.shell: |
+    curl -L -o "{{ iso_storage_path }}/{{ rhel_iso_filename }}" \
+         -u "{{ rhel_iso_username }}:{{ rhel_iso_password }}" \
+         --connect-timeout 30 \
+         --max-time 3600 \
+         --retry 3 \
+         --retry-delay 10 \
+         --silent \
+         --show-error \
+         "{{ rhel_iso_url }}"
+  when: iso_exists.rc != 0 and (rhel_iso_username is defined and rhel_iso_username | length > 0)
+  become: true
+  register: iso_download_curl
+
+- name: Verify ISO file was downloaded successfully
+  ansible.builtin.stat:
+    path: "{{ iso_storage_path }}/{{ rhel_iso_filename }}"
+  register: iso_verify
+  when: iso_exists.rc != 0
+
+- name: Set file permissions on downloaded ISO
+  ansible.builtin.file:
+    path: "{{ iso_storage_path }}/{{ rhel_iso_filename }}"
+    mode: '0644'
+    owner: root
+    group: root
+  when: iso_exists.rc != 0 and iso_verify.stat.exists
+  become: true
+  
+- name: Check if ISO is already mounted
+  ansible.builtin.shell: mount | grep "{{ iso_mount_path }}"
+  register: mount_check
+  failed_when: false
+  changed_when: false
+
+- name: Add ISO mount to fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    line: "{{ iso_storage_path }}/{{ rhel_iso_filename }} {{ iso_mount_path }} iso9660 ro,defaults 0 0"
+    backup: "{{ backup_configs }}"
+  become: true
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+
+- name: Mount RHEL 10 ISO
+  ansible.posix.mount:
+    path: "{{ iso_mount_path }}"
+    src: "{{ iso_storage_path }}/{{ rhel_iso_filename }}"
+    fstype: iso9660
+    opts: ro,defaults
+    state: mounted
+  become: true
+  when: mount_check.rc != 0
+
+- name: Copy EFI files to TFTP directory
+  ansible.builtin.copy:
+    src: "{{ iso_mount_path }}/EFI"
+    dest: "{{ tftp_root }}/rhel10/"
+    remote_src: true
+    mode: preserve
+  become: true
+
+- name: Set permissions on TFTP RHEL10 directory
+  ansible.builtin.file:
+    path: "{{ tftp_root }}/rhel10/"
+    mode: '0755'
+    recurse: true
+  become: true
+
+- name: Configure DHCP server
+  ansible.builtin.template:
+    src: dhcpd.conf.j2
+    dest: /etc/dhcp/dhcpd.conf
+    backup: "{{ backup_configs }}"
+    mode: '0644'
+  become: true
+  notify: restart dhcpd
+
+- name: Create GRUB configuration for PXE boot
+  ansible.builtin.template:
+    src: grub.cfg.j2
+    dest: "{{ tftp_root }}/rhel10/EFI/BOOT/grub.cfg"
+    mode: '0644'
+  become: true
+
+- name: Generate salted password hash for kickstart
+  ansible.builtin.set_fact:
+    kickstart_user_password_hash: "{{ generated_password | password_hash('sha512') }}"
+  when: generated_password is defined
+
+- name: Create kickstart file
+  ansible.builtin.template:
+    src: host-kickstart.ks.j2
+    dest: "{{ kickstart_path }}/rhel10-{{ server_private_mac }}.ks"
+    mode: '0644'
+  become: true
+
+- name: Configure HAProxy
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    backup: "{{ backup_configs }}"
+    mode: '0644'
+  become: true
+  notify: restart haproxy
+  when: 
+    - haproxy_services | length > 0
+    - bm_server_info.remote_mgmt_ip is defined
+    - bm_server_info.remote_mgmt_ip != ""
+
+- name: Convert HAProxy config to Unix line endings
+  ansible.builtin.replace:
+    path: /etc/haproxy/haproxy.cfg
+    regexp: '\r\n'
+    replace: '\n'
+  become: true
+  when: 
+    - haproxy_services | length > 0
+    - bm_server_info.remote_mgmt_ip is defined
+    - bm_server_info.remote_mgmt_ip != ""
+
+- name: Copy kernel and initrd files for PXE boot
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    remote_src: true
+  loop:
+    - { src: "{{ iso_mount_path }}/images/pxeboot/vmlinuz", dest: "{{ tftp_root }}/images/RHEL-10/vmlinuz" }
+    - { src: "{{ iso_mount_path }}/images/pxeboot/initrd.img", dest: "{{ tftp_root }}/images/RHEL-10/initrd.img" }
+  become: true
+
+- name: Create symbolic link for RHEL 10 repository access via HTTP
+  ansible.builtin.file:
+    src: "{{ iso_mount_path }}"
+    dest: "{{ web_root }}/rhel10"
+    state: link
+  become: true
+
+- name: Ensure all services are enabled and started
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: "{{ pxe_services }}"
+  become: true
