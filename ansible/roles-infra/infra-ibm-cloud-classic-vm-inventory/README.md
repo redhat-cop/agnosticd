@@ -99,8 +99,8 @@ The role automatically creates the `vm_info` variable by extracting data from Te
 vm_info:
   - id: "12345678"
     hostname: "web-01"
-    domain: "iaas.rhdp.net"
-    fqdn: "web-01.iaas.rhdp.net"
+    domain: "example.com"
+    fqdn: "web-01.example.com"
     public_ip: "169.62.x.x"
     private_ip: "10.x.x.x"
     datacenter: "dal13"

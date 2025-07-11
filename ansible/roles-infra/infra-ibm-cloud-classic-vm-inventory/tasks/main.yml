@@ -1,4 +1,29 @@
 ---
+- name: Check if Terraform directory exists
+  ansible.builtin.stat:
+    path: "{{ terraform_working_dir }}"
+  register: terraform_dir_stat
+
+- name: Debug Terraform directory
+  ansible.builtin.debug:
+    msg: 
+      - "Terraform working directory: {{ terraform_working_dir }}"
+      - "Directory exists: {{ terraform_dir_stat.stat.exists }}"
+      - "Directory is directory: {{ terraform_dir_stat.stat.isdir | default(false) }}"
+
+- name: Check if Terraform state exists
+  ansible.builtin.stat:
+    path: "{{ terraform_working_dir }}/terraform.tfstate"
+  register: terraform_state_stat
+  when: terraform_dir_stat.stat.exists
+
+- name: Debug Terraform state
+  ansible.builtin.debug:
+    msg: 
+      - "Terraform state file exists: {{ terraform_state_stat.stat.exists | default(false) }}"
+      - "State file size: {{ terraform_state_stat.stat.size | default(0) }} bytes"
+  when: terraform_dir_stat.stat.exists
+
 - name: Get Terraform outputs
   ansible.builtin.command:
     cmd: terraform output -json
@@ -6,13 +31,38 @@
   register: terraform_outputs
   changed_when: false
 
+- name: Debug raw Terraform output
+  ansible.builtin.debug:
+    msg: 
+      - "Terraform output stdout: {{ terraform_outputs.stdout }}"
+      - "Terraform output stderr: {{ terraform_outputs.stderr }}"
+      - "Terraform output return code: {{ terraform_outputs.rc }}"
+
 - name: Parse Terraform outputs
   ansible.builtin.set_fact:
     vm_outputs: "{{ terraform_outputs.stdout | from_json }}"
 
+- name: Debug Terraform outputs
+  ansible.builtin.debug:
+    msg: "Available Terraform outputs: {{ vm_outputs.keys() | list }}"
+
 - name: Initialize VM info list
   ansible.builtin.set_fact:
     vm_info: []
+
+- name: Get VM count from outputs
+  ansible.builtin.set_fact:
+    vm_count: "{{ vm_outputs.vm_count.value | default(0) | int }}"
+  when: vm_outputs.vm_count is defined
+
+- name: Set VM count to 0 if not defined
+  ansible.builtin.set_fact:
+    vm_count: 0
+  when: vm_outputs.vm_count is not defined
+
+- name: Debug VM count
+  ansible.builtin.debug:
+    msg: "VM count: {{ vm_count }}"
 
 - name: Store VM information (multiple VMs)
   ansible.builtin.set_fact:
@@ -39,7 +89,8 @@
       creation_date: "{{ vm_outputs.vm_creation_dates.value[item] }}"
       private_vlan_id: "{{ vm_outputs.private_vlan_ids.value[item] }}"
       public_vlan_id: "{{ vm_outputs.public_vlan_ids.value[item] }}"
-  loop: "{{ range(vm_outputs.vm_count.value | int) | list }}"
+  loop: "{{ range(vm_count | int) | list }}"
+  when: vm_count | int > 0
 
 - name: Display VM deployment results
   ansible.builtin.debug:
@@ -80,7 +131,7 @@
     groups: "{{ vm_groups }}"
     ansible_host: "{{ item.public_ip }}"
     ansible_user: "{{ ssh_user | default('root') }}"
-          ansible_ssh_private_key_file: "{{ ssh_private_key_path }}"
+    ansible_ssh_private_key_file: "{{ ssh_private_key_path }}"
   vars:
     vm_groups: "{{ base_groups + ansible_groups }}"
     base_groups:
@@ -128,7 +179,7 @@
 
 - name: Test SSH connection to all VMs
   ansible.builtin.command:
-          cmd: "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i {{ ssh_private_key_path }} {{ ssh_user | default('root') }}@{{ item.public_ip }} 'echo SSH connection successful'"
+    cmd: "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i {{ ssh_private_key_path }} {{ ssh_user | default('root') }}@{{ item.public_ip }} 'echo SSH connection successful'"
   register: ssh_tests
   failed_when: false
   changed_when: false
@@ -146,6 +197,10 @@
   loop_control:
     label: "{{ item.item.hostname }}"
   when: test_ssh_connection | default(true) and ssh_tests is defined
+
+- name: Initialize display ansible groups
+  ansible.builtin.set_fact:
+    display_ansible_groups: {}
 
 - name: Build ansible groups for display
   ansible.builtin.set_fact:

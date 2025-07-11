@@ -252,7 +252,7 @@ The role includes comprehensive validation:
 🖥️ Virtual Machine (Bastion):
 VM ID: 151802381
 Hostname: bastion-aaaa
-FQDN: bastion-aaaa.iaas.rhdp.net
+FQDN: bastion-aaaa.example.com
 Public IP: 169.62.251.23
 Private IP: 10.73.77.235
 CPU: 1 cores
@@ -263,7 +263,7 @@ VM Status: 🔴 STOPPED
 ⚙️ Bare Metal Server:
 Server ID: 3389586
 Hostname: dal13-bm02
-FQDN: dal13-bm02.iaas.rhdp.net
+FQDN: dal13-bm02.example.com
 Datacenter: dal13
 Public IP: 169.62.251.20
 Private IP: 10.73.77.224

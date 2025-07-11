@@ -16,9 +16,15 @@ variable "guid" {
 }
 
 variable "domain" {
-  description = "Domain name for VMs"
+  description = "Domain name for IBM Cloud Classic VMs"
   type        = string
-  default     = "iaas.rhdp.net"
+  default     = "example.com"
+}
+
+variable "cluster_dns_zone" {
+  description = "DNS domain for Route53 records"
+  type        = string
+  default     = ""
 }
 
 variable "image" {
@@ -160,4 +166,45 @@ variable "instances" {
 variable "total_vm_count" {
   description = "Total number of VMs to create"
   type        = number
+}
+
+# Route53 DNS Configuration
+variable "create_dns_records" {
+  description = "Whether to create Route53 DNS records"
+  type        = bool
+  default     = false
+}
+
+variable "route53_aws_access_key_id" {
+  description = "AWS access key ID for Route53"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "route53_aws_secret_access_key" {
+  description = "AWS secret access key for Route53"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "aws_region" {
+  description = "AWS region for Route53"
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "route53_aws_zone_id" {
+  description = "Route53 hosted zone ID"
+  type        = string
+  default     = ""
+}
+
+
+
+variable "dns_ttl" {
+  description = "TTL for DNS records"
+  type        = number
+  default     = 300
 } 

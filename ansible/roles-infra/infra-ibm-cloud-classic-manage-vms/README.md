@@ -556,6 +556,7 @@ ansible/roles-infra/infra-ibm-cloud-classic-vm/
 
 - `ibm_cloud_api_key`: IBM Cloud API key
 - `output_dir`: Directory for terraform files and outputs
+- `domain`: VM domain name (no default - must be provided)
 - `instances`: List of VM configurations (each VM must have `name` and `datacenter`)
 
 ### Instance Configuration
@@ -576,7 +577,6 @@ Each instance in the `instances` list supports:
 ### Optional Variables
 - `ACTION`: provision or destroy (default: provision)
 - `region`: IBM Cloud region (default: us-south)
-- `domain`: VM domain (default: iaas.rhdp.net)
 - `private_vlan_id`: Private VLAN ID (default: auto-assigned by IBM Cloud)
 - `public_vlan_id`: Public VLAN ID (default: auto-assigned by IBM Cloud)
 - `image`: Operating system (default: REDHAT_9_64)
@@ -596,6 +596,39 @@ Each instance in the `instances` list supports:
 - `create_security_group`: Global default for creating security groups (default: true)
 - `security_group_rules`: Global default security group rules (used when not specified per instance)
 
+### DNS Configuration Variables
+
+- `create_dns_records`: Whether to create Route53 DNS records (default: false)
+- `route53_aws_access_key_id`: AWS access key ID for Route53 (required if create_dns_records is true)
+- `route53_aws_secret_access_key`: AWS secret access key for Route53 (required if create_dns_records is true)
+- `aws_region`: AWS region for Route53 (default: us-east-1)
+- `route53_aws_zone_id`: Route53 hosted zone ID (auto-discovered from cluster_dns_zone if not provided)
+- `cluster_dns_zone`: DNS domain for Route53 records (required if create_dns_records is true)
+- `dns_ttl`: TTL for DNS records in seconds (default: 300)
+
+**Auto-Discovery Feature**: The role automatically discovers the Route53 hosted zone ID for your `cluster_dns_zone` domain. The discovery process supports pagination and will retrieve all hosted zones in your account, making it suitable for accounts with many zones. If a hosted zone exists for your domain, `route53_aws_zone_id` will be set automatically. You only need to manually provide `route53_aws_zone_id` if auto-discovery fails or you want to use a different zone.
+
+### Terraform Logging Configuration Variables
+
+- `terraform_enable_logging`: Enable comprehensive Terraform logging (default: true)
+- `terraform_log_level`: Terraform log level (default: "INFO", options: TRACE, DEBUG, INFO, WARN, ERROR)
+
+**Terraform Logging Features**:
+- **Comprehensive Logging**: Captures all Terraform operations (init, plan, apply, destroy) with timestamps
+- **Structured Logs**: Individual log files for each operation plus master log combining all operations
+- **Configurable Verbosity**: Adjust log level from ERROR (minimal) to TRACE (maximum detail)
+- **Centralized Storage**: All logs stored in `{{ output_dir }}/terraform-logs/` directory
+- **Easy Monitoring**: Use `tail -f {{ output_dir }}/terraform-logs/terraform-master-*.log` to monitor progress
+
+**Log Files Created**:
+- `terraform-master-TIMESTAMP.log`: Combined log with all operations
+- `terraform-init-TIMESTAMP.log`: Terraform initialization
+- `terraform-plan-TIMESTAMP.log`: Terraform planning
+- `terraform-apply-TIMESTAMP.log`: Terraform application
+- `terraform-state-TIMESTAMP.log`: State checking
+- `terraform-verify-TIMESTAMP.log`: Deployment verification
+- `terraform-destroy-*-TIMESTAMP.log`: Destroy operations (when applicable)
+
 ## Outputs
 
 After successful deployment, the role provides:
@@ -603,6 +636,7 @@ After successful deployment, the role provides:
 - Ansible inventory groups
 - SSH connection details
 - VM information saved to `vm_info.json`
+- DNS records (if DNS is enabled)
 
 ## Error Handling
 
@@ -629,6 +663,83 @@ The role includes comprehensive error handling:
         tags:
           - "agnosticd"
           - "web-server"
+```
+
+### VM Deployment with DNS Records (Auto-Discovery)
+```yaml
+- name: Deploy IBM Cloud Classic VMs with Route53 DNS
+  include_role:
+    name: infra-ibm-cloud-classic-vm
+  vars:
+    ACTION: provision
+    ibm_cloud_api_key: "{{ vault_ibm_cloud_api_key }}"
+    output_dir: "/tmp"
+    create_dns_records: true
+    route53_aws_access_key_id: "{{ vault_aws_access_key_id }}"
+    route53_aws_secret_access_key: "{{ vault_aws_secret_access_key }}"
+    cluster_dns_zone: "example.com"  # Zone ID auto-discovered
+    dns_ttl: 300
+    instances:
+      - name: "web-server"
+        datacenter: "dal13"
+        tags:
+          - "agnosticd"
+          - "web-server"
+```
+
+### VM Deployment with Enhanced Terraform Logging
+```yaml
+- name: Deploy IBM Cloud Classic VMs with detailed logging
+  include_role:
+    name: infra-ibm-cloud-classic-vm
+  vars:
+    ACTION: provision
+    ibm_cloud_api_key: "{{ vault_ibm_cloud_api_key }}"
+    output_dir: "/tmp"
+    # Enhanced logging configuration
+    terraform_enable_logging: true
+    terraform_log_level: "DEBUG"  # More verbose logging
+    instances:
+      - name: "debug-server"
+        datacenter: "dal13"
+        tags:
+          - "agnosticd"
+          - "debug-server"
+```
+
+### VM Deployment with Minimal Logging
+```yaml
+- name: Deploy IBM Cloud Classic VMs with minimal logging
+  include_role:
+    name: infra-ibm-cloud-classic-vm
+  vars:
+    ACTION: provision
+    ibm_cloud_api_key: "{{ vault_ibm_cloud_api_key }}"
+    output_dir: "/tmp"
+    # Minimal logging configuration
+    terraform_enable_logging: true
+    terraform_log_level: "ERROR"  # Only log errors
+    instances:
+      - name: "prod-server"
+        datacenter: "dal13"
+        tags:
+          - "agnosticd"
+          - "production"
+```
+
+### Monitoring Terraform Progress
+```bash
+# Monitor live progress during deployment
+tail -f /tmp/terraform-logs/terraform-master-*.log
+
+# Check specific operation logs
+tail -f /tmp/terraform-logs/terraform-apply-*.log
+
+# View all terraform logs
+ls -la /tmp/terraform-logs/
+
+# Search for errors in logs
+grep -i "error" /tmp/terraform-logs/terraform-master-*.log
 ```
 
 ### Multi-VM Deployment with Multiple Security Groups

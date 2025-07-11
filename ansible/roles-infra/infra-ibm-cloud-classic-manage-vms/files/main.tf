@@ -145,8 +145,32 @@ locals {
   vm_tags = [for vm in local.vm_list : vm.tags]
 }
 
+# AWS Provider for Route53
+provider "aws" {
+  access_key = var.route53_aws_access_key_id
+  secret_key = var.route53_aws_secret_access_key
+  region     = var.aws_region
+  
+  # Only configure if we're creating DNS records
+  skip_credentials_validation = !var.create_dns_records
+  skip_metadata_api_check     = !var.create_dns_records
+  skip_region_validation      = !var.create_dns_records
+}
 
+# Local values for DNS
+locals {
+  dns_domain = var.cluster_dns_zone != "" ? var.cluster_dns_zone : var.domain
+}
 
-
-
- 
+# Route53 A records for public IPs
+resource "aws_route53_record" "vm_public" {
+  count = var.create_dns_records && !var.private_network_only ? length(ibm_compute_vm_instance.vm) : 0
+  
+  zone_id = var.route53_aws_zone_id
+  name    = "${ibm_compute_vm_instance.vm[count.index].hostname}.${local.dns_domain}"
+  type    = "A"
+  ttl     = var.dns_ttl
+  records = [ibm_compute_vm_instance.vm[count.index].ipv4_address]
+  
+  depends_on = [ibm_compute_vm_instance.vm]
+}
