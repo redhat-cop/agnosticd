@@ -1,6 +1,6 @@
 # IBM Cloud Classic VM Infrastructure Role
 
-This AgnosticD infrastructure role deploys and manages multiple Virtual Machines (VMs) in IBM Cloud Classic infrastructure using Terraform templates.
+This AgnosticD infrastructure role manages multiple Virtual Machines (VMs) in IBM Cloud Classic infrastructure using Terraform templates.
 
 ## Features
 
@@ -401,11 +401,11 @@ ansible-playbook playbook.yml -e ACTION=provision \
 
 ```bash
 ansible-playbook playbook.yml -e ACTION=destroy \
-  -e terraform_working_dir=/tmp/terraform-ibm-vm-TIMESTAMP
+  -e terraform_working_dir=/tmp/terraform-ibm-vm-guid
 # Or use custom output directory
 ansible-playbook playbook.yml -e ACTION=destroy \
   -e output_dir=/custom/path \
-  -e terraform_working_dir=/custom/path/terraform-ibm-vm-TIMESTAMP
+  -e terraform_working_dir=/custom/path/terraform-ibm-vm-guid
 ```
 
 ## Default Configuration

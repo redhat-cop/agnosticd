@@ -1,12 +1,21 @@
 # infra-ibm-cloud-classic-bm-info
 
-This role retrieves information about IBM Cloud Classic bare metal servers including IP addresses, VLAN information, MAC addresses, and remote management details.
+This role handles IBM Cloud CLI setup and retrieves information about IBM Cloud Classic bare metal servers including IP addresses, VLAN information, MAC addresses, and remote management details.
+
+## Features
+
+- **IBM Cloud CLI Setup**: Automatically installs IBM Cloud CLI if not present
+- **Authentication**: Logs in to IBM Cloud using the provided API key
+- **Plugin Management**: Installs required SoftLayer plugins
+- **Server Information**: Retrieves comprehensive bare metal server details
+- **Validation**: Ensures all required information is available
 
 ## Requirements
 
-- IBM Cloud CLI installed (role will install it if not present)
 - Valid IBM Cloud API key with Classic Infrastructure permissions
 - Server ID for the bare metal server to query
+- Internet access for CLI installation (if needed)
+- sudo privileges for CLI installation (if needed)
 
 ## Role Variables
 
@@ -23,6 +32,18 @@ This role retrieves information about IBM Cloud Classic bare metal servers inclu
 ## Dependencies
 
 None
+
+## IBM Cloud CLI Setup Process
+
+The role automatically handles IBM Cloud CLI setup in the following steps:
+
+1. **Installation Check**: Verifies if IBM Cloud CLI is installed
+2. **CLI Installation**: Downloads and installs IBM Cloud CLI if not present
+3. **Authentication**: Logs in to IBM Cloud using the provided API key
+4. **Plugin Installation**: Installs required SoftLayer plugins (`infrastructure-service` and `sl`)
+5. **Validation**: Verifies that all components are working correctly
+
+The role will fail with detailed error messages if any step fails, providing guidance for manual troubleshooting.
 
 ## Example Playbook
 
