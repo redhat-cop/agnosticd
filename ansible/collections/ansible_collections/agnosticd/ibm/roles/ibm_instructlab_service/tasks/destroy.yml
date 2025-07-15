@@ -1,0 +1,115 @@
+---
+- name: Starting IBM InstructLab Service destruction
+  ansible.builtin.debug:
+    msg: "Destroying IBM InstructLab Service in {{ ibmcloud_region }} (GUID: {{ guid }})"
+
+- name: Set up environment variables safely
+  ansible.builtin.set_fact:
+    user_home: "{{ ansible_env.HOME | default(lookup('env', 'HOME')) }}"
+    user_path: "{{ ansible_env.PATH | default(lookup('env', 'PATH')) }}"
+
+- name: Ensure Terraform is available
+  block:
+    - name: Check if Terraform is installed
+      ansible.builtin.command: terraform version
+      register: terraform_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install Terraform if needed  
+      when: terraform_check.rc != 0
+      block:
+        - name: Create local bin directory for Terraform
+          ansible.builtin.file:
+            path: "{{ user_home }}/.local/bin"
+            state: directory
+            mode: '0755'
+
+        - name: Download Terraform
+          ansible.builtin.get_url:
+            url: "https://releases.hashicorp.com/terraform/{{ ibmcloud_terraform_version }}/terraform_{{ ibmcloud_terraform_version }}_linux_amd64.zip"
+            dest: "/tmp/terraform.zip"
+            mode: '0644'
+
+        - name: Check if unzip is available
+          ansible.builtin.command: which unzip
+          register: unzip_check
+          failed_when: false
+          changed_when: false
+
+        - name: Install unzip if available and needed
+          ansible.builtin.package:
+            name: unzip
+            state: present
+          become: false
+          when: unzip_check.rc != 0
+          ignore_errors: true
+
+        - name: Extract Terraform to user local bin
+          ansible.builtin.unarchive:
+            src: "/tmp/terraform.zip"
+            dest: "{{ user_home }}/.local/bin"
+            remote_src: true
+            mode: '0755'
+
+        - name: Add local bin to PATH for this session
+          ansible.builtin.set_fact:
+            user_path: "{{ user_home }}/.local/bin:{{ user_path }}"
+
+- name: Check if Terraform state exists
+  ansible.builtin.stat:
+    path: "{{ output_dir }}/terraform.tfstate"
+  register: terraform_state_check
+
+- name: Run Terraform destroy if state exists
+  when: terraform_state_check.stat.exists
+  block:
+
+    - name: Execute Terraform destroy
+      community.general.terraform:
+        project_path: "{{ output_dir }}"
+        state: absent
+        force_init: true
+        variables:
+          ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+          ibm_region_location: "{{ ibmcloud_region }}"
+          requester_email: "{{ requester_email }}"
+          ibm_realm_name: "{{ ibm_realm_name }}"
+          guid: "{{ guid }}"
+      environment:
+        PATH: "{{ user_path }}"
+        TF_LOG: "DEBUG"
+        TF_LOG_PATH: "{{ output_dir }}/terraform_destroy.log"
+      register: r_terraform_destroy
+      retries: 2
+      delay: 30
+      until: r_terraform_destroy is succeeded
+
+    - name: IBM InstructLab Service destruction completed
+      ansible.builtin.debug:
+        msg: "IBM InstructLab Service destroyed successfully (GUID: {{ guid }}, Region: {{ ibmcloud_region }})"
+
+    - name: Clean up local Terraform files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ output_dir }}/main.tf"
+        - "{{ output_dir }}/terraform.tfstate"
+        - "{{ output_dir }}/terraform.tfstate.backup"
+        - "{{ output_dir }}/.terraform"
+      ignore_errors: true
+
+  rescue:
+    - name: Handle destroy failure
+      ansible.builtin.debug:
+        msg: "IBM InstructLab Service destruction failed: {{ r_terraform_destroy.msg | default('Unknown error') }}. Manual cleanup may be required."
+
+    - name: Continue with warning (don't fail)
+      ansible.builtin.debug:
+        msg: "Destruction completed with warnings. Manual verification recommended."
+
+- name: Handle case when no Terraform state exists
+  when: not terraform_state_check.stat.exists
+  ansible.builtin.debug:
+    msg: "No Terraform state file found. Resources may already be destroyed or deployed elsewhere." 
