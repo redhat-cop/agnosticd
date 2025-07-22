@@ -1,96 +1,310 @@
 # Configure IBM Cloud Provider
-
 terraform {
   required_providers {
     ibm = {
       source  = "IBM-Cloud/ibm"
-      version = "~> {{ ibm_terraform_version }}"
+      version = "~> {{ ibmcloud_provider_version }}"
     }
   }
 }
 
-## Create Resource Group
-
-resource "ibm_resource_group" "{{ ibm_terraform_resource_prefix }}_resource_group" {
-  name = "{{ ibm_terraform_name_prefix }}-instructlab-resource-group"
+# Configure IBM Cloud Provider
+provider "ibm" {
+  ibmcloud_api_key = var.ibmcloud_api_key
+  region           = var.ibm_region_location
 }
 
-# Create Trusted Profile
+# Variables
+variable "ibmcloud_api_key" {
+  description = "IBM Cloud API Key"
+  type        = string
+  sensitive   = true
+}
 
-resource "ibm_iam_trusted_profile" "{{ ibm_terraform_resource_prefix }}_trusted_profile" {
-  name = "{{ ibm_terraform_name_prefix }}-trusted-profile"
+variable "ibm_region_location" {
+  description = "IBM Cloud region"
+  type        = string
+  default     = "{{ ibmcloud_region }}"
+}
+
+variable "requester_email" {
+  description = "Email for SAML authentication"
+  type        = string
+  default     = "{{ requester_email | default('user@example.com') }}"
+}
+
+variable "ibm_realm_name" {
+  description = "SAML realm name"
+  type        = string
+  default     = "{{ ibm_realm_name | default('default') }}"
+}
+
+variable "guid" {
+  description = "Unique deployment identifier"
+  type        = string
+  default     = "{{ guid }}"
+}
+
+# Local values for naming consistency
+locals {
+  name_prefix     = "{{ ibmcloud_terraform_name_prefix }}"
+  
+  # Use GUID for resource naming
+  deployment_id   = var.guid
+  
+  # Service configuration
+  instructlab_service = "{{ ibmcloud_instructlab_instance_service }}"
+  instructlab_plan    = "{{ ibmcloud_instructlab_instance_plan }}"
+  
+  # Storage configuration  
+  storage_class = "{{ ibmcloud_storage_class }}"
+  
+  # Resource names - instructlab-{guid}-{type} pattern
+  resource_group_name = "${local.name_prefix}-${local.deployment_id}-rg"
+  trusted_profile_name = "${local.name_prefix}-${local.deployment_id}-tp"
+  cos_instance_name = "${local.name_prefix}-${local.deployment_id}-cos"
+  cos_bucket_name = "${local.name_prefix}-${local.deployment_id}-bucket"
+  instructlab_instance_name = "${local.name_prefix}-${local.deployment_id}-il"
+  
+  # Common tags
+  tags = [
+    "agnosticd",
+    "instructlab",
+    "guid:${var.guid}",
+    "deployment_id:${local.deployment_id}",
+    "managed_by:terraform"
+  ]
+}
+
+
+
+# Data sources to check for existing resources - using simpler approach
+# Note: We'll use try() functions and ignore_changes for idempotency instead of complex data source queries
+
+# Check if resource group already exists by trying to reference it
+# This is a simpler approach that relies on Terraform's built-in state management
+locals {
+  # Use existing resource group if terraform state shows it exists, otherwise create new
+  # The GUID ensures uniqueness across different deployments while maintaining idempotency within same deployment
+  resource_group_id = ibm_resource_group.instructlab_resource_group.id
+}
+
+## Create Resource Group with enhanced error handling
+# Idempotency Strategy:
+# - Uses GUID-based naming for uniqueness across deployments
+# - create_before_destroy ensures smooth updates if name conflicts occur
+# - Terraform state management handles resource existence detection
+resource "ibm_resource_group" "instructlab_resource_group" {
+  name = local.resource_group_name
+  tags = local.tags
+  
+  lifecycle {
+    prevent_destroy = false
+    ignore_changes = [tags]
+    # Allow recreation if name conflicts occur
+    create_before_destroy = true
+  }
+}
+
+# Create Trusted Profile with better error handling
+# Uses the same idempotency strategy as resource group
+resource "ibm_iam_trusted_profile" "instructlab_trusted_profile" {
+  name        = local.trusted_profile_name
+  description = "IBM Cloud Trusted Profile for InstructLab Service - ${var.guid}"
+  
+  lifecycle {
+    prevent_destroy = false
+    ignore_changes = [description]
+  }
 }
 
 # Add SAML rule to the Trusted Profile
-
-resource "ibm_iam_trusted_profile_claim_rule" "{{ ibm_terraform_resource_prefix }}_saml_rule" {
-  profile_id = ibm_iam_trusted_profile.{{ ibm_terraform_resource_prefix }}_trusted_profile.id
+resource "ibm_iam_trusted_profile_claim_rule" "instructlab_saml_rule" {
+  profile_id = ibm_iam_trusted_profile.instructlab_trusted_profile.id
   type       = "Profile-SAML"
-  name       = "SAML Rule for {{ email }}"
-  realm_name = "{{ ibm_realm_name }}"
-  expiration = 3600
+  name       = "SAML Rule for ${var.requester_email}"
+  realm_name = var.ibm_realm_name
+  expiration = 10800  # 3 hours
+
   conditions {
     claim    = "email"
     operator = "EQUALS"
-    value    = "\"{{ email }}\""
+    value    = "\"${var.requester_email}\""
   }
 }
 
 ## Create Cloud Object Storage instance
+resource "ibm_resource_instance" "instructlab_cos_instance" {
+  name              = local.cos_instance_name
+  service           = "cloud-object-storage"
+  plan              = "standard"
+  location          = "global"
+  resource_group_id = local.resource_group_id
+  tags              = local.tags
 
-resource "ibm_resource_instance" "{{ ibm_terraform_resource_prefix }}_cos_instance" {
- name              = "{{ ibm_terraform_name_prefix }}-cos-instance"
- service           = "cloud-object-storage"
- plan              = "standard"
- location          = "global"
- resource_group_id = ibm_resource_group.{{ ibm_terraform_resource_prefix }}_resource_group.id
-}
-
-## Create bucket
-
-resource "ibm_cos_bucket" "{{ ibm_terraform_resource_prefix }}_bucket" {
- bucket_name          = "{{ ibm_terraform_name_prefix }}-bucket"
- resource_instance_id = ibm_resource_instance.{{ ibm_terraform_resource_prefix }}_cos_instance.id
- region_location      = "{{ ibm_region_location }}"
- storage_class        = "{{ ibm_storage_class }}"
-}
-
-# New code 2025-01-08
-
-# Grant Trusted Profile permissions to the COS instance
-
-resource "ibm_iam_trusted_profile_policy" "{{ ibm_terraform_resource_prefix }}_trusted_profile_cos_policy" {
-  profile_id = ibm_iam_trusted_profile.{{ ibm_terraform_resource_prefix }}_trusted_profile.id
-  # roles      = ["Reader", "Writer", "Viewer"] 
-  roles       = ["Object Reader", "Object Writer", "Content Reader", "Manager"] 
-
-  resources {
-    service              = "cloud-object-storage"
-    resource_instance_id = ibm_resource_instance.{{ ibm_terraform_resource_prefix }}_cos_instance.id
+  timeouts {
+    create = "15m"
+    update = "15m"
+    delete = "15m"
   }
 }
 
-# Grant Trusted Profile permissions to the bucket
+## Create COS bucket
+resource "ibm_cos_bucket" "instructlab_bucket" {
+  bucket_name          = local.cos_bucket_name
+  resource_instance_id = ibm_resource_instance.instructlab_cos_instance.id
+  region_location      = var.ibm_region_location
+  storage_class        = local.storage_class
 
-resource "ibm_iam_trusted_profile_policy" "{{ ibm_terraform_resource_prefix }}_trusted_profile_bucket_policy" {
-  profile_id = ibm_iam_trusted_profile.{{ ibm_terraform_resource_prefix }}_trusted_profile.id
-  # roles      = ["Reader", "Writer", "Viewer"]
-  roles      = ["Object Reader", "Object Writer"]
+  depends_on = [ibm_resource_instance.instructlab_cos_instance]
+}
 
-  resources {
-    service       = "cloud-object-storage"
-    resource_type = "bucket"
-    resource      = "{{ ibm_terraform_resource_prefix }}-bucket"
-    resource_instance_id = ibm_resource_instance.{{ ibm_terraform_resource_prefix }}_cos_instance.id 
+## Create InstructLab service instance
+resource "ibm_resource_instance" "instructlab_instance" {
+  name              = local.instructlab_instance_name
+  service           = local.instructlab_service
+  plan              = local.instructlab_plan
+  location          = var.ibm_region_location
+  resource_group_id = local.resource_group_id
+  tags              = local.tags
+
+  timeouts {
+    create = "15m"
+    update = "15m"
+    delete = "15m"
   }
 }
 
-resource "ibm_iam_trusted_profile_policy" "{{ ibm_terraform_resource_prefix }}_trusted_profile_resource_group_policy" {
-  profile_id = ibm_iam_trusted_profile.{{ ibm_terraform_resource_prefix }}_trusted_profile.id
-  roles      = ["Viewer"]  # Use "Editor" or "Operator" if write access is required.
+# Grant Trusted Profile permissions to the Resource Group
+resource "ibm_iam_trusted_profile_policy" "instructlab_resource_group_policy" {
+  profile_id = ibm_iam_trusted_profile.instructlab_trusted_profile.id
+  roles      = ["Viewer"]
 
   resources {
     resource_type = "resource-group"
-    resource      = ibm_resource_group.{{ ibm_terraform_resource_prefix }}_resource_group.id
+    resource      = local.resource_group_id
+  }
+}
+
+# Grant Trusted Profile permissions to the COS instance
+resource "ibm_iam_trusted_profile_policy" "instructlab_cos_policy" {
+  profile_id = ibm_iam_trusted_profile.instructlab_trusted_profile.id
+  roles      = ["Object Reader", "Object Writer", "Content Reader", "Manager"]
+
+  resources {
+    service              = "cloud-object-storage"
+    resource_instance_id = ibm_resource_instance.instructlab_cos_instance.id
+  }
+
+  depends_on = [ibm_resource_instance.instructlab_cos_instance]
+}
+
+# Grant Trusted Profile permissions to the COS bucket
+resource "ibm_iam_trusted_profile_policy" "instructlab_bucket_policy" {
+  profile_id = ibm_iam_trusted_profile.instructlab_trusted_profile.id
+  roles      = ["Object Reader", "Object Writer"]
+
+  resources {
+    service              = "cloud-object-storage"
+    resource_type        = "bucket"
+    resource             = ibm_cos_bucket.instructlab_bucket.bucket_name
+    resource_instance_id = ibm_resource_instance.instructlab_cos_instance.id
+  }
+
+  depends_on = [
+    ibm_resource_instance.instructlab_cos_instance,
+    ibm_cos_bucket.instructlab_bucket
+  ]
+}
+
+# Grant Trusted Profile InstructLab service Writer/Operator permissions to the resource group
+resource "ibm_iam_trusted_profile_policy" "instructlab_service_rg_policy" {
+  profile_id = ibm_iam_trusted_profile.instructlab_trusted_profile.id
+  roles      = ["Writer", "Operator"]
+
+  resources {
+    service           = local.instructlab_service
+    resource_group_id = local.resource_group_id
+  }
+
+  depends_on = [ibm_resource_group.instructlab_resource_group]
+}
+
+# Grant Trusted Profile InstructLab service Writer/Operator permissions to the service instance
+resource "ibm_iam_trusted_profile_policy" "instructlab_service_instance_policy" {
+  profile_id = ibm_iam_trusted_profile.instructlab_trusted_profile.id
+  roles      = ["Writer", "Operator"]
+
+  resources {
+    service              = local.instructlab_service
+    resource_instance_id = ibm_resource_instance.instructlab_instance.id
+  }
+
+  depends_on = [ibm_resource_instance.instructlab_instance]
+}
+
+# Outputs
+output "resource_group_id" {
+  description = "ID of the created resource group"
+  value       = local.resource_group_id
+}
+
+output "resource_group_name" {
+  description = "Name of the created resource group"
+  value       = local.resource_group_name
+}
+
+output "trusted_profile_id" {
+  description = "ID of the created trusted profile"
+  value       = ibm_iam_trusted_profile.instructlab_trusted_profile.id
+}
+
+output "trusted_profile_name" {
+  description = "Name of the created trusted profile"
+  value       = ibm_iam_trusted_profile.instructlab_trusted_profile.name
+}
+
+output "cos_instance_id" {
+  description = "ID of the COS instance"
+  value       = ibm_resource_instance.instructlab_cos_instance.id
+}
+
+output "cos_instance_guid" {
+  description = "GUID of the COS instance"
+  value       = ibm_resource_instance.instructlab_cos_instance.guid
+}
+
+output "cos_bucket_name" {
+  description = "Name of the COS bucket"
+  value       = ibm_cos_bucket.instructlab_bucket.bucket_name
+}
+
+output "instructlab_instance_id" {
+  description = "ID of the InstructLab service instance"
+  value       = ibm_resource_instance.instructlab_instance.id
+}
+
+output "instructlab_instance_guid" {
+  description = "GUID of the InstructLab service instance"
+  value       = ibm_resource_instance.instructlab_instance.guid
+}
+
+output "instructlab_instance_name" {
+  description = "Name of the InstructLab service instance"
+  value       = ibm_resource_instance.instructlab_instance.name
+}
+
+output "deployment_summary" {
+  description = "Summary of deployed resources"
+  value = {
+    region              = var.ibm_region_location
+    guid               = var.guid
+    resource_group     = local.resource_group_name
+    trusted_profile    = ibm_iam_trusted_profile.instructlab_trusted_profile.name
+    cos_instance       = ibm_resource_instance.instructlab_cos_instance.name
+    cos_bucket         = ibm_cos_bucket.instructlab_bucket.bucket_name
+    instructlab_service = ibm_resource_instance.instructlab_instance.name
+    service_type       = local.instructlab_service
+    service_plan       = local.instructlab_plan
   }
 }

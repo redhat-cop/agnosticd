@@ -65,31 +65,34 @@
   ansible.builtin.shell:
     cmd: restorecon /var/lib/libvirt
 
-#- name: Ensure lab dependencies are installed
-#  ansible.builtin.dnf:
-#    name:
-#      - libvirt
-#      - libvirt-daemon-driver-qemu
-#      - qemu-kvm
-#      - git
-#      - dnsmasq
-#      - policycoreutils-python-utils
-#      - podman
-#      - httpd-tools
-#      - haproxy
-#      - pip
-#      - firewalld
-#      - nmstate
-#    state: present
+- name: Ensure lab dependencies are installed
+  ansible.builtin.dnf:
+    name:
+      - libvirt
+      - libvirt-daemon-driver-qemu
+      - qemu-kvm
+      - git
+      - dnsmasq
+      - policycoreutils-python-utils
+      - podman
+      - httpd-tools
+      - haproxy
+      - pip
+      - firewalld
+      - nmstate
+    state: present
+  when: install_lab_dependencies
 
-#- name: Ensure required Python modules are installed
-#  ansible.builtin.pip:
-#    name: kubernetes, passlib, pyopenssl, cherrypy, firewall, minio
+- name: Ensure required Python modules are installed
+  ansible.builtin.pip:
+    name: kubernetes, passlib, pyopenssl, cherrypy, firewall, minio
+  when: install_lab_dependencies
 
-#- name: Ensure kcli rpm is installed
-#  ansible.builtin.dnf:
-#    name: "{{ kcli_rpm }}"
-#    disable_gpg_check: true
+- name: Ensure kcli rpm is installed
+  ansible.builtin.dnf:
+    name: "{{ kcli_rpm }}"
+    disable_gpg_check: true
+  when: install_lab_dependencies
 
 - name: Ensure libvirtd service is enabled and running
   ansible.builtin.systemd:
@@ -114,6 +117,10 @@
   ansible.builtin.command:
     cmd: "kcli create network -c {{ lab_sriov_cidr }} -P dhcp=false -P dns=false --domain {{ lab_sriov_domain }} -i sriov-network"
 
+- name: Ensure ptp-network is present
+  ansible.builtin.command:
+    cmd: "kcli create network -c {{ lab_ptp_cidr }} -P dhcp=false -P dns=false --domain {{ lab_ptp_domain }} -i ptp-network"
+
 - name: Ensure oc/kubectl tooling is present
   ansible.builtin.command:
     cmd: "kcli download {{ item.binary }} -P version={{ item.version }} -P tag='{{ item.tag }}'"
@@ -121,7 +128,8 @@
     - {binary: "oc", version: "stable", tag: "{{ ocp4_major_release }}"}
     - {binary: "kubectl", version: "latest", tag: "{{ ocp4_major_release }}"}
     - {binary: "openshift-installer", version: "stable", tag: "{{ ocp4_minor_release }}"}
-#    - {binary: "oc-mirror", version: "stable", tag: "{{ ocp4_major_release }}"}
+    - {binary: "oc-mirror", version: "stable", tag: "{{ ocp4_major_release }}"}
+
 - name: Ensure oc/kubectl are in the PATH
   ansible.builtin.copy:
     src: "{{ item }}"
@@ -132,7 +140,7 @@
     - oc
     - kubectl
     - openshift-install
-#    - oc-mirror
+    - oc-mirror
 
 - name: Ensure DNSMasq folder exists
   ansible.builtin.file:
@@ -223,6 +231,8 @@
     # yamllint enable rule:line-length
     dest: "/etc/systemd/system/podman-webcache.service"
     mode: "0644"
+  retries: 5
+  delay: 10
 
 - name: Ensure webcache folder exist
   ansible.builtin.file:
@@ -237,17 +247,18 @@
     enabled: true
     name: podman-webcache
 
-#- name: Download live and rootfs images
-#  ansible.builtin.get_url:
-#    url: "{{ item }}"
-#    dest: "/opt/webcache/data/"
-#    mode: "0644"
-#  with_items:
-#    - "{{ rhcos_live_image_url }}"
-#    - "{{ rhcos_rootfs_image_url }}"
-#  poll: 0
-#  async: 900
-#  register: download_rhcos
+- name: Download live and rootfs images
+  ansible.builtin.get_url:
+    url: "{{ item }}"
+    dest: "/opt/webcache/data/"
+    mode: "0644"
+  with_items:
+    - "{{ rhcos_live_image_url }}"
+    - "{{ rhcos_rootfs_image_url }}"
+  poll: 0
+  async: 900
+  register: download_rhcos
+  when: download_rhcos_isos
 
 - name: Ensure ksushy is installed
   ansible.builtin.command:
@@ -315,6 +326,8 @@
     # yamllint enable rule:line-length
     dest: "/etc/systemd/system/podman-minio.service"
     mode: "0644"
+  retries: 5
+  delay: 10
 
 - name: Ensure s3 folder exist
   ansible.builtin.file:
@@ -346,16 +359,17 @@
   until: result.rc == 0 or 'Added `minio` successfully.' in result.stdout
   failed_when: result.rc != 0 and 'Added `minio` successfully.' not in result.stdout
 
-- name: Create backup bucket
+- name: Create backup/logging buckets
   block:
-    - name: Check if backup bucket exists
+    - name: Check if logging/backup buckets exists
       ansible.builtin.shell:
         cmd: "mc stat minio/{{ item.name }}"
       with_items:
         - {name: "sno-abi"}
         - {name: "sno-ibi"}
+        - {name: "logs"}
   rescue:
-    - name: Create a backup bucket
+    - name: Create a backup/logging buckets
       ansible.builtin.shell:
         cmd: "mc mb minio/{{ item.name }}"
       retries: 3
@@ -366,6 +380,7 @@
       with_items:
         - {name: "sno-abi"}
         - {name: "sno-ibi"}
+        - {name: "logs"}
 
 - name: Ensure firewalld is enabled
   ansible.builtin.systemd:
@@ -484,7 +499,7 @@
 - name: Ensure lab VMs exist
   ansible.builtin.shell:
     # yamllint disable rule:line-length
-    cmd: "kcli create vm -P start=False -P uefi_legacy=true -P plan=hub -P memory={{ item.memory }} -P numcpus={{ item.cpus }} -P disks=[{{ item.disk }},{{ item.disk }}] -P nets=['{\"name\": \"5gdeploymentlab\", \"mac\": \"{{ item.mac}}\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"0\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"1\"}'] -P uuid={{ item.uuid }} -P name={{ item.name }}"
+    cmd: "kcli create vm -P start=False -P uefi_legacy=true -P plan=hub -P memory={{ item.memory }} -P numcpus={{ item.cpus }} -P disks=[{{ item.disk }},{{ item.disk }}] -P nets=['{\"name\": \"5gdeploymentlab\", \"mac\": \"{{ item.mac}}\"}','{\"name\":\"ptp-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"0\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"1\"}'] -P uuid={{ item.uuid }} -P name={{ item.name }}"
     # yamllint enable rule:line-length
   register: result
   failed_when: result.rc != 0 and "not created because VM" not in result.stderr
@@ -759,47 +774,48 @@
     enabled: true
     name: podman-showroom-traefik
 
-#- name: Async check download live and rootfs images
-#  block:
-#    - name: Checking the async jobs
-#      ansible.builtin.async_status:
-#        jid: "{{ async_result_item.ansible_job_id }}"
-#      loop: "{{ download_rhcos.results }}"
-#      loop_control:
-#        loop_var: "async_result_item"
-#      register: job_result
-#      until: job_result.finished
-#      retries: 60
-#      delay: 10
-#  rescue:
-#    - name: Check status of {{ rhcos_live_image }}
-#      ansible.builtin.stat:
-#        path: "/opt/webcache/data/{{ rhcos_live_image }}"
-#      register: rhcos_live_image_file
-#    - name: "{{ rhcos_live_image }} was not downloaded. Re-downloading again..."
-#      ansible.builtin.get_url:
-#        url: "{{ rhcos_live_image_url }}"
-#        dest: "/opt/webcache/data/"
-#        mode: "0644"
-#      register: download_live_result
-#      until: not download_live_result.failed
-#      retries: 3
-#      delay: 10
-#      when: not rhcos_live_image_file.stat.exists
-#    - name: Check status of {{ rhcos_rootfs_image }}
-#      ansible.builtin.stat:
-#        path: "/opt/webcache/data/{{ rhcos_rootfs_image }}"
-#      register: rhcos_rootfs_image_file
-#    - name: "{{ rhcos_rootfs_image }} was not downloaded. Re-downloading again..."
-#      ansible.builtin.get_url:
-#        url: "{{ rhcos_rootfs_image_url }}"
-#        dest: "/opt/webcache/data/"
-#        mode: "0644"
-#      register: download_rootfs_result
-#      until: not download_rootfs_result.failed
-#      retries: 3
-#      delay: 10
-#      when: not rhcos_rootfs_image_file.stat.exists
+- name: Async check download live and rootfs images
+  block:
+    - name: Checking the async jobs
+      ansible.builtin.async_status:
+        jid: "{{ async_result_item.ansible_job_id }}"
+      loop: "{{ download_rhcos.results }}"
+      loop_control:
+        loop_var: "async_result_item"
+      register: job_result
+      until: job_result.finished
+      retries: 60
+      delay: 10
+  rescue:
+    - name: Check status of {{ rhcos_live_image }}
+      ansible.builtin.stat:
+        path: "/opt/webcache/data/{{ rhcos_live_image }}"
+      register: rhcos_live_image_file
+    - name: "{{ rhcos_live_image }} was not downloaded. Re-downloading again..."
+      ansible.builtin.get_url:
+        url: "{{ rhcos_live_image_url }}"
+        dest: "/opt/webcache/data/"
+        mode: "0644"
+      register: download_live_result
+      until: not download_live_result.failed
+      retries: 3
+      delay: 10
+      when: not rhcos_live_image_file.stat.exists
+    - name: Check status of {{ rhcos_rootfs_image }}
+      ansible.builtin.stat:
+        path: "/opt/webcache/data/{{ rhcos_rootfs_image }}"
+      register: rhcos_rootfs_image_file
+    - name: "{{ rhcos_rootfs_image }} was not downloaded. Re-downloading again..."
+      ansible.builtin.get_url:
+        url: "{{ rhcos_rootfs_image_url }}"
+        dest: "/opt/webcache/data/"
+        mode: "0644"
+      register: download_rootfs_result
+      until: not download_rootfs_result.failed
+      retries: 3
+      delay: 10
+      when: not rhcos_rootfs_image_file.stat.exists
+  when: download_rhcos_isos
 
 # Leave this as the last task in the playbook.
 - name: pre_workload tasks complete

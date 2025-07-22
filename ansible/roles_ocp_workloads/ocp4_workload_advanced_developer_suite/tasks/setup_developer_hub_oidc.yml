@@ -1,0 +1,152 @@
+---
+- name: Create Developer Hub client
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/trusted-artifact-signer/clients
+    method: POST
+    validate_certs: false
+    body_format: json
+    headers:
+      Authorization: Bearer {{ _keycloak_access_token }}
+    body:
+      clientId: "{{ ocp4_workload_advanced_developer_suite_dh_keycloak_client_id }}"
+      enabled: true
+      redirectUris:
+      - https://backstage-developer-hub-{{ ocp4_workload_advanced_developer_suite_dh_namespace }}.{{
+        _ocp_apps_domain }}/api/auth/oidc/handler/frame
+      protocol: openid-connect
+      publicClient: false
+      secret: "{{ ocp4_workload_advanced_developer_suite_dh_keycloak_client_secret }}"
+      serviceAccountsEnabled: true
+    status_code: 201
+
+- name: Get Developer Hub client
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/trusted-artifact-signer/clients?clientId={{
+      ocp4_workload_advanced_developer_suite_dh_keycloak_client_id }}
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ _keycloak_access_token }}
+  register: r_keycloak_dh_client
+
+- name: Get Service Account ID
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/trusted-artifact-signer/clients/{{
+      r_keycloak_dh_client.json[0].id }}/service-account-user
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ _keycloak_access_token }}
+  register: r_keycloak_dh_sa
+
+- name: Get Realm Management client
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/trusted-artifact-signer/clients?clientId=realm-management
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ _keycloak_access_token }}
+  register: r_keycloak_rm_client
+
+- name: Configure keycloak
+  ansible.builtin.include_tasks:
+    file: ./setup_developer_hub_client_realm_management_roles.yml
+  vars:
+    _dh_rm_client_id: "{{ r_keycloak_rm_client.json[0].id }}"
+    _dh_rhdh_sa_id: "{{ r_keycloak_dh_sa.json.id }}"
+  loop:
+  - view-users
+  - query-groups
+  - query-users
+  loop_control:
+    loop_var: _role
+
+- name: Set oidc metadata url
+  set_fact:
+    _dh_auth_providers_oidc_production_metadata_url: "{{ _metadata_url | b64encode }}"
+    _dh_auth_providers_oidc_production_client_id: "{{ ocp4_workload_advanced_developer_suite_dh_keycloak_client_id | b64encode }}"
+    _dh_auth_providers_oidc_production_client_secret: "{{ ocp4_workload_advanced_developer_suite_dh_keycloak_client_secret | b64encode }}"
+  vars:
+    _metadata_url: https://sso.{{ _ocp_apps_domain }}/realms/trusted-artifact-signer/.well-known/openid-configuration
+
+- name: Update developer hub env variables
+  set_fact:
+    _dh_env: >-
+      {{ _dh_env | combine(
+        {
+          'data': {
+            'AUTH_OIDC_CLIENT_ID': _dh_auth_providers_oidc_production_client_id,
+            'AUTH_OIDC_METADATA_URL': _dh_auth_providers_oidc_production_metadata_url,
+            'AUTH_OIDC_CLIENT_SECRET': _dh_auth_providers_oidc_production_client_secret
+          }
+        }, recursive=True )
+      }}
+
+- name: Update developer hub config - set session
+  set_fact:
+    _dh_app_config: >-
+      {{ _dh_app_config | combine(
+        {
+          'auth': {
+            'session': {
+              'secret': {
+                '$env': 'BACKEND_SECRET'
+              }
+            }
+          },
+          'signInPage': 'oidc'
+        }, recursive=True)
+      }}
+
+- name: Update developer hub config - remove config
+  set_fact:
+    _dh_app_config: >-
+      {{ _dh_app_config | combine(
+        {
+          'auth': _dh_app_config.auth | dict2items
+                    | rejectattr('key', 'equalto', 'providers')
+                    | list
+                    | items2dict
+        }) | dict2items
+          | rejectattr('key', 'equalto', 'dangerouslyAllowSignInWithoutUserInCatalog')
+          | list
+          | items2dict
+      }}
+
+- name: Update developer hub config - set environment
+  set_fact:
+    _dh_app_config: >-
+      {{ _dh_app_config | combine(
+        {
+          'auth': {
+            'environment': 'production'
+          }
+        }, recursive=True)
+      }}
+
+- name: Update developer hub config - set oidc provider
+  set_fact:
+    _dh_app_config: >-
+      {{ _dh_app_config | combine(
+        {
+          'auth': {
+            'providers': {
+              'oidc': {
+                'production': {
+                  'metadataUrl': '${AUTH_OIDC_METADATA_URL}',
+                  'clientId': '${AUTH_OIDC_CLIENT_ID}',
+                  'clientSecret': '${AUTH_OIDC_CLIENT_SECRET}',
+                  'prompt': 'auto',
+                  'signIn': {
+                    'resolvers': [
+                      {
+                        'resolver': 'preferredUsernameMatchingUserEntityName'
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }, recursive=True)
+      }}
