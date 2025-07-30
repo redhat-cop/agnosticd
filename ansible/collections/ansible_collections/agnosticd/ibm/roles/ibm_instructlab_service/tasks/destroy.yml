@@ -65,6 +65,75 @@
   when: terraform_state_check.stat.exists
   block:
 
+    - name: Get Terraform outputs before destruction
+      community.general.terraform:
+        project_path: "{{ output_dir }}"
+        state: present
+        force_init: true
+        variables:
+          ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+          ibm_region_location: "{{ ibmcloud_region }}"
+          requester_email: "{{ requester_email }}"
+          ibm_realm_name: "{{ ibm_realm_name }}"
+          guid: "{{ guid }}"
+      environment:
+        PATH: "{{ user_path }}"
+      register: terraform_outputs_for_cleanup
+      failed_when: false
+
+    - name: Remove authorization policy before destroying resources
+      when: terraform_outputs_for_cleanup is succeeded and terraform_outputs_for_cleanup.outputs is defined
+      block:
+        - name: Set cleanup facts from Terraform outputs
+          ansible.builtin.set_fact:
+            cleanup_instructlab_guid: "{{ terraform_outputs_for_cleanup.outputs.instructlab_instance_guid.value | default('') }}"
+            cleanup_cos_guid: "{{ terraform_outputs_for_cleanup.outputs.cos_instance_guid.value | default('') }}"
+
+        - name: Authenticate with IBM Cloud CLI for cleanup
+          ansible.builtin.shell: |
+            export IBMCLOUD_API_KEY="{{ ibmcloud_api_key }}"
+            ibmcloud login --apikey "${IBMCLOUD_API_KEY}" -r "{{ ibmcloud_region }}" --quiet
+          environment:
+            IBMCLOUD_API_KEY: "{{ ibmcloud_api_key }}"
+          register: ibmcloud_login_cleanup
+          changed_when: false
+          no_log: true
+          failed_when: false
+
+        - name: Find and delete authorization policies for this InstructLab instance
+          when: 
+            - cleanup_instructlab_guid != ''
+            - cleanup_cos_guid != ''
+            - ibmcloud_login_cleanup.rc == 0
+          block:
+            - name: Find authorization policies for InstructLab instance
+              ansible.builtin.shell: |
+                ibmcloud iam authorization-policies --output json | \
+                jq -r '.[] | select(.subjects[0].attributes[]?.value == "{{ cleanup_instructlab_guid }}" and .resources[0].attributes[]?.value == "{{ cleanup_cos_guid }}") | .id'
+              register: auth_policies_to_delete
+              failed_when: false
+              changed_when: false
+
+            - name: Delete authorization policies
+              ansible.builtin.shell: |
+                ibmcloud iam authorization-policy-delete "{{ item }}" --force
+              loop: "{{ auth_policies_to_delete.stdout_lines | default([]) }}"
+              when: 
+                - auth_policies_to_delete.rc == 0
+                - auth_policies_to_delete.stdout_lines is defined
+                - auth_policies_to_delete.stdout_lines | length > 0
+              register: auth_policy_deletion
+              failed_when: false
+
+            - name: Report authorization policy cleanup results
+              ansible.builtin.debug:
+                msg: "{{ 'Authorization policies deleted successfully' if (auth_policy_deletion.results | default([]) | selectattr('rc', 'equalto', 0) | list | length > 0) else 'No authorization policies found or deletion failed' }}"
+
+      rescue:
+        - name: Handle authorization policy cleanup failure
+          ansible.builtin.debug:
+            msg: "⚠️ WARNING: Could not clean up authorization policies automatically. Manual cleanup may be required."
+
     - name: Execute Terraform destroy
       community.general.terraform:
         project_path: "{{ output_dir }}"
