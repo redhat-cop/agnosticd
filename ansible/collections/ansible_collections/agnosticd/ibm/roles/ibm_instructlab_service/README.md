@@ -35,11 +35,12 @@ This Ansible role automates the deployment and management of IBM InstructLab ser
 | `guid` | Unique identifier for deployment | `user01` |
 | `output_dir` | Directory for terraform files and logs | `/tmp/instructlab-deploy` |
 
+**Note**: Region is automatically set to `us-east` as InstructLab service is only available in that region.
+
 ### Optional Variables (defaults/main.yml)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ibmcloud_region` | `us-east` | IBM Cloud region for deployment |
 | `ibmcloud_terraform_version` | `1.51.0` | Terraform version to install |
 | `ibmcloud_terraform_name_prefix` | `instructlab` | Prefix for resource names |
 | `ibmcloud_storage_class` | `standard` | Storage class for COS resources |
@@ -92,7 +93,6 @@ Examples:
     output_dir: "/tmp/instructlab-{{ guid }}"
     
     # Optional customizations
-    ibmcloud_region: "us-south"
     ibmcloud_terraform_name_prefix: "instructlab"
     
   tasks:
@@ -172,6 +172,12 @@ All operations generate detailed logs in the `output_dir`:
 4. **Quota Limits**
    - Review IBM Cloud account quotas
    - Contact IBM support for quota increases
+
+5. **COS Console Access Issues**
+   - If COS instances are not visible: Check resource group permissions
+   - If buckets are not visible: Verify bucket-specific policy with `resourceType: "bucket"`
+   - If console freezes: Ensure all COS policies have identical permission levels
+   - See CLAUDE.md for detailed COS permission troubleshooting
 
 ## Dependencies
 

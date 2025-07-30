@@ -19,7 +19,7 @@
 
 - name: Starting IBM InstructLab Service deployment
   ansible.builtin.debug:
-    msg: "Deploying IBM InstructLab Service: {{ ibmcloud_instructlab_instance_service }} in {{ ibmcloud_region }} (GUID: {{ guid }})"
+    msg: "Deploying IBM InstructLab Service: {{ ibmcloud_instructlab_instance_service }} in us-east (GUID: {{ guid }}) [Note: InstructLab requires us-east regardless of general region setting]"
 
 - name: Set up environment variables safely
   ansible.builtin.set_fact:
@@ -78,9 +78,8 @@
           ansible.builtin.set_fact:
             user_path: "{{ user_home }}/.local/bin:{{ user_path }}"
 
-        - name: Verify Terraform installation
+        - name: Verify Terraform installation works
           ansible.builtin.command: "{{ user_home }}/.local/bin/terraform version"
-          register: terraform_version_check
           changed_when: false
 
     - name: Ensure PATH includes local bin directory
@@ -98,31 +97,11 @@
     path: "{{ output_dir }}/terraform.tfstate"
   register: terraform_state_exists
 
-- name: Refresh Terraform state if it exists
-  when: terraform_state_exists.stat.exists
-  community.general.terraform:
-    project_path: "{{ output_dir }}"
-    state: "{{ ibm_terraform_state | default('present') }}"
-    force_init: true
-    variables:
-      ibmcloud_api_key: "{{ ibmcloud_api_key }}"
-      ibm_region_location: "{{ ibmcloud_region }}"
-      requester_email: "{{ requester_email }}"
-      ibm_realm_name: "{{ ibm_realm_name }}"
-      guid: "{{ guid }}"
-    backend_config:
-      path: "{{ output_dir }}/terraform.tfstate"
-  environment:
-    PATH: "{{ user_path }}"
-    TF_LOG: "DEBUG"
-    TF_LOG_PATH: "{{ output_dir }}/terraform_refresh.log"
-  register: r_terraform_refresh
-  failed_when: false
-  
-- name: Terraform state refresh completed
-  when: terraform_state_exists.stat.exists and r_terraform_refresh is defined
-  ansible.builtin.debug:
-    msg: "Terraform state refreshed: {{ 'Success' if not r_terraform_refresh.failed else 'Failed' }}"
+# Skip state refresh to avoid lock issues - Terraform will handle state automatically
+
+- name: Set timestamp for log files
+  ansible.builtin.set_fact:
+    terraform_log_timestamp: "{{ ansible_date_time.epoch }}"
 
 - name: Execute Terraform deployment with error handling
   block:
@@ -133,7 +112,6 @@
         force_init: true
         variables:
           ibmcloud_api_key: "{{ ibmcloud_api_key }}"
-          ibm_region_location: "{{ ibmcloud_region }}"
           requester_email: "{{ requester_email }}"
           ibm_realm_name: "{{ ibm_realm_name }}"
           guid: "{{ guid }}"
@@ -142,24 +120,13 @@
       environment:
         PATH: "{{ user_path }}"
         TF_LOG: "DEBUG"
-        TF_LOG_PATH: "{{ output_dir }}/terraform_deploy.log"
+        TF_LOG_PATH: "{{ output_dir }}/terraform_deploy_{{ terraform_log_timestamp }}.log"
       register: r_terraform_output
-      retries: 2
-      delay: 30
-      until: r_terraform_output is succeeded
 
     - name: IBM InstructLab Service deployment completed
       ansible.builtin.debug:
-        msg: "IBM InstructLab Service deployed successfully (GUID: {{ guid }}, Region: {{ ibmcloud_region }})"
+        msg: "IBM InstructLab Service deployed successfully (GUID: {{ guid }}, Region: us-east)"
 
-    - name: Set facts from Terraform outputs for compatibility
-      ansible.builtin.set_fact:
-        f_ibmcloud_resource_group_id: "{{ r_terraform_output.outputs.resource_group_id.value }}"
-        f_ibmcloud_trusted_profile_id: "{{ r_terraform_output.outputs.trusted_profile_id.value }}"
-        f_ibmcloud_cos_instance_id: "{{ r_terraform_output.outputs.cos_instance_id.value }}"
-        f_ibmcloud_instructlab_instance_id: "{{ r_terraform_output.outputs.instructlab_instance_id.value }}"
-        f_ibmcloud_instructlab_instance_guid: "{{ r_terraform_output.outputs.instructlab_instance_guid.value }}"
-        f_ibmcloud_cos_instance_guid: "{{ r_terraform_output.outputs.cos_instance_guid.value }}"
 
     - name: Authorization policy managed by Terraform
       ansible.builtin.debug:
@@ -180,16 +147,17 @@
     - name: Handle general deployment failure
       when: not (has_name_conflict | bool)
       ansible.builtin.debug:
-        msg: "IBM InstructLab Service deployment failed in {{ ibmcloud_region }}. Check terraform logs at {{ output_dir }}/terraform_deploy.log"
+        msg: "IBM InstructLab Service deployment failed in us-east. Check terraform logs at {{ output_dir }}/terraform_deploy_{{ terraform_log_timestamp }}.log"
 
     - name: Fail with structured error message
       ansible.builtin.fail:
-        msg: "IBM InstructLab Service deployment failed. {{ 'Resource naming conflict' if has_name_conflict else 'Deployment failure' }}. Logs: {{ output_dir }}/terraform_deploy.log"
+        msg: "IBM InstructLab Service deployment failed. {{ 'Resource naming conflict' if has_name_conflict else 'Deployment failure' }}. Logs: {{ output_dir }}/terraform_deploy_{{ terraform_log_timestamp }}.log"
 
 - name: Record link when actions complete
   agnosticd_user_info:
     data:
-      display_link: "{{ ibmcloud_instructlab_authorization_link }}"
+      authorization_link: "{{ ibmcloud_instructlab_authorization_link }}"
+      project_link: "{{ r_terraform_output.outputs.instructlab_direct_url.value }}"
     msg: |
       You need to authenticate first using this link {{ ibmcloud_instructlab_authorization_link }}
-      Once you are authenticated, use this link to get to your InstructLab project https://cloud.ibm.com/instructlab/projects
+      Once you are authenticated, use this direct link to access your InstructLab project: {{ r_terraform_output.outputs.instructlab_direct_url.value }}
