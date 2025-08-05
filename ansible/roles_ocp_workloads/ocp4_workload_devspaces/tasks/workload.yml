@@ -31,18 +31,18 @@
   retries: 30
   delay: 10
 
-- name: check {{ ocp4_workload_devspaces_devworkspace_devfile }}
-  kubernetes.core.k8s_exec:
-    namespace: "{{ ocp4_workload_devspaces_namespace }}"
-    pod: "{{ r_devspaces_dashboard_pod.resources[0].metadata.name }}"
-    command: curl -sf "{{ ocp4_workload_devspaces_devworkspace_devfile }}"
-  register: r_dashboard_check
-  until: r_dashboard_check.rc == 0
-  retries: 15
-  delay: 5
 - name: create devworkspace
   when: ocp4_workload_devspaces_devworkspace | bool
   block:
+    - name: check {{ ocp4_workload_devspaces_devworkspace_devfile }}
+      kubernetes.core.k8s_exec:
+        namespace: "{{ ocp4_workload_devspaces_namespace }}"
+        pod: "{{ r_devspaces_dashboard_pod.resources[0].metadata.name }}"
+        command: curl -sf "{{ ocp4_workload_devspaces_devworkspace_devfile }}"
+      register: r_dashboard_check
+      until: r_dashboard_check.rc == 0
+      retries: 15
+      delay: 5
     - name: create devworkspace
       kubernetes.core.k8s:
         state: present
@@ -50,14 +50,49 @@
       loop:
         - namespace.yml.j2
         - devworkspace.yml.j2
-    - name: check devworkspace is running
-      kubernetes.core.k8s_info:
-        api_version: workspace.devfile.io/v1alpha2
-        kind: DevWorkspace
-        name: "{{ ocp4_workload_devspaces_devworkspace_name }}"
-        namespace: "{{ ocp4_workload_devspaces_devworkspace_namespace }}"
-      register: r_devworkspace
-      failed_when: r_devworkspace.resources[0].status.phase | default('') != 'Running'
-      until: r_devworkspace is successful
-      retries: 30
-      delay: 10
+    - name: check/recover devworkspace
+      block:
+        - name: check devworkspace is running
+          kubernetes.core.k8s_info:
+            api_version: workspace.devfile.io/v1alpha2
+            kind: DevWorkspace
+            name: "{{ ocp4_workload_devspaces_devworkspace_name }}"
+            namespace: "{{ ocp4_workload_devspaces_devworkspace_namespace }}"
+          register: r_devworkspace
+          failed_when: r_devworkspace.resources[0].status.phase | default('') != 'Running'
+          until: r_devworkspace is successful
+          retries: 30
+          delay: 10
+      rescue:
+        - name: delete devworkspace (rescue)
+          kubernetes.core.k8s:
+            state: absent
+            api_version: workspace.devfile.io/v1alpha2
+            kind: DevWorkspace
+            name: "{{ ocp4_workload_devspaces_devworkspace_name }}"
+            namespace: "{{ ocp4_workload_devspaces_devworkspace_namespace }}"
+        - name: wait for devworkspace deletion (rescue)
+          kubernetes.core.k8s_info:
+            api_version: workspace.devfile.io/v1alpha2
+            kind: DevWorkspace
+            name: "{{ ocp4_workload_devspaces_devworkspace_name }}"
+            namespace: "{{ ocp4_workload_devspaces_devworkspace_namespace }}"
+          register: r_devworkspace_deletion
+          until: r_devworkspace_deletion.resources | length == 0
+          retries: 10
+          delay: 5
+        - name: recreate devworkspace (rescue)
+          kubernetes.core.k8s:
+            state: present
+            definition: "{{ lookup('template', 'devworkspace.yml.j2') | from_yaml }}"
+        - name: check devworkspace is running (rescue)
+          kubernetes.core.k8s_info:
+            api_version: workspace.devfile.io/v1alpha2
+            kind: DevWorkspace
+            name: "{{ ocp4_workload_devspaces_devworkspace_name }}"
+            namespace: "{{ ocp4_workload_devspaces_devworkspace_namespace }}"
+          register: r_devworkspace_retry
+          failed_when: r_devworkspace_retry.resources[0].status.phase | default('') != 'Running'
+          until: r_devworkspace_retry is successful
+          retries: 30
+          delay: 5
