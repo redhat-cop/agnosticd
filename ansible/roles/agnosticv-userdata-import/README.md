@@ -23,7 +23,7 @@ agnosticv_importdata:
   ssh_password: "{{ common_password }}"
   cockpit_user_password: "{{ common_password }}"
   vscode_server_password: "{{ common_password }}"
-  vscode_server_url: "https://ansible-1.{{ guid }}.sandbox2418.opentlc.com/editor/"
+  vscode_server_url: "https://ansible-1.{{ guid }}.sandbox2418.opentlc.com/login/"
   page-links:
   - url: "{{ automationcontroller_url }}"
     text: "AAP Web UI"
