@@ -66,6 +66,11 @@
   command: aws iam create-role --role-name hcp-cli-role --assume-role-policy-document file://trust-relationship.json --query "Role.Arn" --output json
   register: r_iam
 
+- name: Save role id
+  delegate_to: localhost
+  set_fact:
+    role_arn: "{{ r_iam.stdout }}"
+
 - name: Create policy file
   delegate_to: localhost
   environment:
@@ -90,7 +95,10 @@
   command: aws sts get-session-token --output json
   register: r_sts_creds
 
-- fail:
+- name: Generate /tmp/sts-creds.json
+  copy:
+    content: "{{ r_sts_creds.stdout }}"
+    dest: /tmp/sts-creds.json
 
 ### END WAS
 - name: Log in (obtain access token)
@@ -239,6 +247,66 @@
 
     - name: Create htpasswd secret for admin and userX
       include_tasks: setup_htpasswd_authentication.yml
+
+    - name: Save the pull secret
+      template:
+        src: pullsecret.yaml
+        dest: /tmp/pull-secret.txt
+
+    - name: Get HCP CLI download URL
+      kubernetes.core.k8s_info:
+        api_version: console.openshift.io/v1
+        kind: ConsoleCLIDownload
+        name: hcp-cli-download
+      register: r_hcp_cli_download
+      retries: 20
+      delay: 10
+      until: r_hcp_cli_download.resources | length > 0
+
+    - name: Set HCP CLI download URL
+      when: r_hcp_cli_download.resources | length > 0
+      ansible.builtin.set_fact:
+        _ocp4_workload_rhacm_hcp_cli_url: >-
+          {{ r_hcp_cli_download.resources[0] | to_json | from_json
+          | json_query("spec.links[?contains(href,'/linux/amd64')].href") | first }}
+
+    - name: Download HCP CLI
+      ansible.builtin.get_url:
+        url: "{{ _ocp4_workload_rhacm_hcp_cli_url }}"
+        validate_certs: false
+        dest: /tmp/hcp.tar.gz
+        mode: "0660"
+      register: r_hcp_cli
+      until: r_hcp_cli is success
+      retries: 10
+      delay: 10
+
+    - name: Install HCP CLI on bastion
+      become: true
+      ansible.builtin.unarchive:
+        src: /tmp/hcp.tar.gz
+        remote_src: true
+        dest: /usr/bin
+        mode: "0775"
+        owner: root
+        group: root
+      args:
+        creates: /usr/bin/hcp
+
+    - name: Remove downloaded file
+      ansible.builtin.file:
+        state: absent
+        path: /tmp/hcp.tar.gz
+
+    - name: Setup HCP CLI bash completion
+      become: true
+      ansible.builtin.shell: "/usr/bin/hcp completion bash >/etc/bash_completion.d/hcp"
+      args:
+        creates: /etc/bash_completion.d/hcp
+
+    - name: Create cluster
+      command: hcp create cluster aws --name {{ guid }} --infra-id {{ guid }} --base-domain {{ aws_sandbox_provision_data.aws_route53_domain[1:] }} --sts-creds /tmp/sts-creds.json --pull-secret /tmp/pull-secret.txt --region {{ aws_sandox_provision_data.aws_default_region }} --generate-ssh --node-pool-replicas 3 --namespace {{ sandbox_hcp.sandbox_openshift_namespace }} --role-arn  {{ hostvars.localhost.role_arn }} --etcd-storage-class ocs-external-storagecluster-ceph-rbd
+    - fail:
 
     - name: Create the HostedCluster
       kubernetes.core.k8s:
