@@ -1,0 +1,112 @@
+---
+# Network SSH Configuration Role for Cisco/Network Devices
+# This role configures SSH client settings for network device connectivity
+
+- name: Create SSH config directory for student user
+  ansible.builtin.file:
+    path: "/home/{{ student_name }}/.ssh"
+    state: directory
+    owner: "{{ student_name }}"
+    group: "{{ student_name }}"
+    mode: '0700'
+
+- name: Configure SSH client for network devices
+  ansible.builtin.blockinfile:
+    path: "/home/{{ student_name }}/.ssh/config"
+    create: yes
+    owner: "{{ student_name }}"
+    group: "{{ student_name }}"
+    mode: '0600'
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - Network Devices"
+    block: |
+      # Configuration for Cisco and other network devices
+      Host cisco-rtr* *.internal
+          HostKeyAlgorithms +ssh-rsa
+          PubkeyAcceptedKeyTypes +ssh-rsa
+          KexAlgorithms +diffie-hellman-group14-sha1,diffie-hellman-group1-sha1
+          Ciphers +aes128-cbc,aes192-cbc,aes256-cbc
+          User {{ student_name }}
+          IdentityFile ~/.ssh/{{ env_authorized_key }}.pem
+          StrictHostKeyChecking no
+          UserKnownHostsFile /dev/null
+          ConnectTimeout 30
+          ServerAliveInterval 30
+          LogLevel ERROR
+
+- name: Install required network automation collections
+  ansible.builtin.command:
+    cmd: ansible-galaxy collection install {{ item }} --force
+  loop:
+    - ansible.netcommon
+    - cisco.ios
+  become: yes
+  become_user: "{{ student_name }}"
+  environment:
+    HOME: "/home/{{ student_name }}"
+  ignore_errors: yes
+
+- name: Create network devices inventory for testing
+  ansible.builtin.template:
+    src: network_inventory.j2
+    dest: "/home/{{ student_name }}/network_inventory.yml"
+    owner: "{{ student_name }}"
+    group: "{{ student_name }}"
+    mode: '0644'
+
+- name: Create sample network playbook for testing
+  ansible.builtin.template:
+    src: test_network_connectivity.yml.j2
+    dest: "/home/{{ student_name }}/test_network_connectivity.yml"
+    owner: "{{ student_name }}"
+    group: "{{ student_name }}"
+    mode: '0644'
+
+- name: Copy SSH public key to Cisco devices
+  cisco.ios.ios_config:
+    lines:
+      - "username {{ student_name }} ssh-rsa {{ lookup('file', '/home/' + student_name + '/.ssh/' + env_authorized_key + '.pub') | regex_replace('\\s.*$', '') }}"
+    save_when: modified
+  delegate_to: "{{ item }}"
+  loop:
+    - "cisco-rtr-1.{{ guid }}.internal"
+    - "cisco-rtr-2.{{ guid }}.internal"
+  vars:
+    ansible_network_os: ios
+    ansible_connection: ansible.netcommon.network_cli
+    ansible_user: "{{ student_name }}"
+    ansible_password: "{{ common_password }}"
+    ansible_become: yes
+    ansible_become_method: enable
+    ansible_become_password: "{{ common_password }}"
+  ignore_errors: yes
+  register: ssh_key_copy_result
+
+- name: Update SSH config to use key authentication for working devices
+  ansible.builtin.blockinfile:
+    path: "/home/{{ student_name }}/.ssh/config"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - Network Devices Key Auth"
+    block: |
+      # Updated configuration for Cisco devices with SSH key auth
+      Host cisco-rtr* *.internal
+          HostKeyAlgorithms +ssh-rsa
+          PubkeyAcceptedKeyTypes +ssh-rsa
+          KexAlgorithms +diffie-hellman-group14-sha1,diffie-hellman-group1-sha1
+          Ciphers +aes128-cbc,aes192-cbc,aes256-cbc
+          User {{ student_name }}
+          IdentityFile ~/.ssh/{{ env_authorized_key }}.pem
+          PreferredAuthentications publickey,password
+          StrictHostKeyChecking no
+          UserKnownHostsFile /dev/null
+          ConnectTimeout 30
+          ServerAliveInterval 30
+          LogLevel ERROR
+  when: ssh_key_copy_result is succeeded
+
+- name: Display network configuration information
+  ansible.builtin.debug:
+    msg:
+      - "Network SSH configuration completed!"
+      - "SSH config file: /home/{{ student_name }}/.ssh/config"
+      - "SSH keys copied to Cisco devices: {{ ssh_key_copy_result.results | selectattr('failed', 'equalto', false) | list | length }}/2"
+      - "Test network connectivity with: ansible-playbook -i network_inventory.yml test_network_connectivity.yml"
+      - "SSH directly to devices: ssh cisco-rtr-1.{{ guid }}.internal"
