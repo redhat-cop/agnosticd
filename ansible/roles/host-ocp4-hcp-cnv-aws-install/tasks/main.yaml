@@ -47,6 +47,15 @@
   register: r_sts
   changed_when: false
 
+- name: Get account ID
+  delegate_to: localhost
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_sandbox_provision_data.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_sandbox_provision_data.aws_secret_access_key }}"
+  command: aws sts get-caller-identity --query "Account" --output text
+  register: r_sts_account
+  changed_when: false
+
 - name: Create trust relationship file
   delegate_to: localhost
   environment:
@@ -67,9 +76,12 @@
   register: r_iam
 
 - name: Save role id
-  delegate_to: localhost
   set_fact:
     role_arn: "{{ r_iam.stdout }}"
+
+- name: Save aws account id
+  set_fact:
+    aws_account_id: "{{ r_sts_account.stdout }}"
 
 - name: Create policy file
   delegate_to: localhost
@@ -99,6 +111,64 @@
   copy:
     content: "{{ r_sts_creds.stdout }}"
     dest: /tmp/sts-creds.json
+
+- name: Gather information about all VPC subnets
+  delegate_to: localhost
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_sandbox_provision_data.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_sandbox_provision_data.aws_secret_access_key }}"
+  amazon.aws.ec2_vpc_subnet_info:
+  register: subnet_info
+
+- name: Get subnet ID containing "-private-" in the Name tag
+  set_fact:
+    aws_subnet_id: >-
+      {{ subnet_info.subnets
+         | selectattr('tags.Name', 'search', '-private-')
+         | map(attribute='subnet_id')
+         | list | first }}
+
+- name: Gather Route53 hosted zones
+  delegate_to: localhost
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_sandbox_provision_data.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_sandbox_provision_data.aws_secret_access_key }}"
+  amazon.aws.ec2_vpc_subnet_info:
+  amazon.aws.route53_info:
+    query: hosted_zone
+  register: r53_info
+
+- name: Set private and public zone IDs
+  set_fact:
+    aws_route53_private_zone_id: >-
+      {{ r53_info.HostedZones
+         | selectattr('Name', 'equalto', 'hcp-' + guid + aws_sandbox_provision_data.aws_route53_domain)
+         | map(attribute='Id')
+         | map('regex_replace', '^/hostedzone/', '')
+         | first }}
+    aws_route53_public_zone_id: >-
+      {{ r53_info.HostedZones
+         | selectattr('Name', 'equalto', aws_sandbox_provision_data.aws_route53_domain[1:] + ".")
+         | map(attribute='Id')
+         | map('regex_replace', '^/hostedzone/', '')
+         | first }}
+
+- name: Gather all VPCs
+  delegate_to: localhost
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_sandbox_provision_data.aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_sandbox_provision_data.aws_secret_access_key }}"
+  amazon.aws.ec2_vpc_net_info:
+  register: vpc_info
+
+- name: Set VPC ID fact
+  set_fact:
+    aws_vpc_id: >-
+      {{ vpc_info.vpcs
+         | selectattr('tags.Name', 'equalto', 'hcp-' + guid + '-vpc')
+         | map(attribute='vpc_id')
+         | first }}
+
 
 ### END WAS
 - name: Log in (obtain access token)
@@ -131,7 +201,7 @@
           fail:
             msg: "Version {{ hcp_cluster_version }} not available"
           when:
-            - r_check_image_set.resources | default([]) | length == 0 
+            - r_check_image_set.resources | default([]) | length == 0
 
         - name: Set releaseImage
           set_fact:
@@ -155,7 +225,7 @@
                 | sort(attribute='metadata.name', reverse=True)
                 | first | default(None)
               }}
-    
+
         - name: Fail if version not available
           fail:
             msg: "Version {{ hcp_cluster_version }} not available"
@@ -164,9 +234,9 @@
         - name: Set releaseImage
           set_fact:
             ocp_release_image: "{{ filtered_image.spec.releaseImage }}"
-    - debug: 
+    - debug:
         msg: "Selected HCP version {{ ocp_release_image }}"
-        
+
     - name: Add the certificate definition for OAuth service
       kubernetes.core.k8s:
         definition: "{{ lookup('ansible.builtin.template', 'certificate.yaml') }}"
@@ -189,7 +259,7 @@
         wait_condition:
           type: "Ready"
           status: "True"
-          
+
     - name: Restart OAuth request if it fails
       when: r_oauth is failed
       block:
@@ -200,7 +270,7 @@
             name: oauth-{{ guid }}
             namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
             state: absent
-            
+
         - name: Add the certificate definition for OAuth service
           kubernetes.core.k8s:
             definition: "{{ lookup('ansible.builtin.template', 'certificate.yaml') }}"
@@ -208,7 +278,7 @@
             wait_timeout: 300
           vars:
             namespace: "{{ sandbox_hcp.sandbox_openshift_namespace }}"
-    
+
         - name: Wait until Oauth Certificate is ready
           register: r_oauth
           kubernetes.core.k8s_info:
@@ -305,7 +375,7 @@
         creates: /etc/bash_completion.d/hcp
 
     - name: Create cluster
-      command: hcp create cluster aws --name {{ guid }} --infra-id {{ guid }} --base-domain {{ aws_sandbox_provision_data.aws_route53_domain[1:] }} --sts-creds /tmp/sts-creds.json --pull-secret /tmp/pull-secret.txt --region {{ aws_sandbox_provision_data.aws_default_region }} --generate-ssh --node-pool-replicas 3 --namespace {{ sandbox_hcp.sandbox_openshift_namespace }} --role-arn  {{ hostvars.localhost.role_arn }} --etcd-storage-class ocs-external-storagecluster-ceph-rbd
+      command: hcp create cluster aws --name {{ guid }} --infra-id {{ guid }} --base-domain {{ aws_sandbox_provision_data.aws_route53_domain[1:] }} --sts-creds /tmp/sts-creds.json --pull-secret /tmp/pull-secret.txt --region {{ aws_sandbox_provision_data.aws_default_region }} --generate-ssh --node-pool-replicas 3 --namespace {{ sandbox_hcp.sandbox_openshift_namespace }} --role-arn  {{ role_arn }} --etcd-storage-class ocs-external-storagecluster-ceph-rbd --render
     - fail:
 
     - name: Create the HostedCluster
@@ -359,7 +429,7 @@
     - name: Decode the kubeconfig secret
       set_fact:
         kubeconfig_decoded: "{{ kubeadmin_secret_result.resources[0].data.kubeconfig | b64decode }}"
-        
+
     - name: Decode the kubeadmin password secret
       when: hcp_authentication | default('') != 'htpasswd'
       set_fact:
