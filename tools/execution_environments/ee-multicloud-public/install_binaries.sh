@@ -63,3 +63,11 @@ export IBMCLOUD_HOME=/opt/ibmcloud
 mkdir -p /opt/ibmcloud
 ibmcloud plugin install --all || true
 ibmcloud config --check-version=false
+
+# Terraform
+terraform_version=1.12.0
+curl -s -L "https://releases.hashicorp.com/terraform/${terraform_version}/terraform_${terraform_version}_linux_${ARCH}.zip" \
+    -o "terraform.zip"
+unzip -q terraform.zip
+install -t /usr/bin terraform
+rm terraform terraform.zip
