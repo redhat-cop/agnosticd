@@ -40,7 +40,7 @@ rosa_compute_replicas: 2
 rosa_setup_cluster_admin_login: true
 
 bastion_instance_type: t2.small
-bastion_instance_image: RHEL93GOLD-latest
+bastion_instance_image: RHEL95GOLD-latest
 
 install_student_user: false
 
@@ -93,14 +93,14 @@ master_instance_count: 1
 worker_instance_type: m6a.2xlarge
 worker_instance_count: 0
 bastion_instance_type: t2.small
-bastion_instance_image: RHEL93GOLD-latest
+bastion_instance_image: RHEL95GOLD-latest
 aws_region: ${AGD_AWS_REGION}
 agnosticd_aws_capacity_reservation_enable: false
 
 # -------------------------------------------------------------------
 # OpenShift installer
 # -------------------------------------------------------------------
-ocp4_installer_version: "4.17"
+ocp4_installer_version: "4.19"
 ocp4_installer_root_url: https://mirror.openshift.com/pub/openshift-v4/clients
 
 # -------------------------------------------------------------------
@@ -112,19 +112,25 @@ install_student_user: false
 # Workloads
 # -------------------------------------------------------------------
 infra_workloads:
-  - ocp4_workload_le_certificates
-  - ocp4_workload_authentication
+  - ocp4_workload_rhsso_authentication
+  - ocp4_workload_cert_manager
 
 # -------------------------------------------------------------------
-# Workload: ocp4_workload_authentication
+# Workload: ocp4_workload_cert_manager
 # -------------------------------------------------------------------
-ocp4_workload_authentication_idm_type: htpasswd
-ocp4_workload_authentication_admin_user: admin
-ocp4_workload_authentication_htpasswd_admin_password: r3dh4t1!
-ocp4_workload_authentication_htpasswd_user_base: user
-ocp4_workload_authentication_htpasswd_user_password: openshift
-ocp4_workload_authentication_htpasswd_user_count: 10
-ocp4_workload_authentication_remove_kubeadmin: true
+ocp4_workload_cert_manager_channel: stable-v1
+ocp4_workload_cert_manager_install_ingress_certificates: true
+ocp4_workload_cert_manager_install_api_certificates: false
+
+# -------------------------------------------------------------------
+# ocp4_workload_rhsso_authentication
+# -------------------------------------------------------------------
+ocp4_workload_rhsso_authentication_channel: stable
+ocp4_workload_rhsso_authentication_admin_username: admin
+ocp4_workload_rhsso_authentication_admin_password: r3dh4t1!
+ocp4_workload_rhsso_authentication_user_count: 5
+ocp4_workload_rhsso_authentication_user_name_base: user
+ocp4_workload_rhsso_authentication_user_password: openshift
 EOF
 
 cat << EOF >${AGD_HOME}/${AGD_EXECUTION_DIR}/ocp-workloads-base.yml
