@@ -13,7 +13,7 @@ ENV PATH="/usr/local/maven/apache-maven-${MVN_VERSION}/bin:$JAVA_HOME/bin:${PATH
 ENV RHBQ_VERSION=3.20.1.redhat-00003
 ENV QUARKUS_CLI_VERSION=3.24.3
 ENV JBANG_DIR="/usr/local/jbang"
-ENV OC_VERSION=4.15
+ENV OC_VERSION=4.19
 
 USER root
 
