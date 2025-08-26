@@ -15,6 +15,54 @@
           {{ service.ports }}
         selector:
           vm.cnv.io/name: "{{ _instance_name }}"
+        type: {{ service.type | default('ClusterIP') }}
+  loop: "{{ range(1, _instance.count|default(1)|int+1) | list }}"
+  loop_control:
+    index_var: _index
+  register: r_service
+  until: r_service is success
+  retries: "{{ openshift_cnv_retries }}"
+  delay: "{{ openshift_cnv_delay }}"
+
+- name: Wait for the LoadBalancer value
+  register: svc_fip
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Service
+    name: "{{ service.name }}"
+    namespace: "{{ openshift_cnv_namespace }}"
+  until: svc_fip.resources[0].status.loadBalancer.ingress[0].ip | default('') != ''
+  retries: 10
+  delay: 2
+  when:
+    - service.type | default('ClusterIP') == "LoadBalancer"
+
+- name: If exist set the external IP for the instance and the ports
+  set_fact:
+    _instance_external_ip: "{{ svc_fip.resources[0].status.loadBalancer.ingress[0].ip }}"
+    _instance_external_ports: "{{ service.ports | map(attribute='port') | join(',') }}"
+  when:
+    - service.type | default('ClusterIP') == "LoadBalancer"
+
+- name: Add external_ip and external_ports to the instance
+  when:
+    - service.type | default('ClusterIP') == "LoadBalancer"
+  kubernetes.core.k8s:
+    state: patched
+    api_version: v1
+    kind: VirtualMachine
+    name: "{{ _instance_name }}"
+    definition:
+      apiVersion: v1
+      kind: VirtualMachine
+      metadata:
+        name: "{{ _instance_name }}"
+        namespace: "{{ openshift_cnv_namespace }}"
+        annotations:
+          external_ip: "{{ _instance_external_ip }}"
+          external_ports: "{{ _instance_external_ports }}"
+  vars:
+    _instance_name: "{{ _instance.name }}{{ _index+1 if _instance.count|d(1)|int > 1 }}"
   loop: "{{ range(1, _instance.count|default(1)|int+1) | list }}"
   loop_control:
     index_var: _index

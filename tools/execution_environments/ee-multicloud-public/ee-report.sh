@@ -27,3 +27,10 @@ alternatives --list
 
 echo -e "\n# /runner directory \n"
 find /runner -printf "%M %u %g %k %p\n"
+
+ibmcloud --version
+ibmcloud plugin list
+
+aws --version
+
+az --version

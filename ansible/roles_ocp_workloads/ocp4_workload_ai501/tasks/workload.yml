@@ -1,0 +1,169 @@
+---
+# Implement your Workload deployment tasks here
+
+- name: Setting up workload for user
+  debug:
+    msg: "Setting up workload for user ocp_username = {{ ocp_username }}"
+
+- name: Get lab deployment git repo
+  command: "{{ item }}"
+  args:
+    chdir: "/tmp/{{ guid }}/"
+  loop:
+    - "git clone https://github.com/rhoai-genaiops/deploy-lab.git"
+
+- name: Install ai501-base chart
+  command: "{{ item }}"
+  args:
+    chdir: "/tmp/{{ guid }}/deploy-lab/operators"
+  loop:
+    - "helm dep up"
+    - "helm upgrade --install ai501-base . \
+        --namespace ai501 --create-namespace --timeout=20m"
+
+  register: ai501_base_result
+  until: ai501_base_result.rc == 0
+  # ignore_errors: true
+  retries: 3
+  delay: 10
+
+- name: Wait a moment before checking Operator status
+  ansible.builtin.pause:
+    seconds: 60
+
+- name: Wait for all CSVs in specified namespaces to reach Succeeded phase
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ item }}"
+  register: namespace_csvs
+  loop:
+    - openshift-operators
+    - redhat-ods-operator
+    - openshift-operators-redhat
+  retries: 30
+  delay: 10
+  until: >
+    (namespace_csvs.resources | default([]) | length > 0) and
+    (namespace_csvs.resources | default([]) |
+     rejectattr('status', 'defined') | list | length == 0) and
+    (namespace_csvs.resources | default([]) |
+     rejectattr('status.phase', 'defined') | list | length == 0) and
+    (namespace_csvs.resources | default([]) |
+     selectattr('status.phase', 'defined') |
+     rejectattr('status.phase', 'equalto', 'Succeeded') | list | length == 0)
+
+- name: Install ai501-toolings chart
+  command: "{{ item }}"
+  args:
+    chdir: "/tmp/{{ guid }}/deploy-lab/toolings"
+  loop:
+    - "helm dep up"
+    - "helm upgrade --install ai501-toolings . \
+        --namespace ai501 --timeout=20m"
+  register: ai501_toolings_result
+  until: ai501_toolings_result.rc == 0
+  ignore_errors: true
+  retries: 5
+  delay: 10
+
+- name: Wait for DataScienceCluster to become Ready
+  kubernetes.core.k8s_info:
+    api_version: datasciencecluster.opendatahub.io/v1
+    kind: DataScienceCluster
+  register: dsc_info
+  until: >
+    dsc_info.resources | length > 0 and
+    (
+      dsc_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready')
+                                              | selectattr('status', 'equalto', 'True')
+                                              | list
+    ) | length > 0
+  retries: 10
+  delay: 30
+
+- name: Apply updated ConfigMap for user workload monitoring
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: user-workload-monitoring-config
+        namespace: openshift-user-workload-monitoring
+      data:
+        config.yaml: |
+          prometheus:
+            logLevel: debug
+            retention: 15d
+          alertmanager:
+            enabled: true
+            enableAlertmanagerConfig: true
+  collections:
+    - kubernetes.core
+
+- name: Install ai501-student-content chart
+  command: "{{ item }}"
+  args:
+    chdir: "/tmp/{{ guid }}/deploy-lab/student-content"
+  loop:
+    - "helm upgrade --install ai501-student-content . \
+        --namespace ai501 --create-namespace --timeout=20m \
+        --set cluster_domain={{ ocp4_workload_ai501_apps_domain }} \
+        --set attendees={{ num_users }}"
+  register: ai501_student_content
+  until: ai501_student_content.rc == 0
+  # ignore_errors: true
+  retries: 3
+  delay: 10
+
+- name: Patch OAuth configuration to add HTPasswd identity providers
+  kubernetes.core.k8s_json_patch:
+    api_version: config.openshift.io/v1
+    kind: OAuth
+    name: cluster
+    patch:
+      - op: add
+        path: /spec/identityProviders/-
+        value:
+          name: Students
+          type: HTPasswd
+          mappingMethod: claim
+          htpasswd:
+            fileData:
+              name: htpasswd-ai501
+
+- name: Enable default route for OpenShift image registry
+  kubernetes.core.k8s_json_patch:
+    api_version: imageregistry.operator.openshift.io/v1
+    kind: Config
+    name: cluster
+    patch:
+      - op: add
+        path: /spec/defaultRoute
+        value: true
+
+- name: Patch GitOps Operator with user namespaces
+  block:
+    - name: Create namespace list
+      set_fact:
+        namespace_list: "{{ range(1, num_users + 1) | map('regex_replace', '^(.*)$', 'user\\1-toolings') | join(',') }}"
+
+    - name: Patch OpenShift GitOps Operator subscription
+      kubernetes.core.k8s_json_patch:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: openshift-gitops-operator
+        namespace: openshift-gitops-operator
+        patch:
+          - op: add
+            path: /spec/config/env/1
+            value:
+              name: ARGOCD_CLUSTER_CONFIG_NAMESPACES
+              value: "{{ namespace_list }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully."
+  when: not silent | bool

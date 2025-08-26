@@ -1,14 +1,70 @@
 ---
 
-- name: Render asciidoc via antora container
+- name: Check if default-site.yml exists
+  ansible.builtin.stat:
+    path: "{{ showroom_user_content_dir }}/default-site.yml"
+  register: default_site_stat
+
+- name: Ensure output.dir is set to ./www/www for zero-touch
+  when:
+    - default_site_stat.stat.exists
+    - showroom_ui == "zero-touch"
+  block:
+
+    - name: Read default-site.yml
+      ansible.builtin.slurp:
+        path: "{{ showroom_user_content_dir }}/default-site.yml"
+      register: default_site_raw
+
+    - name: Decode YAML content
+      ansible.builtin.set_fact:
+        default_site_data: "{{ default_site_raw.content | b64decode | from_yaml }}"
+
+    - name: Update output.dir to ./www/www
+      ansible.builtin.set_fact:
+        default_site_data: >-
+          {{
+            default_site_data | combine({
+              'output': (default_site_data.output | default({})) | combine({
+                'dir': './www/www'
+              })
+            }, recursive=True)
+          }}
+
+    - name: Write updated default-site.yml
+      ansible.builtin.copy:
+        content: "{{ default_site_data | to_nice_yaml(indent=2) }}"
+        dest: "{{ showroom_user_content_dir }}/default-site.yml"
+        backup: yes
+        owner: "{{ showroom_user }}"
+        group: "{{ showroom_user_group }}"
+        mode: "u=rw,g=r,o=r"
+
+- name: Render asciidoc via antora container using the default-site.yml
   containers.podman.podman_container:
     name: container
     image: "{{ showroom_antora_image }}:{{ showroom_antora_image_tag }}"
-    command: "{{ showroom_ui | default('default') }}-site.yml"
+    command: "default-site.yml"
     detach: false                               # ensure completion of render before moving on
     volumes:
       - "{{ showroom_user_content_dir }}:/antora:Z"
   become_user: "{{ showroom_user }}"
+  when: default_site_stat.stat.exists
+  register: r_podman_run_antora
+  vars:
+  tags:
+    - showroom-render
+
+- name: Render asciidoc via antora container using a custom site.yml
+  containers.podman.podman_container:
+    name: container
+    image: "{{ showroom_antora_image }}:{{ showroom_antora_image_tag }}"
+    command: "{{ showroom_ui }}-site.yml"
+    detach: false                               # ensure completion of render before moving on
+    volumes:
+      - "{{ showroom_user_content_dir }}:/antora:Z"
+  become_user: "{{ showroom_user }}"
+  when: not default_site_stat.stat.exists
   register: r_podman_run_antora
   vars:
   tags:
@@ -66,12 +122,49 @@
         mode: "u=rwx,g=rx,o=rx"
         recurse: true
 
-    - name: Create a symbolic link for the zero-touch-config file
+    - name: Check if zero-touch-config.yml exists
+      ansible.builtin.stat:
+        path: "{{ showroom_user_content_dir }}/zero-touch-config.yml"
+      register: zero_touch_config_stat
+
+    - name: Create a symbolic link for zero-touch-config.yml if it exists
       ansible.builtin.copy:
         src: "{{ showroom_user_content_dir }}/zero-touch-config.yml"
         dest: "{{ showroom_user_content_dir }}/www/zero-touch-config.yml"
-        owner: "{{ showroom_user }}"
-        group: "{{ showroom_user_group }}"
         mode: "u=rw,g=r,o=r"
         remote_src: true
         # state: link
+        owner: "{{ showroom_user }}"
+        group: "{{ showroom_user_group }}"
+      when: zero_touch_config_stat.stat.exists
+
+    - name: Create a symbolic link to ui-config.yml as fallback
+      ansible.builtin.copy:
+        src: "{{ showroom_user_content_dir }}/ui-config.yml"
+        dest: "{{ showroom_user_content_dir }}/www/ui-config.yml"
+        mode: "u=rw,g=r,o=r"
+        remote_src: true
+        # state: link
+        owner: "{{ showroom_user }}"
+        group: "{{ showroom_user_group }}"
+      when: not zero_touch_config_stat.stat.exists
+
+    - name: Ensure /etc/containers directory exists
+      ansible.builtin.file:
+        path: "/etc/containers"
+        state: directory
+        owner: "root"
+        group: "root"
+        mode: "u=rwx,g=rx,o=rx"
+
+    - name: Create containers.conf file to specify rootless network
+      ansible.builtin.lineinfile:
+        path: "/etc/containers/containers.conf"
+        owner: "root"
+        group: "root"
+        state: present
+        create: true
+        mode: "u=rwx,g=rx,o=rx"
+        line: |
+          [network]
+          default_rootless_network_cmd = "slirp4netns"

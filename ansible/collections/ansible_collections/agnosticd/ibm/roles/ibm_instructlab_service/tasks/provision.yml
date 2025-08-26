@@ -1,0 +1,161 @@
+---
+- name: Validate required variables for deployment
+  ansible.builtin.assert:
+    that:
+      - ibmcloud_api_key is defined
+      - ibmcloud_api_key | length > 0
+      - requester_email is defined
+      - requester_email | length > 0
+      - guid is defined
+      - guid | length > 0
+      - ibm_realm_name is defined
+      - ibm_realm_name | length > 0
+    fail_msg: |
+      🚫 Missing required variables for deployment:
+      - ibmcloud_api_key: {{ 'defined' if ibmcloud_api_key is defined else 'MISSING' }}
+      - requester_email: {{ 'defined' if requester_email is defined else 'MISSING' }}
+      - guid: {{ 'defined' if guid is defined else 'MISSING' }}
+      - ibm_realm_name: {{ 'defined' if ibm_realm_name is defined else 'MISSING' }}
+
+- name: Starting IBM InstructLab Service deployment
+  ansible.builtin.debug:
+    msg: "Deploying IBM InstructLab Service: {{ ibmcloud_instructlab_instance_service }} in us-east (GUID: {{ guid }}) [Note: InstructLab requires us-east regardless of general region setting]"
+
+- name: Set up environment variables safely
+  ansible.builtin.set_fact:
+    user_home: "{{ ansible_env.HOME | default(lookup('env', 'HOME')) }}"
+    user_path: "{{ ansible_env.PATH | default(lookup('env', 'PATH')) }}"
+
+- name: Ensure Terraform is available
+  block:
+    - name: Check if Terraform is installed
+      ansible.builtin.command: terraform version
+      register: terraform_check
+      failed_when: false
+      changed_when: false
+
+    - name: Debug terraform check result
+      ansible.builtin.debug:
+        msg: "Terraform check result: rc={{ terraform_check.rc }}, PATH={{ user_path }}"
+
+    - name: Install Terraform if needed
+      when: terraform_check.rc != 0
+      block:
+        - name: Create local bin directory for Terraform
+          ansible.builtin.file:
+            path: "{{ user_home }}/.local/bin"
+            state: directory
+            mode: '0755'
+
+        - name: Download Terraform
+          ansible.builtin.get_url:
+            url: "https://releases.hashicorp.com/terraform/{{ ibmcloud_terraform_version }}/terraform_{{ ibmcloud_terraform_version }}_linux_amd64.zip"
+            dest: "/tmp/terraform.zip"
+            mode: '0644'
+
+        - name: Check if unzip is available
+          ansible.builtin.command: which unzip
+          register: unzip_check
+          failed_when: false
+          changed_when: false
+
+        - name: Install unzip if available and needed
+          ansible.builtin.package:
+            name: unzip
+            state: present
+          become: false
+          when: unzip_check.rc != 0
+          ignore_errors: true
+
+        - name: Extract Terraform to user local bin
+          ansible.builtin.unarchive:
+            src: "/tmp/terraform.zip"
+            dest: "{{ user_home }}/.local/bin"
+            remote_src: true
+            mode: '0755'
+
+        - name: Add local bin to PATH for this session
+          ansible.builtin.set_fact:
+            user_path: "{{ user_home }}/.local/bin:{{ user_path }}"
+
+        - name: Verify Terraform installation works
+          ansible.builtin.command: "{{ user_home }}/.local/bin/terraform version"
+          changed_when: false
+
+    - name: Ensure PATH includes local bin directory
+      ansible.builtin.set_fact:
+        user_path: "{{ user_home }}/.local/bin:{{ user_path }}"
+
+- name: Generate Terraform configuration
+  ansible.builtin.template:
+    src: instructlab-as-a-service.j2
+    dest: "{{ output_dir }}/main.tf"
+    mode: '0644'
+
+- name: Check if Terraform state exists
+  ansible.builtin.stat:
+    path: "{{ output_dir }}/terraform.tfstate"
+  register: terraform_state_exists
+
+# Skip state refresh to avoid lock issues - Terraform will handle state automatically
+
+- name: Set timestamp for log files
+  ansible.builtin.set_fact:
+    terraform_log_timestamp: "{{ ansible_date_time.epoch }}"
+
+- name: Execute Terraform deployment with error handling
+  block:
+    - name: Execute Terraform deployment
+      community.general.terraform:
+        project_path: "{{ output_dir }}"
+        state: "{{ ibm_terraform_state | default('present') }}"
+        force_init: true
+        variables:
+          ibmcloud_api_key: "{{ ibmcloud_api_key }}"
+          requester_email: "{{ requester_email }}"
+          ibm_realm_name: "{{ ibm_realm_name }}"
+          guid: "{{ guid }}"
+        backend_config:
+          path: "{{ output_dir }}/terraform.tfstate"
+      environment:
+        PATH: "{{ user_path }}"
+        TF_LOG: "DEBUG"
+        TF_LOG_PATH: "{{ output_dir }}/terraform_deploy_{{ terraform_log_timestamp }}.log"
+      register: r_terraform_output
+
+    - name: IBM InstructLab Service deployment completed
+      ansible.builtin.debug:
+        msg: "IBM InstructLab Service deployed successfully (GUID: {{ guid }}, Region: us-east)"
+
+
+    - name: Authorization policy managed by Terraform
+      ansible.builtin.debug:
+        msg: "Authorization policy for InstructLab to access COS is managed by Terraform"
+
+  rescue:
+    - name: Check for specific error types
+      ansible.builtin.set_fact:
+        has_name_conflict: "{{ 'must be unique' in (r_terraform_output.stderr | default('')) }}"
+        has_resource_exists: "{{ 'already exists' in (r_terraform_output.stderr | default('')) }}"
+        error_details: "{{ r_terraform_output.stderr | default(r_terraform_output.msg | default('Unknown error')) }}"
+
+    - name: Handle resource naming conflicts
+      when: has_name_conflict | bool
+      ansible.builtin.debug:
+        msg: "Resource naming conflict detected for GUID: {{ guid }}. Use a different GUID or run with ACTION=destroy first."
+
+    - name: Handle general deployment failure
+      when: not (has_name_conflict | bool)
+      ansible.builtin.debug:
+        msg: "IBM InstructLab Service deployment failed in us-east. Check terraform logs at {{ output_dir }}/terraform_deploy_{{ terraform_log_timestamp }}.log"
+
+    - name: Fail with structured error message
+      ansible.builtin.fail:
+        msg: "IBM InstructLab Service deployment failed. {{ 'Resource naming conflict' if has_name_conflict else 'Deployment failure' }}. Logs: {{ output_dir }}/terraform_deploy_{{ terraform_log_timestamp }}.log"
+
+- name: Record link when actions complete
+  agnosticd_user_info:
+    data:
+      authorization_link: "{{ ibmcloud_instructlab_authorization_link }}"
+      project_link: "{{ r_terraform_output.outputs.instructlab_direct_url.value }}"
+      guid: "{{ guid }}"

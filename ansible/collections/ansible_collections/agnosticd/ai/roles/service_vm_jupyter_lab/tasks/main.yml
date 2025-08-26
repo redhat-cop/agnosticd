@@ -1,0 +1,100 @@
+---
+
+- name: Install EPEL for certbot
+  ansible.builtin.dnf:
+    name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"
+    state: present
+    validate_certs: no
+    disable_gpg_check: yes
+
+- name: Install required Python pip packages in virtualenv
+  when: 
+    service_vm_jupyter_lab_jupyter_pip_packages is defined 
+    and service_vm_jupyter_lab_jupyter_pip_packages | length > 0
+  ansible.builtin.pip:
+    name: "{{ service_vm_jupyter_lab_jupyter_pip_packages }}"
+    virtualenv: "/home/{{ service_vm_jupyter_lab_jupyter_user }}/venv"
+    virtualenv_command: "/home/{{ service_vm_jupyter_lab_jupyter_user }}/venv/bin/python3"
+    state: present
+  become: true
+  become_user: "{{ service_vm_jupyter_lab_jupyter_user }}"
+
+- name: Install Certbot package for zerossl
+  ansible.builtin.dnf:
+    name: certbot
+    state: present
+
+
+- name: Request certificate using standalone mode
+  ansible.builtin.command: >
+    certbot certonly --standalone
+    -d {{ service_vm_jupyter_lab_domain_name }}
+    --agree-tos
+    --email {{ service_vm_jupyter_lab_certbot_email }}
+    --non-interactive
+    --keep-until-expiring
+    --server https://acme-v02.api.letsencrypt.org/directory
+  register: r_certbot_result
+  retries: 5
+  delay: 30
+  until: r_certbot_result.rc == 0
+  args:
+    creates: "/etc/letsencrypt/live/{{ service_vm_jupyter_lab_domain_name }}/fullchain.pem"
+
+- name: Create directory for Jupyter certificates
+  ansible.builtin.file:
+    path: "{{ service_vm_jupyter_lab_jupyter_ssl_dir }}"
+    state: directory
+    mode: u=rwx,g=,o=
+    owner: "{{ service_vm_jupyter_lab_jupyter_user }}"
+    group: "{{ service_vm_jupyter_lab_jupyter_group | default('users') }}"
+
+- name: Copy certificates to Jupyter directory
+  ansible.builtin.copy:
+    src: "/etc/letsencrypt/live/{{ service_vm_jupyter_lab_domain_name }}/{{ __key.src }}"
+    dest: "{{ service_vm_jupyter_lab_jupyter_ssl_dir }}/{{ __key.dest }}"
+    remote_src: true
+    owner: "{{ service_vm_jupyter_lab_jupyter_user }}"
+    group: "{{ service_vm_jupyter_lab_jupyter_group | default('users') }}"
+    mode: u=rw,g=,o=
+  loop:
+    - { src: 'fullchain.pem', dest: 'fullchain.pem' }
+    - { src: 'privkey.pem', dest: 'privkey.pem' }
+  loop_control:
+    loop_var: __key
+
+- name: Setup Jupyter Lab configuration
+  block:
+
+    - name: Create Jupyter Lab config directory
+      ansible.builtin.file:
+        path: "~/.jupyter"
+        state: directory
+        mode: u=rwx,g=,o=
+        owner: "{{ service_vm_jupyter_lab_jupyter_user }}"
+        group: "{{ service_vm_jupyter_lab_jupyter_group | default('users') }}"
+
+    - name: Generate Jupyter Lab config using template
+      ansible.builtin.template:
+        src: jupyter_lab_config.py.j2
+        dest: "~/.jupyter/jupyter_lab_config.py"
+        owner: "{{ service_vm_jupyter_lab_jupyter_user }}"
+        group: "{{ service_vm_jupyter_lab_jupyter_group | default('users') }}"
+        mode: u=rw,g=,o=
+
+  become_user: "{{ service_vm_jupyter_lab_jupyter_user }}"
+
+- name: Copy JupyterLab systemd unit template
+  ansible.builtin.template:
+    src: jupyter.service.j2
+    dest: /etc/systemd/system/jupyter.service
+    owner: root
+    group: root
+    mode: u=rw,g=r,o=r
+
+- name: Enable and restart JupyterLab service
+  ansible.builtin.systemd:
+    name: jupyter
+    enabled: true
+    state: restarted
+    daemon_reload: true
