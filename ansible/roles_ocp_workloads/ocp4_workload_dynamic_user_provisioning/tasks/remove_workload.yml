@@ -1,0 +1,149 @@
+---
+- name: Remove Workload Tasks
+  debug:
+    msg: "Remove-Workload tasks Started"
+
+- name: Set dynamic user facts for removal
+  ansible.builtin.set_fact:
+    _dynamic_username: "user-{{ guid }}"
+    _dynamic_user_email: "user-{{ guid }}@demo.redhat.com"
+    _dynamic_showroom_namespace: "{{ ocp4_workload_dynamic_user_provisioning_showroom_namespace }}-user-{{ guid }}"
+
+- name: Retrieve OpenShift Ingress config
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: r_ingress_config
+
+- name: Set OpenShift Apps Domain
+  ansible.builtin.set_fact:
+    _ocp_apps_domain: "{{ r_ingress_config.resources[0].spec.domain }}"
+
+# =============================================
+# Remove Showroom Instance
+# =============================================
+- name: Remove showroom Helm release
+  kubernetes.core.helm:
+    name: "showroom-{{ _dynamic_username }}"
+    release_namespace: "{{ _dynamic_showroom_namespace }}"
+    state: absent
+  failed_when: false
+
+- name: Remove showroom namespace
+  kubernetes.core.k8s:
+    name: "{{ _dynamic_showroom_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: absent
+  failed_when: false
+
+# =============================================
+# Remove Keycloak User
+# =============================================
+- name: Retrieve Keycloak admin credentials
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: keycloak-initial-admin
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_keycloak_namespace }}"
+  register: r_keycloak_admin_credentials
+  failed_when: false
+
+- name: Set Keycloak admin credentials
+  ansible.builtin.set_fact:
+    _keycloak_admin_username: "{{ r_keycloak_admin_credentials.resources[0].data.username | b64decode }}"
+    _keycloak_admin_password: "{{ r_keycloak_admin_credentials.resources[0].data.password | b64decode }}"
+  when: r_keycloak_admin_credentials.resources | length > 0
+
+- name: Generate Keycloak access token
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/realms/master/protocol/openid-connect/token
+    method: POST
+    validate_certs: false
+    body_format: form-urlencoded
+    body:
+      client_id: admin-cli
+      username: "{{ _keycloak_admin_username }}"
+      password: "{{ _keycloak_admin_password }}"
+      grant_type: password
+  register: r_keycloak_access_token
+  failed_when: false
+  when: _keycloak_admin_username is defined
+
+- name: Get Keycloak user to delete
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users?username={{ _dynamic_username }}
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token.json.access_token }}
+  register: r_keycloak_user
+  failed_when: false
+  when: r_keycloak_access_token.json is defined
+
+- name: Delete Keycloak user
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users/{{ r_keycloak_user.json[0].id }}
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token.json.access_token }}
+    status_code: [204, 404]
+  failed_when: false
+  when: 
+    - r_keycloak_user.json is defined
+    - r_keycloak_user.json | length > 0
+
+# =============================================
+# Remove GitLab User
+# =============================================
+- name: Get GitLab user to delete
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users?username={{ _dynamic_username }}
+    method: GET
+    validate_certs: false
+    status_code: [200, 404]
+  register: r_gitlab_user
+  failed_when: false
+
+- name: Delete GitLab user
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users/{{ r_gitlab_user.json[0].id }}
+    method: DELETE
+    validate_certs: false
+    headers:
+      Content-Type: application/json
+    body_format: form-urlencoded
+    body:
+      hard_delete: "true"
+    status_code: [202, 204, 404]
+  failed_when: false
+  when: 
+    - r_gitlab_user.json is defined
+    - r_gitlab_user.json | length > 0
+
+# =============================================
+# Clean up user data
+# =============================================
+- name: Remove user from AgnosticD user data
+  agnosticd_user_info:
+    user: "{{ _dynamic_username }}"
+    data: {}
+    state: absent
+  failed_when: false
+
+- name: Report user removal status
+  agnosticd_user_info:
+    msg: |
+      Dynamic user {{ _dynamic_username }} has been removed from workshop {{ guid }}:
+      
+      === Cleanup Status ===
+      Showroom Instance: Removed
+      Keycloak User: {{ 'Removed' if r_keycloak_user.json is defined and r_keycloak_user.json | length > 0 else 'Not found' }}
+      GitLab User: {{ 'Removed' if r_gitlab_user.json is defined and r_gitlab_user.json | length > 0 else 'Not found' }}
+      User Data: Cleaned up
+
+- name: Remove Workload Tasks Complete
+  debug:
+    msg: "Remove-Workload tasks completed successfully"

@@ -1,0 +1,280 @@
+---
+- name: Setting up dynamic user provisioning
+  debug:
+    msg: "Creating dynamic user: {{ _dynamic_username }}"
+
+# =============================================
+# Fetch Environment Credentials
+# =============================================
+- name: Retrieve Keycloak admin credentials
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: keycloak-initial-admin
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_keycloak_namespace }}"
+  register: r_keycloak_admin_credentials
+  retries: 60
+  delay: 10
+  until:
+    - r_keycloak_admin_credentials is defined
+    - r_keycloak_admin_credentials.resources is defined
+    - r_keycloak_admin_credentials.resources | length > 0
+
+- name: Set Keycloak admin credentials
+  ansible.builtin.set_fact:
+    _keycloak_admin_username: "{{ r_keycloak_admin_credentials.resources[0].data.username | b64decode }}"
+    _keycloak_admin_password: "{{ r_keycloak_admin_credentials.resources[0].data.password | b64decode }}"
+
+# =============================================
+# Create Keycloak User
+# =============================================
+- name: Generate Keycloak access token
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/realms/master/protocol/openid-connect/token
+    method: POST
+    validate_certs: false
+    body_format: form-urlencoded
+    body:
+      client_id: admin-cli
+      username: "{{ _keycloak_admin_username }}"
+      password: "{{ _keycloak_admin_password }}"
+      grant_type: password
+  register: r_keycloak_access_token
+
+- name: Set Keycloak access token
+  ansible.builtin.set_fact:
+    _keycloak_access_token: "{{ r_keycloak_access_token.json.access_token }}"
+
+- name: Create user in Keycloak
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users
+    method: POST
+    validate_certs: false
+    body_format: json
+    headers:
+      Authorization: Bearer {{ _keycloak_access_token }}
+    body:
+      username: "{{ _dynamic_username }}"
+      enabled: true
+      firstName: "{{ _dynamic_username }}"
+      lastName: TSSC
+      email: "{{ _dynamic_user_email }}"
+      emailVerified: true
+    status_code: [201, 409]
+  register: r_create_keycloak_user
+
+- name: Get user details from Keycloak
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users?username={{ _dynamic_username }}
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ _keycloak_access_token }}
+  register: r_keycloak_user
+
+- name: Set password for Keycloak user
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users/{{ r_keycloak_user.json[0].id }}/reset-password
+    method: PUT
+    validate_certs: false
+    body_format: json
+    headers:
+      Authorization: Bearer {{ _keycloak_access_token }}
+    body:
+      type: password
+      temporary: false
+      value: "{{ ocp4_workload_dynamic_user_provisioning_password }}"
+    status_code: 204
+
+# =============================================
+# Create GitLab User
+# =============================================
+- name: Get GitLab root password
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: gitlab-gitlab-initial-root-password
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}"
+  register: r_gitlab_root_password
+
+- name: Set GitLab root password
+  ansible.builtin.set_fact:
+    _gitlab_root_password: "{{ r_gitlab_root_password.resources[0].data.password | b64decode }}"
+
+- name: Get GitLab root personal access token
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/user/personal_access_tokens
+    method: POST
+    validate_certs: false
+    headers:
+      PRIVATE-TOKEN: "{{ _gitlab_root_token | default('') }}"
+    body_format: json
+    body:
+      name: "admin-token-{{ guid }}"
+      scopes: ["api", "read_user", "write_repository"]
+    status_code: [201, 400]
+  register: r_gitlab_token
+  when: _gitlab_root_token is not defined
+  failed_when: false
+
+- name: Create GitLab user
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users
+    method: POST
+    validate_certs: false
+    headers:
+      Content-Type: application/json
+    body_format: form-urlencoded
+    body:
+      email: "{{ _dynamic_user_email }}"
+      password: "{{ ocp4_workload_dynamic_user_provisioning_password }}"
+      username: "{{ _dynamic_username }}"
+      name: "{{ _dynamic_username }} TSSC"
+      skip_confirmation: "true"
+    status_code: [201, 409]
+  register: r_create_gitlab_user
+
+# =============================================
+# Discover URLs for Showroom Variables
+# =============================================
+- name: Get Red Hat Developer Hub route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
+    label_selectors:
+      - app.kubernetes.io/name=developer-hub
+  register: r_rhdh_route
+
+- name: Set RHDH URL
+  ansible.builtin.set_fact:
+    _rhdh_url: "https://{{ r_rhdh_route.resources[0].spec.host }}"
+  when: r_rhdh_route.resources | length > 0
+
+- name: Set OpenShift Console URL
+  ansible.builtin.set_fact:
+    _openshift_console_url: "https://console-openshift-console.{{ _ocp_apps_domain }}"
+
+- name: Debug discovered URLs
+  ansible.builtin.debug:
+    msg:
+      - "RHDH URL: {{ _rhdh_url | default('Not found') }}"
+      - "OpenShift Console URL: {{ _openshift_console_url }}"
+      - "GitLab URL: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}"
+
+# =============================================
+# Create Showroom Instance
+# =============================================
+- name: Detect existing showroom configuration
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_showroom_namespace }}"
+    label_selectors:
+      - app=showroom
+  register: r_showroom_config
+
+- name: Set showroom content repo from existing configuration
+  ansible.builtin.set_fact:
+    _showroom_content_repo: "{{ r_showroom_config.resources[0].data['CONTENT_URL'] | default('https://github.com/rhpds/showroom-ads-workshop.git') }}"
+  when: 
+    - r_showroom_config.resources | length > 0
+    - ocp4_workload_dynamic_user_provisioning_showroom_content_repo == ""
+
+- name: Set default showroom content repo if not discovered
+  ansible.builtin.set_fact:
+    _showroom_content_repo: "https://github.com/rhpds/showroom-ads-workshop.git"
+  when: _showroom_content_repo is not defined or _showroom_content_repo == ""
+
+- name: Retrieve additional service credentials for user data
+  block:
+  - name: Retrieve gitops credentials
+    kubernetes.core.k8s_info:
+      api_version: v1
+      kind: Secret
+      name: tssc-gitops-cluster
+      namespace: "{{ ocp4_workload_dynamic_user_provisioning_gitops_namespace | default('tssc-gitops') }}"
+    register: r_gitops_credentials
+    failed_when: false
+
+  - name: Retrieve quay credentials
+    kubernetes.core.k8s_info:
+      api_version: v1
+      kind: Secret
+      name: tssc-quay-super-user
+      namespace: "{{ ocp4_workload_dynamic_user_provisioning_quay_namespace | default('tssc-quay') }}"
+    register: r_quay_credentials
+    failed_when: false
+
+  - name: Retrieve acs credentials
+    kubernetes.core.k8s_info:
+      api_version: v1
+      kind: Secret
+      name: central-htpasswd
+      namespace: "{{ ocp4_workload_dynamic_user_provisioning_acs_namespace | default('tssc-acs') }}"
+    register: r_acs_credentials
+    failed_when: false
+
+- name: Set additional service URLs
+  ansible.builtin.set_fact:
+    _gitops_url: "https://tssc-gitops-server-{{ ocp4_workload_dynamic_user_provisioning_gitops_namespace | default('tssc-gitops') }}.{{ _ocp_apps_domain }}"
+    _devspaces_url: "https://devspaces.{{ _ocp_apps_domain }}"
+    _tpa_url: "https://server-{{ ocp4_workload_dynamic_user_provisioning_tpa_namespace | default('tssc-tpa') }}.{{ _ocp_apps_domain }}"
+    _quay_url: "https://{{ ocp4_workload_dynamic_user_provisioning_quay_namespace | default('tssc-quay') }}-quay-{{ ocp4_workload_dynamic_user_provisioning_quay_namespace | default('tssc-quay') }}.{{ _ocp_apps_domain }}"
+    _acs_url: "https://central-{{ ocp4_workload_dynamic_user_provisioning_acs_namespace | default('tssc-acs') }}.{{ _ocp_apps_domain }}"
+
+- name: Add comprehensive user data for showroom
+  agnosticd_user_info:
+    user: "{{ _dynamic_username }}"
+    data:
+      openshift_admin_user: "{{ ocp4_workload_dynamic_user_provisioning_admin_user }}"
+      openshift_admin_password: "{{ ocp4_workload_dynamic_user_provisioning_admin_password }}"
+      rhdh_url: "{{ _rhdh_url | default('') }}"
+      rhdh_auth: oidc
+      rhdh_user: "{{ _dynamic_username }}"
+      rhdh_user_password: "{{ ocp4_workload_dynamic_user_provisioning_password }}"
+      gitops_url: "{{ _gitops_url }}"
+      gitops_admin_user: admin
+      gitops_admin_password: "{{ r_gitops_credentials.resources[0].data['admin.password'] | b64decode if r_gitops_credentials.resources | length > 0 else '' }}"
+      gitlab_url: "https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}"
+      gitlab_user: "{{ _dynamic_username }}"
+      gitlab_user_password: "{{ ocp4_workload_dynamic_user_provisioning_password }}"
+      devspaces_url: "{{ _devspaces_url }}"
+      devspaces_user: "{{ _dynamic_username }}"
+      devspaces_user_password: "{{ ocp4_workload_dynamic_user_provisioning_password }}"
+      tpa_url: "{{ _tpa_url }}"
+      tpa_user: "{{ _dynamic_username }}"
+      tpa_user_password: "{{ ocp4_workload_dynamic_user_provisioning_password }}"
+      quay_url: "{{ _quay_url }}"
+      quay_admin_user: "{{ r_quay_credentials.resources[0].data.username | b64decode if r_quay_credentials.resources | length > 0 else '' }}"
+      quay_admin_password: "{{ r_quay_credentials.resources[0].data.password | b64decode if r_quay_credentials.resources | length > 0 else '' }}"
+      acs_url: "{{ _acs_url }}"
+      acs_admin_user: "{{ ocp4_workload_dynamic_user_provisioning_acs_admin_user | default('admin') }}"
+      acs_admin_password: "{{ r_acs_credentials.resources[0].data.password | b64decode if r_acs_credentials.resources | length > 0 else '' }}"
+
+- name: Create showroom namespace
+  kubernetes.core.k8s:
+    name: "{{ _dynamic_showroom_namespace }}"
+    api_version: v1
+    kind: Namespace
+    state: present
+
+- name: Deploy showroom instance via Helm
+  kubernetes.core.helm:
+    name: "showroom-{{ _dynamic_username }}"
+    chart_ref: "{{ ocp4_workload_dynamic_user_provisioning_showroom_chart_repo }}/{{ ocp4_workload_dynamic_user_provisioning_showroom_chart_name }}"
+    release_namespace: "{{ _dynamic_showroom_namespace }}"
+    create_namespace: false
+    values:
+      showroom:
+        user: "{{ _dynamic_username }}"
+        guid: "{{ guid }}"
+        domain: "{{ _ocp_apps_domain }}"
+        content:
+          git_repo: "{{ _showroom_content_repo | default(ocp4_workload_dynamic_user_provisioning_showroom_content_repo) }}"
+          git_repo_ref: "{{ ocp4_workload_dynamic_user_provisioning_showroom_content_ref }}"
+  when: _showroom_content_repo is defined and _showroom_content_repo != ""
+
+- name: Workload tasks complete
+  debug:
+    msg: "Dynamic user {{ _dynamic_username }} created successfully"
