@@ -89,33 +89,24 @@
 # =============================================
 # Create GitLab User
 # =============================================
-- name: Get GitLab root password
+- name: Get GitLab root personal access token from secret
   kubernetes.core.k8s_info:
     api_version: v1
     kind: Secret
-    name: gitlab-gitlab-initial-root-password
+    name: root-user-personal-token
     namespace: "{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}"
-  register: r_gitlab_root_password
+  register: r_gitlab_root_token
+  retries: 120
+  delay: 10
+  until:
+    - r_gitlab_root_token is defined
+    - r_gitlab_root_token.resources is defined
+    - r_gitlab_root_token.resources | length > 0
+    - r_gitlab_root_token.resources[0].data.token is defined
 
-- name: Set GitLab root password
+- name: Set GitLab root token
   ansible.builtin.set_fact:
-    _gitlab_root_password: "{{ r_gitlab_root_password.resources[0].data.password | b64decode }}"
-
-- name: Get GitLab root personal access token
-  uri:
-    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/user/personal_access_tokens
-    method: POST
-    validate_certs: false
-    headers:
-      PRIVATE-TOKEN: "{{ _gitlab_root_token | default('') }}"
-    body_format: json
-    body:
-      name: "admin-token-{{ guid }}"
-      scopes: ["api", "read_user", "write_repository"]
-    status_code: [201, 400]
-  register: r_gitlab_token
-  when: _gitlab_root_token is not defined
-  failed_when: false
+    _gitlab_root_token: "{{ r_gitlab_root_token.resources[0].data.token | b64decode }}"
 
 - name: Create GitLab user
   uri:
@@ -133,6 +124,47 @@
       skip_confirmation: "true"
     status_code: [201, 409]
   register: r_create_gitlab_user
+
+- name: Get development group from GitLab
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/groups/development
+    method: GET
+    validate_certs: false
+    headers:
+      PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+    status_code: [200, 404]
+  register: r_gitlab_dev_group
+  failed_when: false
+
+- name: Get GitLab user details for group assignment
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users?username={{ _dynamic_username }}
+    method: GET
+    validate_certs: false
+    headers:
+      PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+    status_code: [200, 404]
+  register: r_gitlab_user_details
+  when: r_gitlab_dev_group.status == 200
+
+- name: Add user to development group
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/groups/{{ r_gitlab_dev_group.json.id }}/members
+    method: POST
+    validate_certs: false
+    body_format: form-urlencoded
+    body:
+      user_id: "{{ r_gitlab_user_details.json[0].id }}"
+      access_level: 50
+    headers:
+      PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+    status_code: [201, 409]
+  register: r_gitlab_group_membership
+  failed_when: false
+  when: 
+    - r_gitlab_dev_group.status == 200
+    - r_gitlab_user_details.json is defined
+    - r_gitlab_user_details.json | length > 0
 
 # =============================================
 # Discover URLs for Showroom Variables
