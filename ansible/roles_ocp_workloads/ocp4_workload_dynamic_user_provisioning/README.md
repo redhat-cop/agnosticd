@@ -25,7 +25,8 @@ ansible-playbook main.yml \
   -e guid=abc123 \
   -e ACTION=create \
   -e ocp4_workload_dynamic_user_provisioning_admin_user=admin \
-  -e ocp4_workload_dynamic_user_provisioning_admin_password=your-admin-password
+  -e ocp4_workload_dynamic_user_provisioning_admin_password=your-admin-password \
+  -e ocp4_workload_dynamic_user_provisioning_openshift_console_url=https://console-openshift-console.apps.cluster-lnj4s.dynamic.redhatworkshops.io
 ```
 
 This will create user: `user-abc123`
@@ -38,7 +39,8 @@ ansible-playbook main.yml \
   -e guid=abc123 \
   -e ACTION=remove \
   -e ocp4_workload_dynamic_user_provisioning_admin_user=admin \
-  -e ocp4_workload_dynamic_user_provisioning_admin_password=your-admin-password
+  -e ocp4_workload_dynamic_user_provisioning_admin_password=your-admin-password \
+  -e ocp4_workload_dynamic_user_provisioning_openshift_console_url=https://console-openshift-console.apps.cluster-lnj4s.dynamic.redhatworkshops.io
 ```
 
 ## Variables
@@ -50,6 +52,7 @@ ansible-playbook main.yml \
 | `guid` | Workshop GUID (auto-available in AgnosticD) | `abc123` |
 | `ocp4_workload_dynamic_user_provisioning_admin_user` | OpenShift admin username | `admin` |
 | `ocp4_workload_dynamic_user_provisioning_admin_password` | OpenShift admin password | `password123` |
+| `ocp4_workload_dynamic_user_provisioning_openshift_console_url` | OpenShift Console URL | `https://console-openshift-console.apps.cluster-lnj4s.dynamic.redhatworkshops.io` |
 
 ### Optional Variables
 
