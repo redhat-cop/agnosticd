@@ -259,7 +259,32 @@
     _user_app_name: "my-quarkus-tkn-{{ _dynamic_username | replace('user-', 'user') }}"
     _argocd_namespace: "{{ ocp4_workload_dynamic_user_provisioning_gitops_namespace | default('tssc-gitops') }}"
 
-- name: Find user ArgoCD applications in gitops namespace
+- name: Get user's GitLab repositories for safe ArgoCD app identification
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users/{{ r_gitlab_user.json[0].id }}/projects
+    method: GET
+    validate_certs: false
+    headers:
+      PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+    status_code: [200, 404]
+  register: r_user_gitlab_repos
+  failed_when: false
+  when: 
+    - r_gitlab_user.json is defined
+    - r_gitlab_user.json | length > 0
+    - _gitlab_root_token is defined
+
+- name: Extract user repository URLs for matching
+  ansible.builtin.set_fact:
+    _user_repo_urls: >-
+      {{
+        r_user_gitlab_repos.json | default([])
+        | map(attribute='http_url_to_repo')
+        | list
+      }}
+  when: r_user_gitlab_repos.json is defined
+
+- name: Find all ArgoCD applications in gitops namespace
   kubernetes.core.k8s_info:
     api_version: argoproj.io/v1alpha1
     kind: Application
@@ -267,7 +292,37 @@
   register: r_all_argocd_apps
   failed_when: false
 
-- name: Identify user-specific ArgoCD applications
+- name: Identify ArgoCD applications sourced from user's GitLab repositories
+  ansible.builtin.set_fact:
+    _user_argocd_apps: >-
+      {{
+        r_all_argocd_apps.resources | default([])
+        | selectattr('spec.source.repoURL', 'defined')
+        | selectattr('spec.source.repoURL', 'in', _user_repo_urls | default([]))
+        | list
+      }}
+  when: _user_repo_urls is defined and _user_repo_urls | length > 0
+
+- name: Add additional safety check for apps with user annotations or labels
+  ansible.builtin.set_fact:
+    _user_argocd_apps: >-
+      {{
+        (_user_argocd_apps | default([])) +
+        (r_all_argocd_apps.resources | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations', 'mapping')
+        | selectattr('metadata.annotations.values() | join(" ")', 'match', '.*' + _dynamic_username + '.*')
+        | list) +
+        (r_all_argocd_apps.resources | default([])
+        | selectattr('metadata.labels', 'defined')
+        | selectattr('metadata.labels', 'mapping')
+        | selectattr('metadata.labels.values() | join(" ")', 'match', '.*' + _dynamic_username + '.*')
+        | list)
+        | unique
+      }}
+  when: _user_repo_urls is defined and _user_repo_urls | length > 0
+
+- name: Fallback to name-based matching if GitLab repo matching fails
   ansible.builtin.set_fact:
     _user_argocd_apps: >-
       {{
@@ -275,8 +330,41 @@
         | selectattr('metadata.name', 'match', '.*user-?' + _user_guid + '.*')
         | list
       }}
+  when: _user_repo_urls is not defined or _user_repo_urls | length == 0
 
-- name: Delete user ArgoCD applications (cascade deletes all managed resources)
+- name: Debug ArgoCD application matching
+  ansible.builtin.debug:
+    msg:
+      - "User repositories found: {{ _user_repo_urls | default([]) | length }}"
+      - "ArgoCD apps matched by repo: {{ _user_argocd_apps | length }}"
+      - "Matched apps: {{ _user_argocd_apps | map(attribute='metadata.name') | list }}"
+      - "App sources: {{ _user_argocd_apps | map(attribute='spec.source.repoURL') | list }}"
+
+- name: Final safety validation - only delete apps with clear user ownership
+  ansible.builtin.set_fact:
+    _validated_user_apps: >-
+      {{
+        _user_argocd_apps | default([])
+        | selectattr('spec.source.repoURL', 'defined')
+        | select('test', _dynamic_username, 'metadata.name')
+        | list
+      }}
+  vars:
+    test: >-
+      {{
+        (item.spec.source.repoURL in (_user_repo_urls | default([]))) or
+        (item.metadata.name | regex_search('.*user-?' + _user_guid + '.*')) or
+        (item.metadata.annotations | default({}) | dict2items | selectattr('value', 'match', '.*' + _dynamic_username + '.*') | list | length > 0)
+      }}
+
+- name: Safety check - abort if too many apps would be deleted
+  ansible.builtin.fail:
+    msg: "SAFETY: Refusing to delete {{ _validated_user_apps | length }} ArgoCD apps. Manual review required."
+  when: 
+    - _validated_user_apps | length > 10
+    - _validated_user_apps | length > (_user_repo_urls | default([]) | length * 2)
+
+- name: Delete validated user ArgoCD applications (cascade deletes all managed resources)
   kubernetes.core.k8s:
     api_version: argoproj.io/v1alpha1
     kind: Application
@@ -288,15 +376,17 @@
     wait_condition:
       type: Deleted
       status: "True"
-  loop: "{{ _user_argocd_apps }}"
-  when: _user_argocd_apps | length > 0
+  loop: "{{ _validated_user_apps }}"
+  loop_control:
+    label: "{{ item.metadata.name }} (repo: {{ item.spec.source.repoURL | default('unknown') }})"
+  when: _validated_user_apps | length > 0
   register: r_argocd_cleanup
 
 - name: Wait for ArgoCD cascade deletion to complete
   ansible.builtin.pause:
     seconds: 30
     prompt: "Waiting for ArgoCD cascade deletion to clean up all managed resources..."
-  when: _user_argocd_apps | length > 0
+  when: _validated_user_apps | length > 0
 
 # =============================================
 # Fallback cleanup for any remaining resources
@@ -366,12 +456,13 @@
       Keycloak User: {{ 'Removed' if r_keycloak_user.json is defined and r_keycloak_user.json | length > 0 else 'Not found' }}
       GitLab User: {{ 'Removed' if r_gitlab_user.json is defined and r_gitlab_user.json | length > 0 else 'Not found' }}
       RHDH Catalog: {{ 'Cleaned' if _rhdh_token is defined and (r_catalog_entities.json is defined or r_user_components.json is defined) else 'Skipped (auth failed or not accessible)' }}
-      ArgoCD Applications: {{ 'Deleted (' + (_user_argocd_apps | length | string) + ' apps)' if _user_argocd_apps | length > 0 else 'None found' }}
+      ArgoCD Applications: {{ 'Deleted (' + (_validated_user_apps | length | string) + ' apps)' if _validated_user_apps | length > 0 else 'None found' }}
+      Repository Matching: {{ 'Used GitLab repos (' + (_user_repo_urls | default([]) | length | string) + ' repos)' if _user_repo_urls is defined else 'Fallback to name matching' }}
       
-      {% if _user_argocd_apps | length > 0 %}
+      {% if _validated_user_apps | length > 0 %}
       === ArgoCD Applications Removed ===
-      {% for app in _user_argocd_apps %}
-      - {{ app.metadata.name }} (namespace: {{ app.metadata.namespace }})
+      {% for app in _validated_user_apps %}
+      - {{ app.metadata.name }} (repo: {{ app.spec.source.repoURL | default('unknown') }})
       {% endfor %}
       (All managed resources automatically cleaned up via cascade deletion)
       {% endif %}
