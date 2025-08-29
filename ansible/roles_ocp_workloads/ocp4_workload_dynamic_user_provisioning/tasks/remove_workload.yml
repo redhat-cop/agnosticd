@@ -132,68 +132,171 @@
     - r_gitlab_user.json | length > 0
 
 # =============================================
-# Check for user-created resources
+# Clean up user-created resources
 # =============================================
-- name: Get all non-system namespaces
+# Find all resources that contain the username anywhere in the name
+# This catches variations like: my-app-user1234, user1234-webhook-job, app-user1234-db, etc.
+
+- name: Set comprehensive user patterns for cleanup
+  ansible.builtin.set_fact:
+    _user_patterns:
+      - ".*{{ _dynamic_username }}.*"  # Contains username anywhere
+      - ".*{{ _dynamic_username | replace('user-', '') }}.*"  # Contains just the GUID part
+
+- name: Find user-specific deployments across all namespaces
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+  register: r_all_deployments
+
+- name: Identify user-specific deployments
+  ansible.builtin.set_fact:
+    _user_deployments: >-
+      {{
+        r_all_deployments.resources
+        | selectattr('metadata.name', 'match', _user_patterns[0])
+        | list
+      }}
+
+- name: Delete user-specific deployments
+  kubernetes.core.k8s:
+    api_version: apps/v1
+    kind: Deployment
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ item.metadata.namespace }}"
+    state: absent
+  loop: "{{ _user_deployments }}"
+  when: _user_deployments | length > 0
+
+- name: Find user-specific jobs across all namespaces
+  kubernetes.core.k8s_info:
+    api_version: batch/v1
+    kind: Job
+  register: r_all_jobs
+
+- name: Identify and delete user-specific jobs
+  kubernetes.core.k8s:
+    api_version: batch/v1
+    kind: Job
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ item.metadata.namespace }}"
+    state: absent
+  loop: >-
+    {{
+      r_all_jobs.resources
+      | selectattr('metadata.name', 'match', _user_patterns[0])
+      | list
+    }}
+  when: r_all_jobs.resources | selectattr('metadata.name', 'match', _user_patterns[0]) | list | length > 0
+
+- name: Find user-specific pods across all namespaces
   kubernetes.core.k8s_info:
     api_version: v1
-    kind: Namespace
-  register: r_all_namespaces
+    kind: Pod
+  register: r_all_pods
 
-- name: Filter out system and workshop infrastructure namespaces
-  ansible.builtin.set_fact:
-    _potential_user_namespaces: >-
-      {{
-        r_all_namespaces.resources
-        | map(attribute='metadata.name')
-        | list
-        | reject('match', '^(kube-|openshift-|default$|tssc-.*|gitlab$|showroom.*)')
-        | reject('match', '^' + _dynamic_showroom_namespace + '$')
-        | list
-      }}
+- name: Identify and delete user-specific pods
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Pod
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ item.metadata.namespace }}"
+    state: absent
+  loop: >-
+    {{
+      r_all_pods.resources
+      | selectattr('metadata.name', 'match', _user_patterns[0])
+      | list
+    }}
+  when: r_all_pods.resources | selectattr('metadata.name', 'match', _user_patterns[0]) | list | length > 0
 
-- name: Check ownership of potential user namespaces
+- name: Find user-specific services
   kubernetes.core.k8s_info:
     api_version: v1
-    kind: Namespace
-    name: "{{ item }}"
-  register: r_namespace_details
-  loop: "{{ _potential_user_namespaces }}"
-  when: _potential_user_namespaces | length > 0
+    kind: Service
+  register: r_all_services
 
-- name: Identify user-created namespaces by checking annotations and labels
-  ansible.builtin.set_fact:
-    _user_namespaces: >-
-      {{
-        r_namespace_details.results
-        | default([])
-        | selectattr('resources', 'defined')
-        | selectattr('resources', 'length', 1)
-        | map(attribute='resources.0')
-        | selectattr('metadata.annotations', 'defined')
-        | selectattr('metadata.annotations', 'search', _dynamic_username)
-        | map(attribute='metadata.name')
-        | list
-        | union(
-          r_namespace_details.results
-          | default([])
-          | selectattr('resources', 'defined')
-          | selectattr('resources', 'length', 1)
-          | map(attribute='resources.0')
-          | selectattr('metadata.labels', 'defined')
-          | selectattr('metadata.labels', 'search', _dynamic_username)
-          | map(attribute='metadata.name')
-          | list
-        )
-      }}
+- name: Identify and delete user-specific services
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Service
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ item.metadata.namespace }}"
+    state: absent
+  loop: >-
+    {{
+      r_all_services.resources
+      | selectattr('metadata.name', 'match', _user_patterns[0])
+      | list
+    }}
+  when: r_all_services.resources | selectattr('metadata.name', 'match', _user_patterns[0]) | list | length > 0
 
-- name: Provide manual check guidance for remaining namespaces
-  ansible.builtin.set_fact:
-    _check_namespaces: >-
-      {{
-        _potential_user_namespaces
-        | difference(_user_namespaces)
-      }}
+- name: Find user-specific routes
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+  register: r_all_routes
+  failed_when: false
+
+- name: Identify and delete user-specific routes
+  kubernetes.core.k8s:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ item.metadata.namespace }}"
+    state: absent
+  loop: >-
+    {{
+      r_all_routes.resources | default([])
+      | selectattr('metadata.name', 'match', _user_patterns[0])
+      | list
+    }}
+  when: 
+    - r_all_routes.resources is defined
+    - r_all_routes.resources | selectattr('metadata.name', 'match', _user_patterns[0]) | list | length > 0
+
+- name: Find user-specific configmaps
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+  register: r_all_configmaps
+
+- name: Identify and delete user-specific configmaps
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: ConfigMap
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ item.metadata.namespace }}"
+    state: absent
+  loop: >-
+    {{
+      r_all_configmaps.resources
+      | selectattr('metadata.name', 'match', _user_patterns[0])
+      | list
+    }}
+  when: r_all_configmaps.resources | selectattr('metadata.name', 'match', _user_patterns[0]) | list | length > 0
+
+- name: Find user-specific secrets
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+  register: r_all_secrets
+
+- name: Identify and delete user-specific secrets (excluding system secrets)
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: Secret
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ item.metadata.namespace }}"
+    state: absent
+  loop: >-
+    {{
+      r_all_secrets.resources
+      | selectattr('metadata.name', 'match', _user_patterns[0])
+      | rejectattr('type', 'match', 'kubernetes.io/.*')
+      | list
+    }}
+  when: r_all_secrets.resources | selectattr('metadata.name', 'match', _user_patterns[0]) | rejectattr('type', 'match', 'kubernetes.io/.*') | list | length > 0
 
 # =============================================
 # Report cleanup status
@@ -208,39 +311,22 @@
       Keycloak User: {{ 'Removed' if r_keycloak_user.json is defined and r_keycloak_user.json | length > 0 else 'Not found' }}
       GitLab User: {{ 'Removed' if r_gitlab_user.json is defined and r_gitlab_user.json | length > 0 else 'Not found' }}
       
-      {% if _user_namespaces | length > 0 %}
-      === WARNING: User-Created Resources Found ===
-      The following namespaces contain references to {{ _dynamic_username }}:
-      {% for ns in _user_namespaces %}
-      - {{ ns }}
-      {% endfor %}
-      
-      Commands to remove these namespaces:
-      {% for ns in _user_namespaces %}
-      oc delete namespace {{ ns }}
+      {% if _user_deployments | length > 0 %}
+      === User-Created Resources Removed ===
+      Deployments removed:
+      {% for deployment in _user_deployments %}
+      - {{ deployment.metadata.name }} (namespace: {{ deployment.metadata.namespace }})
       {% endfor %}
       {% endif %}
       
-      {% if _check_namespaces | length > 0 %}
-      === Manual Check Required ===
-      The following namespaces may contain user-created resources:
-      {% for ns in _check_namespaces %}
-      - {{ ns }}
-      {% endfor %}
-      
-      Check each namespace manually:
-      {% for ns in _check_namespaces %}
-      oc get all -n {{ ns }}
-      oc describe namespace {{ ns }}
-      {% endfor %}
-      
-      If user-created, remove with: oc delete namespace <namespace-name>
-      {% endif %}
-      
-      === Complete Cleanup Commands ===
-      # Check for any remaining user resources
-      oc get all --all-namespaces -o wide | grep {{ _dynamic_username }}
-      oc get namespaces -o yaml | grep -A 5 -B 5 {{ _dynamic_username }}
+      === Verification Commands ===
+      # Check for any remaining user resources (try both username patterns)
+      oc get all --all-namespaces -o wide | grep -E "{{ _dynamic_username }}|{{ _dynamic_username | replace('user-', '') }}"
+      oc get jobs --all-namespaces | grep -E "{{ _dynamic_username }}|{{ _dynamic_username | replace('user-', '') }}"
+      oc get pods --all-namespaces | grep -E "{{ _dynamic_username }}|{{ _dynamic_username | replace('user-', '') }}"
+      oc get routes --all-namespaces | grep -E "{{ _dynamic_username }}|{{ _dynamic_username | replace('user-', '') }}"
+      oc get secrets --all-namespaces | grep -E "{{ _dynamic_username }}|{{ _dynamic_username | replace('user-', '') }}"
+      oc get configmaps --all-namespaces | grep -E "{{ _dynamic_username }}|{{ _dynamic_username | replace('user-', '') }}"
 
 - name: Remove Workload Tasks Complete
   debug:
