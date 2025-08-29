@@ -134,27 +134,66 @@
 # =============================================
 # Check for user-created resources
 # =============================================
-- name: Check for namespaces created by user
+- name: Get all non-system namespaces
   kubernetes.core.k8s_info:
     api_version: v1
     kind: Namespace
-    label_selectors:
-      - "kubernetes.io/metadata.name!=kube-system"
   register: r_all_namespaces
 
-- name: Find potential user-created namespaces
+- name: Filter out system and workshop infrastructure namespaces
   ansible.builtin.set_fact:
-    _user_namespaces: "{{ r_all_namespaces.resources | selectattr('metadata.annotations', 'defined') | selectattr('metadata.annotations', 'search', _dynamic_username) | map(attribute='metadata.name') | list }}"
+    _potential_user_namespaces: >-
+      {{
+        r_all_namespaces.resources
+        | map(attribute='metadata.name')
+        | list
+        | reject('match', '^(kube-|openshift-|default$|tssc-.*|gitlab$|showroom.*)')
+        | reject('match', '^' + _dynamic_showroom_namespace + '$')
+        | list
+      }}
 
-- name: Check for resources in user namespaces
+- name: Check ownership of potential user namespaces
   kubernetes.core.k8s_info:
     api_version: v1
-    kind: Pod
-    namespace: "{{ item }}"
-  register: r_user_pods
-  loop: "{{ _user_namespaces }}"
-  when: _user_namespaces | length > 0
-  failed_when: false
+    kind: Namespace
+    name: "{{ item }}"
+  register: r_namespace_details
+  loop: "{{ _potential_user_namespaces }}"
+  when: _potential_user_namespaces | length > 0
+
+- name: Identify user-created namespaces by checking annotations and labels
+  ansible.builtin.set_fact:
+    _user_namespaces: >-
+      {{
+        r_namespace_details.results
+        | default([])
+        | selectattr('resources', 'defined')
+        | selectattr('resources', 'length', 1)
+        | map(attribute='resources.0')
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations', 'search', _dynamic_username)
+        | map(attribute='metadata.name')
+        | list
+        | union(
+          r_namespace_details.results
+          | default([])
+          | selectattr('resources', 'defined')
+          | selectattr('resources', 'length', 1)
+          | map(attribute='resources.0')
+          | selectattr('metadata.labels', 'defined')
+          | selectattr('metadata.labels', 'search', _dynamic_username)
+          | map(attribute='metadata.name')
+          | list
+        )
+      }}
+
+- name: Provide manual check guidance for remaining namespaces
+  ansible.builtin.set_fact:
+    _check_namespaces: >-
+      {{
+        _potential_user_namespaces
+        | difference(_user_namespaces)
+      }}
 
 # =============================================
 # Report cleanup status
@@ -171,16 +210,37 @@
       
       {% if _user_namespaces | length > 0 %}
       === WARNING: User-Created Resources Found ===
-      The following namespaces may contain user-created resources:
+      The following namespaces contain references to {{ _dynamic_username }}:
       {% for ns in _user_namespaces %}
       - {{ ns }}
       {% endfor %}
       
-      Manual cleanup may be required:
+      Commands to remove these namespaces:
       {% for ns in _user_namespaces %}
       oc delete namespace {{ ns }}
       {% endfor %}
       {% endif %}
+      
+      {% if _check_namespaces | length > 0 %}
+      === Manual Check Required ===
+      The following namespaces may contain user-created resources:
+      {% for ns in _check_namespaces %}
+      - {{ ns }}
+      {% endfor %}
+      
+      Check each namespace manually:
+      {% for ns in _check_namespaces %}
+      oc get all -n {{ ns }}
+      oc describe namespace {{ ns }}
+      {% endfor %}
+      
+      If user-created, remove with: oc delete namespace <namespace-name>
+      {% endif %}
+      
+      === Complete Cleanup Commands ===
+      # Check for any remaining user resources
+      oc get all --all-namespaces -o wide | grep {{ _dynamic_username }}
+      oc get namespaces -o yaml | grep -A 5 -B 5 {{ _dynamic_username }}
 
 - name: Remove Workload Tasks Complete
   debug:
