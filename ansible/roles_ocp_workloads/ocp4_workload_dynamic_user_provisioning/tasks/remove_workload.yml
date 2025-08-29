@@ -250,27 +250,42 @@
 # =============================================
 # Clean up user-created resources
 # =============================================
-# Find all resources that contain the username anywhere in the name
-# This catches variations like: my-app-user1234, user1234-webhook-job, app-user1234-db, etc.
+# Use both label selectors (primary) and name patterns (fallback)
+# Label selectors are more reliable for Tekton/ArgoCD/Backstage created resources
+# Name patterns catch any manually created resources that might not have proper labels
 
-- name: Set comprehensive user patterns for cleanup
+- name: Set comprehensive user patterns and labels for cleanup
   ansible.builtin.set_fact:
     _user_guid: "{{ _dynamic_username | replace('user-', '') }}"
     _user_pattern: ".*user-?{{ _dynamic_username | replace('user-', '') }}.*"
+    _user_app_name: "my-quarkus-tkn-{{ _dynamic_username | replace('user-', 'user') }}"
+    _user_label_selectors:
+      - "app.kubernetes.io/instance=my-quarkus-tkn-{{ _dynamic_username | replace('user-', 'user') }}"
+      - "app.kubernetes.io/part-of=my-quarkus-tkn-{{ _dynamic_username | replace('user-', 'user') }}"
+      - "backstage.io/kubernetes-id=my-quarkus-tkn-{{ _dynamic_username | replace('user-', 'user') }}"
+      - "janus-idp.io/tekton=my-quarkus-tkn-{{ _dynamic_username | replace('user-', 'user') }}"
 
-- name: Find user-specific deployments across all namespaces
+- name: Find user-specific deployments using label selectors
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    label_selectors: "{{ _user_label_selectors }}"
+  register: r_labeled_deployments
+  failed_when: false
+
+- name: Find user-specific deployments using name patterns (fallback)
   kubernetes.core.k8s_info:
     api_version: apps/v1
     kind: Deployment
   register: r_all_deployments
 
-- name: Identify user-specific deployments
+- name: Identify user-specific deployments (combine labeled and pattern-matched)
   ansible.builtin.set_fact:
     _user_deployments: >-
       {{
-        r_all_deployments.resources
-        | selectattr('metadata.name', 'match', _user_pattern)
-        | list
+        (r_labeled_deployments.resources | default([])) +
+        (r_all_deployments.resources | selectattr('metadata.name', 'match', _user_pattern) | list)
+        | unique
       }}
 
 - name: Delete user-specific deployments
@@ -283,13 +298,21 @@
   loop: "{{ _user_deployments }}"
   when: _user_deployments | length > 0
 
-- name: Find user-specific replicasets across all namespaces
+- name: Find user-specific replicasets using label selectors
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: ReplicaSet
+    label_selectors: "{{ _user_label_selectors }}"
+  register: r_labeled_replicasets
+  failed_when: false
+
+- name: Find user-specific replicasets using name patterns (fallback)
   kubernetes.core.k8s_info:
     api_version: apps/v1
     kind: ReplicaSet
   register: r_all_replicasets
 
-- name: Identify and delete user-specific replicasets
+- name: Identify and delete user-specific replicasets (combine labeled and pattern-matched)
   kubernetes.core.k8s:
     api_version: apps/v1
     kind: ReplicaSet
@@ -298,11 +321,16 @@
     state: absent
   loop: >-
     {{
-      r_all_replicasets.resources
-      | selectattr('metadata.name', 'match', _user_pattern)
-      | list
+      ((r_labeled_replicasets.resources | default([])) +
+       (r_all_replicasets.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
+      | unique
     }}
-  when: r_all_replicasets.resources | selectattr('metadata.name', 'match', _user_pattern) | list | length > 0
+  when: >
+    {{
+      ((r_labeled_replicasets.resources | default([])) +
+       (r_all_replicasets.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
+      | unique | length > 0
+    }}
 
 - name: Find user-specific jobs across all namespaces
   kubernetes.core.k8s_info:
@@ -325,13 +353,21 @@
     }}
   when: r_all_jobs.resources | selectattr('metadata.name', 'match', _user_pattern) | list | length > 0
 
-- name: Find user-specific pods across all namespaces
+- name: Find user-specific pods using label selectors
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    label_selectors: "{{ _user_label_selectors }}"
+  register: r_labeled_pods
+  failed_when: false
+
+- name: Find user-specific pods using name patterns (fallback)
   kubernetes.core.k8s_info:
     api_version: v1
     kind: Pod
   register: r_all_pods
 
-- name: Identify and delete user-specific pods
+- name: Identify and delete user-specific pods (combine labeled and pattern-matched)
   kubernetes.core.k8s:
     api_version: v1
     kind: Pod
@@ -340,19 +376,32 @@
     state: absent
   loop: >-
     {{
-      r_all_pods.resources
-      | selectattr('metadata.name', 'match', _user_pattern)
-      | list
+      ((r_labeled_pods.resources | default([])) +
+       (r_all_pods.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
+      | unique
     }}
-  when: r_all_pods.resources | selectattr('metadata.name', 'match', _user_pattern) | list | length > 0
+  when: >-
+    {{
+      ((r_labeled_pods.resources | default([])) +
+       (r_all_pods.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
+      | unique | length > 0
+    }}
 
-- name: Find user-specific services
+- name: Find user-specific services using label selectors
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Service
+    label_selectors: "{{ _user_label_selectors }}"
+  register: r_labeled_services
+  failed_when: false
+
+- name: Find user-specific services using name patterns (fallback)
   kubernetes.core.k8s_info:
     api_version: v1
     kind: Service
   register: r_all_services
 
-- name: Identify and delete user-specific services
+- name: Identify and delete user-specific services (combine labeled and pattern-matched)
   kubernetes.core.k8s:
     api_version: v1
     kind: Service
@@ -361,11 +410,16 @@
     state: absent
   loop: >-
     {{
-      r_all_services.resources
-      | selectattr('metadata.name', 'match', _user_pattern)
-      | list
+      ((r_labeled_services.resources | default([])) +
+       (r_all_services.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
+      | unique
     }}
-  when: r_all_services.resources | selectattr('metadata.name', 'match', _user_pattern) | list | length > 0
+  when: >-
+    {{
+      ((r_labeled_services.resources | default([])) +
+       (r_all_services.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
+      | unique | length > 0
+    }}
 
 - name: Find user-specific routes
   kubernetes.core.k8s_info:
@@ -433,6 +487,22 @@
       | list
     }}
   when: r_all_secrets.resources | selectattr('metadata.name', 'match', _user_pattern) | rejectattr('type', 'match', 'kubernetes.io/.*') | list | length > 0
+
+# =============================================
+# Comprehensive cleanup using primary app label
+# =============================================
+- name: Final cleanup using primary app instance label
+  kubernetes.core.k8s:
+    state: absent
+    api_version: "{{ item.api_version }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ item.metadata.namespace }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.name }} in {{ item.metadata.namespace }}"
+  loop: "{{ query('kubernetes.core.k8s', label_selector='app.kubernetes.io/instance=' + _user_app_name) }}"
+  failed_when: false
+  when: _user_app_name is defined
 
 # =============================================
 # Report cleanup status
