@@ -248,261 +248,110 @@
     - _rhdh_token is defined
 
 # =============================================
-# Clean up user-created resources
+# Clean up ArgoCD Applications (Primary Strategy)
 # =============================================
-# Use both label selectors (primary) and name patterns (fallback)
-# Label selectors are more reliable for Tekton/ArgoCD/Backstage created resources
-# Name patterns catch any manually created resources that might not have proper labels
+# ArgoCD applications in tssc-gitops namespace manage all user resources
+# Deleting the ArgoCD app should cascade delete all managed resources
 
-- name: Set comprehensive user patterns and labels for cleanup
+- name: Set user application facts for cleanup
   ansible.builtin.set_fact:
     _user_guid: "{{ _dynamic_username | replace('user-', '') }}"
-    _user_pattern: ".*user-?{{ _dynamic_username | replace('user-', '') }}.*"
     _user_app_name: "my-quarkus-tkn-{{ _dynamic_username | replace('user-', 'user') }}"
-    _user_label_selectors:
-      - "app.kubernetes.io/instance=my-quarkus-tkn-{{ _dynamic_username | replace('user-', 'user') }}"
-      - "app.kubernetes.io/part-of=my-quarkus-tkn-{{ _dynamic_username | replace('user-', 'user') }}"
-      - "backstage.io/kubernetes-id=my-quarkus-tkn-{{ _dynamic_username | replace('user-', 'user') }}"
-      - "janus-idp.io/tekton=my-quarkus-tkn-{{ _dynamic_username | replace('user-', 'user') }}"
+    _argocd_namespace: "{{ ocp4_workload_dynamic_user_provisioning_gitops_namespace | default('tssc-gitops') }}"
 
-- name: Find user-specific deployments using label selectors
+- name: Find user ArgoCD applications in gitops namespace
   kubernetes.core.k8s_info:
-    api_version: apps/v1
-    kind: Deployment
-    label_selectors: "{{ _user_label_selectors }}"
-  register: r_labeled_deployments
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ _argocd_namespace }}"
+  register: r_all_argocd_apps
   failed_when: false
 
-- name: Find user-specific deployments using name patterns (fallback)
-  kubernetes.core.k8s_info:
-    api_version: apps/v1
-    kind: Deployment
-  register: r_all_deployments
-
-- name: Identify user-specific deployments (combine labeled and pattern-matched)
+- name: Identify user-specific ArgoCD applications
   ansible.builtin.set_fact:
-    _user_deployments: >-
+    _user_argocd_apps: >-
       {{
-        (r_labeled_deployments.resources | default([])) +
-        (r_all_deployments.resources | selectattr('metadata.name', 'match', _user_pattern) | list)
-        | unique
+        r_all_argocd_apps.resources | default([])
+        | selectattr('metadata.name', 'match', '.*user-?' + _user_guid + '.*')
+        | list
       }}
 
-- name: Delete user-specific deployments
+- name: Delete user ArgoCD applications (cascade deletes all managed resources)
   kubernetes.core.k8s:
-    api_version: apps/v1
-    kind: Deployment
+    api_version: argoproj.io/v1alpha1
+    kind: Application
     name: "{{ item.metadata.name }}"
     namespace: "{{ item.metadata.namespace }}"
     state: absent
-  loop: "{{ _user_deployments }}"
-  when: _user_deployments | length > 0
+    wait: true
+    wait_timeout: 300
+    wait_condition:
+      type: Deleted
+      status: "True"
+  loop: "{{ _user_argocd_apps }}"
+  when: _user_argocd_apps | length > 0
+  register: r_argocd_cleanup
 
-- name: Find user-specific replicasets using label selectors
-  kubernetes.core.k8s_info:
-    api_version: apps/v1
-    kind: ReplicaSet
-    label_selectors: "{{ _user_label_selectors }}"
-  register: r_labeled_replicasets
-  failed_when: false
-
-- name: Find user-specific replicasets using name patterns (fallback)
-  kubernetes.core.k8s_info:
-    api_version: apps/v1
-    kind: ReplicaSet
-  register: r_all_replicasets
-
-- name: Identify and delete user-specific replicasets (combine labeled and pattern-matched)
-  kubernetes.core.k8s:
-    api_version: apps/v1
-    kind: ReplicaSet
-    name: "{{ item.metadata.name }}"
-    namespace: "{{ item.metadata.namespace }}"
-    state: absent
-  loop: >-
-    {{
-      ((r_labeled_replicasets.resources | default([])) +
-       (r_all_replicasets.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
-      | unique
-    }}
-  when: >
-    {{
-      ((r_labeled_replicasets.resources | default([])) +
-       (r_all_replicasets.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
-      | unique | length > 0
-    }}
-
-- name: Find user-specific jobs across all namespaces
-  kubernetes.core.k8s_info:
-    api_version: batch/v1
-    kind: Job
-  register: r_all_jobs
-
-- name: Identify and delete user-specific jobs
-  kubernetes.core.k8s:
-    api_version: batch/v1
-    kind: Job
-    name: "{{ item.metadata.name }}"
-    namespace: "{{ item.metadata.namespace }}"
-    state: absent
-  loop: >-
-    {{
-      r_all_jobs.resources
-      | selectattr('metadata.name', 'match', _user_pattern)
-      | list
-    }}
-  when: r_all_jobs.resources | selectattr('metadata.name', 'match', _user_pattern) | list | length > 0
-
-- name: Find user-specific pods using label selectors
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Pod
-    label_selectors: "{{ _user_label_selectors }}"
-  register: r_labeled_pods
-  failed_when: false
-
-- name: Find user-specific pods using name patterns (fallback)
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Pod
-  register: r_all_pods
-
-- name: Identify and delete user-specific pods (combine labeled and pattern-matched)
-  kubernetes.core.k8s:
-    api_version: v1
-    kind: Pod
-    name: "{{ item.metadata.name }}"
-    namespace: "{{ item.metadata.namespace }}"
-    state: absent
-  loop: >-
-    {{
-      ((r_labeled_pods.resources | default([])) +
-       (r_all_pods.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
-      | unique
-    }}
-  when: >-
-    {{
-      ((r_labeled_pods.resources | default([])) +
-       (r_all_pods.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
-      | unique | length > 0
-    }}
-
-- name: Find user-specific services using label selectors
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Service
-    label_selectors: "{{ _user_label_selectors }}"
-  register: r_labeled_services
-  failed_when: false
-
-- name: Find user-specific services using name patterns (fallback)
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Service
-  register: r_all_services
-
-- name: Identify and delete user-specific services (combine labeled and pattern-matched)
-  kubernetes.core.k8s:
-    api_version: v1
-    kind: Service
-    name: "{{ item.metadata.name }}"
-    namespace: "{{ item.metadata.namespace }}"
-    state: absent
-  loop: >-
-    {{
-      ((r_labeled_services.resources | default([])) +
-       (r_all_services.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
-      | unique
-    }}
-  when: >-
-    {{
-      ((r_labeled_services.resources | default([])) +
-       (r_all_services.resources | selectattr('metadata.name', 'match', _user_pattern) | list))
-      | unique | length > 0
-    }}
-
-- name: Find user-specific routes
-  kubernetes.core.k8s_info:
-    api_version: route.openshift.io/v1
-    kind: Route
-  register: r_all_routes
-  failed_when: false
-
-- name: Identify and delete user-specific routes
-  kubernetes.core.k8s:
-    api_version: route.openshift.io/v1
-    kind: Route
-    name: "{{ item.metadata.name }}"
-    namespace: "{{ item.metadata.namespace }}"
-    state: absent
-  loop: >-
-    {{
-      r_all_routes.resources | default([])
-      | selectattr('metadata.name', 'match', _user_pattern)
-      | list
-    }}
-  when: 
-    - r_all_routes.resources is defined
-    - r_all_routes.resources | selectattr('metadata.name', 'match', _user_pattern) | list | length > 0
-
-- name: Find user-specific configmaps
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: ConfigMap
-  register: r_all_configmaps
-
-- name: Identify and delete user-specific configmaps
-  kubernetes.core.k8s:
-    api_version: v1
-    kind: ConfigMap
-    name: "{{ item.metadata.name }}"
-    namespace: "{{ item.metadata.namespace }}"
-    state: absent
-  loop: >-
-    {{
-      r_all_configmaps.resources
-      | selectattr('metadata.name', 'match', _user_pattern)
-      | list
-    }}
-  when: r_all_configmaps.resources | selectattr('metadata.name', 'match', _user_pattern) | list | length > 0
-
-- name: Find user-specific secrets
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Secret
-  register: r_all_secrets
-
-- name: Identify and delete user-specific secrets (excluding system secrets)
-  kubernetes.core.k8s:
-    api_version: v1
-    kind: Secret
-    name: "{{ item.metadata.name }}"
-    namespace: "{{ item.metadata.namespace }}"
-    state: absent
-  loop: >-
-    {{
-      r_all_secrets.resources
-      | selectattr('metadata.name', 'match', _user_pattern)
-      | rejectattr('type', 'match', 'kubernetes.io/.*')
-      | list
-    }}
-  when: r_all_secrets.resources | selectattr('metadata.name', 'match', _user_pattern) | rejectattr('type', 'match', 'kubernetes.io/.*') | list | length > 0
+- name: Wait for ArgoCD cascade deletion to complete
+  ansible.builtin.pause:
+    seconds: 30
+    prompt: "Waiting for ArgoCD cascade deletion to clean up all managed resources..."
+  when: _user_argocd_apps | length > 0
 
 # =============================================
-# Comprehensive cleanup using primary app label
+# Fallback cleanup for any remaining resources
 # =============================================
-- name: Final cleanup using primary app instance label
-  kubernetes.core.k8s:
-    state: absent
+# ArgoCD should have handled most resources, but clean up any manually created ones
+
+- name: Set user pattern for fallback cleanup
+  ansible.builtin.set_fact:
+    _user_pattern: ".*user-?{{ _user_guid }}.*"
+
+- name: Find any remaining user-specific resources by name pattern
+  kubernetes.core.k8s_info:
     api_version: "{{ item.api_version }}"
     kind: "{{ item.kind }}"
+  register: r_remaining_resources
+  loop:
+    - { api_version: "apps/v1", kind: "Deployment" }
+    - { api_version: "apps/v1", kind: "ReplicaSet" }
+    - { api_version: "v1", kind: "Pod" }
+    - { api_version: "v1", kind: "Service" }
+    - { api_version: "route.openshift.io/v1", kind: "Route" }
+    - { api_version: "batch/v1", kind: "Job" }
+    - { api_version: "v1", kind: "ConfigMap" }
+  failed_when: false
+
+- name: Delete any remaining user-specific resources
+  kubernetes.core.k8s:
+    api_version: "{{ resource.api_version }}"
+    kind: "{{ resource.kind }}"
     name: "{{ item.metadata.name }}"
     namespace: "{{ item.metadata.namespace }}"
+    state: absent
+  loop: >-
+    {{
+      r_remaining_resources.results
+      | selectattr('resources', 'defined')
+      | map(attribute='resources')
+      | flatten
+      | selectattr('metadata.name', 'match', _user_pattern)
+      | list
+    }}
   loop_control:
-    label: "{{ item.kind }}/{{ item.metadata.name }} in {{ item.metadata.namespace }}"
-  loop: "{{ query('kubernetes.core.k8s', label_selector='app.kubernetes.io/instance=' + _user_app_name) }}"
+    loop_var: item
+  vars:
+    resource: "{{ r_remaining_resources.results | selectattr('item.kind', 'equalto', item.kind) | first | default({}) }}"
   failed_when: false
-  when: _user_app_name is defined
+  when: >
+    {{
+      r_remaining_resources.results
+      | selectattr('resources', 'defined')
+      | map(attribute='resources')
+      | flatten
+      | selectattr('metadata.name', 'match', _user_pattern)
+      | list | length > 0
+    }}
 
 # =============================================
 # Report cleanup status
@@ -517,13 +366,14 @@
       Keycloak User: {{ 'Removed' if r_keycloak_user.json is defined and r_keycloak_user.json | length > 0 else 'Not found' }}
       GitLab User: {{ 'Removed' if r_gitlab_user.json is defined and r_gitlab_user.json | length > 0 else 'Not found' }}
       RHDH Catalog: {{ 'Cleaned' if _rhdh_token is defined and (r_catalog_entities.json is defined or r_user_components.json is defined) else 'Skipped (auth failed or not accessible)' }}
+      ArgoCD Applications: {{ 'Deleted (' + (_user_argocd_apps | length | string) + ' apps)' if _user_argocd_apps | length > 0 else 'None found' }}
       
-      {% if _user_deployments | length > 0 %}
-      === User-Created Resources Removed ===
-      Deployments removed:
-      {% for deployment in _user_deployments %}
-      - {{ deployment.metadata.name }} (namespace: {{ deployment.metadata.namespace }})
+      {% if _user_argocd_apps | length > 0 %}
+      === ArgoCD Applications Removed ===
+      {% for app in _user_argocd_apps %}
+      - {{ app.metadata.name }} (namespace: {{ app.metadata.namespace }})
       {% endfor %}
+      (All managed resources automatically cleaned up via cascade deletion)
       {% endif %}
       
       === Verification Commands ===
