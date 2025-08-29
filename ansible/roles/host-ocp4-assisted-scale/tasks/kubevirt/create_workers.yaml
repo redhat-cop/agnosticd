@@ -1,0 +1,164 @@
+---
+- name: Set default interfaces/networks variables
+  ansible.builtin.set_fact:
+    _instance_interfaces:
+      - masquerade: {}
+        model: virtio
+        name: default
+        macAddress: "{{ ai_workers_macs[_index|int-1] }}"
+      - name: "{{ network }}"
+        macAddress: "{{ ai_workers_macs2[_index|int-1] }}"
+        bridge: {}
+    _instance_networks:
+      - name: default
+        pod:
+          vmNetworkCIDR: "{{ pod_network }}"
+      - name: "{{ network }}"
+        multus:
+          networkName: "{{ network_name }}"
+
+- name: Add attach workers networks if defined
+  vars:
+    _network_name: "{{ _network.split('/')[1] if '/' in _network else _network + guid }}"
+    _network_multusname: "{{ _network if '/' in _network else _network + guid }}"
+  when: ai_attach_workers_networks | default([]) | length > 0
+  ansible.builtin.set_fact:
+    _instance_interfaces: >-
+      {{
+        _instance_interfaces + [{
+          'name': _network_name,
+          'bridge': {},
+          'model': 'virtio',
+          'macAddress': ai_attach_workers_macs[_network][_index|int-1]
+        } ]
+      }}
+    _instance_networks: >-
+      {{ _instance_networks + [
+          {
+              'name': _network_name,
+              'multus': {'networkName': _network_multusname}
+          }] }}
+  loop: "{{ ai_attach_workers_networks }}"
+  loop_control:
+    loop_var: _network
+
+- name: Set default volumes/disks variables
+  ansible.builtin.set_fact:
+    _instance_volumes:
+      - dataVolume:
+          name: "{{ vmname }}"
+        name: rootdisk
+      - dataVolume:
+          name: "{{ vmname }}-installation-cdrom"
+        name: installation-cdrom
+    _instance_disks:
+      - bootOrder: 1
+        disk:
+          bus: virtio
+        name: rootdisk
+      - bootOrder: 2
+        cdrom:
+          bus: sata
+        name: installation-cdrom
+
+- name: Set the instances disks
+  ansible.builtin.set_fact:
+    _instance_disks: "{{ _instance_disks | from_yaml + [
+    {
+        'name': _disk.metadata.name,
+        'disk': {'bus': _instance.disk_type | default('virtio')}
+    }
+    ] }}"
+    _instance_volumes: "{{ _instance_volumes | from_yaml + [
+        {
+            'name': _disk.metadata.name,
+            'dataVolume': {'name': _disk.metadata.name}
+        }
+    ] }}"
+  loop: "{{ ai_workers_extra_disks | default([]) | list }}"
+  loop_control:
+    loop_var: _disk
+
+- name: Create Worker virtual machine
+  kubevirt.core.kubevirt_vm:
+    api_version: kubevirt.io/v1
+    host: "{{ sandbox_openshift_api_url }}"
+    api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+    validate_certs: false
+    name: "{{ vmname }}"
+    namespace: "{{ namespace }}"
+    data_volume_templates: "{{ _datavolume + (ai_workers_extra_disks | default([]) | to_json | replace('INSTANCENAME', vmname) | from_json ) }}"
+    running: true
+    wait: false
+    annotations:
+      vm.kubevirt.io/os: rhel8
+    labels:
+      kubevirt.io/domain: "{{ vmname }}"
+      role: worker
+    spec: "{{ _spec | from_yaml }}"
+  vars:
+    _datavolume:
+      - metadata:
+          name: "{{ vmname }}-installation-cdrom"
+        spec:
+          source:
+            pvc:
+              name: "{{ pvcinstall }}"
+              namespace: "{{ namespace }}"
+          storage:
+            resources:
+              requests:
+                storage: 1Gi
+      - metadata:
+          name: "{{ vmname }}"
+        spec:
+          preallocation: false
+          source:
+            blank: {}
+          storage:
+            resources:
+              requests:
+                storage: 100Gi
+            storageClassName: "{{ storageclass }}"
+    _spec: |
+      domain:
+        cpu:
+          cores: {{ ai_workers_cores | int }}
+          sockets: 1
+          threads: 1
+          maxSockets: 2
+          model: host-passthrough
+        devices:
+          disks: {{ _instance_disks | replace('INSTANCENAME', vmname) }}
+          interfaces: {{ _instance_interfaces }}
+          networkInterfaceMultiqueue: true
+        machine:
+          type: pc-q35-rhel8.6.0
+        resources:
+          requests:
+            memory: "{{ ai_workers_memory }}"
+          limits:
+            memory: "{{ ai_workers_memory }}"
+      readinessProbe:
+        tcpSocket:
+          port: 80
+        initialDelaySeconds: 120
+        periodSeconds: 5
+      evictionStrategy: LiveMigrate
+      networks: {{ _instance_networks }}
+      terminationGracePeriodSeconds: 180
+      volumes: {{ _instance_volumes | replace('INSTANCENAME', vmname) }}
+
+- name: Wait till VM is running
+  kubernetes.core.k8s_info:
+    api_version: kubevirt.io/v1
+    host: "{{ sandbox_openshift_api_url }}"
+    api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+    validate_certs: false
+    kind: VirtualMachine
+    name: "{{ vmname }}"
+    namespace: "{{ namespace }}"
+  register: r_vm_status
+  until: r_vm_status.resources[0].status.printableStatus|default('') == "Running"
+  retries: 30
+  delay: 10
