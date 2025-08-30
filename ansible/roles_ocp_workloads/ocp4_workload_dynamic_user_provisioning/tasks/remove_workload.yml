@@ -292,35 +292,83 @@
   register: r_all_argocd_apps
   failed_when: false
 
-- name: Identify ArgoCD applications sourced from user's GitLab repositories
+- name: Debug sample ArgoCD app metadata structure (first app only)
+  ansible.builtin.debug:
+    msg:
+      - "Sample app name: {{ r_all_argocd_apps.resources[0].metadata.name | default('N/A') }}"
+      - "All annotations: {{ r_all_argocd_apps.resources[0].metadata.annotations | default({}) }}"
+      - "All labels: {{ r_all_argocd_apps.resources[0].metadata.labels | default({}) }}"
+      - "ManagedFields managers: {{ r_all_argocd_apps.resources[0].metadata.managedFields | default([]) | selectattr('manager', 'defined') | map(attribute='manager') | list }}"
+      - "Spec source: {{ r_all_argocd_apps.resources[0].spec.source | default({}) }}"
+  when: r_all_argocd_apps.resources | length > 0
+
+- name: Identify ArgoCD applications by actual user ownership
   ansible.builtin.set_fact:
     _user_argocd_apps: >-
       {{
         r_all_argocd_apps.resources | default([])
-        | selectattr('spec.source.repoURL', 'defined')
-        | selectattr('spec.source.repoURL', 'in', _user_repo_urls | default([]))
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations', 'mapping')
+        | selectattr('metadata.annotations.get("argocd.argoproj.io/sync-options", "") + " " + 
+                     metadata.annotations.get("backstage.io/managed-by-origin", "") + " " +
+                     metadata.annotations.get("backstage.io/managed-by-location", "") + " " +
+                     metadata.annotations.get("argocd.argoproj.io/managed-by", "") + " " +
+                     metadata.annotations.get("app.kubernetes.io/managed-by", "")', 'match', '.*' + _dynamic_username + '.*')
         | list
       }}
-  when: _user_repo_urls is defined and _user_repo_urls | length > 0
 
-- name: Add additional safety check for apps with user annotations or labels
+- name: Add apps owned by user through GitLab repositories
   ansible.builtin.set_fact:
     _user_argocd_apps: >-
       {{
         (_user_argocd_apps | default([])) +
         (r_all_argocd_apps.resources | default([])
-        | selectattr('metadata.annotations', 'defined')
-        | selectattr('metadata.annotations', 'mapping')
-        | selectattr('metadata.annotations.values() | join(" ")', 'match', '.*' + _dynamic_username + '.*')
-        | list) +
-        (r_all_argocd_apps.resources | default([])
-        | selectattr('metadata.labels', 'defined')
-        | selectattr('metadata.labels', 'mapping')
-        | selectattr('metadata.labels.values() | join(" ")', 'match', '.*' + _dynamic_username + '.*')
+        | selectattr('spec.source.repoURL', 'defined')
+        | selectattr('spec.source.repoURL', 'in', _user_repo_urls | default([]))
         | list)
         | unique
       }}
   when: _user_repo_urls is defined and _user_repo_urls | length > 0
+
+- name: Add apps created by user through RHDH/Backstage
+  ansible.builtin.set_fact:
+    _user_argocd_apps: >-
+      {{
+        (_user_argocd_apps | default([])) +
+        (r_all_argocd_apps.resources | default([])
+        | selectattr('metadata.labels', 'defined')
+        | selectattr('metadata.labels', 'mapping')
+        | selectattr('metadata.labels.get("backstage.io/kubernetes-id", "")', 'match', '.*' + _dynamic_username + '.*')
+        | list) +
+        (r_all_argocd_apps.resources | default([])
+        | selectattr('metadata.labels', 'defined')
+        | selectattr('metadata.labels', 'mapping')  
+        | selectattr('metadata.labels.get("janus-idp.io/tekton", "")', 'match', '.*' + _dynamic_username + '.*')
+        | list)
+        | unique
+      }}
+
+- name: Add apps with user in creation context
+  ansible.builtin.set_fact:
+    _user_argocd_apps: >-
+      {{
+        (_user_argocd_apps | default([])) +
+        (r_all_argocd_apps.resources | default([])
+        | selectattr('metadata.managedFields', 'defined')
+        | selectattr('metadata.managedFields', 'sequence')
+        | select('test')
+        | list)
+        | unique
+      }}
+  vars:
+    test: >-
+      {{
+        item.metadata.managedFields
+        | selectattr('manager', 'defined')
+        | map(attribute='manager')
+        | join(' ')
+        | regex_search(_dynamic_username) is not none
+      }}
 
 - name: Fallback to name-based matching if GitLab repo matching fails
   ansible.builtin.set_fact:
@@ -332,13 +380,29 @@
       }}
   when: _user_repo_urls is not defined or _user_repo_urls | length == 0
 
-- name: Debug ArgoCD application matching
+- name: Debug ArgoCD application ownership detection
   ansible.builtin.debug:
     msg:
       - "User repositories found: {{ _user_repo_urls | default([]) | length }}"
-      - "ArgoCD apps matched by repo: {{ _user_argocd_apps | length }}"
+      - "ArgoCD apps found by ownership: {{ _user_argocd_apps | length }}"
       - "Matched apps: {{ _user_argocd_apps | map(attribute='metadata.name') | list }}"
       - "App sources: {{ _user_argocd_apps | map(attribute='spec.source.repoURL') | list }}"
+
+- name: Debug detailed ownership metadata for each app
+  ansible.builtin.debug:
+    msg:
+      - "App: {{ item.metadata.name }}"
+      - "Source repo: {{ item.spec.source.repoURL | default('N/A') }}"
+      - "Backstage managed-by-origin: {{ item.metadata.annotations.get('backstage.io/managed-by-origin', 'N/A') }}"
+      - "Backstage managed-by-location: {{ item.metadata.annotations.get('backstage.io/managed-by-location', 'N/A') }}"
+      - "Backstage kubernetes-id: {{ item.metadata.labels.get('backstage.io/kubernetes-id', 'N/A') }}"
+      - "Janus tekton label: {{ item.metadata.labels.get('janus-idp.io/tekton', 'N/A') }}"
+      - "ArgoCD managed-by: {{ item.metadata.annotations.get('argocd.argoproj.io/managed-by', 'N/A') }}"
+      - "App managed-by: {{ item.metadata.annotations.get('app.kubernetes.io/managed-by', 'N/A') }}"
+      - "Creation managers: {{ item.metadata.managedFields | default([]) | selectattr('manager', 'defined') | map(attribute='manager') | list | join(', ') }}"
+  loop: "{{ _user_argocd_apps | default([]) }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
 
 - name: Final safety validation - only delete apps with clear user ownership
   ansible.builtin.set_fact:
