@@ -133,60 +133,8 @@
   failed_when: false
   when: _keycloak_admin_username is defined
 
-- name: Get Keycloak user to delete
-  uri:
-    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users?username={{ _dynamic_username }}
-    method: GET
-    validate_certs: false
-    headers:
-      Authorization: Bearer {{ r_keycloak_access_token.json.access_token }}
-  register: r_keycloak_user
-  failed_when: false
-  when: r_keycloak_access_token.json is defined
-
-- name: Delete Keycloak user
-  uri:
-    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users/{{ r_keycloak_user.json[0].id }}
-    method: DELETE
-    validate_certs: false
-    headers:
-      Authorization: Bearer {{ r_keycloak_access_token.json.access_token }}
-    status_code: [204, 404]
-  failed_when: false
-  when: 
-    - r_keycloak_user.json is defined
-    - r_keycloak_user.json | length > 0
-
 # =============================================
-# Remove GitLab User
-# =============================================
-- name: Get GitLab user to delete
-  uri:
-    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users?username={{ _dynamic_username }}
-    method: GET
-    validate_certs: false
-    status_code: [200, 404]
-  register: r_gitlab_user
-  failed_when: false
-
-- name: Delete GitLab user
-  uri:
-    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users/{{ r_gitlab_user.json[0].id }}
-    method: DELETE
-    validate_certs: false
-    headers:
-      Content-Type: application/json
-    body_format: form-urlencoded
-    body:
-      hard_delete: "true"
-    status_code: [202, 204, 404]
-  failed_when: false
-  when: 
-    - r_gitlab_user.json is defined
-    - r_gitlab_user.json | length > 0
-
-# =============================================
-# Clean up RHDH/Backstage Catalog Entries
+# Clean up RHDH/Backstage Catalog Entries FIRST
 # =============================================
 - name: Get Red Hat Developer Hub route for catalog cleanup
   kubernetes.core.k8s_info:
@@ -228,9 +176,9 @@
     - r_rhdh_user_token.json is defined
     - r_rhdh_user_token.json.access_token is defined
 
-- name: Find user-specific catalog entities in RHDH
+- name: Find user-specific catalog entities in RHDH (by managed-by-origin)
   uri:
-    url: "{{ _rhdh_cleanup_url }}/api/catalog/entities?filter=metadata.annotations.backstage.io/managed-by-origin={{ _dynamic_username }}"
+    url: "{{ _rhdh_cleanup_url }}/api/catalog/entities?filter=metadata.annotations.backstage.io/managed-by-origin=user{{ _user_guid }}"
     method: GET
     validate_certs: false
     headers:
@@ -260,7 +208,7 @@
 
 - name: Find user-specific GitLab projects/repos in catalog
   uri:
-    url: "{{ _rhdh_cleanup_url }}/api/catalog/entities?filter=kind=component,metadata.name={{ _dynamic_username }}*"
+    url: "{{ _rhdh_cleanup_url }}/api/catalog/entities?filter=kind=component,metadata.name=*user{{ _user_guid }}*"
     method: GET
     validate_certs: false
     headers:
@@ -300,6 +248,108 @@
   when: 
     - _rhdh_cleanup_url is defined
     - _rhdh_token is defined
+
+- name: Get Keycloak user to delete
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users?username={{ _dynamic_username }}
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token.json.access_token }}
+  register: r_keycloak_user
+  failed_when: false
+  when: r_keycloak_access_token.json is defined
+
+- name: Delete Keycloak user
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users/{{ r_keycloak_user.json[0].id }}
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token.json.access_token }}
+    status_code: [204, 404]
+  failed_when: false
+  when: 
+    - r_keycloak_user.json is defined
+    - r_keycloak_user.json | length > 0
+
+# =============================================
+# Remove GitLab User and Repositories
+# =============================================
+- name: Get GitLab root personal access token from secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: root-user-personal-token
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}"
+  register: r_gitlab_root_token_cleanup
+  failed_when: false
+
+- name: Set GitLab root token for cleanup
+  ansible.builtin.set_fact:
+    _gitlab_root_token_cleanup: "{{ r_gitlab_root_token_cleanup.resources[0].data.token | b64decode }}"
+  when: r_gitlab_root_token_cleanup.resources | length > 0
+
+- name: Get GitLab user to delete
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users?username={{ _dynamic_username }}
+    method: GET
+    validate_certs: false
+    headers:
+      PRIVATE-TOKEN: "{{ _gitlab_root_token_cleanup }}"
+    status_code: [200, 404]
+  register: r_gitlab_user
+  failed_when: false
+  when: _gitlab_root_token_cleanup is defined
+
+- name: Get user's GitLab projects for deletion
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users/{{ r_gitlab_user.json[0].id }}/projects
+    method: GET
+    validate_certs: false
+    headers:
+      PRIVATE-TOKEN: "{{ _gitlab_root_token_cleanup }}"
+    status_code: [200, 404]
+  register: r_user_gitlab_projects
+  failed_when: false
+  when: 
+    - _gitlab_root_token_cleanup is defined
+    - r_gitlab_user.json is defined
+    - r_gitlab_user.json | length > 0
+
+- name: Delete user's GitLab projects
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/projects/{{ item.id }}
+    method: DELETE
+    validate_certs: false
+    headers:
+      PRIVATE-TOKEN: "{{ _gitlab_root_token_cleanup }}"
+    status_code: [202, 204, 404]
+  loop: "{{ r_user_gitlab_projects.json | default([]) }}"
+  failed_when: false
+  when: 
+    - _gitlab_root_token_cleanup is defined
+    - r_user_gitlab_projects.json is defined
+    - r_user_gitlab_projects.json | length > 0
+
+- name: Delete GitLab user
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users/{{ r_gitlab_user.json[0].id }}
+    method: DELETE
+    validate_certs: false
+    headers:
+      PRIVATE-TOKEN: "{{ _gitlab_root_token_cleanup }}"
+      Content-Type: application/json
+    body_format: form-urlencoded
+    body:
+      hard_delete: "true"
+    status_code: [202, 204, 404]
+  failed_when: false
+  when: 
+    - _gitlab_root_token_cleanup is defined
+    - r_gitlab_user.json is defined
+    - r_gitlab_user.json | length > 0
+
 
 # =============================================
 # Clean up ArgoCD Applications (Primary Strategy)
