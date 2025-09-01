@@ -586,12 +586,41 @@
       register: r_argocd_apps
       failed_when: false
 
-    - name: Filter ArgoCD apps related to user
+    - name: Extract ArgoCD app selectors from RHDH entities
+      ansible.builtin.set_fact:
+        _argocd_selectors: []
+
+    - name: Find ArgoCD app selectors from RHDH entity annotations
+      ansible.builtin.set_fact:
+        _argocd_selectors: >-
+          {{
+            _argocd_selectors + [selector_value]
+          }}
+      vars:
+        selector_value: "{{ item.metadata.annotations['argocd/app-selector'] }}"
+      loop: "{{ _user_entities | default([]) }}"
+      when:
+        - item.metadata.annotations is defined
+        - item.metadata.annotations['argocd/app-selector'] is defined
+        - selector_value != ""
+      loop_control:
+        label: "{{ item.metadata.name | default('unnamed') }}"
+
+    - name: Extract component names from RHDH entities for ArgoCD matching
+      ansible.builtin.set_fact:
+        _component_names: >-
+          {{
+            (_rhdh_components | default([]) | map(attribute='metadata.name') | list) +
+            (_rhdh_resources | default([]) | map(attribute='metadata.name') | list) +
+            (_rhdh_apis | default([]) | map(attribute='metadata.name') | list)
+          }}
+
+    - name: Filter ArgoCD apps related to user using RHDH entity data
       ansible.builtin.set_fact:
         _user_argocd_apps: []
       when: r_argocd_apps.resources is defined
 
-    - name: Find ArgoCD apps containing username patterns
+    - name: Find ArgoCD apps by component names and selectors from RHDH entities
       ansible.builtin.set_fact:
         _user_argocd_apps: >-
           {{
@@ -601,24 +630,21 @@
       when:
         - r_argocd_apps.resources is defined
         - >-
+          (item.metadata.name in _component_names) or
+          (item.metadata.labels | default({}) | dict2items | selectattr('key', 'equalto', 'tssc/gitops') |
+           map(attribute='value') | list | intersect(_argocd_selectors) | length > 0) or
           (_dynamic_username in item.metadata.name) or
-          (_dynamic_username.replace('-', '') in item.metadata.name) or
-          (_dynamic_username in (item.spec.project | default(''))) or
-          (_dynamic_username in (item.spec.source.repoURL | default(''))) or
-          (_dynamic_username in (item.metadata.labels | default({}) | to_nice_yaml)) or
-          (('tssc/gitops=' + _dynamic_username) in (item.metadata.labels | default({}) | to_nice_yaml)) or
-          (('tssc/gitops=' + _dynamic_username.replace('-', '')) in (item.metadata.labels | default({}) | to_nice_yaml))
+          (_dynamic_username in (item.spec.source.repoURL | default('')))
       loop_control:
         label: "{{ item.metadata.name }}"
 
-    - name: Debug ArgoCD app discovery patterns
+    - name: Debug ArgoCD app discovery using RHDH entities
       ansible.builtin.debug:
         msg:
-          - "ArgoCD app search patterns for {{ _dynamic_username }}:"
-          - "  • {{ _dynamic_username }} (original)"
-          - "  • {{ _dynamic_username.replace('-', '') }} (no hyphens)"
-          - "  • tssc/gitops={{ _dynamic_username }}"
-          - "  • tssc/gitops={{ _dynamic_username.replace('-', '') }}"
+          - "Using RHDH entities as source of truth for ArgoCD discovery:"
+          - "  • Component names from RHDH: {{ _component_names }}"
+          - "  • ArgoCD selectors from RHDH: {{ _argocd_selectors }}"
+          - "  • User pattern: {{ _dynamic_username }}"
           - ""
           - "Found ArgoCD applications:"
           - "{{ _user_argocd_apps | map(attribute='metadata.name') | list }}"
@@ -963,6 +989,7 @@
       - "✅ Deleted RHDH {{ item.item.kind }}: {{ item.item.metadata.name }}"
       - "   └─ Namespace: {{ item.item.metadata.namespace | default('default') }}"
       - "   └─ Status: {{ item.status }}"
+      - "   └─ URL: {{ item.url | default('N/A') }}"
       - ""
   loop: >-
     {{
@@ -973,6 +1000,24 @@
   loop_control:
     label: "{{ item.item.metadata.name }}"
   when: item.status in [200, 202, 204]
+
+- name: Report RHDH entity deletion failures
+  ansible.builtin.debug:
+    msg:
+      - "❌ Failed to delete RHDH {{ item.item.kind }}: {{ item.item.metadata.name }}"
+      - "   └─ Status: {{ item.status }}"
+      - "   └─ Error: {{ item.msg | default('Unknown error') }}"
+      - "   └─ URL: {{ item.url | default('N/A') }}"
+      - ""
+  loop: >-
+    {{
+      (r_delete_rhdh_resource.results | default([])) +
+      (r_delete_rhdh_component.results | default([])) +
+      (r_delete_rhdh_api.results | default([]))
+    }}
+  loop_control:
+    label: "{{ item.item.metadata.name }}"
+  when: item.status not in [200, 202, 204, 404]
 
 - name: "🚀 DELETING ARGOCD APPLICATIONS"
   ansible.builtin.debug:
