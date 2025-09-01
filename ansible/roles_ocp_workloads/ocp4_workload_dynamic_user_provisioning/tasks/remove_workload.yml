@@ -1151,6 +1151,125 @@
   loop_control:
     label: "{{ item.metadata.name }}"
 
+- name: "👤 DELETING KEYCLOAK USER"
+  ansible.builtin.debug:
+    msg:
+      - "┌─────────────────────────────────────────────────────────────────┐"
+      - "│                    DELETING KEYCLOAK USER                       │"
+      - "└─────────────────────────────────────────────────────────────────┘"
+
+- name: Get Keycloak admin credentials for user deletion
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: keycloak-initial-admin
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_keycloak_namespace }}"
+  register: r_keycloak_admin_credentials_cleanup
+  failed_when: false
+
+- name: Set Keycloak admin credentials for cleanup
+  ansible.builtin.set_fact:
+    _keycloak_admin_username_cleanup: "{{ r_keycloak_admin_credentials_cleanup.resources[0].data.username | b64decode }}"
+    _keycloak_admin_password_cleanup: "{{ r_keycloak_admin_credentials_cleanup.resources[0].data.password | b64decode }}"
+  when:
+    - r_keycloak_admin_credentials_cleanup.resources is defined
+    - r_keycloak_admin_credentials_cleanup.resources | length > 0
+
+- name: Generate Keycloak access token for user deletion
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/realms/master/protocol/openid-connect/token
+    method: POST
+    validate_certs: false
+    body_format: form-urlencoded
+    body:
+      client_id: admin-cli
+      username: "{{ _keycloak_admin_username_cleanup }}"
+      password: "{{ _keycloak_admin_password_cleanup }}"
+      grant_type: password
+    timeout: 30
+  register: r_keycloak_access_token_cleanup
+  failed_when: false
+  when: _keycloak_admin_username_cleanup is defined
+
+- name: Get user details from trusted-artifact-signer realm
+  uri:
+    url: >-
+      https://sso.{{ _ocp_apps_domain }}/admin/realms/
+      {{- ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users?username={{ _dynamic_username }}
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token_cleanup.json.access_token }}
+    timeout: 30
+  register: r_keycloak_user_cleanup
+  failed_when: false
+  when:
+    - r_keycloak_access_token_cleanup is defined
+    - r_keycloak_access_token_cleanup.json is defined
+    - r_keycloak_access_token_cleanup.json.access_token is defined
+
+- name: Delete user from trusted-artifact-signer realm
+  uri:
+    url: >-
+      https://sso.{{ _ocp_apps_domain }}/admin/realms/
+      {{- ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users/{{ r_keycloak_user_cleanup.json[0].id }}
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token_cleanup.json.access_token }}
+    status_code: [204, 404]
+    timeout: 30
+  register: r_delete_keycloak_user
+  failed_when: false
+  when:
+    - r_keycloak_user_cleanup is defined
+    - r_keycloak_user_cleanup.json is defined
+    - r_keycloak_user_cleanup.json | length > 0
+
+- name: Get user details from chicken realm (TPA)
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/chicken/users?username={{ _dynamic_username }}
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token_cleanup.json.access_token }}
+    timeout: 30
+  register: r_tpa_user_cleanup
+  failed_when: false
+  when:
+    - r_keycloak_access_token_cleanup is defined
+    - r_keycloak_access_token_cleanup.json is defined
+    - r_keycloak_access_token_cleanup.json.access_token is defined
+
+- name: Delete user from chicken realm (TPA)
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/chicken/users/{{ r_tpa_user_cleanup.json[0].id }}
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token_cleanup.json.access_token }}
+    status_code: [204, 404]
+    timeout: 30
+  register: r_delete_tpa_user
+  failed_when: false
+  when:
+    - r_tpa_user_cleanup is defined
+    - r_tpa_user_cleanup.json is defined
+    - r_tpa_user_cleanup.json | length > 0
+
+- name: Report Keycloak user deletions
+  ansible.builtin.debug:
+    msg:
+      - "✅ Deleted Keycloak user {{ _dynamic_username }} from trusted-artifact-signer realm"
+      - "   └─ Status: {{ r_delete_keycloak_user.status | default('N/A') }}"
+      - ""
+      - "✅ Deleted Keycloak user {{ _dynamic_username }} from chicken realm (TPA)"
+      - "   └─ Status: {{ r_delete_tpa_user.status | default('N/A') }}"
+      - ""
+  when:
+    - (r_delete_keycloak_user.status is defined and r_delete_keycloak_user.status == 204) or
+      (r_delete_tpa_user.status is defined and r_delete_tpa_user.status == 204)
+
 - name: "📊 CLEANUP SUMMARY"
   ansible.builtin.debug:
     msg:
@@ -1172,16 +1291,19 @@
         {{ r_delete_rhdh_api.results | default([]) | selectattr('status', 'in', [200, 202, 204]) | list | length }}
       - "  ├─ ArgoCD Applications Deleted: {{ _user_argocd_apps | default([]) | length }}"
       - >-
+        ├─ Keycloak Users Deleted:
+        {{ ((r_delete_keycloak_user.status | default(0) == 204) | int) + ((r_delete_tpa_user.status | default(0) == 204) | int) }}
+      - >-
         └─ TOTAL ACTIONS TAKEN:
         {{ (r_delete_gitlab_project.results | selectattr('status', 'in', [202, 204]) | list | length) +
            (r_delete_rhdh_resource.results | default([]) | selectattr('status', 'in', [200, 202, 204]) | list | length) +
            (r_delete_rhdh_component.results | default([]) | selectattr('status', 'in', [200, 202, 204]) | list | length) +
            (r_delete_rhdh_api.results | default([]) | selectattr('status', 'in', [200, 202, 204]) | list | length) +
-           (_user_argocd_apps | default([]) | length) }}
+           (_user_argocd_apps | default([]) | length) +
+           (((r_delete_keycloak_user.status | default(0) == 204) | int) + ((r_delete_tpa_user.status | default(0) == 204) | int)) }}
       - ""
       - "⚠️  STILL TO BE IMPLEMENTED:"
-      - "  ├─ OpenShift Resource Cleanup: TBD"
-      - "  └─ User Account Cleanup: TBD"
+      - "  └─ OpenShift Resource Cleanup: TBD"
       - ""
       - "✅ Comprehensive cleanup completed successfully!"
       - ""
