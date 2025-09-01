@@ -25,63 +25,66 @@
     msg: "RHDH route not found in namespace {{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
   when: r_rhdh_route.resources | length == 0
 
-- name: Retrieve Keycloak admin credentials for RHDH API access
+- name: Get RHDH backend token from secret
   kubernetes.core.k8s_info:
     api_version: v1
     kind: Secret
-    name: keycloak-initial-admin
-    namespace: "{{ ocp4_workload_dynamic_user_provisioning_keycloak_namespace }}"
-  register: r_keycloak_admin_credentials
-  retries: 60
-  delay: 10
-  until:
-    - r_keycloak_admin_credentials is defined
-    - r_keycloak_admin_credentials.resources is defined
-    - r_keycloak_admin_credentials.resources | length > 0
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
+  register: r_rhdh_secrets
 
-- name: Set Keycloak admin credentials
+- name: Debug RHDH secrets
+  ansible.builtin.debug:
+    msg:
+      - "RHDH secrets found: {{ r_rhdh_secrets.resources | map(attribute='metadata.name') | list }}"
+
+- name: Find RHDH backend token secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
+    label_selectors:
+      - app.kubernetes.io/name=backstage
+  register: r_rhdh_backend_secrets
+
+- name: Try to get RHDH backend auth token from backstage secrets
   ansible.builtin.set_fact:
-    _keycloak_admin_username: >-
-      {{ r_keycloak_admin_credentials.resources[0].data.username | b64decode }}
-    _keycloak_admin_password: >-
-      {{ r_keycloak_admin_credentials.resources[0].data.password | b64decode }}
+    _rhdh_backend_token: >-
+      {{
+        r_rhdh_backend_secrets.resources |
+        selectattr('data.BACKEND_SECRET', 'defined') |
+        map(attribute='data.BACKEND_SECRET') |
+        first |
+        b64decode
+      }}
+  when: 
+    - r_rhdh_backend_secrets.resources | length > 0
+    - r_rhdh_backend_secrets.resources | selectattr('data.BACKEND_SECRET', 'defined') | list | length > 0
 
-- name: Generate Keycloak access token for RHDH API
-  uri:
-    url: >-
-      https://sso.{{ _ocp_apps_domain }}/realms/master/protocol/openid-connect/token
-    method: POST
-    validate_certs: false
-    body_format: form-urlencoded
-    body:
-      client_id: admin-cli
-      username: "{{ _keycloak_admin_username }}"
-      password: "{{ _keycloak_admin_password }}"
-      grant_type: password
-  register: r_keycloak_access_token
-  changed_when: true
+- name: Try alternative token sources if BACKEND_SECRET not found
+  block:
+    - name: Look for backstage-backend-auth-key secret
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: backstage-backend-auth-key
+        namespace: "{{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
+      register: r_backend_auth_key
+      failed_when: false
 
-- name: Get user token for RHDH API access
-  uri:
-    url: >-
-      https://sso.{{ _ocp_apps_domain }}/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/protocol/openid-connect/token
-    method: POST
-    validate_certs: false
-    body_format: form-urlencoded
-    body:
-      client_id: backstage
-      username: "{{ _dynamic_username }}"
-      password: "{{ ocp4_workload_dynamic_user_provisioning_password }}"
-      grant_type: password
-  register: r_user_access_token
-  failed_when: false
+    - name: Set token from backstage-backend-auth-key
+      ansible.builtin.set_fact:
+        _rhdh_backend_token: "{{ r_backend_auth_key.resources[0].data['backend-auth-key'] | b64decode }}"
+      when:
+        - r_backend_auth_key.resources | length > 0
+        - r_backend_auth_key.resources[0].data['backend-auth-key'] is defined
+  when: _rhdh_backend_token is not defined
 
 - name: Debug RHDH API access setup
   ansible.builtin.debug:
     msg:
       - "RHDH URL: {{ _rhdh_url }}"
       - "Dynamic Username: {{ _dynamic_username }}"
-      - "User token available: {{ r_user_access_token.status == 200 }}"
+      - "Backend token available: {{ _rhdh_backend_token is defined }}"
 
 - name: Discover all entities in RHDH catalog
   uri:
@@ -89,11 +92,11 @@
     method: GET
     validate_certs: false
     headers:
-      Authorization: "Bearer {{ r_user_access_token.json.access_token }}"
+      Authorization: "Bearer {{ _rhdh_backend_token }}"
       Content-Type: application/json
     status_code: [200, 401, 403]
   register: r_all_entities
-  when: r_user_access_token.status == 200
+  when: _rhdh_backend_token is defined
 
 - name: Filter entities owned by or related to the user
   ansible.builtin.set_fact:
@@ -111,7 +114,9 @@
         selectattr('metadata.name', 'search', _dynamic_username) |
         list
       }}
-  when: r_all_entities.status == 200
+  when: 
+    - r_all_entities is defined
+    - r_all_entities.status == 200
 
 - name: Debug discovered user entities
   ansible.builtin.debug:
