@@ -373,23 +373,24 @@
       k8s_patterns:
         - "my-quarkus-tkn-{{ _dynamic_username }}"
 
-- name: Delete user entities directly by name pattern
+- name: Unregister user entity locations from RHDH catalog
   uri:
-    url: "{{ _rhdh_cleanup_url }}/api/catalog/entities/by-name/{{ item.kind | lower }}/default/{{ item.name }}"
+    url: "{{ _rhdh_cleanup_url }}/api/catalog/locations/by-entity/{{ item.kind | lower }}/{{ item.metadata.namespace | default('default') }}/{{ item.metadata.name }}"
     method: DELETE
     validate_certs: false
     headers:
-      Authorization: Bearer {{ _rhdh_backend_secret.data['BACKEND_SECRET'] | b64decode }}
+      Authorization: Bearer {{ _rhdh_token }}
     status_code: [200, 204, 404, 409]
-  loop: "{{ _user_resource_names }}"
+  loop: "{{ _all_user_entities_final }}"
   loop_control:
-    label: "{{ item.kind }}/default/{{ item.name }}"
+    label: "Unregister {{ item.kind }}/{{ item.metadata.namespace | default('default') }}/{{ item.metadata.name }}"
   failed_when: false
   when: 
     - _rhdh_cleanup_url is defined
-    - _backend_secret_exists | bool
+    - _rhdh_token is defined
+    - _all_user_entities_final | length > 0
 
-- name: Fallback - Delete discovered user entities from RHDH catalog
+- name: Delete user entities from RHDH catalog (after unregistering locations)
   uri:
     url: "{{ _rhdh_cleanup_url }}/api/catalog/entities/by-name/{{ item.kind | lower }}/{{ item.metadata.namespace | default('default') }}/{{ item.metadata.name }}"
     method: DELETE
@@ -399,12 +400,30 @@
     status_code: [200, 204, 404, 409]
   loop: "{{ _all_user_entities_final }}"
   loop_control:
-    label: "{{ item.kind }}/{{ item.metadata.namespace | default('default') }}/{{ item.metadata.name }}"
+    label: "Delete {{ item.kind }}/{{ item.metadata.namespace | default('default') }}/{{ item.metadata.name }}"
   failed_when: false
   when: 
     - _rhdh_cleanup_url is defined
     - _rhdh_token is defined
     - _all_user_entities_final | length > 0
+
+- name: Fallback - Delete user entities directly by name pattern
+  uri:
+    url: "{{ _rhdh_cleanup_url }}/api/catalog/entities/by-name/{{ item.kind | lower }}/default/{{ item.name }}"
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ _rhdh_backend_secret.data['BACKEND_SECRET'] | b64decode }}
+    status_code: [200, 204, 404, 409]
+  loop: "{{ _user_resource_names }}"
+  loop_control:
+    label: "Fallback delete {{ item.kind }}/default/{{ item.name }}"
+  failed_when: false
+  when: 
+    - _rhdh_cleanup_url is defined
+    - _rhdh_backend_secret.data is defined
+    - _rhdh_backend_secret.data['BACKEND_SECRET'] is defined
+    - (_all_user_entities_final | length == 0)
 
 # =============================================
 # Step 4: Extract GitLab Repository Information from Discovered Entities
@@ -510,6 +529,15 @@
       - "BACKEND_SECRET key exists: {{ _backend_secret_exists | bool }}"
       - "Available secret keys: {{ _rhdh_backend_secret.data.keys() | list if _rhdh_backend_secret.data is defined else [] }}"
 
+- name: Get ArgoCD admin credentials from tssc-gitops namespace
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: tssc-gitops-cluster
+    namespace: tssc-gitops
+  register: r_argocd_admin_secret
+  failed_when: false
+
 - name: Extract service tokens from RHDH backend secret
   ansible.builtin.set_fact:
     _rhdh_gitlab_token: "{{ _rhdh_backend_secret.data['GITLAB__TOKEN'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['GITLAB__TOKEN'] is defined else '' }}"
@@ -524,6 +552,29 @@
     _rhdh_quay_token: "{{ _rhdh_backend_secret.data['QUAY__API_TOKEN'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['QUAY__API_TOKEN'] is defined else '' }}"
     _rhdh_quay_url: "{{ _rhdh_backend_secret.data['QUAY__URL'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['QUAY__URL'] is defined else '' }}"
   when: _rhdh_backend_secret.data is defined
+
+- name: Get Quay super user credentials from tssc-quay namespace
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: tssc-quay-super-user
+    namespace: tssc-quay
+  register: r_quay_admin_secret
+  failed_when: false
+
+- name: Set ArgoCD admin credentials from tssc-gitops secret
+  ansible.builtin.set_fact:
+    _argocd_admin_user: "{{ r_argocd_admin_secret.resources[0].data.admin | b64decode if r_argocd_admin_secret.resources | length > 0 and r_argocd_admin_secret.resources[0].data.admin is defined else 'admin' }}"
+    _argocd_admin_password: "{{ r_argocd_admin_secret.resources[0].data['admin.password'] | b64decode if r_argocd_admin_secret.resources | length > 0 and r_argocd_admin_secret.resources[0].data['admin.password'] is defined else '' }}"
+    _argocd_server_url: "https://tssc-gitops-server-tssc-gitops.{{ _ocp_apps_domain }}"
+  when: r_argocd_admin_secret.resources is defined
+
+- name: Set Quay admin credentials
+  ansible.builtin.set_fact:
+    _quay_admin_username: "{{ r_quay_admin_secret.resources[0].data.username | b64decode if r_quay_admin_secret.resources | length > 0 and r_quay_admin_secret.resources[0].data.username is defined else 'quayadmin' }}"
+    _quay_admin_password: "{{ r_quay_admin_secret.resources[0].data.password | b64decode if r_quay_admin_secret.resources | length > 0 and r_quay_admin_secret.resources[0].data.password is defined else '' }}"
+    _quay_server_url: "https://tssc-quay-quay-tssc-quay.{{ _ocp_apps_domain }}"
+  when: r_quay_admin_secret.resources is defined
 
 - name: Set GitLab token (prefer root token, fallback to RHDH token)
   ansible.builtin.set_fact:
@@ -647,6 +698,13 @@
       - "RHDH ArgoCD URL: {{ _rhdh_argocd_url | default('Not configured') }}"
       - "RHDH Quay URL: {{ _rhdh_quay_url | default('Not configured') }}"
       - "RHDH Keycloak Realm: {{ _rhdh_keycloak_realm | default('Not configured') }}"
+      - ""
+      - "=== Admin Credentials Status ==="
+      - "GitLab root token available: {{ _gitlab_root_token is defined and _gitlab_root_token != '' }}"
+      - "ArgoCD admin credentials: {{ _argocd_admin_password is defined and _argocd_admin_password != '' }}"
+      - "ArgoCD server URL: {{ _argocd_server_url | default('Not configured') }}"
+      - "Quay admin credentials: {{ _quay_admin_password is defined and _quay_admin_password != '' }}"
+      - "Quay server URL: {{ _quay_server_url | default('Not configured') }}"
 
 - name: Delete user-owned GitLab projects
   uri:
@@ -942,7 +1000,40 @@
   when: _user_argocd_apps | default([]) | length > 0
   register: r_argocd_cleanup
 
-- name: Alternative - Delete ArgoCD applications using ArgoCD admin API
+- name: Get ArgoCD admin session token
+  uri:
+    url: "{{ _argocd_server_url }}/api/v1/session"
+    method: POST
+    validate_certs: false
+    body_format: json
+    body:
+      username: "{{ _argocd_admin_user }}"
+      password: "{{ _argocd_admin_password }}"
+    status_code: [200, 401, 403]
+  register: r_argocd_admin_session
+  failed_when: false
+  when: 
+    - _argocd_admin_password is defined and _argocd_admin_password != ''
+    - _user_argocd_apps | default([]) | length > 0
+    - r_argocd_cleanup is failed
+
+- name: Delete ArgoCD applications using admin API with session token
+  uri:
+    url: "{{ _argocd_server_url }}/api/v1/applications/{{ item.metadata.name }}?cascade=true"
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: "Bearer {{ r_argocd_admin_session.json.token }}"
+    status_code: [200, 204, 404]
+  loop: "{{ _user_argocd_apps | default([]) }}"
+  failed_when: false
+  when: 
+    - r_argocd_admin_session.json is defined
+    - r_argocd_admin_session.json.token is defined
+    - _user_argocd_apps | default([]) | length > 0
+    - r_argocd_cleanup is failed
+
+- name: Fallback - Delete ArgoCD applications using RHDH token
   uri:
     url: "{{ _rhdh_argocd_url }}/api/v1/applications/{{ item.metadata.name }}?cascade=true"
     method: DELETE
@@ -957,6 +1048,7 @@
     - _rhdh_argocd_token is defined and _rhdh_argocd_token != ''
     - _user_argocd_apps | default([]) | length > 0
     - r_argocd_cleanup is failed
+    - r_argocd_admin_session.json is not defined
 
 - name: Wait for ArgoCD cascade deletion to complete
   ansible.builtin.pause:
@@ -1066,23 +1158,80 @@
       - "=== Quay Repository Cleanup ==="
       - "Repository slugs from RHDH: {{ _quay_repo_slugs | default([]) }}"
 
-- name: Delete Quay repositories using direct patterns
+- name: Get Quay admin session token
   uri:
-    url: "{{ _rhdh_quay_url }}/api/v1/repository/{{ item }}"
+    url: "{{ _quay_server_url }}/api/v1/signin"
+    method: POST
+    validate_certs: false
+    body_format: json
+    body:
+      username: "{{ _quay_admin_username }}"
+      password: "{{ _quay_admin_password }}"
+    status_code: [200, 401, 403]
+  register: r_quay_admin_session
+  failed_when: false
+  when: 
+    - _quay_admin_password is defined and _quay_admin_password != ''
+
+- name: Delete Quay repositories using direct patterns with admin token
+  uri:
+    url: "{{ _quay_server_url }}/api/v1/repository/{{ item }}"
     method: DELETE
     validate_certs: false
     headers:
-      Authorization: "Bearer {{ _rhdh_quay_token }}"
+      Authorization: "Bearer {{ r_quay_admin_session.json.token }}"
     status_code: [204, 404]
   loop: "{{ _direct_cleanup_resources.quay_repos }}"
   failed_when: false
   when: 
-    - _rhdh_quay_url is defined
-    - _rhdh_quay_token is defined
-    - _rhdh_quay_url != ''
-    - _rhdh_quay_token != ''
+    - r_quay_admin_session.json is defined
+    - r_quay_admin_session.json.token is defined
 
-- name: Fallback - Delete Quay repositories from RHDH entities
+- name: Get user Quay namespace repositories using admin token
+  uri:
+    url: "{{ _quay_server_url }}/api/v1/repository?namespace={{ _dynamic_username }}"
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: "Bearer {{ r_quay_admin_session.json.token }}"
+    status_code: [200, 401, 403, 404]
+  register: r_user_quay_repos_admin
+  failed_when: false
+  when: 
+    - r_quay_admin_session.json is defined
+    - r_quay_admin_session.json.token is defined
+
+- name: Delete Quay repositories from RHDH entities using admin token
+  uri:
+    url: "{{ _quay_server_url }}/api/v1/repository/{{ item }}"
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: "Bearer {{ r_quay_admin_session.json.token }}"
+    status_code: [204, 404]
+  loop: "{{ _quay_repo_slugs | default([]) }}"
+  failed_when: false
+  when: 
+    - r_quay_admin_session.json is defined
+    - r_quay_admin_session.json.token is defined
+    - _quay_repo_slugs | default([]) | length > 0
+
+- name: Delete user namespace Quay repositories using admin token
+  uri:
+    url: "{{ _quay_server_url }}/api/v1/repository/{{ _dynamic_username }}/{{ item.name }}"
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: "Bearer {{ r_quay_admin_session.json.token }}"
+    status_code: [204, 404]
+  loop: "{{ r_user_quay_repos_admin.json.repositories | default([]) }}"
+  failed_when: false
+  when: 
+    - r_user_quay_repos_admin.json is defined
+    - r_user_quay_repos_admin.json.repositories is defined
+    - r_user_quay_repos_admin.json.repositories | length > 0
+
+- name: Fallback - Delete Quay repositories using RHDH token
   uri:
     url: "{{ _rhdh_quay_url }}/api/v1/repository/{{ item }}"
     method: DELETE
@@ -1090,16 +1239,15 @@
     headers:
       Authorization: "Bearer {{ _rhdh_quay_token }}"
     status_code: [204, 404]
-  loop: "{{ _quay_repo_slugs | default([]) }}"
+  loop: "{{ _quay_repo_slugs | default([]) + _direct_cleanup_resources.quay_repos | default([]) }}"
   failed_when: false
   when: 
-    - _rhdh_quay_url is defined
-    - _rhdh_quay_token is defined
-    - _rhdh_quay_url != ''
-    - _rhdh_quay_token != ''
+    - _rhdh_quay_url is defined and _rhdh_quay_url != ''
+    - _rhdh_quay_token is defined and _rhdh_quay_token != ''
+    - r_quay_admin_session.json is not defined
     - _quay_repo_slugs | default([]) | length > 0
 
-- name: Fallback cleanup of user Quay namespace repositories
+- name: Fallback - Get user Quay namespace repositories using RHDH token
   uri:
     url: "{{ _rhdh_quay_url }}/api/v1/repository?namespace={{ _dynamic_username }}"
     method: GET
@@ -1107,16 +1255,15 @@
     headers:
       Authorization: "Bearer {{ _rhdh_quay_token }}"
     status_code: [200, 401, 403, 404]
-  register: r_user_quay_repos
+  register: r_user_quay_repos_rhdh
   failed_when: false
   when: 
-    - _rhdh_quay_url is defined
-    - _rhdh_quay_token is defined
-    - _rhdh_quay_url != ''
-    - _rhdh_quay_token != ''
+    - _rhdh_quay_url is defined and _rhdh_quay_url != ''
+    - _rhdh_quay_token is defined and _rhdh_quay_token != ''
+    - r_quay_admin_session.json is not defined
     - (_quay_repo_slugs | default([]) | length == 0)
 
-- name: Delete user namespace Quay repositories
+- name: Fallback - Delete user namespace Quay repositories using RHDH token
   uri:
     url: "{{ _rhdh_quay_url }}/api/v1/repository/{{ _dynamic_username }}/{{ item.name }}"
     method: DELETE
@@ -1124,12 +1271,12 @@
     headers:
       Authorization: "Bearer {{ _rhdh_quay_token }}"
     status_code: [204, 404]
-  loop: "{{ r_user_quay_repos.json.repositories | default([]) }}"
+  loop: "{{ r_user_quay_repos_rhdh.json.repositories | default([]) }}"
   failed_when: false
   when: 
-    - r_user_quay_repos.json is defined
-    - r_user_quay_repos.json.repositories is defined
-    - r_user_quay_repos.json.repositories | length > 0
+    - r_user_quay_repos_rhdh.json is defined
+    - r_user_quay_repos_rhdh.json.repositories is defined
+    - r_user_quay_repos_rhdh.json.repositories | length > 0
 
 # =============================================
 # Final Cleanup: Remove Keycloak User
