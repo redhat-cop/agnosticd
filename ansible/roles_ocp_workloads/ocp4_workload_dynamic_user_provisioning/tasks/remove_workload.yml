@@ -300,23 +300,178 @@
       register: r_gitlab_development_projects
       failed_when: false
 
+    - name: Search for projects with user ID pattern (user123 instead of user-123)
+      uri:
+        url: >-
+          https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/
+          {{- 'api/v4/groups/development/projects?search=' }}{{ _dynamic_username | replace('-', '') }}
+        method: GET
+        validate_certs: false
+        headers:
+          PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+        status_code: [200, 404]
+      register: r_gitlab_development_projects_alt
+      failed_when: false
+
+    - name: Get all projects in development group for comprehensive search
+      uri:
+        url: >-
+          https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/
+          {{- 'api/v4/groups/development/projects' }}
+        method: GET
+        validate_certs: false
+        headers:
+          PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+        status_code: [200, 404]
+      register: r_gitlab_all_development_projects
+      failed_when: false
+
+    - name: Filter development projects for user-related repos
+      ansible.builtin.set_fact:
+        _filtered_dev_projects: []
+
+    - name: Find user-related projects in all development projects
+      ansible.builtin.set_fact:
+        _filtered_dev_projects: >-
+          {{
+            _filtered_dev_projects + [item]
+          }}
+      loop: "{{ r_gitlab_all_development_projects.json | default([]) }}"
+      when:
+        - r_gitlab_all_development_projects.json is defined
+        - >-
+          (_dynamic_username in item.name) or
+          (_dynamic_username.replace('-', '') in item.name) or
+          (_dynamic_username in item.path) or
+          (_dynamic_username.replace('-', '') in item.path)
+      loop_control:
+        label: "{{ item.name }}"
+
     - name: Combine all GitLab projects
       ansible.builtin.set_fact:
         r_gitlab_projects:
           json: >-
             {{
               (r_gitlab_projects.json | default([])) +
-              (r_gitlab_development_projects.json | default([]))
+              (r_gitlab_development_projects.json | default([])) +
+              (r_gitlab_development_projects_alt.json | default([])) +
+              (_filtered_dev_projects | default([]))
             }}
-      when: r_gitlab_development_projects.json is defined
 
-    - name: Debug GitLab projects
+    - name: Remove duplicate GitLab projects
+      ansible.builtin.set_fact:
+        r_gitlab_projects:
+          json: >-
+            {{
+              r_gitlab_projects.json | default([]) |
+              unique_by('id') |
+              list
+            }}
+
+    - name: Extract GitLab repository URLs from discovered resources
+      ansible.builtin.set_fact:
+        _gitlab_repo_urls: []
+
+    - name: Find GitLab URLs from RHDH entities
+      ansible.builtin.set_fact:
+        _gitlab_repo_urls: >-
+          {{
+            _gitlab_repo_urls + [item]
+          }}
+      loop: >-
+        {{
+          (_user_entities | default([]) | map(attribute='metadata.annotations') | 
+           map('dict2items') | flatten |
+           selectattr('key', 'match', '.*source-location.*') |
+           map(attribute='value') |
+           selectattr('match', '.*gitlab.*') |
+           map('regex_replace', '^url:', '') |
+           map('regex_replace', '/-/blob/.*$', '') |
+           map('regex_replace', '/-/edit/.*$', '') |
+           map('regex_replace', '/$', '') |
+           unique | list) +
+          (_user_argocd_apps | default([]) | map(attribute='spec.source.repoURL') |
+           selectattr('match', '.*gitlab.*') |
+           map('regex_replace', '\\.git$', '') |
+           unique | list)
+        }}
+      when: item != ""
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Extract project paths from GitLab URLs
+      ansible.builtin.set_fact:
+        _gitlab_project_paths: >-
+          {{
+            _gitlab_repo_urls | map('regex_replace', '^https://[^/]+/', '') | list
+          }}
+
+    - name: Get GitLab project details by path
+      uri:
+        url: >-
+          https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/
+          {{- 'api/v4/projects/' }}{{ item | urlencode }}
+        method: GET
+        validate_certs: false
+        headers:
+          PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+        status_code: [200, 404]
+      register: r_gitlab_project_details
+      loop: "{{ _gitlab_project_paths }}"
+      loop_control:
+        label: "{{ item }}"
+      failed_when: false
+
+    - name: Combine discovered GitLab projects with URL-based projects
+      ansible.builtin.set_fact:
+        r_gitlab_projects:
+          json: >-
+            {{
+              (r_gitlab_projects.json | default([])) +
+              (r_gitlab_project_details.results | 
+               selectattr('status', 'equalto', 200) |
+               map(attribute='json') | list)
+            }}
+
+    - name: Remove duplicate GitLab projects (final)
+      ansible.builtin.set_fact:
+        r_gitlab_projects:
+          json: >-
+            {{
+              r_gitlab_projects.json | default([]) |
+              unique_by('id') |
+              list
+            }}
+
+    - name: Debug final GitLab discovery results
       ansible.builtin.debug:
         msg:
-          - "GitLab user found: {{ r_gitlab_user.status == 200 and r_gitlab_user.json | length > 0 }}"
-          - "Projects count: {{ r_gitlab_projects.json | default([]) | length }}"
-          - "Project names: {{ r_gitlab_projects.json | default([]) | map(attribute='name') | list }}"
-      when: r_gitlab_user.status == 200
+          - "GitLab Repository URLs found in RHDH/ArgoCD:"
+          - "{{ _gitlab_repo_urls }}"
+          - "Project paths extracted:"
+          - "{{ _gitlab_project_paths }}"
+          - "Final GitLab projects count: {{ r_gitlab_projects.json | default([]) | length }}"
+
+    - name: List each discovered GitLab project
+      ansible.builtin.debug:
+        msg:
+          - "Project: {{ item.name }}"
+          - "  ID: {{ item.id }}"
+          - "  Path: {{ item.path_with_namespace }}"
+          - "  Owner: {{ item.owner.username | default('N/A') if item.owner is defined else 'N/A' }}"
+          - "  URL: {{ item.web_url }}"
+          - ""
+      loop: "{{ r_gitlab_projects.json | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Debug search patterns used
+      ansible.builtin.debug:
+        msg:
+          - "Search patterns used:"
+          - "  Original username: {{ _dynamic_username }}"
+          - "  Without hyphens: {{ _dynamic_username | replace('-', '') }}"
+          - "  Development group API: /api/v4/groups/development/projects"
 
 - name: Discover ArgoCD Applications for user
   block:
