@@ -150,7 +150,25 @@
   ansible.builtin.set_fact:
     _rhdh_cleanup_url: "{{ _rhdh_backend_url if _rhdh_backend_url is defined and _rhdh_backend_url != '' else ('https://' + r_rhdh_cleanup_route.resources[0].spec.host) if r_rhdh_cleanup_route.resources | length > 0 else '' }}"
 
-- name: Generate RHDH access token for catalog cleanup
+- name: Generate RHDH access token using client credentials from secret
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/protocol/openid-connect/token
+    method: POST
+    validate_certs: false
+    body_format: form-urlencoded
+    body:
+      client_id: "{{ _rhdh_backend_secret.data['AUTH_OIDC_CLIENT_ID'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['AUTH_OIDC_CLIENT_ID'] is defined else 'rhdh' }}"
+      client_secret: "{{ _rhdh_backend_secret.data['AUTH_OIDC_CLIENT_SECRET'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['AUTH_OIDC_CLIENT_SECRET'] is defined else '' }}"
+      grant_type: client_credentials
+      scope: openid
+    status_code: [200, 400, 401, 403]
+  register: r_rhdh_service_token
+  failed_when: false
+  when: 
+    - _rhdh_cleanup_url is defined
+    - _rhdh_backend_secret.data is defined
+
+- name: Fallback RHDH token generation using user credentials
   uri:
     url: https://sso.{{ _ocp_apps_domain }}/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/protocol/openid-connect/token
     method: POST
@@ -167,13 +185,35 @@
   when: 
     - _rhdh_cleanup_url is defined
     - r_keycloak_access_token.json is defined
+    - (r_rhdh_service_token.json is not defined or r_rhdh_service_token.json.access_token is not defined)
 
-- name: Set RHDH token if authentication succeeded
+- name: Set RHDH token from service credentials
+  ansible.builtin.set_fact:
+    _rhdh_token: "{{ r_rhdh_service_token.json.access_token }}"
+  when: 
+    - r_rhdh_service_token.json is defined
+    - r_rhdh_service_token.json.access_token is defined
+
+- name: Set RHDH token from user credentials (fallback)
   ansible.builtin.set_fact:
     _rhdh_token: "{{ r_rhdh_user_token.json.access_token }}"
   when: 
     - r_rhdh_user_token.json is defined
     - r_rhdh_user_token.json.access_token is defined
+    - _rhdh_token is not defined
+
+- name: Debug RHDH token generation
+  ansible.builtin.debug:
+    msg:
+      - "=== RHDH Token Generation Debug ==="
+      - "Client ID available: {{ _rhdh_backend_secret.data['AUTH_OIDC_CLIENT_ID'] is defined if _rhdh_backend_secret.data is defined else false }}"
+      - "Client Secret available: {{ _rhdh_backend_secret.data['AUTH_OIDC_CLIENT_SECRET'] is defined if _rhdh_backend_secret.data is defined else false }}"
+      - "Service token call status: {{ r_rhdh_service_token.status | default('not attempted') }}"
+      - "Service token success: {{ r_rhdh_service_token.json.access_token is defined if r_rhdh_service_token.json is defined else false }}"
+      - "User token call status: {{ r_rhdh_user_token.status | default('not attempted') }}"
+      - "User token success: {{ r_rhdh_user_token.json.access_token is defined if r_rhdh_user_token.json is defined else false }}"
+      - "Final RHDH token available: {{ _rhdh_token is defined and _rhdh_token != '' }}"
+      - "Token length: {{ _rhdh_token | length if _rhdh_token is defined else 0 }}"
 
 # =============================================
 # Step 1: Comprehensive Entity Discovery in RHDH
