@@ -412,18 +412,32 @@
     - r_gitlab_user.json is defined
     - r_gitlab_user.json | length > 0
 
-- name: Find GitLab projects by repository names from RHDH catalog
+- name: Extract GitLab project names from RHDH entities
+  ansible.builtin.set_fact:
+    _gitlab_projects_to_delete: >-
+      {{
+        _all_user_entities_final | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.backstage.io/source-location', 'defined')
+        | map(attribute='metadata.annotations.backstage.io/source-location')
+        | select('match', '.*gitlab.*')
+        | map('regex_replace', '.*/(development/[^/]+).*', '\1')
+        | unique
+        | list
+      }}
+
+- name: Find GitLab projects by full path from RHDH entities
   uri:
-    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/projects?search={{ item }}
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/projects?search={{ item.split('/')[-1] }}
     method: GET
     validate_certs: false
     headers:
       PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
     status_code: [200, 404]
   register: r_gitlab_projects_by_name
-  loop: "{{ _user_gitlab_repo_names | default([]) }}"
+  loop: "{{ _gitlab_projects_to_delete | default([]) }}"
   failed_when: false
-  when: _user_gitlab_repo_names | default([]) | length > 0
+  when: _gitlab_projects_to_delete | default([]) | length > 0
 
 - name: Combine all found GitLab projects for deletion
   ansible.builtin.set_fact:
@@ -568,72 +582,106 @@
       - "Spec source: {{ r_all_argocd_apps.resources[0].spec.source | default({}) }}"
   when: r_all_argocd_apps.resources | length > 0
 
-- name: Identify ArgoCD applications by actual user ownership
+- name: Extract resource identifiers from RHDH entities for cleanup
   ansible.builtin.set_fact:
-    _user_argocd_apps: []
-
-- name: Add apps owned by user through GitLab repositories
-  ansible.builtin.set_fact:
-    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('spec.source.repoURL', 'defined') | selectattr('spec.source.repoURL', 'in', _user_repo_urls) | list) }}"
-  when: _user_repo_urls is defined and _user_repo_urls | length > 0
-
-- name: Add apps with backstage kubernetes-id label (contains user456)
-  ansible.builtin.set_fact:
-    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('metadata.labels.backstage.io/kubernetes-id', 'defined') | selectattr('metadata.labels.backstage.io/kubernetes-id', 'match', '.*user' + _user_guid + '.*') | list) }}"
-  when: r_all_argocd_apps.resources is defined
-
-- name: Add apps with janus tekton label (contains user456)
-  ansible.builtin.set_fact:
-    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('metadata.labels.janus-idp.io/tekton', 'defined') | selectattr('metadata.labels.janus-idp.io/tekton', 'match', '.*user' + _user_guid + '.*') | list) }}"
-  when: r_all_argocd_apps.resources is defined
-
-- name: Add apps using ArgoCD selector from discovered RHDH entities
-  ansible.builtin.set_fact:
+    _kubernetes_ids_from_rhdh: >-
+      {{
+        _all_user_entities_final | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.backstage.io/kubernetes-id', 'defined')
+        | map(attribute='metadata.annotations.backstage.io/kubernetes-id')
+        | unique
+        | list
+      }}
+    _tekton_ids_from_rhdh: >-
+      {{
+        _all_user_entities_final | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.janus-idp.io/tekton', 'defined')
+        | map(attribute='metadata.annotations.janus-idp.io/tekton')
+        | unique
+        | list
+      }}
     _argocd_selectors_from_rhdh: >-
       {{
         _all_user_entities_final | default([])
         | selectattr('metadata.annotations', 'defined')
         | selectattr('metadata.annotations.argocd/app-selector', 'defined')
         | map(attribute='metadata.annotations.argocd/app-selector')
+        | map('regex_replace', '.*=(.*)$', '\1')
+        | unique
         | list
       }}
 
-- name: Add apps matching ArgoCD selectors from RHDH
+- name: Find ArgoCD applications matching RHDH resource identifiers
   ansible.builtin.set_fact:
-    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('metadata.name', 'in', _argocd_selectors_from_rhdh | map('regex_replace', '.*/(.+)$', '\\1') | list) | list) }}"
+    _user_argocd_apps: >-
+      {{
+        r_all_argocd_apps.resources | default([])
+        | selectattr('metadata.name', 'match', '.*(' + (_kubernetes_ids_from_rhdh + _tekton_ids_from_rhdh + _argocd_selectors_from_rhdh) | join('|') + ').*')
+        | list
+      }}
   when: 
     - r_all_argocd_apps.resources is defined
-    - _argocd_selectors_from_rhdh is defined
-    - _argocd_selectors_from_rhdh | length > 0
+    - (_kubernetes_ids_from_rhdh + _tekton_ids_from_rhdh + _argocd_selectors_from_rhdh) | length > 0
 
-- name: Add apps with backstage-name label (contains user456)
+- name: Fallback to GitLab repo URL matching for ArgoCD apps
   ansible.builtin.set_fact:
-    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('metadata.labels.backstage-name', 'defined') | selectattr('metadata.labels.backstage-name', 'match', '.*user' + _user_guid + '.*') | list) }}"
-  when: r_all_argocd_apps.resources is defined
+    _gitlab_repo_urls_from_rhdh: >-
+      {{
+        _all_user_entities_final | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.backstage.io/source-location', 'defined')
+        | map(attribute='metadata.annotations.backstage.io/source-location')
+        | select('match', '.*gitlab.*')
+        | list
+      }}
+    _user_argocd_apps: >-
+      {{
+        (_user_argocd_apps | default([])) +
+        (r_all_argocd_apps.resources | default([])
+        | selectattr('spec.source.repoURL', 'defined')
+        | selectattr('spec.source.repoURL', 'in', 
+          _all_user_entities_final | default([])
+          | selectattr('metadata.annotations', 'defined')
+          | selectattr('metadata.annotations.backstage.io/source-location', 'defined')
+          | map(attribute='metadata.annotations.backstage.io/source-location')
+          | select('match', '.*gitlab.*')
+          | list)
+        | list)
+        | unique
+      }}
+  when: 
+    - r_all_argocd_apps.resources is defined
+    - _all_user_entities_final | default([]) | length > 0
 
-- name: Add apps with user project ownership (contains user456)
+- name: Final fallback to name pattern matching for ArgoCD apps
   ansible.builtin.set_fact:
-    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('spec.project', 'defined') | selectattr('spec.project', 'match', '.*user' + _user_guid + '.*') | list) }}"
-  when: r_all_argocd_apps.resources is defined
+    _user_argocd_apps: >-
+      {{
+        (_user_argocd_apps | default([])) +
+        (r_all_argocd_apps.resources | default([])
+        | selectattr('metadata.name', 'match', '.*user-?' + _user_guid + '.*')
+        | list)
+        | unique
+      }}
+  when: 
+    - r_all_argocd_apps.resources is defined
+    - (_user_argocd_apps | default([]) | length == 0)
 
-- name: Remove duplicates from user ArgoCD apps list
-  ansible.builtin.set_fact:
-    _user_argocd_apps: "{{ _user_argocd_apps | unique }}"
-
-- name: Fallback to name-based matching if GitLab repo matching fails
-  ansible.builtin.set_fact:
-    _user_argocd_apps: "{{ r_all_argocd_apps.resources | selectattr('metadata.name', 'match', '.*user-?' + _user_guid + '.*') | list }}"
-  when: _user_repo_urls is not defined or _user_repo_urls | length == 0
-
-- name: Debug ArgoCD application ownership detection
+- name: Debug RHDH resource identifiers and ArgoCD matching
   ansible.builtin.debug:
     msg:
-      - "User repositories found: {{ _user_repo_urls | default([]) | length }}"
-      - "ArgoCD selectors from RHDH: {{ _argocd_selectors_from_rhdh | default([]) }}"
-      - "ArgoCD app names from selectors: {{ _argocd_selectors_from_rhdh | default([]) | map('regex_replace', '.*/(.+)$', '\\1') | list }}"
-      - "ArgoCD apps found by ownership: {{ _user_argocd_apps | length }}"
-      - "Matched apps: {{ _user_argocd_apps | map(attribute='metadata.name') | list }}"
-      - "App sources: {{ _user_argocd_apps | map(attribute='spec.source.repoURL') | list }}"
+      - "=== RHDH Resource Identifiers ==="
+      - "Kubernetes IDs: {{ _kubernetes_ids_from_rhdh | default([]) }}"
+      - "Tekton IDs: {{ _tekton_ids_from_rhdh | default([]) }}"
+      - "ArgoCD selectors: {{ _argocd_selectors_from_rhdh | default([]) }}"
+      - "GitLab repo URLs: {{ _gitlab_repo_urls_from_rhdh | default([]) }}"
+      - ""
+      - "=== ArgoCD Application Matching ==="
+      - "ArgoCD apps found: {{ _user_argocd_apps | default([]) | length }}"
+      - "Matched apps: {{ _user_argocd_apps | default([]) | map(attribute='metadata.name') | list }}"
+      - "App sources: {{ _user_argocd_apps | default([]) | map(attribute='spec.source.repoURL') | list }}"
 
 - name: Debug detailed ownership metadata for each app
   ansible.builtin.debug:
@@ -717,15 +765,20 @@
 # =============================================
 # ArgoCD should have handled most resources, but clean up any manually created ones
 
-- name: Set user pattern for fallback cleanup
+- name: Set resource patterns for cleanup based on RHDH entities
   ansible.builtin.set_fact:
-    _user_pattern: ".*user-?{{ _user_guid }}.*"
+    _resource_patterns: >-
+      {{
+        (_kubernetes_ids_from_rhdh | default([])) +
+        (_tekton_ids_from_rhdh | default([])) +
+        (['user-' + _user_guid, 'user' + _user_guid])
+      }}
 
-- name: Find any remaining user-specific resources by name pattern
+- name: Find resources matching RHDH entity identifiers
   kubernetes.core.k8s_info:
     api_version: "{{ item.api_version }}"
     kind: "{{ item.kind }}"
-  register: r_remaining_resources
+  register: r_resources_by_type
   loop:
     - { api_version: "apps/v1", kind: "Deployment" }
     - { api_version: "apps/v1", kind: "ReplicaSet" }
@@ -734,30 +787,41 @@
     - { api_version: "route.openshift.io/v1", kind: "Route" }
     - { api_version: "batch/v1", kind: "Job" }
     - { api_version: "v1", kind: "ConfigMap" }
+    - { api_version: "tekton.dev/v1beta1", kind: "PipelineRun" }
+    - { api_version: "tekton.dev/v1beta1", kind: "TaskRun" }
   failed_when: false
 
-- name: Find remaining user-specific resources
+- name: Filter resources matching user patterns
   ansible.builtin.set_fact:
-    _remaining_user_resources: >-
+    _user_resources_to_delete: >-
       {{
-        r_remaining_resources.results
+        r_resources_by_type.results
         | selectattr('resources', 'defined')
         | map(attribute='resources')
         | flatten
-        | selectattr('metadata.name', 'match', _user_pattern)
+        | selectattr('metadata.name', 'match', '.*(' + _resource_patterns | join('|') + ').*')
         | list
       }}
 
-- name: Delete any remaining user-specific resources
+- name: Debug resources found for deletion
+  ansible.builtin.debug:
+    msg:
+      - "=== Kubernetes Resources to Delete ==="
+      - "Resource patterns: {{ _resource_patterns }}"
+      - "Resources found: {{ _user_resources_to_delete | length }}"
+      - "Resource names: {{ _user_resources_to_delete | map(attribute='metadata.name') | list }}"
+      - "Resource types: {{ _user_resources_to_delete | map(attribute='kind') | unique | list }}"
+
+- name: Delete user-specific Kubernetes resources
   kubernetes.core.k8s:
     api_version: "{{ item.apiVersion }}"
     kind: "{{ item.kind }}"
     name: "{{ item.metadata.name }}"
     namespace: "{{ item.metadata.namespace }}"
     state: absent
-  loop: "{{ _remaining_user_resources }}"
+  loop: "{{ _user_resources_to_delete }}"
   failed_when: false
-  when: _remaining_user_resources | length > 0
+  when: _user_resources_to_delete | length > 0
 
 # =============================================
 # Clean up Quay Container Images
