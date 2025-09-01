@@ -245,247 +245,126 @@
   loop_control:
     label: "{{ item.metadata.name }}"
 
-- name: Discover GitLab projects owned by user
-  block:
-    - name: Get GitLab root personal access token
-      kubernetes.core.k8s_info:
-        api_version: v1
-        kind: Secret
-        name: root-user-personal-token
-        namespace: "{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}"
-      register: r_gitlab_root_token
+- name: Get GitLab root personal access token
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: root-user-personal-token
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}"
+  register: r_gitlab_root_token
 
-    - name: Set GitLab root token
-      ansible.builtin.set_fact:
-        _gitlab_root_token: "{{ r_gitlab_root_token.resources[0].data.token | b64decode }}"
+- name: Set GitLab root token
+  ansible.builtin.set_fact:
+    _gitlab_root_token: "{{ r_gitlab_root_token.resources[0].data.token | b64decode }}"
 
-    - name: Get GitLab user details
-      uri:
-        url: >-
-          https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/
-          {{- 'api/v4/users?username=' }}{{ _dynamic_username }}
-        method: GET
-        validate_certs: false
-        headers:
-          PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
-        status_code: [200, 404]
-      register: r_gitlab_user
-      failed_when: false
+- name: Extract GitLab project information directly from RHDH entities
+  ansible.builtin.set_fact:
+    _gitlab_projects_from_rhdh: []
 
-    - name: Get GitLab projects owned by user
-      uri:
-        url: >-
-          https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/
-          {{- 'api/v4/users/' }}{{ r_gitlab_user.json[0].id }}/projects
-        method: GET
-        validate_certs: false
-        headers:
-          PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
-        status_code: [200, 404]
-      register: r_gitlab_projects
-      when:
-        - r_gitlab_user.status == 200
-        - r_gitlab_user.json | length > 0
+- name: Get GitLab project paths from RHDH entity annotations
+  ansible.builtin.set_fact:
+    _gitlab_projects_from_rhdh: >-
+      {{
+        _gitlab_projects_from_rhdh + [project_info]
+      }}
+  vars:
+    project_info:
+      name: "{{ item.metadata.name }}"
+      project_slug: "{{ item.metadata.annotations['gitlab.com/project-slug'] | default('') }}"
+      entity_kind: "{{ item.kind }}"
+  loop: "{{ _user_entities | default([]) }}"
+  when:
+    - item.metadata.annotations is defined
+    - item.metadata.annotations['gitlab.com/project-slug'] is defined
+    - item.metadata.annotations['gitlab.com/project-slug'] != ""
+  loop_control:
+    label: "{{ item.metadata.name | default('unnamed') }}"
 
-    - name: Search for user-related projects in development group
-      uri:
-        url: >-
-          https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/
-          {{- 'api/v4/groups/development/projects?search=' }}{{ _dynamic_username }}
-        method: GET
-        validate_certs: false
-        headers:
-          PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
-        status_code: [200, 404]
-      register: r_gitlab_development_projects
-      failed_when: false
+- name: Debug GitLab projects from RHDH entities
+  ansible.builtin.debug:
+    msg:
+      - "GitLab projects found directly in RHDH entities:"
+      - "{{ _gitlab_projects_from_rhdh | map(attribute='project_slug') | list }}"
+      - ""
+      - "These will be deleted directly using project slugs - no API lookup needed!"
 
-    - name: Search for projects with user ID pattern (user123 instead of user-123)
-      uri:
-        url: >-
-          https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/
-          {{- 'api/v4/groups/development/projects?search=' }}{{ _dynamic_username | replace('-', '') }}
-        method: GET
-        validate_certs: false
-        headers:
-          PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
-        status_code: [200, 404]
-      register: r_gitlab_development_projects_alt
-      failed_when: false
+- name: Set GitLab projects directly from RHDH entities
+  ansible.builtin.set_fact:
+    r_gitlab_projects:
+      json: "{{ _gitlab_projects_from_rhdh }}"
 
-    - name: Get all projects in development group for comprehensive search
-      uri:
-        url: >-
-          https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/
-          {{- 'api/v4/groups/development/projects' }}
-        method: GET
-        validate_certs: false
-        headers:
-          PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
-        status_code: [200, 404]
-      register: r_gitlab_all_development_projects
-      failed_when: false
+- name: Extract repository names from GitLab projects for ArgoCD matching
+  ansible.builtin.set_fact:
+    _gitlab_repo_names: []
 
-    - name: Filter development projects for user-related repos
-      ansible.builtin.set_fact:
-        _filtered_dev_projects: []
+- name: Build list of GitLab repository names for ArgoCD discovery
+  ansible.builtin.set_fact:
+    _gitlab_repo_names: >-
+      {{
+        _gitlab_repo_names + [repo_name]
+      }}
+  vars:
+    repo_name: "{{ item.project_slug.split('/')[1] }}"
+  loop: "{{ _gitlab_projects_from_rhdh }}"
+  when: item.project_slug is defined and '/' in item.project_slug
+  loop_control:
+    label: "{{ item.name }} → {{ repo_name }}"
 
-    - name: Find user-related projects in all development projects
-      ansible.builtin.set_fact:
-        _filtered_dev_projects: >-
-          {{
-            _filtered_dev_projects + [item]
-          }}
-      loop: "{{ r_gitlab_all_development_projects.json | default([]) }}"
-      when:
-        - r_gitlab_all_development_projects.json is defined
-        - >-
-          (_dynamic_username in item.name) or
-          (_dynamic_username.replace('-', '') in item.name) or
-          (_dynamic_username in item.path) or
-          (_dynamic_username.replace('-', '') in item.path)
-      loop_control:
-        label: "{{ item.name }}"
+- name: Debug GitLab repository names for ArgoCD matching
+  ansible.builtin.debug:
+    msg:
+      - "GitLab repository names extracted for ArgoCD discovery:"
+      - "{{ _gitlab_repo_names }}"
+      - ""
+      - "These will be used to find ArgoCD applications containing these names"
 
-    - name: Combine all GitLab projects
-      ansible.builtin.set_fact:
-        r_gitlab_projects:
-          json: >-
-            {{
-              (r_gitlab_projects.json | default([])) +
-              (r_gitlab_development_projects.json | default([])) +
-              (r_gitlab_development_projects_alt.json | default([])) +
-              (_filtered_dev_projects | default([]))
-            }}
+- name: Debug final GitLab discovery results
+  ansible.builtin.debug:
+    msg:
+      - "GitLab projects found directly from RHDH entities:"
+      - "{{ r_gitlab_projects.json | default([]) | map(attribute='project_slug') | list }}"
+      - "Final GitLab projects count: {{ r_gitlab_projects.json | default([]) | length }}"
+      - ""
+      - "✅ SIMPLIFIED APPROACH: Using project slugs directly from RHDH"
+      - "   → No URL construction or API lookups needed"
+      - "   → Direct deletion using gitlab.com/project-slug annotations"
 
-    - name: Remove duplicate GitLab projects
-      ansible.builtin.set_fact:
-        _unique_gitlab_projects: []
+- name: List each discovered GitLab project
+  ansible.builtin.debug:
+    msg:
+      - "RHDH Entity: {{ item.name }}"
+      - "  Entity Kind: {{ item.entity_kind }}"
+      - "  GitLab Project Slug: {{ item.project_slug }}"
+      - "  Will be deleted using: /api/v4/projects/{{ item.project_slug | replace('/', '%2F') }}"
+      - ""
+  loop: "{{ r_gitlab_projects.json | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
 
-    - name: Build unique GitLab projects list
-      ansible.builtin.set_fact:
-        _unique_gitlab_projects: >-
-          {{
-            _unique_gitlab_projects + [item]
-          }}
-      loop: "{{ r_gitlab_projects.json | default([]) }}"
-      when: item.id not in (_unique_gitlab_projects | map(attribute='id') | list)
-      loop_control:
-        label: "{{ item.name }} (ID: {{ item.id }})"
-
-    - name: Set final unique GitLab projects
-      ansible.builtin.set_fact:
-        r_gitlab_projects:
-          json: "{{ _unique_gitlab_projects }}"
-
-    - name: Extract GitLab project information directly from RHDH entities
-      ansible.builtin.set_fact:
-        _gitlab_projects_from_rhdh: []
-
-    - name: Get GitLab project paths from RHDH entity annotations
-      ansible.builtin.set_fact:
-        _gitlab_projects_from_rhdh: >-
-          {{
-            _gitlab_projects_from_rhdh + [project_info]
-          }}
-      vars:
-        project_info:
-          name: "{{ item.metadata.name }}"
-          project_slug: "{{ item.metadata.annotations['gitlab.com/project-slug'] | default('') }}"
-          entity_kind: "{{ item.kind }}"
-      loop: "{{ _user_entities | default([]) }}"
-      when:
-        - item.metadata.annotations is defined
-        - item.metadata.annotations['gitlab.com/project-slug'] is defined
-        - item.metadata.annotations['gitlab.com/project-slug'] != ""
-      loop_control:
-        label: "{{ item.metadata.name | default('unnamed') }}"
-
-    - name: Debug GitLab projects from RHDH entities
-      ansible.builtin.debug:
-        msg:
-          - "GitLab projects found directly in RHDH entities:"
-          - "{{ _gitlab_projects_from_rhdh | map(attribute='project_slug') | list }}"
-          - ""
-          - "These will be deleted directly using project slugs - no API lookup needed!"
-
-    - name: Set GitLab projects directly from RHDH entities
-      ansible.builtin.set_fact:
-        r_gitlab_projects:
-          json: "{{ _gitlab_projects_from_rhdh }}"
-
-    - name: Extract repository names from GitLab projects for ArgoCD matching
-      ansible.builtin.set_fact:
-        _gitlab_repo_names: []
-
-    - name: Build list of GitLab repository names for ArgoCD discovery
-      ansible.builtin.set_fact:
-        _gitlab_repo_names: >-
-          {{
-            _gitlab_repo_names + [repo_name]
-          }}
-      vars:
-        repo_name: "{{ item.project_slug.split('/')[1] }}"
-      loop: "{{ _gitlab_projects_from_rhdh }}"
-      when: item.project_slug is defined and '/' in item.project_slug
-      loop_control:
-        label: "{{ item.name }} → {{ repo_name }}"
-
-    - name: Debug GitLab repository names for ArgoCD matching
-      ansible.builtin.debug:
-        msg:
-          - "GitLab repository names extracted for ArgoCD discovery:"
-          - "{{ _gitlab_repo_names }}"
-          - ""
-          - "These will be used to find ArgoCD applications containing these names"
-
-    - name: Debug final GitLab discovery results
-      ansible.builtin.debug:
-        msg:
-          - "GitLab projects found directly from RHDH entities:"
-          - "{{ r_gitlab_projects.json | default([]) | map(attribute='project_slug') | list }}"
-          - "Final GitLab projects count: {{ r_gitlab_projects.json | default([]) | length }}"
-          - ""
-          - "✅ SIMPLIFIED APPROACH: Using project slugs directly from RHDH"
-          - "   → No URL construction or API lookups needed"
-          - "   → Direct deletion using gitlab.com/project-slug annotations"
-
-    - name: List each discovered GitLab project
-      ansible.builtin.debug:
-        msg:
-          - "RHDH Entity: {{ item.name }}"
-          - "  Entity Kind: {{ item.entity_kind }}"
-          - "  GitLab Project Slug: {{ item.project_slug }}"
-          - "  Will be deleted using: /api/v4/projects/{{ item.project_slug | replace('/', '%2F') }}"
-          - ""
-      loop: "{{ r_gitlab_projects.json | default([]) }}"
-      loop_control:
-        label: "{{ item.name }}"
-
-    - name: Debug GitLab deletion readiness
-      ansible.builtin.debug:
-        msg:
-          - "=== GITLAB DELETION READINESS CHECK ==="
-          - "r_gitlab_projects defined: {{ r_gitlab_projects is defined }}"
-          - "r_gitlab_projects.json defined: {{ (r_gitlab_projects is defined and r_gitlab_projects.json is defined) }}"
-          - "r_gitlab_projects.json length: {{ r_gitlab_projects.json | default([]) | length }}"
-          - "r_gitlab_projects.json content: {{ r_gitlab_projects.json | default('UNDEFINED') }}"
-          - ""
-          - "Deletion condition check:"
-          - "  Condition: r_gitlab_projects.json | default([]) | length > 0"
-          - "  Result: {{ r_gitlab_projects.json | default([]) | length > 0 }}"
-          - ""
-          - >-
-            CONCLUSION:
-            {{ '🔍 GitLab deletion tasks will be SKIPPED' if r_gitlab_projects.json | default([]) | length == 0
-               else '✅ GitLab deletion tasks will PROCEED' }}
-          - >-
-            {{ '   → No actual GitLab repositories found to delete'
-               if r_gitlab_projects.json | default([]) | length == 0
-               else '   → ' + (r_gitlab_projects.json | length | string) + ' repositories will be deleted' }}
-          - >-
-            {{ '   → RHDH entities will still be cleaned up (they reference non-existent repos)'
-               if r_gitlab_projects.json | default([]) | length == 0 else '' }}
+- name: Debug GitLab deletion readiness
+  ansible.builtin.debug:
+    msg:
+      - "=== GITLAB DELETION READINESS CHECK ==="
+      - "r_gitlab_projects defined: {{ r_gitlab_projects is defined }}"
+      - "r_gitlab_projects.json defined: {{ (r_gitlab_projects is defined and r_gitlab_projects.json is defined) }}"
+      - "r_gitlab_projects.json length: {{ r_gitlab_projects.json | default([]) | length }}"
+      - "r_gitlab_projects.json content: {{ r_gitlab_projects.json | default('UNDEFINED') }}"
+      - ""
+      - "Deletion condition check:"
+      - "  Condition: r_gitlab_projects.json | default([]) | length > 0"
+      - "  Result: {{ r_gitlab_projects.json | default([]) | length > 0 }}"
+      - ""
+      - >-
+        CONCLUSION:
+        {{ '🔍 GitLab deletion tasks will be SKIPPED' if r_gitlab_projects.json | default([]) | length == 0
+           else '✅ GitLab deletion tasks will PROCEED' }}
+      - >-
+        {{ '   → No actual GitLab repositories found to delete'
+           if r_gitlab_projects.json | default([]) | length == 0
+           else '   → ' + (r_gitlab_projects.json | length | string) + ' repositories will be deleted' }}
+      - >-
+        {{ '   → RHDH entities will still be cleaned up (they reference non-existent repos)'
+           if r_gitlab_projects.json | default([]) | length == 0 else '' }}
 
 - name: Discover ArgoCD Applications for user
   block:
@@ -750,10 +629,9 @@
   ansible.builtin.debug:
     msg:
       - "  • {{ item.name }}"
-      - "    └─ Path: {{ item.path_with_namespace }}"
-      - "    └─ URL: {{ item.web_url }}"
-      - "    └─ Visibility: {{ item.visibility }}"
-      - "    └─ Last Activity: {{ item.last_activity_at | default('N/A') }}"
+      - "    └─ RHDH Entity Kind: {{ item.entity_kind }}"
+      - "    └─ GitLab Project Slug: {{ item.project_slug }}"
+      - "    └─ Will delete via: /api/v4/projects/{{ item.project_slug | replace('/', '%2F') }}"
       - ""
   loop: "{{ r_gitlab_projects.json | default([]) }}"
   loop_control:
