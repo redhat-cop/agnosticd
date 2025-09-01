@@ -930,7 +930,19 @@
       - "┌─────────────────────────────────────────────────────────────────┐"
       - "│                DELETING RHDH CATALOG ENTITIES                   │"
       - "└─────────────────────────────────────────────────────────────────┘"
-  when: _user_entities | default([]) | length > 0
+      - ""
+      - "Resources to delete: {{ _rhdh_resources | default([]) | length }}"
+      - "Components to delete: {{ _rhdh_components | default([]) | length }}"
+      - "APIs to delete: {{ _rhdh_apis | default([]) | length }}"
+      - ""
+  when: (_user_entities | default([]) | length > 0) and (_rhdh_backend_token is defined)
+
+- name: Check RHDH authentication before deletion
+  ansible.builtin.fail:
+    msg: "RHDH backend token not available - cannot delete entities"
+  when:
+    - (_user_entities | default([]) | length > 0)
+    - (_rhdh_backend_token is not defined)
 
 - name: Delete RHDH Resource entities
   uri:
@@ -943,11 +955,15 @@
       Authorization: "Bearer {{ _rhdh_backend_token }}"
       Content-Type: application/json
     status_code: [200, 202, 204, 404, 409]
+    timeout: 30
   register: r_delete_rhdh_resource
   loop: "{{ _rhdh_resources | default([]) }}"
   loop_control:
     label: "{{ item.metadata.name }} (Resource)"
-  when: _rhdh_backend_token is defined
+  when:
+    - _rhdh_backend_token is defined
+    - _rhdh_resources | default([]) | length > 0
+  failed_when: false
 
 - name: Delete RHDH Component entities
   uri:
@@ -960,11 +976,15 @@
       Authorization: "Bearer {{ _rhdh_backend_token }}"
       Content-Type: application/json
     status_code: [200, 202, 204, 404, 409]
+    timeout: 30
   register: r_delete_rhdh_component
   loop: "{{ _rhdh_components | default([]) }}"
   loop_control:
     label: "{{ item.metadata.name }} (Component)"
-  when: _rhdh_backend_token is defined
+  when:
+    - _rhdh_backend_token is defined
+    - _rhdh_components | default([]) | length > 0
+  failed_when: false
 
 - name: Delete RHDH API entities
   uri:
@@ -977,11 +997,15 @@
       Authorization: "Bearer {{ _rhdh_backend_token }}"
       Content-Type: application/json
     status_code: [200, 202, 204, 404, 409]
+    timeout: 30
   register: r_delete_rhdh_api
   loop: "{{ _rhdh_apis | default([]) }}"
   loop_control:
     label: "{{ item.metadata.name }} (API)"
-  when: _rhdh_backend_token is defined
+  when:
+    - _rhdh_backend_token is defined
+    - _rhdh_apis | default([]) | length > 0
+  failed_when: false
 
 - name: Report RHDH entity deletions
   ansible.builtin.debug:
@@ -1018,6 +1042,52 @@
   loop_control:
     label: "{{ item.item.metadata.name }}"
   when: item.status not in [200, 202, 204, 404]
+
+- name: Wait for RHDH entity deletions to complete
+  ansible.builtin.pause:
+    seconds: 5
+    prompt: "Waiting for RHDH catalog to process entity deletions..."
+  when:
+    - (r_delete_rhdh_resource.results | default([]) | selectattr('status', 'in', [200, 202, 204]) | list | length > 0) or
+      (r_delete_rhdh_component.results | default([]) | selectattr('status', 'in', [200, 202, 204]) | list | length > 0) or
+      (r_delete_rhdh_api.results | default([]) | selectattr('status', 'in', [200, 202, 204]) | list | length > 0)
+
+- name: Verify RHDH entity deletions
+  uri:
+    url: >-
+      {{ _rhdh_url }}/api/catalog/entities/by-name/{{ item.item.kind | lower }}/
+      {{- item.item.metadata.namespace | default('default') }}/{{ item.item.metadata.name }}
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: "Bearer {{ _rhdh_backend_token }}"
+      Content-Type: application/json
+    status_code: [404, 200]
+    timeout: 10
+  register: r_verify_rhdh_deletion
+  loop: >-
+    {{
+      (r_delete_rhdh_resource.results | default([]) | selectattr('status', 'in', [200, 202, 204]) | list) +
+      (r_delete_rhdh_component.results | default([]) | selectattr('status', 'in', [200, 202, 204]) | list) +
+      (r_delete_rhdh_api.results | default([]) | selectattr('status', 'in', [200, 202, 204]) | list)
+    }}
+  loop_control:
+    label: "{{ item.item.metadata.name }}"
+  failed_when: false
+  when: _rhdh_backend_token is defined
+
+- name: Report RHDH deletion verification
+  ansible.builtin.debug:
+    msg:
+      - "✅ Verified deletion of {{ item.item.item.kind }}: {{ item.item.item.metadata.name }}"
+      - "   └─ Status: {{ '404 (Deleted)' if item.status == 404 else '200 (Still exists)' }}"
+      - ""
+  loop: "{{ r_verify_rhdh_deletion.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.item.metadata.name }}"
+  when:
+    - r_verify_rhdh_deletion.results is defined
+    - item.status == 404
 
 - name: "🚀 DELETING ARGOCD APPLICATIONS"
   ansible.builtin.debug:
