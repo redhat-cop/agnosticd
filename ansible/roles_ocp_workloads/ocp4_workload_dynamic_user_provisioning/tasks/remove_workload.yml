@@ -101,17 +101,49 @@
       - "Dynamic Username: {{ _dynamic_username }}"
       - "Backend token available: {{ _rhdh_backend_token is defined }}"
 
-- name: Discover all entities in RHDH catalog
-  uri:
-    url: "{{ _rhdh_url }}/api/catalog/entities"
-    method: GET
-    validate_certs: false
-    headers:
-      Authorization: "Bearer {{ _rhdh_backend_token }}"
-      Content-Type: application/json
-    status_code: [200, 401, 403]
-  register: r_all_entities
-  when: _rhdh_backend_token is defined
+- name: Try different authentication approaches for RHDH API
+  block:
+    - name: Try RHDH API with backend token
+      uri:
+        url: "{{ _rhdh_url }}/api/catalog/entities"
+        method: GET
+        validate_certs: false
+        headers:
+          Authorization: "Bearer {{ _rhdh_backend_token }}"
+          Content-Type: application/json
+        status_code: [200, 401, 403]
+      register: r_all_entities_backend
+      failed_when: false
+      when: _rhdh_backend_token is defined
+
+    - name: Try RHDH API without authentication
+      uri:
+        url: "{{ _rhdh_url }}/api/catalog/entities"
+        method: GET
+        validate_certs: false
+        headers:
+          Content-Type: application/json
+        status_code: [200, 401, 403]
+      register: r_all_entities_noauth
+      failed_when: false
+      when: 
+        - _rhdh_backend_token is not defined or r_all_entities_backend.status != 200
+
+    - name: Set successful entities response
+      ansible.builtin.set_fact:
+        r_all_entities: >-
+          {{
+            r_all_entities_backend if (r_all_entities_backend is defined and r_all_entities_backend.status == 200)
+            else r_all_entities_noauth
+          }}
+
+- name: Debug RHDH API response
+  ansible.builtin.debug:
+    msg:
+      - "API call successful: {{ r_all_entities.status == 200 }}"
+      - "Response status: {{ r_all_entities.status | default('undefined') }}"
+      - "Response type: {{ r_all_entities.json | type_debug }}"
+      - "Response content: {{ r_all_entities.json | default('no content') }}"
 
 - name: Convert entities to YAML and search for user references
   ansible.builtin.set_fact:
@@ -126,10 +158,14 @@
       {{
         _user_entities + [item]
       }}
-  loop: "{{ r_all_entities.json | default([]) }}"
+  loop: "{{ r_all_entities.json if (r_all_entities.json is iterable and r_all_entities.json is not string) else [] }}"
   when:
     - r_all_entities is defined
     - r_all_entities.status == 200
+    - r_all_entities.json is defined
+    - r_all_entities.json is iterable
+    - r_all_entities.json is not string
+    - item is mapping
     - >-
       (item | to_nice_yaml | lower | search(_dynamic_username | lower)) or
       (item.metadata.name | default('') | search(_dynamic_username)) or
