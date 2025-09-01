@@ -38,6 +38,17 @@
     state: absent
   failed_when: false
 
+- name: Remove finalizers from showroom namespace
+  kubernetes.core.k8s:
+    name: "{{ _dynamic_showroom_namespace }}"
+    api_version: v1
+    kind: Namespace
+    merge_type: merge
+    definition:
+      metadata:
+        finalizers: []
+  failed_when: false
+
 - name: Remove showroom namespace
   kubernetes.core.k8s:
     name: "{{ _dynamic_showroom_namespace }}"
@@ -49,12 +60,35 @@
 # =============================================
 # Remove User Quota Resources
 # =============================================
+- name: Remove finalizers from user workspace namespace
+  kubernetes.core.k8s:
+    name: "{{ _dynamic_username }}-workspace"
+    api_version: v1
+    kind: Namespace
+    merge_type: merge
+    definition:
+      metadata:
+        finalizers: []
+  failed_when: false
+
 - name: Remove user workspace namespace (includes quotas and limits)
   kubernetes.core.k8s:
     name: "{{ _dynamic_username }}-workspace"
     api_version: v1
     kind: Namespace
     state: absent
+  failed_when: false
+
+- name: Remove finalizers from user ArgoCD AppProject
+  kubernetes.core.k8s:
+    api_version: argoproj.io/v1alpha1
+    kind: AppProject
+    name: "{{ _dynamic_username }}-project"
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_gitops_namespace | default('tssc-gitops') }}"
+    merge_type: merge
+    definition:
+      metadata:
+        finalizers: []
   failed_when: false
 
 - name: Remove user ArgoCD AppProject
@@ -324,93 +358,40 @@
 
 - name: Identify ArgoCD applications by actual user ownership
   ansible.builtin.set_fact:
-    _user_argocd_apps: >-
-      {{
-        r_all_argocd_apps.resources | default([])
-        | selectattr('metadata.annotations', 'defined')
-        | selectattr('metadata.annotations', 'mapping')
-        | select('test')
-        | list
-      }}
-  vars:
-    test: >-
-      {{
-        (item.metadata.annotations.get("backstage.io/managed-by-origin", "") + " " +
-         item.metadata.annotations.get("backstage.io/managed-by-location", "") + " " +
-         item.metadata.annotations.get("argocd.argoproj.io/managed-by", "") + " " +
-         item.metadata.annotations.get("app.kubernetes.io/managed-by", "")) | regex_search(_dynamic_username)
-      }}
+    _user_argocd_apps: []
 
 - name: Add apps owned by user through GitLab repositories
   ansible.builtin.set_fact:
-    _user_argocd_apps: >-
-      {{
-        (_user_argocd_apps | default([])) +
-        (r_all_argocd_apps.resources | default([])
-        | selectattr('spec.source.repoURL', 'defined')
-        | selectattr('spec.source.repoURL', 'in', _user_repo_urls | default([]))
-        | list)
-        | unique
-      }}
+    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('spec.source.repoURL', 'defined') | selectattr('spec.source.repoURL', 'in', _user_repo_urls) | list) }}"
   when: _user_repo_urls is defined and _user_repo_urls | length > 0
 
-- name: Add apps created by user through RHDH/Backstage
+- name: Add apps with backstage kubernetes-id label
   ansible.builtin.set_fact:
-    _user_argocd_apps: >-
-      {{
-        (_user_argocd_apps | default([])) +
-        (r_all_argocd_apps.resources | default([])
-        | selectattr('metadata.labels', 'defined')
-        | selectattr('metadata.labels', 'mapping')
-        | selectattr('metadata.labels.get("backstage.io/kubernetes-id", "")', 'match', '.*' + _dynamic_username + '.*')
-        | list) +
-        (r_all_argocd_apps.resources | default([])
-        | selectattr('metadata.labels', 'defined')
-        | selectattr('metadata.labels', 'mapping')  
-        | selectattr('metadata.labels.get("janus-idp.io/tekton", "")', 'match', '.*' + _dynamic_username + '.*')
-        | list) +
-        (r_all_argocd_apps.resources | default([])
-        | selectattr('metadata.labels', 'defined')
-        | selectattr('metadata.labels', 'mapping')  
-        | selectattr('metadata.labels.get("backstage-name", "")', 'match', '.*' + _dynamic_username + '.*')
-        | list)
-        | unique
-      }}
+    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('metadata.labels.backstage.io/kubernetes-id', 'defined') | selectattr('metadata.labels.backstage.io/kubernetes-id', 'match', '.*' + _dynamic_username + '.*') | list) }}"
+  when: r_all_argocd_apps.resources is defined
 
-- name: Add apps with user in creation context and project ownership
+- name: Add apps with janus tekton label
   ansible.builtin.set_fact:
-    _user_argocd_apps: >-
-      {{
-        (_user_argocd_apps | default([])) +
-        (r_all_argocd_apps.resources | default([])
-        | selectattr('metadata.managedFields', 'defined')
-        | selectattr('metadata.managedFields', 'sequence')
-        | select('test')
-        | list) +
-        (r_all_argocd_apps.resources | default([])
-        | selectattr('spec.project', 'defined')
-        | selectattr('spec.project', 'match', '.*' + _dynamic_username + '.*')
-        | list)
-        | unique
-      }}
-  vars:
-    test: >-
-      {{
-        item.metadata.managedFields
-        | selectattr('manager', 'defined')
-        | map(attribute='manager')
-        | join(' ')
-        | regex_search(_dynamic_username) is not none
-      }}
+    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('metadata.labels.janus-idp.io/tekton', 'defined') | selectattr('metadata.labels.janus-idp.io/tekton', 'match', '.*' + _dynamic_username + '.*') | list) }}"
+  when: r_all_argocd_apps.resources is defined
+
+- name: Add apps with backstage-name label
+  ansible.builtin.set_fact:
+    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('metadata.labels.backstage-name', 'defined') | selectattr('metadata.labels.backstage-name', 'match', '.*' + _dynamic_username + '.*') | list) }}"
+  when: r_all_argocd_apps.resources is defined
+
+- name: Add apps with user project ownership
+  ansible.builtin.set_fact:
+    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('spec.project', 'defined') | selectattr('spec.project', 'match', '.*' + _dynamic_username + '.*') | list) }}"
+  when: r_all_argocd_apps.resources is defined
+
+- name: Remove duplicates from user ArgoCD apps list
+  ansible.builtin.set_fact:
+    _user_argocd_apps: "{{ _user_argocd_apps | unique }}"
 
 - name: Fallback to name-based matching if GitLab repo matching fails
   ansible.builtin.set_fact:
-    _user_argocd_apps: >-
-      {{
-        r_all_argocd_apps.resources | default([])
-        | selectattr('metadata.name', 'match', '.*user-?' + _user_guid + '.*')
-        | list
-      }}
+    _user_argocd_apps: "{{ r_all_argocd_apps.resources | selectattr('metadata.name', 'match', '.*user-?' + _user_guid + '.*') | list }}"
   when: _user_repo_urls is not defined or _user_repo_urls | length == 0
 
 - name: Debug ArgoCD application ownership detection
@@ -442,30 +423,17 @@
 
 - name: Final safety validation - only delete apps with clear user ownership
   ansible.builtin.set_fact:
-    _validated_user_apps: >-
-      {{
-        _user_argocd_apps | default([])
-        | selectattr('spec.source.repoURL', 'defined')
-        | selectattr('spec.source.repoURL', 'match', '.*user-?' + _user_guid + '.*')
-        | list
-      }}
+    _validated_user_apps: "{{ _user_argocd_apps | selectattr('spec.source.repoURL', 'defined') | selectattr('spec.source.repoURL', 'match', '.*user-?' + _user_guid + '.*') | list }}"
 
 - name: Add apps that match by name pattern as additional validation
   ansible.builtin.set_fact:
-    _validated_user_apps: >-
-      {{
-        (_validated_user_apps | default([])) +
-        (_user_argocd_apps | default([])
-        | selectattr('metadata.name', 'match', '.*user-?' + _user_guid + '.*')
-        | list)
-        | unique
-      }}
+    _validated_user_apps: "{{ (_validated_user_apps + (_user_argocd_apps | selectattr('metadata.name', 'match', '.*user-?' + _user_guid + '.*') | list)) | unique }}"
 
 - name: Debug validation results
   ansible.builtin.debug:
     msg:
-      - "Apps validated by repo URL pattern: {{ _user_argocd_apps | default([]) | selectattr('spec.source.repoURL', 'defined') | selectattr('spec.source.repoURL', 'match', '.*user-?' + _user_guid + '.*') | list | length }}"
-      - "Apps validated by name pattern: {{ _user_argocd_apps | default([]) | selectattr('metadata.name', 'match', '.*user-?' + _user_guid + '.*') | list | length }}"
+      - "Apps validated by repo URL pattern: {{ (_user_argocd_apps | selectattr('spec.source.repoURL', 'defined') | selectattr('spec.source.repoURL', 'match', '.*user-?' + _user_guid + '.*') | list) | length }}"
+      - "Apps validated by name pattern: {{ (_user_argocd_apps | selectattr('metadata.name', 'match', '.*user-?' + _user_guid + '.*') | list) | length }}"
       - "Total validated apps: {{ _validated_user_apps | length }}"
       - "Final apps to delete: {{ _validated_user_apps | map(attribute='metadata.name') | list }}"
 
@@ -475,6 +443,22 @@
   when: 
     - _validated_user_apps | length > 10
 
+- name: Remove finalizers from ArgoCD applications to ensure cleanup
+  kubernetes.core.k8s:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ item.metadata.namespace }}"
+    merge_type: merge
+    definition:
+      metadata:
+        finalizers: []
+  loop: "{{ _validated_user_apps }}"
+  loop_control:
+    label: "{{ item.metadata.name }} (removing finalizers)"
+  when: _validated_user_apps | length > 0
+  failed_when: false
+
 - name: Delete validated user ArgoCD applications (cascade deletes all managed resources)
   kubernetes.core.k8s:
     api_version: argoproj.io/v1alpha1
@@ -482,11 +466,7 @@
     name: "{{ item.metadata.name }}"
     namespace: "{{ item.metadata.namespace }}"
     state: absent
-    wait: true
-    wait_timeout: 300
-    wait_condition:
-      type: Deleted
-      status: "True"
+    wait: false
   loop: "{{ _validated_user_apps }}"
   loop_control:
     label: "{{ item.metadata.name }} (repo: {{ item.spec.source.repoURL | default('unknown') }})"
@@ -523,36 +503,28 @@
     - { api_version: "v1", kind: "ConfigMap" }
   failed_when: false
 
+- name: Find remaining user-specific resources
+  ansible.builtin.set_fact:
+    _remaining_user_resources: >-
+      {{
+        r_remaining_resources.results
+        | selectattr('resources', 'defined')
+        | map(attribute='resources')
+        | flatten
+        | selectattr('metadata.name', 'match', _user_pattern)
+        | list
+      }}
+
 - name: Delete any remaining user-specific resources
   kubernetes.core.k8s:
-    api_version: "{{ resource.api_version }}"
-    kind: "{{ resource.kind }}"
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
     name: "{{ item.metadata.name }}"
     namespace: "{{ item.metadata.namespace }}"
     state: absent
-  loop: >-
-    {{
-      r_remaining_resources.results
-      | selectattr('resources', 'defined')
-      | map(attribute='resources')
-      | flatten
-      | selectattr('metadata.name', 'match', _user_pattern)
-      | list
-    }}
-  loop_control:
-    loop_var: item
-  vars:
-    resource: "{{ r_remaining_resources.results | selectattr('item.kind', 'equalto', item.kind) | first | default({}) }}"
+  loop: "{{ _remaining_user_resources }}"
   failed_when: false
-  when: >
-    {{
-      r_remaining_resources.results
-      | selectattr('resources', 'defined')
-      | map(attribute='resources')
-      | flatten
-      | selectattr('metadata.name', 'match', _user_pattern)
-      | list | length > 0
-    }}
+  when: _remaining_user_resources | length > 0
 
 # =============================================
 # Report cleanup status
