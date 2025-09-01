@@ -661,7 +661,7 @@
   when: 
     - r_user_gitlab_projects.json | default([]) | length > 0
 
-- name: Delete GitLab projects found through RHDH catalog
+- name: Delete GitLab projects using root token (direct cleanup)
   uri:
     url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/projects/{{ item.id }}
     method: DELETE
@@ -789,13 +789,25 @@
         | list
       }}
 
-- name: Find ArgoCD applications matching RHDH resource identifiers
+- name: Find ArgoCD applications using direct naming patterns
   ansible.builtin.set_fact:
     _user_argocd_apps: >-
       {{
         r_all_argocd_apps.resources | default([])
-        | selectattr('metadata.name', 'match', '.*(' + (_kubernetes_ids_from_rhdh + _tekton_ids_from_rhdh + _argocd_selectors_from_rhdh) | join('|') + ').*')
+        | selectattr('metadata.name', 'match', '.*my-quarkus-tkn-' + _dynamic_username + '.*')
         | list
+      }}
+  when: r_all_argocd_apps.resources is defined
+
+- name: Find ArgoCD applications matching RHDH resource identifiers (fallback)
+  ansible.builtin.set_fact:
+    _user_argocd_apps: >-
+      {{
+        (_user_argocd_apps | default([])) +
+        (r_all_argocd_apps.resources | default([])
+        | selectattr('metadata.name', 'match', '.*(' + (_kubernetes_ids_from_rhdh + _tekton_ids_from_rhdh + _argocd_selectors_from_rhdh) | join('|') + ').*')
+        | list)
+        | unique
       }}
   when: 
     - r_all_argocd_apps.resources is defined
@@ -900,7 +912,7 @@
   when: 
     - _validated_user_apps | length > 10
 
-- name: Remove finalizers from ArgoCD applications to ensure cleanup
+- name: Remove finalizers from user ArgoCD applications 
   kubernetes.core.k8s:
     api_version: argoproj.io/v1alpha1
     kind: Application
@@ -910,13 +922,13 @@
     definition:
       metadata:
         finalizers: []
-  loop: "{{ _validated_user_apps }}"
+  loop: "{{ _user_argocd_apps | default([]) }}"
   loop_control:
     label: "{{ item.metadata.name }} (removing finalizers)"
-  when: _validated_user_apps | length > 0
+  when: _user_argocd_apps | default([]) | length > 0
   failed_when: false
 
-- name: Delete validated user ArgoCD applications (cascade deletes all managed resources)
+- name: Delete user ArgoCD applications using OpenShift/Kubernetes (direct cleanup)
   kubernetes.core.k8s:
     api_version: argoproj.io/v1alpha1
     kind: Application
@@ -924,11 +936,27 @@
     namespace: "{{ item.metadata.namespace }}"
     state: absent
     wait: false
-  loop: "{{ _validated_user_apps }}"
+  loop: "{{ _user_argocd_apps | default([]) }}"
   loop_control:
     label: "{{ item.metadata.name }} (repo: {{ item.spec.source.repoURL | default('unknown') }})"
-  when: _validated_user_apps | length > 0
+  when: _user_argocd_apps | default([]) | length > 0
   register: r_argocd_cleanup
+
+- name: Alternative - Delete ArgoCD applications using ArgoCD admin API
+  uri:
+    url: "{{ _rhdh_argocd_url }}/api/v1/applications/{{ item.metadata.name }}?cascade=true"
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: "Bearer {{ _rhdh_argocd_token }}"
+    status_code: [200, 204, 404]
+  loop: "{{ _user_argocd_apps | default([]) }}"
+  failed_when: false
+  when: 
+    - _rhdh_argocd_url is defined and _rhdh_argocd_url != ''
+    - _rhdh_argocd_token is defined and _rhdh_argocd_token != ''
+    - _user_argocd_apps | default([]) | length > 0
+    - r_argocd_cleanup is failed
 
 - name: Wait for ArgoCD cascade deletion to complete
   ansible.builtin.pause:
@@ -988,6 +1016,23 @@
       - "Resource names: {{ _user_resources_to_delete | map(attribute='metadata.name') | list }}"
       - "Resource types: {{ _user_resources_to_delete | map(attribute='kind') | unique | list }}"
 
+- name: Remove finalizers from user-specific Kubernetes resources
+  kubernetes.core.k8s:
+    api_version: "{{ item.apiVersion }}"
+    kind: "{{ item.kind }}"
+    name: "{{ item.metadata.name }}"
+    namespace: "{{ item.metadata.namespace }}"
+    merge_type: merge
+    definition:
+      metadata:
+        finalizers: []
+  loop: "{{ _user_resources_to_delete }}"
+  failed_when: false
+  when: 
+    - _user_resources_to_delete | length > 0
+    - item.metadata.finalizers is defined
+    - item.metadata.finalizers | length > 0
+
 - name: Delete user-specific Kubernetes resources
   kubernetes.core.k8s:
     api_version: "{{ item.apiVersion }}"
@@ -995,6 +1040,7 @@
     name: "{{ item.metadata.name }}"
     namespace: "{{ item.metadata.namespace }}"
     state: absent
+    wait: false
   loop: "{{ _user_resources_to_delete }}"
   failed_when: false
   when: _user_resources_to_delete | length > 0
@@ -1020,7 +1066,23 @@
       - "=== Quay Repository Cleanup ==="
       - "Repository slugs from RHDH: {{ _quay_repo_slugs | default([]) }}"
 
-- name: Delete Quay repositories from RHDH entities
+- name: Delete Quay repositories using direct patterns
+  uri:
+    url: "{{ _rhdh_quay_url }}/api/v1/repository/{{ item }}"
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: "Bearer {{ _rhdh_quay_token }}"
+    status_code: [204, 404]
+  loop: "{{ _direct_cleanup_resources.quay_repos }}"
+  failed_when: false
+  when: 
+    - _rhdh_quay_url is defined
+    - _rhdh_quay_token is defined
+    - _rhdh_quay_url != ''
+    - _rhdh_quay_token != ''
+
+- name: Fallback - Delete Quay repositories from RHDH entities
   uri:
     url: "{{ _rhdh_quay_url }}/api/v1/repository/{{ item }}"
     method: DELETE
