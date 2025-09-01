@@ -412,18 +412,43 @@
     - r_gitlab_user.json is defined
     - r_gitlab_user.json | length > 0
 
-- name: Extract GitLab project names from RHDH entities
+- name: Extract GitLab project slugs from RHDH entities
   ansible.builtin.set_fact:
-    _gitlab_projects_to_delete: >-
+    _gitlab_project_slugs: >-
+      {{
+        _all_user_entities_final | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.gitlab.com/project-slug', 'defined')
+        | map(attribute='metadata.annotations.gitlab.com/project-slug')
+        | unique
+        | list
+      }}
+    _gitlab_projects_from_source: >-
       {{
         _all_user_entities_final | default([])
         | selectattr('metadata.annotations', 'defined')
         | selectattr('metadata.annotations.backstage.io/source-location', 'defined')
         | map(attribute='metadata.annotations.backstage.io/source-location')
         | select('match', '.*gitlab.*')
-        | map('regex_replace', '.*/(development/[^/]+).*', '\1')
+        | map('regex_replace', '.*/development/([^/-]+).*', 'development/\1')
         | unique
         | list
+      }}
+    _gitlab_projects_to_delete: >-
+      {{
+        (_all_user_entities_final | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.gitlab.com/project-slug', 'defined')
+        | map(attribute='metadata.annotations.gitlab.com/project-slug')
+        | list) +
+        (_all_user_entities_final | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.backstage.io/source-location', 'defined')
+        | map(attribute='metadata.annotations.backstage.io/source-location')
+        | select('match', '.*gitlab.*')
+        | map('regex_replace', '.*/development/([^/-]+).*', 'development/\1')
+        | list)
+        | unique
       }}
 
 - name: Find GitLab projects by full path from RHDH entities
@@ -826,7 +851,42 @@
 # =============================================
 # Clean up Quay Container Images
 # =============================================
-- name: Clean up user Quay repositories and images
+- name: Extract Quay repository slugs from RHDH entities
+  ansible.builtin.set_fact:
+    _quay_repo_slugs: >-
+      {{
+        _all_user_entities_final | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.quay.io/repository-slug', 'defined')
+        | map(attribute='metadata.annotations.quay.io/repository-slug')
+        | unique
+        | list
+      }}
+
+- name: Debug Quay repositories to delete
+  ansible.builtin.debug:
+    msg:
+      - "=== Quay Repository Cleanup ==="
+      - "Repository slugs from RHDH: {{ _quay_repo_slugs | default([]) }}"
+
+- name: Delete Quay repositories from RHDH entities
+  uri:
+    url: "{{ _rhdh_quay_url }}/api/v1/repository/{{ item }}"
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: "Bearer {{ _rhdh_quay_token }}"
+    status_code: [204, 404]
+  loop: "{{ _quay_repo_slugs | default([]) }}"
+  failed_when: false
+  when: 
+    - _rhdh_quay_url is defined
+    - _rhdh_quay_token is defined
+    - _rhdh_quay_url != ''
+    - _rhdh_quay_token != ''
+    - _quay_repo_slugs | default([]) | length > 0
+
+- name: Fallback cleanup of user Quay namespace repositories
   uri:
     url: "{{ _rhdh_quay_url }}/api/v1/repository?namespace={{ _dynamic_username }}"
     method: GET
@@ -841,8 +901,9 @@
     - _rhdh_quay_token is defined
     - _rhdh_quay_url != ''
     - _rhdh_quay_token != ''
+    - (_quay_repo_slugs | default([]) | length == 0)
 
-- name: Delete user Quay repositories
+- name: Delete user namespace Quay repositories
   uri:
     url: "{{ _rhdh_quay_url }}/api/v1/repository/{{ _dynamic_username }}/{{ item.name }}"
     method: DELETE
@@ -892,12 +953,20 @@
     msg: |
       Dynamic user {{ _dynamic_username }} has been removed from workshop {{ guid }}:
       
+      === Resource Discovery from RHDH ===
+      Entities Found: {{ _all_user_entities_final | default([]) | length }}
+      Kubernetes IDs: {{ _kubernetes_ids_from_rhdh | default([]) | join(', ') if _kubernetes_ids_from_rhdh | default([]) | length > 0 else 'None' }}
+      Tekton IDs: {{ _tekton_ids_from_rhdh | default([]) | join(', ') if _tekton_ids_from_rhdh | default([]) | length > 0 else 'None' }}
+      GitLab Projects: {{ _gitlab_projects_to_delete | default([]) | join(', ') if _gitlab_projects_to_delete | default([]) | length > 0 else 'None' }}
+      Quay Repositories: {{ _quay_repo_slugs | default([]) | join(', ') if _quay_repo_slugs | default([]) | length > 0 else 'None' }}
+      
       === Cleanup Status ===
       RHDH Catalog Entities: {{ 'Cleaned (' + (_all_user_entities_final | default([]) | length | string) + ' entities)' if _all_user_entities_final | default([]) | length > 0 else 'None found' }}
       ArgoCD Applications: {{ 'Deleted (' + (_validated_user_apps | default([]) | length | string) + ' apps)' if _validated_user_apps | default([]) | length > 0 else 'None found' }}
-      GitLab Repositories: {{ 'Deleted (' + (_user_gitlab_repo_names | default([]) | length | string) + ' repos)' if _user_gitlab_repo_names | default([]) | length > 0 else 'None found' }}
+      GitLab Projects: {{ 'Deleted (' + (_gitlab_projects_to_delete | default([]) | length | string) + ' projects)' if _gitlab_projects_to_delete | default([]) | length > 0 else 'None found' }}
       GitLab User: {{ 'Removed' if r_gitlab_user.json is defined and r_gitlab_user.json | length > 0 else 'Not found' }}
-      Quay Repositories: {{ 'Cleaned (' + (r_user_quay_repos.json.repositories | default([]) | length | string) + ' repos)' if r_user_quay_repos.json is defined and r_user_quay_repos.json.repositories is defined else 'Skipped (not accessible)' }}
+      Kubernetes Resources: {{ 'Deleted (' + (_user_resources_to_delete | default([]) | length | string) + ' resources)' if _user_resources_to_delete | default([]) | length > 0 else 'None found' }}
+      Quay Repositories: {{ 'Cleaned (' + (_quay_repo_slugs | default([]) | length | string) + ' from entities)' if _quay_repo_slugs | default([]) | length > 0 else ('Cleaned (' + (r_user_quay_repos.json.repositories | default([]) | length | string) + ' from namespace)' if r_user_quay_repos.json is defined and r_user_quay_repos.json.repositories is defined else 'None found') }}
       Keycloak User: {{ 'Removed' if r_keycloak_user.json is defined and r_keycloak_user.json | length > 0 else 'Not found' }}
       Showroom Instance: Removed
       
