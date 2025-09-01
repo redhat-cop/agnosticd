@@ -113,33 +113,66 @@
   register: r_all_entities
   when: _rhdh_backend_token is defined
 
-- name: Filter entities owned by or related to the user
+- name: Convert entities to YAML and search for user references
   ansible.builtin.set_fact:
-    _user_entities: >-
-      {{
-        r_all_entities.json | default([]) |
-        selectattr('metadata.annotations', 'defined') |
-        selectattr('metadata.annotations', 'search', _dynamic_username) |
-        list +
-        r_all_entities.json | default([]) |
-        selectattr('spec.owner', 'defined') |
-        selectattr('spec.owner', 'search', _dynamic_username) |
-        list +
-        r_all_entities.json | default([]) |
-        selectattr('metadata.name', 'search', _dynamic_username) |
-        list
-      }}
+    _user_entities: []
   when: 
     - r_all_entities is defined
     - r_all_entities.status == 200
 
-- name: Debug discovered user entities
+- name: Search each entity for user references in YAML content
+  ansible.builtin.set_fact:
+    _user_entities: >-
+      {{
+        _user_entities + [item]
+      }}
+  loop: "{{ r_all_entities.json | default([]) }}"
+  when:
+    - r_all_entities is defined
+    - r_all_entities.status == 200
+    - >-
+      (item | to_nice_yaml | lower | search(_dynamic_username | lower)) or
+      (item.metadata.name | default('') | search(_dynamic_username)) or
+      (item.spec.owner | default('') | search(_dynamic_username)) or
+      (item.metadata.namespace | default('') | search(_dynamic_username)) or
+      (item.metadata.annotations | default({}) | to_nice_yaml | search(_dynamic_username)) or
+      (item.spec | default({}) | to_nice_yaml | search(_dynamic_username))
+  loop_control:
+    label: "{{ item.metadata.name | default('unnamed') }}"
+
+- name: Debug all entities summary
   ansible.builtin.debug:
     msg:
-      - "Total entities found: {{ r_all_entities.json | default([]) | length }}"
+      - "Total entities in catalog: {{ r_all_entities.json | default([]) | length }}"
+      - "Entity kinds found: {{ r_all_entities.json | default([]) | map(attribute='kind') | unique | list }}"
+  when: 
+    - r_all_entities is defined
+    - r_all_entities.status == 200
+
+- name: Debug user-related entities found
+  ansible.builtin.debug:
+    msg:
       - "User-related entities: {{ _user_entities | default([]) | length }}"
       - "User entities details:"
-  when: r_all_entities.status == 200
+  when: 
+    - r_all_entities is defined
+    - r_all_entities.status == 200
+
+- name: Show sample of all entities for debugging
+  ansible.builtin.debug:
+    msg:
+      - "Entity {{ ansible_loop.index }}: {{ item.kind }}/{{ item.metadata.name }}"
+      - "  Namespace: {{ item.metadata.namespace | default('N/A') }}"
+      - "  Owner: {{ item.spec.owner | default('N/A') }}"
+      - "  Source location: {{ item.metadata.annotations['backstage.io/source-location'] | default('N/A') }}"
+  loop: "{{ r_all_entities.json | default([]) }}"
+  loop_control:
+    extended: true
+    label: "{{ item.metadata.name }}"
+  when: 
+    - r_all_entities is defined
+    - r_all_entities.status == 200
+    - ansible_loop.index <= 10
 
 - name: List user entity details
   ansible.builtin.debug:
@@ -149,6 +182,8 @@
       - "Namespace: {{ item.metadata.namespace | default('N/A') }}"
       - "Owner: {{ item.spec.owner | default('N/A') }}"
       - "Annotations: {{ item.metadata.annotations | default({}) }}"
+      - "Full YAML content:"
+      - "{{ item | to_nice_yaml }}"
   loop: "{{ _user_entities | default([]) }}"
   loop_control:
     label: "{{ item.metadata.name }}"
