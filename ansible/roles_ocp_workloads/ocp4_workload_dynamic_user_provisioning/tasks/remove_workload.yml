@@ -148,8 +148,7 @@
 
 - name: Set RHDH URL for catalog cleanup
   ansible.builtin.set_fact:
-    _rhdh_cleanup_url: "https://{{ r_rhdh_cleanup_route.resources[0].spec.host }}"
-  when: r_rhdh_cleanup_route.resources | length > 0
+    _rhdh_cleanup_url: "{{ _rhdh_backend_url if _rhdh_backend_url is defined and _rhdh_backend_url != '' else ('https://' + r_rhdh_cleanup_route.resources[0].spec.host) if r_rhdh_cleanup_route.resources | length > 0 else '' }}"
 
 - name: Generate RHDH access token for catalog cleanup
   uri:
@@ -176,21 +175,138 @@
     - r_rhdh_user_token.json is defined
     - r_rhdh_user_token.json.access_token is defined
 
-- name: Find user-specific catalog entities in RHDH (by managed-by-origin)
+# =============================================
+# Step 1: Comprehensive Entity Discovery in RHDH
+# =============================================
+- name: Query ALL entities in RHDH catalog for analysis
   uri:
-    url: "{{ _rhdh_cleanup_url }}/api/catalog/entities?filter=metadata.annotations.backstage.io/managed-by-origin=user{{ _user_guid }}"
+    url: "{{ _rhdh_cleanup_url }}/api/catalog/entities"
     method: GET
     validate_certs: false
     headers:
       Authorization: Bearer {{ _rhdh_token }}
     status_code: [200, 401, 403, 404]
-  register: r_catalog_entities
+  register: r_all_rhdh_entities
   failed_when: false
   when: 
     - _rhdh_cleanup_url is defined
     - _rhdh_token is defined
 
-- name: Delete user-specific catalog entities from RHDH
+- name: Debug total entities in RHDH catalog
+  ansible.builtin.debug:
+    msg:
+      - "=== RHDH Catalog Discovery Phase ==="
+      - "Total entities in catalog: {{ r_all_rhdh_entities.json | default([]) | length }}"
+      - "Entity kinds found: {{ r_all_rhdh_entities.json | default([]) | map(attribute='kind') | unique | list }}"
+  when: r_all_rhdh_entities.json is defined
+
+# =============================================
+# Step 2: Filter User-Specific Entities by Multiple Criteria
+# =============================================
+- name: Find entities by ownedBy relationship (most reliable)
+  ansible.builtin.set_fact:
+    _entities_by_ownership: >-
+      {{
+        r_all_rhdh_entities.json | default([])
+        | selectattr('relations', 'defined')
+        | selectattr('relations', 'length', 'gt', 0)
+        | selectattr('relations.0.targetRef', 'defined')
+        | selectattr('relations.0.targetRef', 'equalto', _dynamic_username)
+        | list
+      }}
+  when: r_all_rhdh_entities.json is defined
+
+- name: Find entities by name pattern (fallback)
+  ansible.builtin.set_fact:
+    _entities_by_name: >-
+      {{
+        r_all_rhdh_entities.json | default([])
+        | selectattr('metadata.name', 'match', '.*user-?' + _user_guid + '.*')
+        | list
+      }}
+  when: r_all_rhdh_entities.json is defined
+
+- name: Find entities by GitLab URL pattern (broad search)
+  ansible.builtin.set_fact:
+    _entities_by_gitlab_url: >-
+      {{
+        r_all_rhdh_entities.json | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.backstage.io/source-location', 'defined')
+        | selectattr('metadata.annotations.backstage.io/source-location', 'match', '.*user-?' + _user_guid + '.*')
+        | list
+      }}
+  when: r_all_rhdh_entities.json is defined
+
+- name: Find entities by managed-by-origin annotation
+  ansible.builtin.set_fact:
+    _entities_by_origin: >-
+      {{
+        r_all_rhdh_entities.json | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.backstage.io/managed-by-origin', 'defined')
+        | selectattr('metadata.annotations.backstage.io/managed-by-origin', 'match', '.*user-?' + _user_guid + '.*')
+        | list
+      }}
+  when: r_all_rhdh_entities.json is defined
+
+# =============================================
+# Step 3: Debug and Analyze Discovery Results
+# =============================================
+- name: Debug entity discovery results by category
+  ansible.builtin.debug:
+    msg:
+      - "=== Entity Discovery Analysis for {{ _dynamic_username }} ==="
+      - ""
+      - "By Ownership Relationship:"
+      - "  Count: {{ _entities_by_ownership | default([]) | length }}"
+      - "  Names: {{ _entities_by_ownership | default([]) | map(attribute='metadata.name') | list }}"
+      - "  Kinds: {{ _entities_by_ownership | default([]) | map(attribute='kind') | unique | list }}"
+      - ""
+      - "By Name Pattern (user-{{ _user_guid }}):"
+      - "  Count: {{ _entities_by_name | default([]) | length }}"
+      - "  Names: {{ _entities_by_name | default([]) | map(attribute='metadata.name') | list }}"
+      - "  Kinds: {{ _entities_by_name | default([]) | map(attribute='kind') | unique | list }}"
+      - ""
+      - "By GitLab URL Pattern:"
+      - "  Count: {{ _entities_by_gitlab_url | default([]) | length }}"
+      - "  Names: {{ _entities_by_gitlab_url | default([]) | map(attribute='metadata.name') | list }}"
+      - "  GitLab URLs: {{ _entities_by_gitlab_url | default([]) | map(attribute='metadata.annotations.backstage.io/source-location') | list }}"
+      - ""
+      - "By Managed-By-Origin:"
+      - "  Count: {{ _entities_by_origin | default([]) | length }}"
+      - "  Names: {{ _entities_by_origin | default([]) | map(attribute='metadata.name') | list }}"
+  when: r_all_rhdh_entities.json is defined
+
+- name: Create comprehensive list of all user entities
+  ansible.builtin.set_fact:
+    _all_user_entities_final: >-
+      {{
+        (_entities_by_ownership | default([])) +
+        (_entities_by_name | default([])) +
+        (_entities_by_gitlab_url | default([])) +
+        (_entities_by_origin | default([]))
+        | unique
+      }}
+
+- name: Debug final entity list for deletion
+  ansible.builtin.debug:
+    msg:
+      - "=== Final Entity Deletion List ==="
+      - "Total unique entities to delete: {{ _all_user_entities_final | length }}"
+      - "Entity details:"
+      - "{% for entity in _all_user_entities_final %}"
+      - "  - Name: {{ entity.metadata.name }}"
+      - "    Kind: {{ entity.kind }}"
+      - "    Namespace: {{ entity.metadata.namespace | default('default') }}"
+      - "    GitLab URL: {{ entity.metadata.annotations['backstage.io/source-location'] | default('N/A') }}"
+      - "    Owned By: {{ entity.relations[0].targetRef | default('N/A') if entity.relations is defined and entity.relations | length > 0 else 'N/A' }}"
+      - "{% endfor %}"
+
+# =============================================
+# Step 4: Targeted Entity Deletion
+# =============================================
+- name: Delete discovered user entities from RHDH catalog
   uri:
     url: "{{ _rhdh_cleanup_url }}/api/catalog/entities/by-name/{{ item.kind | lower }}/{{ item.metadata.namespace | default('default') }}/{{ item.metadata.name }}"
     method: DELETE
@@ -198,44 +314,42 @@
     headers:
       Authorization: Bearer {{ _rhdh_token }}
     status_code: [200, 204, 404, 409]
-  loop: "{{ r_catalog_entities.json | default([]) }}"
+  loop: "{{ _all_user_entities_final }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.namespace | default('default') }}/{{ item.metadata.name }}"
   failed_when: false
   when: 
     - _rhdh_cleanup_url is defined
     - _rhdh_token is defined
-    - r_catalog_entities.json is defined
-    - r_catalog_entities.json | length > 0
+    - _all_user_entities_final | length > 0
 
-- name: Find user-specific GitLab projects/repos in catalog
-  uri:
-    url: "{{ _rhdh_cleanup_url }}/api/catalog/entities?filter=kind=component,metadata.name=*user{{ _user_guid }}*"
-    method: GET
-    validate_certs: false
-    headers:
-      Authorization: Bearer {{ _rhdh_token }}
-    status_code: [200, 401, 403, 404]
-  register: r_user_components
-  failed_when: false
-  when: 
-    - _rhdh_cleanup_url is defined
-    - _rhdh_token is defined
+# =============================================
+# Step 5: Extract GitLab Repository Information from Discovered Entities
+# =============================================
+- name: Extract GitLab repository URLs from discovered RHDH entities
+  ansible.builtin.set_fact:
+    _user_gitlab_repo_urls: >-
+      {{
+        _all_user_entities_final | default([])
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.backstage.io/source-location', 'defined')
+        | map(attribute='metadata.annotations.backstage.io/source-location')
+        | select('match', '.*gitlab.*')
+        | map('regex_replace', '.*/([^/]+)/?$', '\1')
+        | unique
+        | list
+      }}
 
-- name: Delete user-specific components from RHDH catalog
-  uri:
-    url: "{{ _rhdh_cleanup_url }}/api/catalog/entities/by-name/component/{{ item.metadata.namespace | default('default') }}/{{ item.metadata.name }}"
-    method: DELETE
-    validate_certs: false
-    headers:
-      Authorization: Bearer {{ _rhdh_token }}
-    status_code: [200, 204, 404, 409]
-  loop: "{{ r_user_components.json | default([]) }}"
-  failed_when: false
-  when: 
-    - _rhdh_cleanup_url is defined
-    - _rhdh_token is defined
-    - r_user_components.json is defined
-    - r_user_components.json | length > 0
+- name: Debug GitLab repository URLs extracted from discovered entities
+  ansible.builtin.debug:
+    msg:
+      - "=== GitLab Repository Extraction ==="
+      - "Repository URLs found: {{ _user_gitlab_repo_urls | length }}"
+      - "Repository names: {{ _user_gitlab_repo_urls }}"
 
+# =============================================
+# Step 6: Post-Cleanup Actions
+# =============================================
 - name: Trigger RHDH catalog refresh after cleanup
   uri:
     url: "{{ _rhdh_cleanup_url }}/api/catalog/refresh"
@@ -291,9 +405,37 @@
     - r_gitlab_root_token.resources | length > 0
     - r_gitlab_root_token.resources[0].data.token is defined
 
-- name: Set GitLab root token
+- name: Get RHDH backend configuration secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
+  register: r_rhdh_secrets
+  failed_when: false
+
+- name: Find RHDH backend secret with service tokens
   ansible.builtin.set_fact:
-    _gitlab_root_token: "{{ r_gitlab_root_token.resources[0].data.token | b64decode }}"
+    _rhdh_backend_secret: "{{ r_rhdh_secrets.resources | selectattr('data.GITLAB__TOKEN', 'defined') | first | default({}) }}"
+  when: r_rhdh_secrets.resources is defined
+
+- name: Extract service tokens from RHDH backend secret
+  ansible.builtin.set_fact:
+    _rhdh_gitlab_token: "{{ _rhdh_backend_secret.data['GITLAB__TOKEN'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['GITLAB__TOKEN'] is defined else '' }}"
+    _rhdh_argocd_token: "{{ _rhdh_backend_secret.data['ARGOCD__API_TOKEN'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['ARGOCD__API_TOKEN'] is defined else '' }}"
+    _rhdh_argocd_url: "{{ _rhdh_backend_secret.data['ARGOCD__URL'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['ARGOCD__URL'] is defined else '' }}"
+    _rhdh_argocd_user: "{{ _rhdh_backend_secret.data['ARGOCD__USER'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['ARGOCD__USER'] is defined else '' }}"
+    _rhdh_argocd_password: "{{ _rhdh_backend_secret.data['ARGOCD__PASSWORD'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['ARGOCD__PASSWORD'] is defined else '' }}"
+    _rhdh_gitlab_url: "{{ _rhdh_backend_secret.data['GITLAB__URL'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['GITLAB__URL'] is defined else '' }}"
+    _rhdh_backend_url: "{{ _rhdh_backend_secret.data['BACKEND_URL'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['BACKEND_URL'] is defined else '' }}"
+    _rhdh_keycloak_base_url: "{{ _rhdh_backend_secret.data['KEYCLOAK_BASE_URL'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['KEYCLOAK_BASE_URL'] is defined else '' }}"
+    _rhdh_keycloak_realm: "{{ _rhdh_backend_secret.data['KEYCLOAK_REALM'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['KEYCLOAK_REALM'] is defined else '' }}"
+    _rhdh_quay_token: "{{ _rhdh_backend_secret.data['QUAY__API_TOKEN'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['QUAY__API_TOKEN'] is defined else '' }}"
+    _rhdh_quay_url: "{{ _rhdh_backend_secret.data['QUAY__URL'] | b64decode if _rhdh_backend_secret.data is defined and _rhdh_backend_secret.data['QUAY__URL'] is defined else '' }}"
+  when: _rhdh_backend_secret.data is defined
+
+- name: Set GitLab token (prefer root token, fallback to RHDH token)
+  ansible.builtin.set_fact:
+    _gitlab_root_token: "{{ r_gitlab_root_token.resources[0].data.token | b64decode if r_gitlab_root_token.resources | length > 0 else _rhdh_gitlab_token }}"
 
 - name: Get GitLab user to delete
   uri:
@@ -320,40 +462,95 @@
     - r_gitlab_user.json is defined
     - r_gitlab_user.json | length > 0
 
-- name: Get all projects from development group (where user projects are created)
+- name: Extract GitLab repository URLs from RHDH catalog entities
+  ansible.builtin.set_fact:
+    _user_gitlab_repo_urls: >-
+      {{
+        (
+          (r_catalog_entities.json | default([])) +
+          (r_user_components.json | default([]))
+          | selectattr('metadata.annotations', 'defined')
+          | selectattr('metadata.annotations.backstage.io/source-location', 'defined')
+          | map(attribute='metadata.annotations.backstage.io/source-location')
+          | select('match', '.*gitlab.*')
+          | map('regex_replace', '.*/([^/]+)/?$', '\1')
+          | list
+        ) + (
+          (r_catalog_entities.json | default([])) +
+          (r_user_components.json | default([]))
+          | selectattr('metadata.annotations', 'defined')
+          | selectattr('metadata.annotations.backstage.io/managed-by-location', 'defined')
+          | map(attribute='metadata.annotations.backstage.io/managed-by-location')
+          | select('match', '.*gitlab.*')
+          | map('regex_replace', '.*/([^/]+)/?$', '\1')
+          | list
+        ) + (
+          (r_catalog_entities.json | default([])) +
+          (r_user_components.json | default([]))
+          | selectattr('metadata.annotations', 'defined')
+          | selectattr('metadata.annotations.backstage.io/view-url', 'defined')
+          | map(attribute='metadata.annotations.backstage.io/view-url')
+          | select('match', '.*gitlab.*')
+          | map('regex_replace', '.*/([^/]+)/?$', '\1')
+          | list
+        ) | unique
+      }}
+  when: 
+    - _rhdh_token is defined
+    - (r_catalog_entities.json is defined or r_user_components.json is defined)
+
+- name: Debug GitLab repository URLs extracted from RHDH
+  ansible.builtin.debug:
+    msg:
+      - "Repository URLs found in RHDH catalog: {{ _user_gitlab_repo_urls | default([]) | length }}"
+      - "Repository names: {{ _user_gitlab_repo_urls | default([]) }}"
+  when: _user_gitlab_repo_urls is defined
+
+- name: Find GitLab projects by repository names from RHDH catalog
   uri:
-    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/groups/development/projects
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/projects?search={{ item }}
     method: GET
     validate_certs: false
     headers:
       PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
     status_code: [200, 404]
-  register: r_dev_group_projects
+  register: r_gitlab_projects_by_name
+  loop: "{{ _user_gitlab_repo_urls | default([]) }}"
   failed_when: false
+  when: _user_gitlab_repo_urls | default([]) | length > 0
 
-- name: Filter projects created by this user from development group
+- name: Combine all found GitLab projects for deletion
   ansible.builtin.set_fact:
     r_search_user_projects:
-      json: "{{ r_dev_group_projects.json | default([]) | selectattr('description', 'defined') | selectattr('description', 'match', '.*user-' + guid + '.*') | list }}"
-  when: r_dev_group_projects.json is defined
-
-- name: Set empty search results if no development group projects found
-  ansible.builtin.set_fact:
-    r_search_user_projects:
-      json: []
-  when: r_dev_group_projects.json is not defined
+      json: >-
+        {{
+          r_gitlab_projects_by_name.results
+          | default([])
+          | selectattr('json', 'defined')
+          | map(attribute='json')
+          | flatten
+          | list
+        }}
 
 - name: Debug GitLab projects found
   ansible.builtin.debug:
     msg:
-      - "GitLab root token defined: {{ _gitlab_root_token is defined }}"
+      - "=== GitLab Cleanup Status ==="
+      - "GitLab token source: {{ 'root-user-personal-token' if r_gitlab_root_token.resources | length > 0 else ('RHDH backend secret' if _rhdh_gitlab_token is defined and _rhdh_gitlab_token != '' else 'none') }}"
+      - "GitLab token defined: {{ _gitlab_root_token is defined and _gitlab_root_token != '' }}"
       - "GitLab user found: {{ r_gitlab_user.json is defined and r_gitlab_user.json | length > 0 }}"
       - "User-owned projects found: {{ r_user_gitlab_projects.json | default([]) | length }}"
       - "User-owned projects: {{ r_user_gitlab_projects.json | default([]) | map(attribute='name') | list }}"
-      - "Development group projects found: {{ r_dev_group_projects.json | default([]) | length }}"
-      - "Development group project names: {{ r_dev_group_projects.json | default([]) | map(attribute='name') | list }}"
-      - "Filtered user projects found: {{ r_search_user_projects.json | default([]) | length }}"
-      - "Filtered user projects: {{ r_search_user_projects.json | default([]) | map(attribute='name') | list }}"
+      - "RHDH catalog projects found: {{ r_search_user_projects.json | default([]) | length }}"
+      - "RHDH catalog projects: {{ r_search_user_projects.json | default([]) | map(attribute='name') | list }}"
+      - "Repository URLs from RHDH: {{ _user_gitlab_repo_urls | default([]) }}"
+      - ""
+      - "=== Service Integration Status ==="
+      - "RHDH Backend URL: {{ _rhdh_backend_url | default('Not configured') }}"
+      - "RHDH GitLab URL: {{ _rhdh_gitlab_url | default('Not configured') }}"
+      - "RHDH ArgoCD URL: {{ _rhdh_argocd_url | default('Not configured') }}"
+      - "RHDH Quay URL: {{ _rhdh_quay_url | default('Not configured') }}"
+      - "RHDH Keycloak Realm: {{ _rhdh_keycloak_realm | default('Not configured') }}"
 
 - name: Delete user-owned GitLab projects
   uri:
@@ -368,7 +565,7 @@
   when: 
     - r_user_gitlab_projects.json | default([]) | length > 0
 
-- name: Delete GitLab projects found by search (user pattern in name)
+- name: Delete GitLab projects found through RHDH catalog
   uri:
     url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/projects/{{ item.id }}
     method: DELETE
@@ -444,6 +641,17 @@
   register: r_all_argocd_apps
   failed_when: false
 
+- name: Debug RHDH service integrations available
+  ansible.builtin.debug:
+    msg:
+      - "RHDH ArgoCD token available: {{ _rhdh_argocd_token is defined and _rhdh_argocd_token != '' }}"
+      - "RHDH ArgoCD URL: {{ _rhdh_argocd_url | default('Not configured') }}"
+      - "RHDH GitLab token available: {{ _rhdh_gitlab_token is defined and _rhdh_gitlab_token != '' }}"
+      - "RHDH GitLab URL: {{ _rhdh_gitlab_url | default('Not configured') }}"
+      - "RHDH Quay token available: {{ _rhdh_quay_token is defined and _rhdh_quay_token != '' }}"
+      - "RHDH Backend URL: {{ _rhdh_backend_url | default('Not configured') }}"
+  when: _rhdh_backend_secret.data is defined
+
 - name: Debug sample ArgoCD app metadata structure (first app only)
   ansible.builtin.debug:
     msg:
@@ -473,6 +681,26 @@
     _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('metadata.labels.janus-idp.io/tekton', 'defined') | selectattr('metadata.labels.janus-idp.io/tekton', 'match', '.*user' + _user_guid + '.*') | list) }}"
   when: r_all_argocd_apps.resources is defined
 
+- name: Add apps using ArgoCD selector from RHDH catalog entities
+  ansible.builtin.set_fact:
+    _argocd_selectors_from_rhdh: >-
+      {{
+        (r_catalog_entities.json | default([])) +
+        (r_user_components.json | default([]))
+        | selectattr('metadata.annotations', 'defined')
+        | selectattr('metadata.annotations.argocd/app-selector', 'defined')
+        | map(attribute='metadata.annotations.argocd/app-selector')
+        | list
+      }}
+
+- name: Add apps matching ArgoCD selectors from RHDH
+  ansible.builtin.set_fact:
+    _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('metadata.name', 'in', _argocd_selectors_from_rhdh | map('regex_replace', '.*/(.+)$', '\\1') | list) | list) }}"
+  when: 
+    - r_all_argocd_apps.resources is defined
+    - _argocd_selectors_from_rhdh is defined
+    - _argocd_selectors_from_rhdh | length > 0
+
 - name: Add apps with backstage-name label (contains user456)
   ansible.builtin.set_fact:
     _user_argocd_apps: "{{ _user_argocd_apps + (r_all_argocd_apps.resources | selectattr('metadata.labels.backstage-name', 'defined') | selectattr('metadata.labels.backstage-name', 'match', '.*user' + _user_guid + '.*') | list) }}"
@@ -496,6 +724,8 @@
   ansible.builtin.debug:
     msg:
       - "User repositories found: {{ _user_repo_urls | default([]) | length }}"
+      - "ArgoCD selectors from RHDH: {{ _argocd_selectors_from_rhdh | default([]) }}"
+      - "ArgoCD app names from selectors: {{ _argocd_selectors_from_rhdh | default([]) | map('regex_replace', '.*/(.+)$', '\\1') | list }}"
       - "ArgoCD apps found by ownership: {{ _user_argocd_apps | length }}"
       - "Matched apps: {{ _user_argocd_apps | map(attribute='metadata.name') | list }}"
       - "App sources: {{ _user_argocd_apps | map(attribute='spec.source.repoURL') | list }}"
