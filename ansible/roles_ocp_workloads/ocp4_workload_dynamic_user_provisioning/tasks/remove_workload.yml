@@ -1,0 +1,191 @@
+---
+- name: Dynamic user removal started
+  debug:
+    msg: "Starting removal of dynamic user: {{ _dynamic_username }}"
+
+# =============================================
+# Discover RHDH Resources
+# =============================================
+- name: Get Red Hat Developer Hub route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
+    label_selectors:
+      - app.kubernetes.io/name=backstage
+  register: r_rhdh_route
+
+- name: Set RHDH URL
+  ansible.builtin.set_fact:
+    _rhdh_url: "https://{{ r_rhdh_route.resources[0].spec.host }}"
+  when: r_rhdh_route.resources | length > 0
+
+- name: Fail if RHDH route not found
+  ansible.builtin.fail:
+    msg: "RHDH route not found in namespace {{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
+  when: r_rhdh_route.resources | length == 0
+
+- name: Retrieve Keycloak admin credentials for RHDH API access
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: keycloak-initial-admin
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_keycloak_namespace }}"
+  register: r_keycloak_admin_credentials
+  retries: 60
+  delay: 10
+  until:
+    - r_keycloak_admin_credentials is defined
+    - r_keycloak_admin_credentials.resources is defined
+    - r_keycloak_admin_credentials.resources | length > 0
+
+- name: Set Keycloak admin credentials
+  ansible.builtin.set_fact:
+    _keycloak_admin_username: >-
+      {{ r_keycloak_admin_credentials.resources[0].data.username | b64decode }}
+    _keycloak_admin_password: >-
+      {{ r_keycloak_admin_credentials.resources[0].data.password | b64decode }}
+
+- name: Generate Keycloak access token for RHDH API
+  uri:
+    url: >-
+      https://sso.{{ _ocp_apps_domain }}/realms/master/protocol/openid-connect/token
+    method: POST
+    validate_certs: false
+    body_format: form-urlencoded
+    body:
+      client_id: admin-cli
+      username: "{{ _keycloak_admin_username }}"
+      password: "{{ _keycloak_admin_password }}"
+      grant_type: password
+  register: r_keycloak_access_token
+  changed_when: true
+
+- name: Get user token for RHDH API access
+  uri:
+    url: >-
+      https://sso.{{ _ocp_apps_domain }}/realms/{{ ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/protocol/openid-connect/token
+    method: POST
+    validate_certs: false
+    body_format: form-urlencoded
+    body:
+      client_id: backstage
+      username: "{{ _dynamic_username }}"
+      password: "{{ ocp4_workload_dynamic_user_provisioning_password }}"
+      grant_type: password
+  register: r_user_access_token
+  failed_when: false
+
+- name: Debug RHDH API access setup
+  ansible.builtin.debug:
+    msg:
+      - "RHDH URL: {{ _rhdh_url }}"
+      - "Dynamic Username: {{ _dynamic_username }}"
+      - "User token available: {{ r_user_access_token.status == 200 }}"
+
+- name: Discover all entities in RHDH catalog
+  uri:
+    url: "{{ _rhdh_url }}/api/catalog/entities"
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: "Bearer {{ r_user_access_token.json.access_token }}"
+      Content-Type: application/json
+    status_code: [200, 401, 403]
+  register: r_all_entities
+  when: r_user_access_token.status == 200
+
+- name: Filter entities owned by or related to the user
+  ansible.builtin.set_fact:
+    _user_entities: >-
+      {{
+        r_all_entities.json | default([]) |
+        selectattr('metadata.annotations', 'defined') |
+        selectattr('metadata.annotations', 'search', _dynamic_username) |
+        list +
+        r_all_entities.json | default([]) |
+        selectattr('spec.owner', 'defined') |
+        selectattr('spec.owner', 'search', _dynamic_username) |
+        list +
+        r_all_entities.json | default([]) |
+        selectattr('metadata.name', 'search', _dynamic_username) |
+        list
+      }}
+  when: r_all_entities.status == 200
+
+- name: Debug discovered user entities
+  ansible.builtin.debug:
+    msg:
+      - "Total entities found: {{ r_all_entities.json | default([]) | length }}"
+      - "User-related entities: {{ _user_entities | default([]) | length }}"
+      - "User entities details:"
+  when: r_all_entities.status == 200
+
+- name: List user entity details
+  ansible.builtin.debug:
+    msg:
+      - "Kind: {{ item.kind }}"
+      - "Name: {{ item.metadata.name }}"
+      - "Namespace: {{ item.metadata.namespace | default('N/A') }}"
+      - "Owner: {{ item.spec.owner | default('N/A') }}"
+      - "Annotations: {{ item.metadata.annotations | default({}) }}"
+  loop: "{{ _user_entities | default([]) }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+
+- name: Discover GitLab projects owned by user
+  block:
+    - name: Get GitLab root personal access token
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: root-user-personal-token
+        namespace: "{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}"
+      register: r_gitlab_root_token
+
+    - name: Set GitLab root token
+      ansible.builtin.set_fact:
+        _gitlab_root_token: "{{ r_gitlab_root_token.resources[0].data.token | b64decode }}"
+
+    - name: Get GitLab user details
+      uri:
+        url: >-
+          https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users?username={{ _dynamic_username }}
+        method: GET
+        validate_certs: false
+        headers:
+          PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+        status_code: [200, 404]
+      register: r_gitlab_user
+      failed_when: false
+
+    - name: Get GitLab projects owned by user
+      uri:
+        url: >-
+          https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/users/{{ r_gitlab_user.json[0].id }}/projects
+        method: GET
+        validate_certs: false
+        headers:
+          PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+        status_code: [200, 404]
+      register: r_gitlab_projects
+      when:
+        - r_gitlab_user.status == 200
+        - r_gitlab_user.json | length > 0
+
+    - name: Debug GitLab projects
+      ansible.builtin.debug:
+        msg:
+          - "GitLab user found: {{ r_gitlab_user.status == 200 and r_gitlab_user.json | length > 0 }}"
+          - "Projects count: {{ r_gitlab_projects.json | default([]) | length }}"
+          - "Project names: {{ r_gitlab_projects.json | default([]) | map(attribute='name') | list }}"
+      when: r_gitlab_user.status == 200
+
+- name: Summary of discovered resources
+  ansible.builtin.debug:
+    msg:
+      - "=== RESOURCE DISCOVERY SUMMARY ==="
+      - "User: {{ _dynamic_username }}"
+      - "RHDH entities found: {{ _user_entities | default([]) | length }}"
+      - "GitLab projects found: {{ r_gitlab_projects.json | default([]) | length }}"
+      - "=== END SUMMARY ==="
