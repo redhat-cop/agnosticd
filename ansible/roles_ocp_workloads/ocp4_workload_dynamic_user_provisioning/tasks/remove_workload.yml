@@ -353,9 +353,43 @@
   when: _all_user_entities_final | default([]) | length > 0
 
 # =============================================
-# Step 4: Targeted Entity Deletion
+# Step 4: Direct Entity Deletion using known resource names
 # =============================================
-- name: Delete discovered user entities from RHDH catalog
+- name: Set known user resource names for direct deletion
+  ansible.builtin.set_fact:
+    _user_resource_names:
+      - { kind: "API", name: "my-quarkus-tkn-{{ _dynamic_username }}" }
+      - { kind: "Component", name: "my-quarkus-tkn-{{ _dynamic_username }}" }
+      - { kind: "Resource", name: "my-quarkus-tkn-{{ _dynamic_username }}-gitops" }
+    _direct_cleanup_resources:
+      gitlab_projects:
+        - "development/my-quarkus-tkn-{{ _dynamic_username }}"
+        - "development/my-quarkus-tkn-{{ _dynamic_username }}-gitops"
+      argocd_apps:
+        - "my-quarkus-tkn-{{ _dynamic_username }}-app-of-apps"
+        - "my-quarkus-tkn-{{ _dynamic_username }}-gitops"
+      quay_repos:
+        - "tssc/my-quarkus-tkn-{{ _dynamic_username }}"
+      k8s_patterns:
+        - "my-quarkus-tkn-{{ _dynamic_username }}"
+
+- name: Delete user entities directly by name pattern
+  uri:
+    url: "{{ _rhdh_cleanup_url }}/api/catalog/entities/by-name/{{ item.kind | lower }}/default/{{ item.name }}"
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ _rhdh_backend_secret.data['BACKEND_SECRET'] | b64decode }}
+    status_code: [200, 204, 404, 409]
+  loop: "{{ _user_resource_names }}"
+  loop_control:
+    label: "{{ item.kind }}/default/{{ item.name }}"
+  failed_when: false
+  when: 
+    - _rhdh_cleanup_url is defined
+    - _backend_secret_exists | bool
+
+- name: Fallback - Delete discovered user entities from RHDH catalog
   uri:
     url: "{{ _rhdh_cleanup_url }}/api/catalog/entities/by-name/{{ item.kind | lower }}/{{ item.metadata.namespace | default('default') }}/{{ item.metadata.name }}"
     method: DELETE
@@ -559,7 +593,19 @@
         | unique
       }}
 
-- name: Find GitLab projects by full path from RHDH entities
+- name: Find GitLab projects using direct resource names
+  uri:
+    url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/projects?search={{ item.split('/')[-1] }}
+    method: GET
+    validate_certs: false
+    headers:
+      PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+    status_code: [200, 404]
+  register: r_gitlab_projects_direct
+  loop: "{{ _direct_cleanup_resources.gitlab_projects }}"
+  failed_when: false
+
+- name: Fallback - Find GitLab projects by full path from RHDH entities
   uri:
     url: https://gitlab-{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}.{{ _ocp_apps_domain }}/api/v4/projects?search={{ item.split('/')[-1] }}
     method: GET
@@ -577,12 +623,9 @@
     r_search_user_projects:
       json: >-
         {{
-          r_gitlab_projects_by_name.results
-          | default([])
-          | selectattr('json', 'defined')
-          | map(attribute='json')
-          | flatten
-          | list
+          (r_gitlab_projects_direct.results | default([]) | selectattr('json', 'defined') | map(attribute='json') | flatten | list) +
+          (r_gitlab_projects_by_name.results | default([]) | selectattr('json', 'defined') | map(attribute='json') | flatten | list)
+          | unique
         }}
 
 - name: Debug GitLab projects found
