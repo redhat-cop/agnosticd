@@ -2,18 +2,21 @@
 
 ## Description
 
-This AgnosticD workload enables dynamic user provisioning for existing Red Hat Advanced Developer Suite workshops. It allows adding new users on-demand to running workshop environments without affecting existing users or requiring full workshop redeployment.
+This AgnosticD workload enables dynamic user provisioning for existing Red Hat Advanced
+Developer Suite workshops. It allows adding new users on-demand to running workshop
+environments without affecting existing users or requiring full workshop redeployment.
 
 The workload creates users across all workshop components:
 - **Red Hat Build of Keycloak (RHBK)**: Creates SSO user account
-- **GitLab**: Creates GitLab user account  
+- **GitLab**: Creates GitLab user account
 - **Showroom**: Deploys dedicated showroom instance for the user
 
 ## Prerequisites
 
 - Existing REDHAT_ADS_WKS workshop must be deployed and running
-- OpenShift admin credentials required
+- OpenShift service account token with cluster-admin privileges required
 - Workshop GUID must be available
+- OpenShift API CA certificate available
 
 ## Usage
 
@@ -24,8 +27,9 @@ The workload creates users across all workshop components:
 ansible-playbook main.yml \
   -e guid=abc123 \
   -e ACTION=create \
-  -e ocp4_workload_dynamic_user_provisioning_admin_user=admin \
-  -e ocp4_workload_dynamic_user_provisioning_admin_password=your-admin-password \
+  -e ocp4_workload_dynamic_user_provisioning_openshift_api_url=https://api.cluster-lnj4s.dynamic.redhatworkshops.io:6443 \
+  -e ocp4_workload_dynamic_user_provisioning_openshift_cluster_admin_token=eyJhbGciOiJSUzI1NiIsImtpZCI6... \
+  -e ocp4_workload_dynamic_user_provisioning_openshift_api_ca_cert="-----BEGIN CERTIFICATE-----..." \
   -e ocp4_workload_dynamic_user_provisioning_openshift_console_url=https://console-openshift-console.apps.cluster-lnj4s.dynamic.redhatworkshops.io
 ```
 
@@ -38,8 +42,9 @@ This will create user: `user-abc123`
 ansible-playbook main.yml \
   -e guid=abc123 \
   -e ACTION=remove \
-  -e ocp4_workload_dynamic_user_provisioning_admin_user=admin \
-  -e ocp4_workload_dynamic_user_provisioning_admin_password=your-admin-password \
+  -e ocp4_workload_dynamic_user_provisioning_openshift_api_url=https://api.cluster-lnj4s.dynamic.redhatworkshops.io:6443 \
+  -e ocp4_workload_dynamic_user_provisioning_openshift_cluster_admin_token=eyJhbGciOiJSUzI1NiIsImtpZCI6... \
+  -e ocp4_workload_dynamic_user_provisioning_openshift_api_ca_cert="-----BEGIN CERTIFICATE-----..." \
   -e ocp4_workload_dynamic_user_provisioning_openshift_console_url=https://console-openshift-console.apps.cluster-lnj4s.dynamic.redhatworkshops.io
 ```
 
@@ -50,9 +55,17 @@ ansible-playbook main.yml \
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `guid` | Workshop GUID (auto-available in AgnosticD) | `abc123` |
-| `ocp4_workload_dynamic_user_provisioning_admin_user` | OpenShift admin username | `admin` |
-| `ocp4_workload_dynamic_user_provisioning_admin_password` | OpenShift admin password | `password123` |
-| `ocp4_workload_dynamic_user_provisioning_openshift_console_url` | OpenShift Console URL | `https://console-openshift-console.apps.cluster-lnj4s.dynamic.redhatworkshops.io` |
+| `ocp4_workload_dynamic_user_provisioning_openshift_api_url` | OpenShift API URL | `https://api.cluster-lnj4s.dynamic.redhatworkshops.io:6443` |
+| `ocp4_workload_dynamic_user_provisioning_openshift_cluster_admin_token` | Service account token with cluster-admin privileges | `eyJhbGciOiJSUzI1NiIsImtpZCI6...` |
+| `ocp4_workload_dynamic_user_provisioning_openshift_api_ca_cert` | OpenShift API CA certificate | `-----BEGIN CERTIFICATE-----...` |
+| `ocp4_workload_dynamic_user_provisioning_openshift_console_url` | OpenShift Console URL (optional, auto-derived) | `https://console-openshift-console.apps.cluster-lnj4s.dynamic.redhatworkshops.io` |
+
+### Legacy Variables (Deprecated)
+
+| Variable | Description | Status |
+|----------|-------------|--------|
+| `ocp4_workload_dynamic_user_provisioning_admin_user` | OpenShift admin username | **Deprecated** - Use token authentication |
+| `ocp4_workload_dynamic_user_provisioning_admin_password` | OpenShift admin password | **Deprecated** - Use token authentication |
 
 ### Optional Variables
 
@@ -133,10 +146,11 @@ Showroom Instance: Ready
 
 ### Common Issues
 
-1. **Missing admin credentials**: Ensure OpenShift admin user/password are correct
-2. **Workshop not deployed**: Verify REDHAT_ADS_WKS workshop is running
-3. **Network connectivity**: Check routes and ingress configuration
-4. **Namespace conflicts**: Ensure GUID is unique across workshops
+1. **Invalid service account token**: Ensure token has cluster-admin privileges and is not expired
+2. **CA certificate mismatch**: Verify the CA certificate matches the OpenShift cluster
+3. **Workshop not deployed**: Verify REDHAT_ADS_WKS workshop is running
+4. **Network connectivity**: Check routes and ingress configuration
+5. **Namespace conflicts**: Ensure GUID is unique across workshops
 
 ### Debug Mode
 
@@ -146,13 +160,56 @@ Run with increased verbosity for troubleshooting:
 ansible-playbook main.yml -vvv \
   -e guid=abc123 \
   -e ACTION=create \
-  -e ocp4_workload_dynamic_user_provisioning_admin_user=admin \
-  -e ocp4_workload_dynamic_user_provisioning_admin_password=password123
+  -e ocp4_workload_dynamic_user_provisioning_openshift_api_url=https://api.cluster-lnj4s.dynamic.redhatworkshops.io:6443 \
+  -e ocp4_workload_dynamic_user_provisioning_openshift_cluster_admin_token=eyJhbGciOiJSUzI1NiIsImtpZCI6... \
+  -e ocp4_workload_dynamic_user_provisioning_openshift_api_ca_cert="-----BEGIN CERTIFICATE-----..."
 ```
+
+## Authentication Methods
+
+### Token-Based Authentication (Recommended)
+
+The role now supports secure token-based authentication using service account tokens. This method is preferred for automation and CI/CD pipelines.
+
+#### Integration with openshift_cluster_admin_service_account Role
+
+For AgnosticV environments, use the `openshift_cluster_admin_service_account` role to generate the required token and CA certificate:
+
+```yaml
+# In your AgnosticV environment configuration
+infra_workloads:
+- openshift_cluster_admin_service_account
+- ocp4_workload_dynamic_user_provisioning
+
+# Variables are automatically propagated:
+ocp4_workload_dynamic_user_provisioning_openshift_cluster_admin_token: "{{ openshift_cluster_admin_token }}"
+ocp4_workload_dynamic_user_provisioning_openshift_api_ca_cert: "{{ openshift_api_ca_cert }}"
+ocp4_workload_dynamic_user_provisioning_openshift_api_url: "{{ openshift_api_url }}"
+```
+
+#### Manual Token Generation
+
+If not using AgnosticV, create a service account token manually:
+
+```bash
+# Create service account with cluster-admin privileges
+oc create serviceaccount cluster-admin -n openshift-config
+oc create clusterrolebinding cluster-admin:serviceaccount:openshift-config:cluster-admin \
+  --clusterrole=cluster-admin --serviceaccount=openshift-config:cluster-admin
+
+# Generate long-lived token
+oc create token cluster-admin -n openshift-config --duration=99999h
+```
+
+### Legacy Authentication (Deprecated)
+
+Username/password authentication is deprecated but maintained for backward compatibility. Token-based authentication is strongly recommended for security and automation.
 
 ## Security Considerations
 
-- Uses workshop-consistent password generation
-- Leverages existing Keycloak admin credentials
-- No hardcoded secrets or tokens
-- Proper namespace isolation for multi-tenancy
+- **Token Security**: Service account tokens provide secure, time-limited access
+- **Certificate Validation**: CA certificates ensure secure API connections
+- **Password Generation**: Uses workshop-consistent password generation
+- **Namespace Isolation**: Proper namespace isolation for multi-tenancy
+- **No Hardcoded Secrets**: All credentials retrieved from cluster secrets
+- **Least Privilege**: Service accounts can be scoped to specific permissions
