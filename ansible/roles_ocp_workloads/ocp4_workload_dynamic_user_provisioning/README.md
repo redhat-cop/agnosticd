@@ -23,14 +23,10 @@ The workload creates users across all workshop components:
 ### Adding a User
 
 ```bash
-# Add user to workshop with GUID abc123
+# Add user to workshop with GUID abc123 (variables set by openshift_cluster_admin_service_account role)
 ansible-playbook main.yml \
   -e guid=abc123 \
-  -e ACTION=create \
-  -e ocp4_workload_dynamic_user_provisioning_openshift_api_url=https://api.cluster-lnj4s.dynamic.redhatworkshops.io:6443 \
-  -e ocp4_workload_dynamic_user_provisioning_openshift_cluster_admin_token=eyJhbGciOiJSUzI1NiIsImtpZCI6... \
-  -e ocp4_workload_dynamic_user_provisioning_openshift_api_ca_cert="-----BEGIN CERTIFICATE-----..." \
-  -e ocp4_workload_dynamic_user_provisioning_openshift_console_url=https://console-openshift-console.apps.cluster-lnj4s.dynamic.redhatworkshops.io
+  -e ACTION=create
 ```
 
 This will create user: `user-abc123`
@@ -38,27 +34,22 @@ This will create user: `user-abc123`
 ### Removing a User
 
 ```bash
-# Remove user from workshop
+# Remove user from workshop (variables set by openshift_cluster_admin_service_account role)
 ansible-playbook main.yml \
   -e guid=abc123 \
-  -e ACTION=remove \
-  -e ocp4_workload_dynamic_user_provisioning_openshift_api_url=https://api.cluster-lnj4s.dynamic.redhatworkshops.io:6443 \
-  -e ocp4_workload_dynamic_user_provisioning_openshift_cluster_admin_token=eyJhbGciOiJSUzI1NiIsImtpZCI6... \
-  -e ocp4_workload_dynamic_user_provisioning_openshift_api_ca_cert="-----BEGIN CERTIFICATE-----..." \
-  -e ocp4_workload_dynamic_user_provisioning_openshift_console_url=https://console-openshift-console.apps.cluster-lnj4s.dynamic.redhatworkshops.io
+  -e ACTION=remove
 ```
 
 ## Variables
 
 ### Required Variables
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `guid` | Workshop GUID (auto-available in AgnosticD) | `abc123` |
-| `ocp4_workload_dynamic_user_provisioning_openshift_api_url` | OpenShift API URL | `https://api.cluster-lnj4s.dynamic.redhatworkshops.io:6443` |
-| `ocp4_workload_dynamic_user_provisioning_openshift_cluster_admin_token` | Service account token with cluster-admin privileges | `eyJhbGciOiJSUzI1NiIsImtpZCI6...` |
-| `ocp4_workload_dynamic_user_provisioning_openshift_api_ca_cert` | OpenShift API CA certificate | `-----BEGIN CERTIFICATE-----...` |
-| `ocp4_workload_dynamic_user_provisioning_openshift_console_url` | OpenShift Console URL (optional, auto-derived) | `https://console-openshift-console.apps.cluster-lnj4s.dynamic.redhatworkshops.io` |
+| Variable | Description | Set By | Example |
+|----------|-------------|--------|---------|
+| `guid` | Workshop GUID (auto-available in AgnosticD) | User/AgnosticD | `abc123` |
+| `openshift_cluster_admin_token` | Service account token with cluster-admin privileges | `openshift_cluster_admin_service_account` role | `eyJhbGciOiJSUzI1NiIsImtpZCI6...` |
+| `openshift_api_ca_cert` | OpenShift API CA certificate | `openshift_cluster_admin_service_account` role | `-----BEGIN CERTIFICATE-----...` |
+| `openshift_api_url` | OpenShift API URL | `openshift_cluster_admin_service_account` role | `https://api.cluster-lnj4s.dynamic.redhatworkshops.io:6443` |
 
 ### Legacy Variables (Deprecated)
 
@@ -159,10 +150,7 @@ Run with increased verbosity for troubleshooting:
 ```bash
 ansible-playbook main.yml -vvv \
   -e guid=abc123 \
-  -e ACTION=create \
-  -e ocp4_workload_dynamic_user_provisioning_openshift_api_url=https://api.cluster-lnj4s.dynamic.redhatworkshops.io:6443 \
-  -e ocp4_workload_dynamic_user_provisioning_openshift_cluster_admin_token=eyJhbGciOiJSUzI1NiIsImtpZCI6... \
-  -e ocp4_workload_dynamic_user_provisioning_openshift_api_ca_cert="-----BEGIN CERTIFICATE-----..."
+  -e ACTION=create
 ```
 
 ## Authentication Methods
@@ -181,10 +169,10 @@ infra_workloads:
 - openshift_cluster_admin_service_account
 - ocp4_workload_dynamic_user_provisioning
 
-# Variables are automatically propagated:
-ocp4_workload_dynamic_user_provisioning_openshift_cluster_admin_token: "{{ openshift_cluster_admin_token }}"
-ocp4_workload_dynamic_user_provisioning_openshift_api_ca_cert: "{{ openshift_api_ca_cert }}"
-ocp4_workload_dynamic_user_provisioning_openshift_api_url: "{{ openshift_api_url }}"
+# Variables are automatically available from the openshift_cluster_admin_service_account role:
+# - openshift_cluster_admin_token
+# - openshift_api_ca_cert
+# - openshift_api_url
 ```
 
 #### Manual Token Generation
