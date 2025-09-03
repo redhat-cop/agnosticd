@@ -15,9 +15,6 @@
          | json_query("resources[].status.conditions[?type=='Ready' && status=='True']")
          | length }}
 
-- name: Approve CertificateSigningRequests
-  include_role:
-    name: ocp4_approve_certificate_signing_requests
 
 - name: Approve CSR
   module_defaults:
@@ -26,6 +23,32 @@
       api_key: "{{ r_k8s_auth_results.k8s_auth.api_key }}"
       validate_certs: false
   block:
-    - name: Include this tasks again if nodes doesn't appear
-      include_tasks: approve_csr_nodes.yaml
-      when: "{{ current_instance_workers+worker_instance_count != _r_node_status|length }}"
+    - name: Get pending CSRs
+      kubernetes.core.k8s_info:
+        api_version: certificates.k8s.io/v1
+        kind: CertificateSigningRequest
+      register: all_csrs
+
+    - name: Filter for pending CSRs
+      set_fact:
+        pending_csrs: "{{ all_csrs.resources | selectattr('status.conditions', 'none') | list }}"
+
+    - name: Approve each pending CSR
+      kubernetes.core.k8s_json_patch:
+        api_version: certificates.k8s.io/v1
+        kind: CertificateSigningRequest
+        name: "{{ item.metadata.name }}"
+        patch:
+          - op: add
+            path: /status/conditions/-
+            value:
+              type: Approved
+              status: "True"
+              reason: "AnsibleApproval"
+              message: "CSR was approved by autoscale assisted installer."
+      loop: "{{ pending_csrs }}"
+      when: pending_csrs is defined and pending_csrs | length > 0
+
+- name: Include this tasks again if nodes doesn't appear
+  include_tasks: approve_csr_nodes.yaml
+  when: "{{ current_instance_workers+worker_instance_count != _r_node_status|length }}"
