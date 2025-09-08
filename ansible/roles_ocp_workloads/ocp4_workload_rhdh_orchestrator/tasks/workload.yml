@@ -1,0 +1,82 @@
+---
+- name: Create sonataflow pre-requisites
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) | from_yaml }}"
+  loop:
+  - templates/namespace-sonataflow.yml.j2
+  - templates/secret-sonataflow-pgsql.yml.j2
+
+- name: Check if helm is installed
+  ansible.builtin.command: command -v helm
+  register: git_helm
+  ignore_errors: true
+
+- name: Install helm if not present
+  when: git_helm.rc != 0
+  become: true
+  ansible.builtin.shell: |
+    curl -LO https://get.helm.sh/helm-{{ ocp4_workload_rhdh_orchestrator_helm_cli_version }}-linux-amd64.tar.gz
+    tar -zxvf helm-{{ ocp4_workload_rhdh_orchestrator_helm_cli_version }}-linux-amd64.tar.gz
+    mv linux-amd64/helm /usr/local/bin/helm
+  args:
+    chdir: /tmp
+
+- name: Install postgresql for sonataflow
+  ansible.builtin.shell: |
+    git clone {{ ocp4_workload_rhdh_orchestrator_helm_chart }}
+    cd orchestrator-helm-chart/postgresql && git checkout {{ ocp4_workload_rhdh_orchestrator_helm_chart_version }}
+    helm repo add bitnami https://charts.bitnami.com/bitnami
+    helm install sonataflow-psql bitnami/postgresql --version {{
+    ocp4_workload_rhdh_orchestrator_sonataflow_pgsql_version }} -n {{
+    ocp4_workload_rhdh_orchestrator_sonataflow_namespace }} -f ./values.yaml
+
+- name: Install Orchestrator Operator
+  block:
+  - name: Install Orchestrator Operator
+    ansible.builtin.include_role:
+      name: install_operator
+    vars:
+      install_operator_action: install
+      install_operator_name: orchestrator-operator
+      install_operator_namespace: openshift-operators
+      install_operator_channel: stable
+      install_operator_catalog: redhat-operators
+      install_operator_packagemanifest_name: orchestrator-operator
+      install_operator_automatic_install_plan_approval: true
+      install_operator_csv_nameprefix: orchestrator-operator
+
+- name: Install Orchestrator
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'orchestrator-rhdh.yml.j2') | from_yaml }}"
+
+- name: Check if sonataflow-platform-data-index-service deployment is ready
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    api_version: apps/v1
+    namespace: "{{ ocp4_workload_rhdh_orchestrator_sonataflow_namespace }}"
+    name: sonataflow-platform-data-index-service
+  register: r_index_svc
+  retries: 60
+  delay: 10
+  until:
+  - r_index_svc.resources is defined
+  - r_index_svc.resources | length > 0
+  - r_index_svc.resources[0].status is defined
+  - r_index_svc.resources[0].status.readyReplicas is defined
+  - r_index_svc.resources[0].status.readyReplicas > 0
+
+- name: Add Orchestrator workflows repository
+  ansible.builtin.shell: |
+    helm repo add orchestrator-workflows {{ ocp4_workload_rhdh_orchestrator_workflows.repo }}
+
+- name: Install Orchestrator workflows
+  ansible.builtin.shell: |
+    helm install {{ item.name }} {{ item.location }} -n {{
+    ocp4_workload_rhdh_orchestrator_sonataflow_namespace }}
+  loop: "{{ ocp4_workload_rhdh_orchestrator_workflows.chart }}"
+  register: r_orch_workflow
+  until: r_orch_workflow is not failed
+  retries: 120
+  delay: 10

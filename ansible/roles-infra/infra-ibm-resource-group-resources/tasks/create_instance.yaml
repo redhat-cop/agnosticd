@@ -21,28 +21,71 @@
       for instance {{ instance.name }},
       Image {{ instance.image }} not found in the list of available images. Please check the image name.
 
+- name: Set image
+  set_fact:
+    _image_dict: >-
+      {{ ibmcloud_os_image_list
+      | selectattr('name', 'equalto', instance.image)
+      | first }}
+  when: instance.image is defined
+
+- name: Warn if rootfs_size is less than minimum provisioned size and is > 250 GB
+  when: instance.rootfs_size | default(0) | int != 0
+  ignore_errors: true
+  assert:
+    that: >-
+      instance.rootfs_size | default(0) | int >= _image_dict.minimum_provisioned_size
+      and
+      instance.rootfs_size | default(0) | int <= 250
+    fail_msg: >-
+      for instance {{ instance.name }},
+      rootfs_size is set to {{ instance.rootfs_size | default(0) }},
+      Image {{ instance.image }} minimum provisioned size is {{ _image_dict.minimum_provisioned_size }}.
+      Please check the image name or set the rootfs_size to a value greater than {{ _image_dict.minimum_provisioned_size }}.
+      rootfs_size should also not exceed 250 GB. (IBM Cloud limitation)
+      see https://cloud.ibm.com/docs/vpc?topic=vpc-resize-boot-volumes&interface=ui
+
 - name: Provision IBM Cloud Virtual Server (VS) instance
   register: ibmcloud_vs_instance_create
   vars:
-    _secury_group_filter: "[?name=='{{ instance.name }}'].id"
+    mandatory_tags:
+      - guid:{{ guid }}
+      - service_uuid:{{ service_uuid | default(uuid) }}
+      - ansiblename:{{ instance.name }}
   ibm.cloudcollection.ibm_is_instance:
     state: available
-    name: "{{ instance.name }}"
-    image: "{{ (ibmcloud_os_image_list | selectattr('name', 'equalto', instance.image) | first).id }}"
+    name: "{{ instance_name_with_guid }}"
+    image: "{{ _image_dict.id }}"
     profile: "{{ instance.profile }}"
     keys:
-      - "{{ ibmcloud_ssh_public_key.resource.id }}"
+      - "{{ ibmcloud_ssh_public_key.id }}"
     resource_group: "{{ r_ibmcloud_resource_group_id }}"
     zone: "{{ ibmcloud_availability_zone  }}"
     vpc: "{{ ibmcloud_vpc_subnet_create.resource.vpc }}"
-    tags: "{{ instance.tags|default([]) }}"
+    tags: >-
+      {{ ( instance.tags
+           | default([])
+           + mandatory_tags )
+         | unique
+      }}
     primary_network_interface:
-      - name: "{{ instance.name }}-eth0"
+      - name: "{{ instance_name_with_guid }}-eth0"
         subnet: "{{ ibmcloud_vpc_subnet_create.resource.id }}"
         security_groups: "{{ _instance_sg_ids }}"
     auto_delete_volume: true
     boot_volume:
-      - name: "{{ instance.name }}-boot-0"
+      - name: "{{ instance_name_with_guid }}-boot-0"
+        # Use the maximum between the specified rootfs_size
+        # and the image's minimum provisioned size but never exceed 250 GB
+        size: >-
+          {{
+          [
+            [ instance.rootfs_size | default(0) | int, _image_dict.minimum_provisioned_size | int] | max,
+            250
+          ] | min
+          }}
+
+
     region: "{{ ibmcloud_region }}"
     metadata_service:
       - enabled: true
@@ -56,7 +99,7 @@
 
 - name: Configure Floating IP Address
   ibm.cloudcollection.ibm_is_floating_ip:
-    name: "{{ instance.name }}-fip"
+    name: "{{ instance_name_with_guid }}-fip"
     state: available
     target: "{{ ibmcloud_vs_instance_create.resource.primary_network_interface[0]['id'] }}"
     resource_group: "{{ r_ibmcloud_resource_group_id }}"
@@ -70,3 +113,11 @@
 - name: Fill publicips variable
   set_fact:
     publicips: "{{ publicips + [{'name': ibmcloud_vs_instance_create.resource.name, 'ip': r_ibmcloud_fip.resource.address}] }}"
+
+- name: Create volumes
+  loop: "{{ instance.volumes | default([]) }}"
+  loop_control:
+    loop_var: _volume
+  vars:
+    _volume_name: disk-{{ instance_name_with_guid  ~ '-' ~ _volume.name }}
+  ansible.builtin.include_tasks: create_volume.yaml

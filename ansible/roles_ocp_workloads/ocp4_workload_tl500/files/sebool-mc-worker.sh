@@ -32,4 +32,4 @@ spec:
 EOF
 
 sleep 10
-oc wait mcp/worker --for condition=updated --timeout=600s
+oc wait mcp/worker --for condition=updated --timeout=1800s
