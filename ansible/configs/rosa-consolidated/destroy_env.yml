@@ -25,42 +25,55 @@
     ansible.builtin.include_role:
       name: infra-common-ssh-config-generate
 
-- name: Set ssh extra args for all hosts, use ssh_config just created
+  - name: Start instances
+    ansible.builtin.include_tasks: ec2_instances_start.yaml
+
+- name: Include vars after adding hosts
+  ansible.builtin.import_playbook: ../../include_vars.yml
+
+- name: Destroy tasks on hosts
   hosts: all
   gather_facts: false
-  any_errors_fatal: true
-  ignore_errors: false
   tasks:
   - name: Add -F option ansible_ssh_extra_args
     ansible.builtin.set_fact:
-      ansible_ssh_extra_args: "{{ ansible_ssh_extra_args|d() }} -F {{ hostvars['localhost'].ansible_ssh_config }}"
+      ansible_ssh_extra_args: >-
+        {{ ansible_ssh_extra_args | default('') }} -F {{ hostvars['localhost'].ansible_ssh_config }}
 
-- name: Start all EC2 instances if they are stopped
+  - name: Collect forensics
+    when: agnosticd_collect_forensics | bool
+    block:
+    - name: Ensure SSH access is available
+      ansible.builtin.include_role:
+        role: infra-ec2-open-ssh-access
+
+    - name: Run sos report
+      ansible.builtin.include_role:
+        role: collect_sos_report
+
+    - name: Run oc adm must-gather
+      ansible.builtin.include_role:
+        role: collect_openshift_must_gather
+        apply:
+          delegate_to: localhost
+          run_once: true
+
+- name: Remove workloads
   hosts: localhost
   connection: local
   gather_facts: false
   become: false
-  environment:
-    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
-    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
-    AWS_DEFAULT_REGION: "{{ aws_region_final | default(aws_region) }}"
   tasks:
-  - ansible.builtin.include_tasks: ec2_instances_start.yaml
-
-  - name: Remove ocp workloads
-    when:
-    - remove_workloads | default("") | length > 0
-    block:
-    - name: Invoke roles to remove ocp workloads
-      ansible.builtin.include_role:
-        name: "{{ workload_loop_var }}"
-      vars:
-        ocp_username: "system:admin"
-        ACTION: "remove"
-        silent: false
-      loop: "{{ remove_workloads }}"
-      loop_control:
-        loop_var: workload_loop_var
+  - name: Invoke roles to remove ocp workloads
+    ansible.builtin.include_role:
+      name: "{{ workload_loop_var }}"
+    vars:
+      ocp_username: "system:admin"
+      ACTION: "remove"
+      silent: false
+    loop: "{{ remove_workloads | default([], true) }}"
+    loop_control:
+      loop_var: workload_loop_var
 
 - name: Destroy ROSA cluster(s)
   hosts: localhost
@@ -107,7 +120,6 @@
       name: bookbag
     vars:
       ACTION: destroy
-
 
 - name: Import cloud provider specific destroy playbook
   ansible.builtin.import_playbook: "../../cloud_providers/{{ cloud_provider }}_destroy_env.yml"

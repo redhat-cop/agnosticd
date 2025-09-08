@@ -1,0 +1,127 @@
+---
+- name: Deploy FusionServiceInstance odf-manager
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('file', 'fusionserviceinstance_odfmanager.yml') | from_yaml }}"
+
+- name: Wait for FusionServiceInstance to be fully deployed
+  kubernetes.core.k8s_info:
+    api_version: service.isf.ibm.com/v1
+    kind: FusionServiceInstance
+    name: odfmanager
+    namespace: ibm-spectrum-fusion-ns
+  register: r_fusionserviceinstance
+  until:
+  - r_fusionserviceinstance.resources is defined
+  - r_fusionserviceinstance.resources | length > 0
+  - r_fusionserviceinstance.resources[0].status is defined
+  - r_fusionserviceinstance.resources[0].status.health is defined
+  - r_fusionserviceinstance.resources[0].status.health == "Healthy"
+  - r_fusionserviceinstance.resources[0].status.installStatus.status is defined
+  - r_fusionserviceinstance.resources[0].status.installStatus.status == "Completed"
+  retries: 120
+  delay: 5
+
+- name: Wait for the console plugin to become available
+  kubernetes.core.k8s_info:
+    api_version: console.openshift.io/v1alpha1
+    kind: ConsolePlugin
+    name: odf-console
+  register: r_console_plugin
+  retries: 200
+  delay: 10
+  until: r_console_plugin.resources | list | length == 1
+
+- name: Enable ODF console plugin
+  kubernetes.core.k8s:
+    state: patched
+    kind: Console
+    api_version: operator.openshift.io/v1
+    name: cluster
+    definition:
+      spec:
+        plugins:
+        - odf-console
+
+- name: Create the StorageCluster
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'storagecluster.yml.j2') | from_yaml }}"
+
+- name: Wait for Storage Cluster to finish deploying
+  kubernetes.core.k8s_info:
+    api_version: ocs.openshift.io/v1
+    kind: StorageCluster
+    name: ocs-storagecluster
+    namespace: openshift-storage
+    wait: true
+    wait_condition:
+      reason: ReconcileCompleted
+      status: "True"
+      type: Available
+    wait_sleep: 10
+    wait_timeout: "{{ ocp4_workload_ibm_fusion_storage_cluster_deploy_timeout }}"
+
+- name: Wait for Storage System to finish deploying
+  kubernetes.core.k8s_info:
+    api_version: ocs.openshift.io/v1
+    kind: StorageSystem
+    name: ocs-storagecluster-storagesystem
+    namespace: openshift-storage
+    wait: true
+    wait_condition:
+      reason: ReconcileCompleted
+      status: "True"
+      type: Available
+    wait_sleep: 10
+    wait_timeout: "{{ ocp4_workload_ibm_fusion_storage_system_deploy_timeout }}"
+
+- name: Update default storage class
+  when: ocp4_workload_ibm_fusion_update_default_storage_class | bool
+  block:
+  - name: Wait for the StorageClasses to become available
+    kubernetes.core.k8s_info:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+      name: "{{ ocp4_workload_ibm_fusion_new_default_storage_class_name }}"
+    register: r_storageclass
+    retries: 200
+    delay: 10
+    until: r_storageclass.resources | list | length == 1
+
+  - name: Get all storage classes
+    kubernetes.core.k8s_info:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+    register: r_storageclasses
+
+  - name: Remove default from previous default storage class
+    when: storage_class.metadata.annotations['storageclass.kubernetes.io/is-default-class'] is defined
+    kubernetes.core.k8s:
+      api_version: storage.k8s.io/v1
+      kind: StorageClass
+      name: "{{ storage_class.metadata.name }}"
+      definition:
+        kind: StorageClass
+        apiVersion: v1
+        name: "{{ ocp4_workload_ibm_fusion_new_default_storage_class_name }}"
+        metadata:
+          annotations:
+            storageclass.kubernetes.io/is-default-class: "false"
+    loop: "{{ r_storageclasses.resources }}"
+    loop_control:
+      loop_var: storage_class
+      label: "{{ storage_class.metadata.name }}"
+
+  - name: Set new default storage class
+    kubernetes.core.k8s:
+      api_version: v1
+      kind: StorageClass
+      name: "{{ ocp4_workload_ibm_fusion_new_default_storage_class_name }}"
+      definition:
+        kind: StorageClass
+        apiVersion: v1
+        name: "{{ ocp4_workload_ibm_fusion_new_default_storage_class_name }}"
+        metadata:
+          annotations:
+            storageclass.kubernetes.io/is-default-class: "true"

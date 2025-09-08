@@ -1,0 +1,312 @@
+---
+- name: telco 5G lab Golden Image
+  hosts: 10.6.76.211
+  #hosts: hypervisor.hrdrt.dynamic.opentlc.com
+  vars:
+    lab_version: "lab-4.18"
+    lab_release: "4.18"
+    repo_user: "RHsyseng"
+    #repo_user: "alosadagrande"
+    # yamllint disable rule:line-length
+    kcli_rpm: "https://github.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/releases/download/{{ lab_release }}/kcli-99.0.0.git.202503261511.dccfb3f-0.el9.x86_64.rpm"
+    lab_repo: "https://github.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab.git"
+    # yamllint enable rule:line-length
+    ocp4_major_release: "4.18"
+    ocp4_minor_release: "4.18.4"
+    lab_network_cidr: "192.168.125.0/24"
+    lab_network_domain: "5g-deployment.lab"
+    lab_sriov_domain: "sriov-network.lab"
+    lab_sriov_cidr: "192.168.100.0/24"
+    lab_registry_host: "infra.5g-deployment.lab:8443"
+    lab_api_host: "api.hub.5g-deployment.lab:6443"
+    upstream_dns: "1.1.1.1"
+    # yamllint disable rule:line-length
+    rhcos_live_image: 'rhcos-4.18.1-x86_64-live.x86_64.iso'
+    rhcos_rootfs_image: 'rhcos-4.18.1-x86_64-live-rootfs.x86_64.img'
+    rhcos_live_image_url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.18/4.18.1/{{ rhcos_live_image }}"
+    rhcos_rootfs_image_url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.18/4.18.1/{{ rhcos_rootfs_image }}"
+    container_images:
+      - 'quay.io/fedora/httpd-24-micro:2.4'
+      - 'quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z'
+      - 'quay.io/alosadag/httpd:p8080'
+      - 'quay.io/mavazque/gitea:1.17.3'
+      - 'quay.io/mavazque/registry:2.7.1'
+    # yamllint enable rule:line-length
+
+  tasks:
+    - name: Ensure lab dependencies are installed
+      ansible.builtin.dnf:
+        name:
+          - libvirt
+          - libvirt-daemon-driver-qemu
+          - qemu-kvm
+          - git
+          - dnsmasq
+          - policycoreutils-python-utils
+          - podman
+          - httpd-tools
+          - haproxy
+          - pip
+          - firewalld
+          - nmstate
+        state: present
+
+    - name: Ensure required Python modules are installed
+      ansible.builtin.pip:
+        name: kubernetes, passlib, pyopenssl, cherrypy, firewall, minio
+
+    - name: Ensure kcli rpm is installed
+      ansible.builtin.dnf:
+        name: "{{ kcli_rpm }}"
+        disable_gpg_check: true
+
+    - name: Ensure libvirtd service is enabled and running
+      ansible.builtin.systemd:
+        state: restarted
+        daemon_reload: true
+        enabled: true
+        name: libvirtd
+
+    - name: Ensure default image pool is present
+      ansible.builtin.command:
+        cmd: kcli create pool -p /var/lib/libvirt/images default
+
+    - name: Ensure default network is present
+      ansible.builtin.command:
+        cmd: kcli create network -c 192.168.122.0/24 default
+
+    - name: Ensure lab network is present
+      ansible.builtin.command:
+        cmd: "kcli create network -c {{ lab_network_cidr }} -P dhcp=false -P dns=false --domain {{ lab_network_domain }} 5gdeploymentlab"
+
+    - name: Ensure sriov-network is present
+      ansible.builtin.command:
+        cmd: "kcli create network -c {{ lab_sriov_cidr }} -P dhcp=false -P dns=false --domain {{ lab_sriov_domain }} -i sriov-network"
+
+    - name: Ensure oc-mirror tooling is present
+      ansible.builtin.command:
+        cmd: "kcli download {{ item.binary }} -P version={{ item.version }} -P tag='{{ item.tag }}'"
+      with_items:
+        - {binary: "oc-mirror", version: "stable", tag: "{{ ocp4_major_release }}"}
+      tags: oc-mirror
+
+    - name: Ensure oc/kubectl are in the PATH
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/usr/bin/{{ item }}"
+        mode: "0755"
+        remote_src: true
+      with_items:
+        - oc-mirror
+
+    - name: Ensure DNSMasq folder exists
+      ansible.builtin.file:
+        path: /opt/dnsmasq/include.d/
+        state: directory
+        mode: "0755"
+
+    - name: Ensure DNSMasq config files exist
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ item.destination }}"
+        mode: "{{ item.mode }}"
+      # yamllint disable rule:line-length
+      retries: 5
+      delay: 10
+      with_items:
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/dnsmasq.conf", destination: "/opt/dnsmasq/dnsmasq.conf", mode: "0644"}
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/upstream-resolv.conf", destination: "/opt/dnsmasq/upstream-resolv.conf", mode: "0644"}
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/hub.ipv4", destination: "/opt/dnsmasq/include.d/hub.ipv4", mode: "0644"}
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/sno1.ipv4", destination: "/opt/dnsmasq/include.d/sno1.ipv4", mode: "0644"}
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/sno2.ipv4", destination: "/opt/dnsmasq/include.d/sno2.ipv4", mode: "0644"}
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/sno3.ipv4", destination: "/opt/dnsmasq/include.d/sno3.ipv4", mode: "0644"}
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/infrastructure-host.ipv4", destination: "/opt/dnsmasq/include.d/infrastructure-host.ipv4", mode: "0644"}
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/dnsmasq-virt.service", destination: "/etc/systemd/system/dnsmasq-virt.service", mode: "0644"}
+      # yamllint enable rule:line-length
+
+    - name: Ensure DNS Upstream server is configured
+      ansible.builtin.replace:
+        path: /opt/dnsmasq/upstream-resolv.conf
+        regexp: 'UPSTREAM_DNS'
+        replace: "{{ upstream_dns }}"
+
+    - name: Ensure DNSMasq lease file exists
+      ansible.builtin.file:
+        path: /opt/dnsmasq/hosts.leases
+        state: touch
+        mode: "0644"
+        setype: "dnsmasq_lease_t"
+
+    - name: Ensure DNSMasq lease file has the proper SELinux context
+      community.general.sefcontext:
+        target: '/opt/dnsmasq/(.*)?\.leases'
+        setype: dnsmasq_lease_t
+        state: present
+
+    - name: Ensure DNSMasq config files has the proper SELinux context
+      community.general.sefcontext:
+        target: "{{ item }}"
+        setype: dnsmasq_etc_t
+        state: present
+      with_items:
+        - '/opt/dnsmasq/include.d(/.*)?'
+        - '/opt/dnsmasq/(.*)?\.conf'
+        - '/opt/dnsmasq'
+
+    - name: Ensure DNSMasq file applies the proper SELinux context
+      ansible.builtin.command:
+        cmd: restorecon -rv /opt/dnsmasq/
+
+    - name: Ensure DNSMasq service is enabled and running
+      ansible.builtin.systemd:
+        state: restarted
+        daemon_reload: true
+        enabled: true
+        name: dnsmasq-virt
+
+    - name: Ensure dispatcher script exists
+      ansible.builtin.get_url:
+      # yamllint disable rule:line-length
+        url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hypervisor/forcedns"
+        dest: "/etc/NetworkManager/dispatcher.d/forcedns"
+        mode: "0755"
+      # yamllint enable rule:line-length
+
+    - name: Ensure webcache folder exist
+      ansible.builtin.file:
+        path: /opt/webcache/data
+        state: directory
+        mode: "0777"
+
+    - name: Ensure NetworkManager is restarted
+      ansible.builtin.systemd:
+        state: restarted
+        name: NetworkManager
+
+    - name: Download live and rootfs images
+      ansible.builtin.get_url:
+        url: "{{ item }}"
+        dest: "/opt/webcache/data/"
+        mode: "0644"
+      with_items:
+        - "{{ rhcos_live_image_url }}"
+        - "{{ rhcos_rootfs_image_url }}"
+      poll: 0
+      async: 900
+      register: download_rhcos
+
+    - name: Ensure disconnected registry folders exist
+      ansible.builtin.file:
+        path: /opt/registry/{{ item }}
+        state: directory
+        mode: "0755"
+      with_items:
+        - auth
+        - certs
+        - data
+        - conf
+
+    - name: Ensure disconnected registry config files exist
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "{{ item.destination }}"
+        mode: "{{ item.mode }}"
+      # yamllint disable rule:line-length
+      retries: 5
+      delay: 10
+      with_items:
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/registry-key.pem", destination: "/opt/registry/certs/registry-key.pem", mode: "0644"}
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/registry-cert.pem", destination: "/opt/registry/certs/registry-cert.pem", mode: "0644"}
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/config.yml", destination: "/opt/registry/conf/config.yml", mode: "0644"}
+        - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/podman-registry.service", destination: "/etc/systemd/system/podman-registry.service", mode: "0644"}
+      # yamllint enable rule:line-length
+
+    - name: Ensure disconnected registry user credentials exist
+      community.general.htpasswd:
+        path: /opt/registry/auth/htpasswd
+        crypt_scheme: bcrypt
+        name: admin
+        password: 'r3dh4t1!'
+        mode: 0640
+
+    - name: Ensure disconnected registry service is enabled and running
+      ansible.builtin.systemd:
+        state: restarted
+        daemon_reload: true
+        enabled: true
+        name: podman-registry
+
+    - name: Ensure disconnected registry cert is trusted
+      ansible.builtin.copy:
+        src: "/opt/registry/certs/registry-cert.pem"
+        dest: "/etc/pki/ca-trust/source/anchors/registry-cert.pem"
+        mode: "0755"
+        remote_src: true
+
+    - name: Ensure trusted certs are updated
+      ansible.builtin.command:
+        cmd: update-ca-trust
+
+    - name: Ensure S3 storage config files exist
+      ansible.builtin.get_url:
+        # yamllint disable rule:line-length
+        url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/minio/podman-minio.service"
+        # yamllint enable rule:line-length
+        dest: "/etc/systemd/system/podman-minio.service"
+        mode: "0644"
+
+    - name: Ensure s3 folder exist
+      ansible.builtin.file:
+        path: /opt/minio/s3-volume
+        state: directory
+        mode: "0755"
+
+    - name: Download S3 mc client
+      ansible.builtin.get_url:
+        url: https://dl.min.io/client/mc/release/linux-amd64/mc
+        dest: /usr/bin/mc
+        mode: "0744"
+
+    - name: Ensure registry is running by login into it
+      containers.podman.podman_login:
+        username: admin
+        password: 'r3dh4t1!'
+        registry: "{{ lab_registry_host }}"
+        authfile: auth.json
+
+    - name: Ensure git server folder exists
+      ansible.builtin.file:
+        path: /opt/gitea/
+        state: directory
+        owner: 1000
+        group: 1000
+        mode: "0755"
+
+    - name: Pull an image
+      containers.podman.podman_image:
+        name: "{{ item }}"
+        pull: true
+      loop: "{{ container_images }}"
+      tags: pull
+
+    - name: Ensure mirror-config is downloaded
+      ansible.builtin.get_url:
+      # yamllint disable rule:line-length
+        url: "https://raw.githubusercontent.com/{{ repo_user }}/agnosticd/development/ansible/roles_ocp_workloads/ocp4_workload_5gran_deployments_lab/golden_image_playbook/mirror-config-{{ lab_release }}.yaml"
+        dest: "/root/mirror-config.yaml"
+        mode: "0755"
+      # yamllint enable rule:line-length
+
+    - name: Execute mirroring
+      ansible.builtin.shell:
+        cmd: ~/oc-mirror --v2 --workspace file:// --config=mirror-config.yaml docker://infra.5g-deployment.lab:8443 | tee -a /root/mirroring.log
+      args:
+        chdir: /root/
+      tags: oc-mirror
+      register: command_result
+      failed_when: "'some errors occurred during the mirroring' in command_result.stderr"
+
+    # Leave this as the last task in the playbook.
+    - name: Golden image tasks complete
+      debug:
+        msg: "Golden Image tasks completed successfully."

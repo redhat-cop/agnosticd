@@ -1,0 +1,116 @@
+---
+- name: Create Vault application
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'application-vault.yml.j2') | from_yaml }}"
+
+- name: Retrieve Vault Pod
+  kubernetes.core.k8s_info:
+    kind: Pod
+    name: vault-0
+    namespace: "{{ ocp4_workload_gitops_vault_namespace }}"
+  register: r_vault
+  retries: 120
+  delay: 5
+  until:
+  - r_vault.resources is defined
+  - r_vault.resources | length > 0
+  - r_vault.resources[0].status is defined
+  - r_vault.resources[0].status.phase is defined
+  - r_vault.resources[0].status.phase == 'Running'
+
+- name: Copy unsealing key
+  ansible.builtin.shell: |
+    oc exec vault-0 -n {{ ocp4_workload_gitops_vault_namespace
+    }} --stdin --tty -- cat /vault/data/vault-auto-unseal-keys.txt > /tmp/vault-auto-unseal-keys.txt
+  retries: 60
+  delay: 5
+  register: r_copy
+  until: r_copy is not failed
+
+- name: Get login token
+  ansible.builtin.shell: >-
+    grep -A 0 root_token /tmp/vault-auto-unseal-keys.txt | sed 's/root_token: //g'
+  register: r_token
+
+- name: Set vault token fact
+  ansible.builtin.set_fact:
+    ocp4_workload_gitops_vault_token: "{{ r_token.stdout }}"
+
+- name: Create vault auth resources
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', item) | from_yaml }}"
+  loop:
+  - secret-vault-token.yml.j2
+  - service-account-vault.yml.j2
+  - cluster-role-binding-role-token-review.yml.j2
+  - secret-vault-auth.yml.j2
+
+- name: Login to vault
+  ansible.builtin.shell: |
+    oc exec vault-0 -n {{ ocp4_workload_gitops_vault_namespace
+    }} --stdin --tty -- vault login {{ ocp4_workload_gitops_vault_token }}
+  register: r_vault_login
+  until: r_vault_login is not failed
+  retries: 30
+  delay: 10
+
+- name: Create vault policy
+  ansible.builtin.shell: |
+    oc exec vault-0 -n {{ ocp4_workload_gitops_vault_namespace
+    }} -- bash -c 'rm -rf /tmp/rhdh-policy.hcl'
+    oc exec vault-0 -n {{ ocp4_workload_gitops_vault_namespace
+    }} -- bash -c 'echo path \"*\" >> /tmp/rhdh-policy.hcl'
+    oc exec vault-0 -n {{ ocp4_workload_gitops_vault_namespace
+    }} -- bash -c 'echo {  capabilities = [\"read\", \"list\"] >> /tmp/rhdh-policy.hcl'
+    oc exec vault-0 -n {{ ocp4_workload_gitops_vault_namespace
+    }} -- bash -c 'echo } >> /tmp/rhdh-policy.hcl'
+    oc exec vault-0 -n {{ ocp4_workload_gitops_vault_namespace
+    }} -- bash -c 'vault policy write rhdh-policy /tmp/rhdh-policy.hcl'
+
+- name: Enable kubernetes auth
+  ansible.builtin.shell: |
+    export SA_SECRET_NAME=$(oc get secrets -n {{ ocp4_workload_gitops_vault_namespace
+    }} --output=json \
+    | jq -r '.items[].metadata | select(.name|startswith("vault-auth-secret")).name')
+    export SA_JWT_TOKEN=$(oc get secret $SA_SECRET_NAME -n {{ ocp4_workload_gitops_vault_namespace
+    }} \
+    --output 'go-template={{ "{{" }} .data.token {{ "}}" }}' | base64 --decode)
+    export SA_CA_CRT=$(oc config view --raw --minify --flatten \
+    --output 'jsonpath={.clusters[].cluster.certificate-authority-data}' | base64 --decode)
+    export K8S_HOST=$(oc config view --raw --minify --flatten \
+    --output 'jsonpath={.clusters[].cluster.server}')
+    oc exec vault-0 -n {{ ocp4_workload_gitops_vault_namespace
+    }} -- vault auth enable kubernetes
+    oc exec vault-0 -n {{ ocp4_workload_gitops_vault_namespace
+    }} -- vault write auth/kubernetes/config \
+    token_reviewer_jwt="$SA_JWT_TOKEN" \
+    kubernetes_host="$K8S_HOST" \
+    kubernetes_ca_cert="$SA_CA_CRT" \
+    issuer="https://kubernetes.default.svc.cluster.local"
+
+- name: Create role and service account authentication
+  ansible.builtin.shell: |
+    oc exec vault-0 -n {{ ocp4_workload_gitops_vault_namespace
+    }} -- vault write auth/kubernetes/role/rhdh-role \
+    bound_service_account_names=vault-auth \
+    bound_service_account_namespaces={{ ocp4_workload_gitops_vault_namespace
+    }} \
+    token_policies=rhdh-policy \
+    ttl=160h
+    export SA_SECRET_NAME=$(oc get secrets -n {{ ocp4_workload_gitops_vault_namespace
+    }} --output=json \
+    | jq -r '.items[].metadata | select(.name|startswith("vault-auth-secret")).name')
+    export SA_JWT_TOKEN=$(oc get secret $SA_SECRET_NAME -n {{ ocp4_workload_gitops_vault_namespace
+    }} \
+    --output 'go-template={{ "{{" }} .data.token {{ "}}" }}' | base64 --decode)
+    oc exec vault-0 -n vault -- vault write auth/kubernetes/login role=rhdh-role jwt=$SA_JWT_TOKEN
+  register: r_create_role
+  until: r_create_role is succeeded
+  retries: 10
+  delay: 5
+
+- name: Enable kv version 2
+  ansible.builtin.shell: |
+    oc exec vault-0 -n vault -- vault secrets enable -version=2 kv
