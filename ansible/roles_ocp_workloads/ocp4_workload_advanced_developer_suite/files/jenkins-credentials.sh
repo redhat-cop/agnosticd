@@ -8,8 +8,8 @@ COSIGN_SECRET_KEY=$(oc get -n openshift-pipelines secrets/signing-secrets -o jso
 COSIGN_PUBLIC_KEY=$(oc get -n openshift-pipelines secrets/signing-secrets -o json | jq -r '.data["cosign.pub"]')
 GITOPS_AUTH_USERNAME=root
 GITOPS_GIT_TOKEN=$(oc get -n tssc secrets/tssc-gitlab-integration -o json | jq -r '.data.token' | base64 -d)
-QUAY_USERNAME=$(oc get -n tssc secret tssc-quay-integration -o json | jq -r '.data[".dockerconfigjson"]' | base64 --decode | jq -r '.. | objects | select(has("username")) | .username')
-QUAY_PASSWORD=$(oc get -n tssc secret tssc-quay-integration -o json | jq -r '.data[".dockerconfigjson"]' | base64 --decode | jq -r '.. | objects | select(has("password")) | .password')
+QUAY_USERNAME=$(oc get -n tssc secret tssc-quay-integration -o json | jq -r '.data[".dockerconfigjson"]' | base64 --decode | jq -r '.auths[] | .auth | @base64d | split(":")[0]')
+QUAY_PASSWORD=$(oc get -n tssc secret tssc-quay-integration -o json | jq -r '.data[".dockerconfigjson"]' | base64 --decode | jq -r '.auths[] | .auth | @base64d | split(":")[1:] | join(":")')
 ACS_TOKEN=$(oc get -n tssc secret tssc-acs-integration -o json | jq -r '.data.token' | base64 --decode)
 ACS_ENDPOINT=$(oc get -n tssc secret tssc-acs-integration -o json | jq -r '.data.endpoint' | base64 --decode)
 
