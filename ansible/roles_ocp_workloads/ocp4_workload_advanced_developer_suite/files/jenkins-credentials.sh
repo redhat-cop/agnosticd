@@ -1,5 +1,4 @@
 # Jenkins server details
-{% raw %}
 JENKINS__URL=$(oc get -n tssc secrets/tssc-jenkins-integration -o json | jq -r '.data.baseUrl' | base64 -d)
 JENKINS__USERNAME=$(oc get -n tssc secrets/tssc-jenkins-integration -o json | jq -r '.data.username' | base64 -d)
 JENKINS__TOKEN=$(oc get -n tssc secrets/tssc-jenkins-integration -o json | jq -r '.data.token' | base64 -d)
@@ -9,10 +8,8 @@ COSIGN_SECRET_KEY=$(oc get -n openshift-pipelines secrets/signing-secrets -o jso
 COSIGN_PUBLIC_KEY=$(oc get -n openshift-pipelines secrets/signing-secrets -o json | jq -r '.data["cosign.pub"]')
 GITOPS_AUTH_USERNAME=root
 GITOPS_GIT_TOKEN=$(oc get -n tssc secrets/tssc-gitlab-integration -o json | jq -r '.data.token' | base64 -d)
-{% endraw %}
-QUAY_USERNAME={{ ocp4_workload_advanced_developer_suite_quay_admin_user }}
-QUAY_PASSWORD={{ ocp4_workload_advanced_developer_suite_quay_admin_password }}
-{% raw %}
+QUAY_USERNAME=$(oc get -n tssc secret tssc-quay-integration -o json | jq -r '.data[".dockerconfigjson"]' | base64 --decode | jq -r '.auths[] | .auth | @base64d | split(":")[0]')
+QUAY_PASSWORD=$(oc get -n tssc secret tssc-quay-integration -o json | jq -r '.data[".dockerconfigjson"]' | base64 --decode | jq -r '.auths[] | .auth | @base64d | split(":")[1:] | join(":")')
 ACS_TOKEN=$(oc get -n tssc secret tssc-acs-integration -o json | jq -r '.data.token' | base64 --decode)
 ACS_ENDPOINT=$(oc get -n tssc secret tssc-acs-integration -o json | jq -r '.data.endpoint' | base64 --decode)
 
@@ -91,4 +88,3 @@ done
 # Add usernames with passwords
 add_username_with_password "QUAY_IO_CREDS" $QUAY_USERNAME $QUAY_PASSWORD
 add_username_with_password "GITOPS_CREDENTIALS" $GITOPS_AUTH_USERNAME $GITOPS_GIT_TOKEN
-{% endraw %}
