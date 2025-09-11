@@ -9,7 +9,7 @@ DOCUMENTATION = """
     version_added: "2.9"
     short_description: fetch data values set with agnosticd_user_info
     description:
-      - This lookup returns data values set with agnosticd_user_info. 
+      - This lookup returns data values set with agnosticd_user_info.
     options:
       _terms:
         description: Data keys set in agnosticd_user_info.
@@ -29,14 +29,14 @@ EXAMPLES = """
   set_fact:
     user_password: "{{ lookup('agnosticd_user_data', 'password', user='user1') }}"
   when: user_password is undefined
-"""     
+"""
 
 RETURN = """
   _raw:
     description:
       - list of values to get from agnosticd_user_info data
     type: list
-    elements: raw   
+    elements: raw
 """
 
 import os
@@ -44,18 +44,26 @@ import yaml
 
 from ansible.errors import AnsibleError
 from ansible.plugins.lookup import LookupBase
+try:
+    # ansible-core 2.19+: needed to render code-authored Jinja strings
+    from ansible.template import trust_as_template
+except Exception:
+    # ansible-core 2.18 and older: no-op
+    trust_as_template = lambda x: x
 
-class LookupModule(LookupBase): 
+class LookupModule(LookupBase):
     def run(self, terms, action='provision', user=None, **kwargs):
         self.set_options(direct=kwargs)
         ret = []
 
-        output_dir = self._templar.template('{{ output_dir | default(playbook_dir) | default(".") }}')
+        # Use default(..., true) so empty strings/falsey values are treated as unset.
+        _expr = '{{ output_dir | default(playbook_dir, true) | default(".", true) }}'
+        output_dir = self._templar.template(trust_as_template(_expr))
+
         user_data = {}
         try:
-            fh = open(os.path.join(output_dir, f'{action}-user-data.yaml'), 'r')
-            user_data = yaml.safe_load(fh)
-            fh.close()
+            with open(os.path.join(output_dir, f'{action}-user-data.yaml'), 'r') as fh:
+                user_data = yaml.safe_load(fh) or {}
         except FileNotFoundError:
             pass
 

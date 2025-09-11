@@ -1,0 +1,240 @@
+---
+- name: Dynamic user removal started
+  debug:
+    msg: "Starting removal of dynamic user: {{ _dynamic_username }}"
+
+# =============================================
+# Setup Domain Variables
+# =============================================
+- name: Extract cluster domain from console URL
+  ansible.builtin.set_fact:
+    _cluster_domain: >-
+      {{
+        ocp4_workload_dynamic_user_provisioning_openshift_console_url
+        | regex_replace('^https://console-openshift-console\.apps\.', '')
+      }}
+
+- name: Set OpenShift Apps Domain
+  ansible.builtin.set_fact:
+    _ocp_apps_domain: "apps.{{ _cluster_domain }}"
+
+# =============================================
+# Discover RHDH Resources
+# =============================================
+- name: Get Red Hat Developer Hub route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
+    label_selectors:
+      - app.kubernetes.io/name=backstage
+  register: r_rhdh_route
+
+- name: Set RHDH URL
+  ansible.builtin.set_fact:
+    _rhdh_url: "https://{{ r_rhdh_route.resources[0].spec.host }}"
+  when: r_rhdh_route.resources | length > 0
+
+- name: Fail if RHDH route not found
+  ansible.builtin.fail:
+    msg: "RHDH route not found in namespace {{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
+  when: r_rhdh_route.resources | length == 0
+
+- name: Get RHDH backend token from secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
+  register: r_rhdh_secrets
+
+- name: Debug RHDH secrets
+  ansible.builtin.debug:
+    msg:
+      - "RHDH secrets found: {{ r_rhdh_secrets.resources | map(attribute='metadata.name') | list }}"
+
+- name: Find RHDH backend token secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_dh_namespace | default('tssc-dh') }}"
+    label_selectors:
+      - app.kubernetes.io/name=backstage
+  register: r_rhdh_backend_secrets
+
+- name: Debug RHDH API access setup
+  ansible.builtin.debug:
+    msg:
+      - "RHDH URL: {{ _rhdh_url }}"
+      - "Dynamic Username: {{ _dynamic_username }}"
+
+- name: Try RHDH API without authentication
+  uri:
+    url: "{{ _rhdh_url }}/api/catalog/entities?filter=spec.owner=user:default/{{ _dynamic_username }}"
+    method: GET
+    validate_certs: false
+    headers:
+      Content-Type: application/json
+    status_code: [200, 401, 403]
+  register: r_all_entities
+  failed_when: false
+
+- name: Get GitLab root personal access token
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: root-user-personal-token
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_gitlab_namespace }}"
+  register: r_gitlab_root_token
+
+- name: Set GitLab root token
+  ansible.builtin.set_fact:
+    _gitlab_root_token: "{{ r_gitlab_root_token.resources[0].data.token | b64decode }}"
+
+- name: Delete Entities
+  ansible.builtin.include_tasks: delete_entity.yml
+  loop: "{{ r_all_entities.json }}"
+  loop_control:
+    loop_var: _entity
+
+- name: "👤 DELETING KEYCLOAK USER"
+  ansible.builtin.debug:
+    msg:
+      - "┌─────────────────────────────────────────────────────────────────┐"
+      - "│                    DELETING KEYCLOAK USER                       │"
+      - "└─────────────────────────────────────────────────────────────────┘"
+
+- name: Get Keycloak admin credentials for user deletion
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: keycloak-initial-admin
+    namespace: "{{ ocp4_workload_dynamic_user_provisioning_keycloak_namespace }}"
+  register: r_keycloak_admin_credentials_cleanup
+  failed_when: false
+
+- name: Set Keycloak admin credentials for cleanup
+  ansible.builtin.set_fact:
+    _keycloak_admin_username_cleanup: "{{ r_keycloak_admin_credentials_cleanup.resources[0].data.username | b64decode }}"
+    _keycloak_admin_password_cleanup: "{{ r_keycloak_admin_credentials_cleanup.resources[0].data.password | b64decode }}"
+  when:
+    - r_keycloak_admin_credentials_cleanup.resources is defined
+    - r_keycloak_admin_credentials_cleanup.resources | length > 0
+
+- name: Generate Keycloak access token for user deletion
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/realms/master/protocol/openid-connect/token
+    method: POST
+    validate_certs: false
+    body_format: form-urlencoded
+    body:
+      client_id: admin-cli
+      username: "{{ _keycloak_admin_username_cleanup }}"
+      password: "{{ _keycloak_admin_password_cleanup }}"
+      grant_type: password
+    timeout: 30
+  register: r_keycloak_access_token_cleanup
+  failed_when: false
+  when: _keycloak_admin_username_cleanup is defined
+
+- name: Get user details from trusted-artifact-signer realm
+  uri:
+    url: >-
+      https://sso.{{ _ocp_apps_domain }}/admin/realms/
+      {{- ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users?username={{ _dynamic_username }}
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token_cleanup.json.access_token }}
+    timeout: 30
+  register: r_keycloak_user_cleanup
+  failed_when: false
+  when:
+    - r_keycloak_access_token_cleanup is defined
+    - r_keycloak_access_token_cleanup.json is defined
+    - r_keycloak_access_token_cleanup.json.access_token is defined
+
+- name: Delete user from trusted-artifact-signer realm
+  uri:
+    url: >-
+      https://sso.{{ _ocp_apps_domain }}/admin/realms/
+      {{- ocp4_workload_dynamic_user_provisioning_keycloak_realm }}/users/{{ r_keycloak_user_cleanup.json[0].id }}
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token_cleanup.json.access_token }}
+    status_code: [204, 404]
+    timeout: 30
+  register: r_delete_keycloak_user
+  failed_when: false
+  when:
+    - r_keycloak_user_cleanup is defined
+    - r_keycloak_user_cleanup.json is defined
+    - r_keycloak_user_cleanup.json | length > 0
+
+- name: Get user details from chicken realm (TPA)
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/chicken/users?username={{ _dynamic_username }}
+    method: GET
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token_cleanup.json.access_token }}
+    timeout: 30
+  register: r_tpa_user_cleanup
+  failed_when: false
+  when:
+    - r_keycloak_access_token_cleanup is defined
+    - r_keycloak_access_token_cleanup.json is defined
+    - r_keycloak_access_token_cleanup.json.access_token is defined
+
+- name: Delete user from chicken realm (TPA)
+  uri:
+    url: https://sso.{{ _ocp_apps_domain }}/admin/realms/chicken/users/{{ r_tpa_user_cleanup.json[0].id }}
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: Bearer {{ r_keycloak_access_token_cleanup.json.access_token }}
+    status_code: [204, 404]
+    timeout: 30
+  register: r_delete_tpa_user
+  failed_when: false
+  when:
+    - r_tpa_user_cleanup is defined
+    - r_tpa_user_cleanup.json is defined
+    - r_tpa_user_cleanup.json | length > 0
+
+# =============================================
+# Delete Showroom Instance
+# =============================================
+- name: "🎭 DELETING SHOWROOM INSTANCE"
+  ansible.builtin.debug:
+    msg:
+      - "┌─────────────────────────────────────────────────────────────────┐"
+      - "│                   DELETING SHOWROOM INSTANCE                    │"
+      - "└─────────────────────────────────────────────────────────────────┘"
+
+- name: Delete showroom deployment first
+  kubernetes.core.k8s:
+    state: absent
+    api_version: apps/v1
+    kind: Deployment
+    name: "showroom-{{ _dynamic_username }}"
+    namespace: "{{ _dynamic_showroom_namespace }}"
+  register: r_delete_showroom_deployment
+  failed_when: false
+
+- name: Delete showroom namespace
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Namespace
+    name: "{{ _dynamic_showroom_namespace }}"
+  register: r_delete_showroom_namespace
+  failed_when: false
+
+- name: Debug showroom deletion
+  ansible.builtin.debug:
+    msg:
+      - "✅ Deleted showroom deployment: showroom-{{ _dynamic_username }}"
+      - "   └─ Status: {{ 'Success' if r_delete_showroom_deployment.changed else 'Already deleted or not found' }}"
+      - "✅ Deleted showroom namespace: {{ _dynamic_showroom_namespace }}"
+      - "   └─ Status: {{ 'Success' if r_delete_showroom_namespace.changed else 'Already deleted or not found' }}"

@@ -1,0 +1,72 @@
+---
+- name: Retrieve acs credentials
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: tssc-acs-integration
+    namespace: "{{ ocp4_workload_advanced_developer_suite_tssc_namespace }}"
+  register: r_acs_credentials
+  retries: 120
+  delay: 10
+  until:
+  - r_acs_credentials is defined
+  - r_acs_credentials.resources is defined
+  - r_acs_credentials.resources | length > 0
+
+- name: Get ACS token
+  set_fact:
+    _acs_token: "{{ r_acs_credentials.resources[0].data.token | b64decode }}"
+
+- name: Get ACS endpoint
+  set_fact:
+    _acs_endpoint: "{{ r_acs_credentials.resources[0].data.endpoint | b64decode }}"
+
+- name: Get all integrations
+  uri:
+    url: "https://{{ _acs_endpoint }}/v1/imageintegrations"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ _acs_token }}"
+    validate_certs: false
+    return_content: true
+  register: r_integrations_resp
+
+- name: Extract integration ID by name
+  set_fact:
+    _acs_integration_id: >-
+      {{ (r_integrations_resp.json.integrations | selectattr('name', 'equalto', _quay_host) | list | first).id
+          if (r_integrations_resp.json.integrations | selectattr('name', 'equalto', _quay_host) | list) | length > 0
+          else omit }}
+  ignore_errors: true
+
+- name: Delete integration if it exists
+  uri:
+    url: "https://{{ _acs_endpoint }}/v1/imageintegrations/{{ _acs_integration_id }}"
+    method: DELETE
+    headers:
+      Authorization: "Bearer {{ _acs_token }}"
+    validate_certs: false
+  when: _acs_integration_id is defined
+
+- name: Recreate integration with new token
+  uri:
+    url: "https://{{ _acs_endpoint }}/v1/imageintegrations"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ _acs_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      categories:
+      - REGISTRY
+      - SCANNER
+      name: "{{ _quay_host }}"
+      type: "quay"
+      quay:
+        endpoint: "{{ _quay_host }}"
+        oauthToken: "{{ _quay_rw_token }}"
+        registryRobotCredentials:
+          username: "{{ ocp4_workload_advanced_developer_suite_quay_org_name }}+tssc_rw"
+          password: "{{ _quay_rw_token }}"
+        insecure: false
+    validate_certs: false
