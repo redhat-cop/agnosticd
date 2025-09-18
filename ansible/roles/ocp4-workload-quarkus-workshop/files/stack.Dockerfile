@@ -1,6 +1,6 @@
 # To build this stack:
-# docker build -t quay.io/openshiftlabs/quarkus-workshop-stack:3.20-4.19.7 -f stack.Dockerfile .
-# docker push quay.io/openshiftlabs/quarkus-workshop-stack:3.20-4.19.7
+# docker build -t quay.io/openshiftlabs/quarkus-workshop-stack:3.20-ocp-4.19 -f stack.Dockerfile .
+# docker push quay.io/openshiftlabs/quarkus-workshop-stack:3.20-ocp-4.19
 # macOS M1: --platform linux/x86_64
 
 FROM registry.redhat.io/devspaces/udi-rhel9:latest
@@ -20,6 +20,7 @@ USER root
 # WARNING: devspaces/udi-rhel9 also provides an oc binary!
 # Run the following oc installation ONLY in cases when a custom oc version is required:
 RUN curl -s https://mirror.openshift.com/pub/openshift-v4/clients/ocp/$OC_VERSION/openshift-client-linux-$OC_VERSION.tar.gz -o /tmp/openshift-client-linux-$OC_VERSION.tar.gz && tar -xvf /tmp/openshift-client-linux-$OC_VERSION.tar.gz -C /usr/bin/ && chmod +x /usr/bin/oc && chmod +x /usr/bin/kubectl && rm /tmp/openshift-client-linux-$OC_VERSION.tar.gz /usr/bin/README.md
+
 # RUN wget -O /tmp/openjdk-21.0.7.tar.gz https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.7%2B6/OpenJDK21U-jdk_x64_linux_hotspot_21.0.7_6.tar.gz && tar -xvzf /tmp/openjdk-21.0.7.tar.gz && rm -rf /tmp/openjdk-21.0.7.tar.gz && mv jdk-21.0.7+6 /tmp/java-21-openjdk && sudo mv /tmp/java-21-openjdk /usr/lib/jvm/ && sudo alternatives --install /usr/bin/java java /usr/lib/jvm/java-21-openjdk/bin/java 1
 RUN wget -O /tmp/mvn.tar.gz https://archive.apache.org/dist/maven/maven-3/${MVN_VERSION}/binaries/apache-maven-${MVN_VERSION}-bin.tar.gz && sudo tar -xvzf /tmp/mvn.tar.gz && rm -rf /tmp/mvn.tar.gz && mkdir /usr/local/maven && mv apache-maven-${MVN_VERSION}/ /usr/local/maven/ && alternatives --install /usr/bin/mvn mvn /usr/local/maven/apache-maven-${MVN_VERSION}/bin/mvn 1
 RUN sudo rpm -Uvh https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm && sudo microdnf install -y zlib-devel gcc siege gcc-c++ && sudo curl -Lo /usr/bin/jq https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 && sudo chmod a+x /usr/bin/jq

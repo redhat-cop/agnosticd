@@ -58,7 +58,7 @@
       apiVersion: operators.coreos.com/v1alpha1
       kind: CatalogSource
       metadata:
-        name: cs-redhat-operator-index-v4-18-174293
+        name: cs-redhat-operator-index-v4-19-175406
         namespace: openshift-marketplace
         annotations:
           target.workload.openshift.io/management: '{"effect": "PreferredDuringScheduling"}'
@@ -82,22 +82,13 @@
     chdir: /root/
   when: again is undefined
 
-- name: Ensure we can login into the hub cluster with the generated credentials
-  ansible.builtin.shell:
-    cmd: oc login https://{{ lab_api_host }} -u admin -p {{ strong_admin_password }}  --insecure-skip-tls-verify=true > /dev/null
-  register: result
-  until: result.rc == 0
-  retries: 120
-  delay: 60
-  when: again is undefined
-
-- name: Ensure kubernetes manifests are downloaded
+- name: Ensure kubernetes manifests are downloaded #execute while waiting for the hub to be deployed
   ansible.builtin.get_url:
     url: "{{ item.url }}"
     dest: "{{ item.destination }}"
     mode: "{{ item.mode }}"
   # yamllint disable rule:line-length
-  with_items:
+  loop:
     - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hub-cluster/argocd-patch.json", destination: "/tmp/argocd-openshift-gitops-patch.json", mode: "0644"}
     - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hub-cluster/hub-operators-argoapps.yaml", destination: "/tmp/hub-operators-argoapps.yaml", mode: "0644"}
     - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hub-cluster/sno1-argoapp.yaml", destination: "/tmp/sno1-argoapp.yaml", mode: "0644"}
@@ -105,6 +96,22 @@
   # yamllint enable rule:line-length
   delay: 10
   retries: 5
+
+- name: Ensure we can login into the hub cluster with the generated credentials
+  ansible.builtin.shell:
+    cmd: |
+      oc login https://{{ lab_api_host }} \
+        -u admin \
+        -p {{ strong_admin_password }} \
+        --insecure-skip-tls-verify=true \
+        > /dev/null
+  register: hub_login_result
+  until: hub_login_result.rc == 0
+  retries: 120
+  delay: 60
+  when: again is undefined
+  failed_when: hub_login_result.rc != 0
+  changed_when: hub_login_result.rc == 0
 
 - name: Ensure we have the kubeconfig file for the hub cluster copied in the bastion
   ansible.builtin.copy:
@@ -132,10 +139,12 @@
     state: patched
     src: /tmp/argocd-openshift-gitops-patch.json
     merge_type: merge
-  register: result
-  until: result.failed != true
-  retries: 5
-  delay: 60
+  register: argocd_patch_result
+  until: argocd_patch_result.failed != true
+  retries: 10
+  delay: 10
+  failed_when: argocd_patch_result.failed
+  changed_when: not argocd_patch_result.failed
 
 - name: Apply ArgoCD ClusterRoleBinding manifest to the cluster
   kubernetes.core.k8s:
@@ -144,8 +153,8 @@
     src: /tmp/argocd-clusterrolebinding.yaml
   register: result
   until: result.failed != true
-  retries: 5
-  delay: 60
+  retries: 10
+  delay: 10
 
 - name: Wait until ArgoCD Pods are ready
   kubernetes.core.k8s_info:
@@ -158,8 +167,8 @@
   until:
     - result.resources[0].status.phase == "Running"
     - result.resources[0].status.containerStatuses[0].ready == true
-  retries: 25
-  delay: 5
+  retries: 10
+  delay: 10
 
 - name: Apply HUB Cluster Operators APPs
   kubernetes.core.k8s:
@@ -168,8 +177,8 @@
     src: /tmp/hub-operators-argoapps.yaml
   register: result
   until: result.failed != true
-  retries: 5
-  delay: 60
+  retries: 10
+  delay: 10
 
 - name: Wait until LVMCluster is ready
   kubernetes.core.k8s_info:
@@ -179,8 +188,8 @@
     name: lvmcluster
     namespace: openshift-storage
   register: lvmcluster
-  retries: 60
-  delay: 60
+  retries: 10
+  delay: 30
   until:
     - lvmcluster is defined
     - lvmcluster.resources | length > 0
@@ -199,8 +208,8 @@
           storageclass.kubernetes.io/is-default-class: "true"
   register: result
   until: result.failed != true
-  retries: 5
-  delay: 60
+  retries: 10
+  delay: 30
 
 - name: Wait until ArgoCD APP for HUB Cluster Operators deployment is ready
   kubernetes.core.k8s_info:
@@ -278,6 +287,8 @@
     dest: "/home/{{ student_name }}/.ssh/snokey"
     mode: "0400"
     owner: "{{ student_name }}"
+  retries: 3
+  delay: 5
 
 - name: Apply SNO Seed Cluster Deployment APPs
   kubernetes.core.k8s:
@@ -342,12 +353,16 @@
 
 - name: Extract SNO Seed kubeconfig
   ansible.builtin.shell:
-    # yamllint disable rule:line-length
-    cmd: "oc --kubeconfig /home/{{ student_name }}/hub-kubeconfig -n sno-seed extract secret/sno-seed-admin-kubeconfig --to=- > /home/{{ student_name }}/seed-cluster-kubeconfig"
-    # yamllint enable rule:line-length
-  register: result
+    cmd: |
+      oc --kubeconfig /home/{{ student_name }}/hub-kubeconfig \
+        -n sno-seed \
+        extract secret/sno-seed-admin-kubeconfig \
+        --to=- > /home/{{ student_name }}/seed-cluster-kubeconfig
+  register: kubeconfig_extract_result
   retries: 3
   delay: 10
+  failed_when: kubeconfig_extract_result.rc != 0
+  changed_when: kubeconfig_extract_result.rc == 0
 
 - name: Ensure kubernetes manifests for seed cluster are downloaded
   ansible.builtin.get_url:
@@ -355,7 +370,7 @@
     dest: "{{ item.destination }}"
     mode: "{{ item.mode }}"
   # yamllint disable rule:line-length
-  with_items:
+  loop:
     - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/sno-config/02_oadp_deployment.yaml", destination: "/tmp/02_oadp_deployment.yaml", mode: "0644"}
     - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/sno-config/02_lca_deployment.yaml", destination: "/tmp/02_lca_deployment.yaml", mode: "0644"}
     - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/sno-config/02_sriov_deployment.yaml", destination: "/tmp/02_sriov_deployment.yaml", mode: "0644"}
@@ -378,17 +393,19 @@
     kubeconfig: "/home/{{ student_name }}/seed-cluster-kubeconfig"
     state: present
     src: "{{ item }}"
-  with_items:
-    - /tmp/02_lca_deployment.yaml
+  loop:
     - /tmp/02_oadp_deployment.yaml
+    - /tmp/02_lca_deployment.yaml
     - /tmp/02_lvms_deployment.yaml
     - /tmp/02_sriov_deployment.yaml
     - /tmp/02_logging_deployment.yaml
     - /tmp/02_ptp_deployment.yaml
-  register: result
-  until: result.failed != true
+  register: operators_install_result
+  until: operators_install_result.failed != true
   retries: 60
   delay: 10
+  failed_when: operators_install_result.failed
+  changed_when: not operators_install_result.failed
 
 - name: Wait until OADP is installed
   kubernetes.core.k8s_info:
@@ -486,6 +503,20 @@
     - ptpoperator.resources | length > 0
     - ptpoperator.resources[0].status.phase == "Succeeded"
 
+- name: Configure SR-IOV in SNO Seed
+  kubernetes.core.k8s:
+    kubeconfig: "/home/{{ student_name }}/seed-cluster-kubeconfig"
+    state: present
+    src: "{{ item }}"
+  with_items:
+    - /tmp/03_sriovoperatorconfig.yaml
+    - /tmp/03_sriov-nw-du-netdev.yaml
+    - /tmp/03_sriov-nw-du-vfio.yaml
+  register: result
+  until: result.failed != true
+  retries: 60
+  delay: 10
+
 - name: Configure Logging in SNO Seed
   kubernetes.core.k8s:
     kubeconfig: "/home/{{ student_name }}/seed-cluster-kubeconfig"
@@ -506,15 +537,24 @@
   retries: 60
   delay: 10
 
-- name: Configure SR-IOV in SNO Seed
+- name: Patch the Custom Resource to add ztp wave annotation
   kubernetes.core.k8s:
+    state: patched
     kubeconfig: "/home/{{ student_name }}/seed-cluster-kubeconfig"
-    state: present
-    src: "{{ item }}"
-  with_items:
-    - /tmp/03_sriovoperatorconfig.yaml
-    - /tmp/03_sriov-nw-du-netdev.yaml
-    - /tmp/03_sriov-nw-du-vfio.yaml
+    api_version: operators.coreos.com/v1
+    kind: Operator
+    name: "{{ item }}"
+    definition:
+      metadata:
+        annotations:
+          "ran.openshift.io/ztp-deploy-wave": "2"
+  loop:
+    - cluster-logging.openshift-logging
+    - lifecycle-agent.openshift-lifecycle-agent
+    - lvms-operator.openshift-storage
+    - ptp-operator.openshift-ptp
+    - redhat-oadp-operator.openshift-adp
+    - sriov-network-operator.openshift-sriov-network-operator
   register: result
   until: result.failed != true
   retries: 60
@@ -534,18 +574,43 @@
     - sriovconfigured.resources | length > 0
     - sriovconfigured.resources[0].status.allocatable|json_query('\"openshift.io/virt-enp4s0\"') == "2"
 
+- name: Patch the Custom Resource to add ztp wave annotation
+  kubernetes.core.k8s:
+    state: patched
+    kubeconfig: "/home/{{ student_name }}/seed-cluster-kubeconfig"
+    api_version: operators.coreos.com/v1
+    kind: Operator
+    name: "{{ item }}"
+    definition:
+      metadata:
+        annotations:
+          "ran.openshift.io/ztp-deploy-wave": "2"
+  with_items:
+    - cluster-logging.openshift-logging
+    - lifecycle-agent.openshift-lifecycle-agent
+    - lvms-operator.openshift-storage
+    - ptp-operator.openshift-ptp
+    - redhat-oadp-operator.openshift-adp
+    - sriov-network-operator.openshift-sriov-network-operator
+  register: result
+  until: result.failed != true
+  retries: 60
+  delay: 10
+
 - name: Apply performance tuning to SNO Seed
   kubernetes.core.k8s:
     kubeconfig: "/home/{{ student_name }}/seed-cluster-kubeconfig"
     state: present
     src: "{{ item }}"
-  with_items:
+  loop:
     - /tmp/04_performance_profile.yaml
     - /tmp/05_TunedPerformancePatch.yaml
-  register: result
-  until: result.failed != true
+  register: performance_tuning_result
+  until: performance_tuning_result.failed != true
   retries: 60
   delay: 10
+  failed_when: performance_tuning_result.failed
+  changed_when: not performance_tuning_result.failed
 
 - name: Wait Performance Profile is applied
   kubernetes.core.k8s_info:

@@ -80,3 +80,150 @@
     --username="{{ ocp4_workload_advanced_developer_suite_jenkins_admin_user }}"
   args:
     chdir: ~/tssc_cli
+
+- name: Get Quay database pod and ensure it's running
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ ocp4_workload_advanced_developer_suite_quay_namespace }}"
+    label_selectors:
+    - quay-component = postgres
+  register: r_quay_database_pod
+  retries: 40
+  delay: 5
+  until:
+  - r_quay_database_pod.resources is defined
+  - r_quay_database_pod.resources | length == 1
+  - r_quay_database_pod.resources[0].status is defined
+  - r_quay_database_pod.resources[0].status.phase is defined
+  - r_quay_database_pod.resources[0].status.phase == "Running"
+
+- name: Extend Quay token expiration (using shell)
+  ansible.builtin.shell: |
+    oc exec {{ r_quay_database_pod.resources[0].metadata.name }} -n {{
+    ocp4_workload_advanced_developer_suite_quay_namespace }} -- psql -d \
+    quay-quay-database -c \
+    "update public.oauthaccesstoken set expires_at = '2300-12-31 00:00:00' where id = 1;"
+  register: _r_ext__quay_token_exp
+  until: _r_ext__quay_token_exp.rc == 0
+  retries: 5
+  delay: 30
+
+- name: Get Quay token
+  set_fact:
+    _quay_token: "{{ lookup('agnosticd_user_data', 'quay_admin_token') }}"
+
+- name: Create organization '{{ ocp4_workload_advanced_developer_suite_quay_org_name }}'
+  uri:
+    url: "{{ _quay_url }}/api/v1/organization/"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ _quay_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      name: "{{ ocp4_workload_advanced_developer_suite_quay_org_name }}"
+    status_code: [201, 400]  # 400 = already exists
+    validate_certs: false
+
+- name: Create robot accounts in org '{{ ocp4_workload_advanced_developer_suite_quay_org_name }}'
+  uri:
+    url: "{{ _quay_url }}/api/v1/organization/{{ ocp4_workload_advanced_developer_suite_quay_org_name }}/robots/{{ item }}"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ _quay_token }}"
+    return_content: true
+    status_code: [201, 400]
+    validate_certs: false
+  loop:
+  - tssc_rw
+  - tssc_ro
+  register: robot_create_results
+
+- name: Assign default prototype permissions for robots
+  uri:
+    url: "{{ _quay_url }}/api/v1/organization/{{ ocp4_workload_advanced_developer_suite_quay_org_name }}/prototypes"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ _quay_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      role: "{{ item.role }}"
+      delegate:
+        kind: "user"
+        name: "{{ ocp4_workload_advanced_developer_suite_quay_org_name }}+{{ item.name }}"
+    status_code: [200, 400]
+    validate_certs: false
+  loop:
+  - name: "tssc_rw"
+    role: "admin"
+  - name: "tssc_ro"
+    role: "read"
+
+- name: Create a team in Quay organization
+  uri:
+    url: "{{ _quay_url }}/api/v1/organization/{{ ocp4_workload_advanced_developer_suite_quay_org_name }}/team/tssc-creator"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ _quay_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      role: "creator"
+    status_code: [200, 201]
+
+- name: Add user to the team
+  uri:
+    url: "{{ _quay_url }}/api/v1/organization/{{
+      ocp4_workload_advanced_developer_suite_quay_org_name }}/team/tssc-creator/members/{{
+      ocp4_workload_advanced_developer_suite_quay_org_name }}+tssc_rw"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ _quay_token }}"
+    status_code: 200
+
+- name: Get robot tokens
+  ansible.builtin.set_fact:
+    _quay_rw_token: "{{ robot_create_results.results[0].json.token }}"
+    _quay_ro_token: "{{ robot_create_results.results[1].json.token }}"
+
+- name: Set docker auth tokens for write and read
+  set_fact:
+    _dockerconfigjson_write: >-
+      {{
+        {
+          "auths": {
+            _quay_host: {
+              "username": ocp4_workload_advanced_developer_suite_quay_org_name + '+tssc_rw',
+              "password": _quay_rw_token,
+              "email": "admin@" + _ocp_apps_domain,
+              "auth": ((ocp4_workload_advanced_developer_suite_quay_org_name + '+tssc_rw:' + _quay_rw_token) | b64encode)
+            }
+          }
+        } | to_json
+      }}
+    _dockerconfigjson_readonly: >-
+      {{
+        {
+          "auths": {
+            _quay_host: {
+              "username": ocp4_workload_advanced_developer_suite_quay_org_name + '+tssc_ro',
+              "password": _quay_ro_token,
+              "email": "admin@" + _ocp_apps_domain,
+              "auth": ((ocp4_workload_advanced_developer_suite_quay_org_name + '+tssc_ro:' + _quay_ro_token) | b64encode)
+            }
+          }
+        } | to_json
+      }}
+
+- name: Integrate quay
+  become: true
+  ansible.builtin.shell: |
+    ./bin/tssc integration quay \
+    --dockerconfigjson='{{ _dockerconfigjson_write }}' \
+    --dockerconfigjsonreadonly='{{ _dockerconfigjson_readonly }}' \
+    --token="{{ _quay_token}}" \
+    --url="{{ _quay_url }}"
+  args:
+    chdir: ~/tssc_cli

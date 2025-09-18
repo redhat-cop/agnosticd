@@ -34,6 +34,12 @@ from ansible.errors import AnsibleError, AnsibleUndefinedVariable
 from ansible.module_utils.six import string_types
 from ansible.module_utils._text import to_text
 from ansible.plugins.action import ActionBase
+try:
+    # ansible-core 2.19+: needed when templating code-authored strings
+    from ansible.template import trust_as_template
+except Exception:
+    # 2.18 and earlier: no-op
+    trust_as_template = lambda x: x
 
 class ActionModule(ActionBase):
     '''Print statements during execution and save user info to file'''
@@ -88,8 +94,16 @@ class ActionModule(ActionBase):
             result['user'] = user
 
         try:
-            action = self._templar.template('{{ ACTION | default(hostvars.localhost.ACTION) | default("provision") }}')
-            output_dir = self._templar.template('{{ output_dir | default(hostvars.localhost.output_dir) | default(playbook_dir) | default(".") }}')
+            _action_expr = '{{ ACTION | default(hostvars.localhost.ACTION) | default("provision", true) }}'
+            action = self._templar.template(trust_as_template(_action_expr))
+
+            # Use default(..., true) so empty strings/falsey values are treated as unset.
+            _out_expr = '{{ output_dir \
+                           | default(hostvars.localhost.output_dir, true) \
+                           | default(playbook_dir, true) \
+                           | default(".", true) }}'
+            output_dir = self._templar.template(trust_as_template(_out_expr))
+
             # Attempt to make output_dir if not exists
             try:
                 os.makedirs(output_dir)
@@ -97,23 +111,22 @@ class ActionModule(ActionBase):
                 pass
 
             if not user and msg != None:
-                fh = open(os.path.join(output_dir, f'{action}-user-info.yaml'), 'a')
-                if isinstance(msg, list):
-                    for m in msg:
-                        fh.write('- ' + json.dumps(m) + "\n")
-                else:
-                    fh.write('- ' + json.dumps(msg) + "\n")
-                fh.close()
+                with open(os.path.join(output_dir, f'{action}-user-info.yaml'), 'a') as fh:
+                    if isinstance(msg, list):
+                        for m in msg:
+                            fh.write('- ' + json.dumps(m) + "\n")
+                    else:
+                        fh.write('- ' + json.dumps(msg) + "\n")
+
             if not user and body != None:
-                fh = open(os.path.join(output_dir, f'{action}-user-body.yaml'), 'a')
-                fh.write('- ' + json.dumps(body) + "\n")
-                fh.close()
+                with open(os.path.join(output_dir, f'{action}-user-body.yaml'), 'a') as fh:
+                    fh.write('- ' + json.dumps(body) + "\n")
+
             if data or user:
                 user_data = None
                 try:
-                    fh = open(os.path.join(output_dir, f'{action}-user-data.yaml'), 'r')
-                    user_data = yaml.safe_load(fh)
-                    fh.close()
+                    with open(os.path.join(output_dir, f'{action}-user-data.yaml'), 'r') as fh:
+                        user_data = yaml.safe_load(fh) or {}
                 except FileNotFoundError:
                     pass
 
@@ -143,9 +156,9 @@ class ActionModule(ActionBase):
                 else:
                     user_data.update(data)
 
-                fh = open(os.path.join(output_dir, f'{action}-user-data.yaml'), 'w')
-                yaml.safe_dump(user_data, stream=fh, explicit_start=True)
-                fh.close()
+                with open(os.path.join(output_dir, f'{action}-user-data.yaml'), 'w') as fh:
+                    yaml.safe_dump(user_data, stream=fh, explicit_start=True)
+
             result['failed'] = False
         except Exception as e:
             result['failed'] = True

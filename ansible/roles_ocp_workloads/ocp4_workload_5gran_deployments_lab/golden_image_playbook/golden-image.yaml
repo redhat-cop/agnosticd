@@ -3,37 +3,51 @@
   hosts: 10.6.76.211
   #hosts: hypervisor.hrdrt.dynamic.opentlc.com
   vars:
-    lab_version: "lab-4.18"
-    lab_release: "4.18"
+    lab_version: "lab-4.19"
+    lab_release: "4.19"
     repo_user: "RHsyseng"
-    #repo_user: "alosadagrande"
+    student_name: "lab-user"
     # yamllint disable rule:line-length
-    kcli_rpm: "https://github.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/releases/download/{{ lab_release }}/kcli-99.0.0.git.202503261511.dccfb3f-0.el9.x86_64.rpm"
+    kcli_rpm: "https://github.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/releases/download/{{ lab_release }}/kcli-99.0.0.git.202508022053.90e46ab-0.el9.x86_64.rpm"
     lab_repo: "https://github.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab.git"
     # yamllint enable rule:line-length
-    ocp4_major_release: "4.18"
-    ocp4_minor_release: "4.18.4"
+    ocp4_major_release: "4.19"
+    ocp4_minor_release: "4.19.1"
     lab_network_cidr: "192.168.125.0/24"
     lab_network_domain: "5g-deployment.lab"
     lab_sriov_domain: "sriov-network.lab"
+    lab_ptp_domain: "ptp-network.lab"
     lab_sriov_cidr: "192.168.100.0/24"
+    lab_ptp_cidr: "192.168.200.0/24"
     lab_registry_host: "infra.5g-deployment.lab:8443"
     lab_api_host: "api.hub.5g-deployment.lab:6443"
     upstream_dns: "1.1.1.1"
     # yamllint disable rule:line-length
-    rhcos_live_image: 'rhcos-4.18.1-x86_64-live.x86_64.iso'
-    rhcos_rootfs_image: 'rhcos-4.18.1-x86_64-live-rootfs.x86_64.img'
-    rhcos_live_image_url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.18/4.18.1/{{ rhcos_live_image }}"
-    rhcos_rootfs_image_url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.18/4.18.1/{{ rhcos_rootfs_image }}"
+    rhcos_live_image: 'rhcos-4.19.0-x86_64-live-iso.x86_64.iso'
+    rhcos_rootfs_image: 'rhcos-4.19.0-x86_64-live-rootfs.x86_64.img'
+    rhcos_live_image_url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.19/4.19.0/{{ rhcos_live_image }}"
+    rhcos_rootfs_image_url: "https://mirror.openshift.com/pub/openshift-v4/x86_64/dependencies/rhcos/4.19/4.19.0/{{ rhcos_rootfs_image }}"
     container_images:
       - 'quay.io/fedora/httpd-24-micro:2.4'
       - 'quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z'
       - 'quay.io/alosadag/httpd:p8080'
       - 'quay.io/mavazque/gitea:1.17.3'
       - 'quay.io/mavazque/registry:2.7.1'
+      - 'quay.io/rhsysdeseng/showroom:antora-v3.0.0'
+      - 'quay.io/rhsysdeseng/showroom:traefik-v3.3.4'
+      - 'quay.io/rhsysdeseng/showroom:webfirefox'
+      - 'quay.io/rhsysdeseng/showroom:wetty'
     # yamllint enable rule:line-length
 
   tasks:
+    - name: Fail if pull-secret var is empty
+      ansible.builtin.assert:
+        that:
+          - ocp4_pull_secret is defined
+          - ocp4_pull_secret | default("") | length > 0
+        fail_msg: ocp4_pull_secret variable must be defined
+        success_msg: ocp4_pull_secret variable is defined
+
     - name: Ensure lab dependencies are installed
       ansible.builtin.dnf:
         name:
@@ -49,7 +63,9 @@
           - pip
           - firewalld
           - nmstate
-        state: present
+          - container-selinux
+          - shadow-utils
+        state: latest
 
     - name: Ensure required Python modules are installed
       ansible.builtin.pip:
@@ -70,34 +86,60 @@
     - name: Ensure default image pool is present
       ansible.builtin.command:
         cmd: kcli create pool -p /var/lib/libvirt/images default
+      register: pool_result
+      failed_when: pool_result.rc != 0 and "already exists" not in pool_result.stderr
+      changed_when: pool_result.rc == 0
 
     - name: Ensure default network is present
       ansible.builtin.command:
         cmd: kcli create network -c 192.168.122.0/24 default
+      register: network_result
+      failed_when: network_result.rc != 0 and "already exists" not in network_result.stderr
+      changed_when: network_result.rc == 0
 
     - name: Ensure lab network is present
       ansible.builtin.command:
         cmd: "kcli create network -c {{ lab_network_cidr }} -P dhcp=false -P dns=false --domain {{ lab_network_domain }} 5gdeploymentlab"
+      register: network_result
+      failed_when: network_result.rc != 0 and "already exists" not in network_result.stderr
+      changed_when: network_result.rc == 0
 
     - name: Ensure sriov-network is present
       ansible.builtin.command:
         cmd: "kcli create network -c {{ lab_sriov_cidr }} -P dhcp=false -P dns=false --domain {{ lab_sriov_domain }} -i sriov-network"
+      register: network_result
+      failed_when: network_result.rc != 0 and "already exists" not in network_result.stderr
+      changed_when: network_result.rc == 0
+
+    - name: Ensure oc/kubectl/openshift-installer tooling is present
+      ansible.builtin.command:
+        cmd: "kcli download {{ item.binary }} -P version={{ item.version }} -P tag='{{ item.tag }}'"
+      loop:
+        - {binary: "oc", version: "stable", tag: "{{ ocp4_major_release }}"}
+        - {binary: "kubectl", version: "latest", tag: "{{ ocp4_major_release }}"}
+        - {binary: "openshift-installer", version: "stable", tag: "{{ ocp4_minor_release }}"}
 
     - name: Ensure oc-mirror tooling is present
       ansible.builtin.command:
         cmd: "kcli download {{ item.binary }} -P version={{ item.version }} -P tag='{{ item.tag }}'"
-      with_items:
+      loop:
         - {binary: "oc-mirror", version: "stable", tag: "{{ ocp4_major_release }}"}
       tags: oc-mirror
+      register: oc_mirror_result
+      failed_when: oc_mirror_result.rc != 0 and "already exists" not in oc_mirror_result.stderr
+      changed_when: oc_mirror_result.rc == 0
 
-    - name: Ensure oc/kubectl are in the PATH
+    - name: Ensure oc/kubectl/openshift-installer are in the PATH
       ansible.builtin.copy:
         src: "{{ item }}"
         dest: "/usr/bin/{{ item }}"
         mode: "0755"
         remote_src: true
-      with_items:
+      loop:
         - oc-mirror
+        - kubectl
+        - openshift-install
+        - oc
 
     - name: Ensure DNSMasq folder exists
       ansible.builtin.file:
@@ -113,7 +155,7 @@
       # yamllint disable rule:line-length
       retries: 5
       delay: 10
-      with_items:
+      loop:
         - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/dnsmasq.conf", destination: "/opt/dnsmasq/dnsmasq.conf", mode: "0644"}
         - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/upstream-resolv.conf", destination: "/opt/dnsmasq/upstream-resolv.conf", mode: "0644"}
         - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/hub.ipv4", destination: "/opt/dnsmasq/include.d/hub.ipv4", mode: "0644"}
@@ -148,7 +190,7 @@
         target: "{{ item }}"
         setype: dnsmasq_etc_t
         state: present
-      with_items:
+      loop:
         - '/opt/dnsmasq/include.d(/.*)?'
         - '/opt/dnsmasq/(.*)?\.conf'
         - '/opt/dnsmasq'
@@ -183,24 +225,44 @@
         state: restarted
         name: NetworkManager
 
+    - name: Pull container images in parallel
+      containers.podman.podman_image:
+        name: "{{ item }}"
+        pull: true
+        pull_extra_args: "--quiet"
+      loop: "{{ container_images }}"
+      tags: pull
+      async: 600
+      poll: 0
+      register: pull_images
+
     - name: Download live and rootfs images
       ansible.builtin.get_url:
         url: "{{ item }}"
         dest: "/opt/webcache/data/"
         mode: "0644"
-      with_items:
+      loop:
         - "{{ rhcos_live_image_url }}"
         - "{{ rhcos_rootfs_image_url }}"
       poll: 0
-      async: 900
+      async: 600
       register: download_rhcos
+
+    - name: Ensure ksushy is installed
+      ansible.builtin.command:
+        cmd: kcli create sushy-service --port 9000
+      async: 120
+      poll: 1
+      register: sushy_async
+      failed_when: sushy_async.rc != 0 and "already exists" not in sushy_async.stderr
+      changed_when: sushy_async.rc == 0
 
     - name: Ensure disconnected registry folders exist
       ansible.builtin.file:
         path: /opt/registry/{{ item }}
         state: directory
         mode: "0755"
-      with_items:
+      loop:
         - auth
         - certs
         - data
@@ -214,7 +276,7 @@
       # yamllint disable rule:line-length
       retries: 5
       delay: 10
-      with_items:
+      loop:
         - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/registry-key.pem", destination: "/opt/registry/certs/registry-key.pem", mode: "0644"}
         - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/registry-cert.pem", destination: "/opt/registry/certs/registry-cert.pem", mode: "0644"}
         - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-ran-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/config.yml", destination: "/opt/registry/conf/config.yml", mode: "0644"}
@@ -245,7 +307,7 @@
 
     - name: Ensure trusted certs are updated
       ansible.builtin.command:
-        cmd: update-ca-trust
+        cmd: update-ca-trust extract
 
     - name: Ensure S3 storage config files exist
       ansible.builtin.get_url:
@@ -266,6 +328,8 @@
         url: https://dl.min.io/client/mc/release/linux-amd64/mc
         dest: /usr/bin/mc
         mode: "0744"
+      retries: 20
+      delay: 5
 
     - name: Ensure registry is running by login into it
       containers.podman.podman_login:
@@ -282,12 +346,28 @@
         group: 1000
         mode: "0755"
 
-    - name: Pull an image
-      containers.podman.podman_image:
-        name: "{{ item }}"
-        pull: true
-      loop: "{{ container_images }}"
-      tags: pull
+    - name: Wait for container images to be pulled
+      ansible.builtin.async_status:
+        jid: "{{ async_result_item.ansible_job_id }}"
+      loop: "{{ pull_images.results }}"
+      loop_control:
+        loop_var: "async_result_item"
+      register: pull_result
+      until: pull_result.finished
+      retries: 20
+      delay: 5
+      failed_when: pull_result.failed
+
+    - name: Async check download live and rootfs images
+      ansible.builtin.async_status:
+        jid: "{{ async_result_item.ansible_job_id }}"
+      loop: "{{ download_rhcos.results }}"
+      loop_control:
+        loop_var: "async_result_item"
+      register: job_result
+      until: job_result.finished
+      retries: 60
+      delay: 10
 
     - name: Ensure mirror-config is downloaded
       ansible.builtin.get_url:
@@ -299,12 +379,14 @@
 
     - name: Execute mirroring
       ansible.builtin.shell:
-        cmd: ~/oc-mirror --v2 --workspace file:// --config=mirror-config.yaml docker://infra.5g-deployment.lab:8443 | tee -a /root/mirroring.log
+        # yamllint disable rule:line-length
+        cmd: ~/oc-mirror --parallel-images=10 --v2 --workspace file:// --config=mirror-config.yaml docker://infra.5g-deployment.lab:8443 | tee -a /root/mirroring.log
+        # yamllint enable rule:line-length
       args:
         chdir: /root/
       tags: oc-mirror
       register: command_result
-      failed_when: "'some errors occurred during the mirroring' in command_result.stderr"
+      failed_when: "'some errors occurred during the mirroring' in (command_result.stdout + command_result.stderr)"
 
     # Leave this as the last task in the playbook.
     - name: Golden image tasks complete

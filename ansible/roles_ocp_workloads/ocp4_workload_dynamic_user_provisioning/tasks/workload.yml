@@ -315,6 +315,19 @@
 # =============================================
 # Create Showroom Instance
 # =============================================
+- name: Debug showroom configuration mode
+  ansible.builtin.debug:
+    msg:
+      - "Force showroom config: {{ ocp4_workload_dynamic_user_provisioning_force_showroom_config }}"
+      - "Showroom repo: {{ ocp4_workload_showroom_content_git_repo }}"
+      - "Chart name: {{ ocp4_workload_showroom_deployer_chart_name }}"
+
+- name: Initialize showroom config variable when forcing role config
+  ansible.builtin.set_fact:
+    r_showroom_config:
+      resources: []
+  when: ocp4_workload_dynamic_user_provisioning_force_showroom_config | bool
+
 - name: Detect existing showroom configuration
   kubernetes.core.k8s_info:
     api_version: v1
@@ -323,18 +336,28 @@
     label_selectors:
       - app=showroom
   register: r_showroom_config
+  when: not ocp4_workload_dynamic_user_provisioning_force_showroom_config | bool
 
 - name: Set showroom content repo from existing configuration
   ansible.builtin.set_fact:
     _showroom_content_repo: "{{ r_showroom_config.resources[0].data['CONTENT_URL'] | default('https://github.com/rhpds/showroom-ads-workshop.git') }}"
   when:
+    - not ocp4_workload_dynamic_user_provisioning_force_showroom_config | bool
     - r_showroom_config.resources | length > 0
-    - ocp4_workload_dynamic_user_provisioning_showroom_content_repo == ""
 
-- name: Set default showroom content repo if not discovered
+- name: Set default showroom content repo if not discovered or forced
   ansible.builtin.set_fact:
-    _showroom_content_repo: "https://github.com/rhpds/showroom-ads-workshop.git"
-  when: _showroom_content_repo is not defined or _showroom_content_repo == ""
+    _showroom_content_repo: "{{ ocp4_workload_showroom_content_git_repo }}"
+  when: >
+    _showroom_content_repo is not defined or _showroom_content_repo == "" or
+    ocp4_workload_dynamic_user_provisioning_force_showroom_config | bool
+
+- name: Debug final showroom configuration
+  ansible.builtin.debug:
+    msg:
+      - "Final showroom repo: {{ _showroom_content_repo }}"
+      - "Zerotouch UI enabled: {{ ocp4_workload_showroom_zero_touch_ui_enabled }}"
+      - "Zerotouch bundle: {{ ocp4_workload_showroom_zero_touch_bundle }}"
 
 - name: Retrieve additional service credentials for user data
   block:
@@ -381,7 +404,7 @@
     user: "{{ _dynamic_username }}"
     data:
       openshift_api_url: "{{ openshift_api_url }}"
-      openshift_cluster_admin_token: "{{ openshift_cluster_admin_token }}"
+      openshift_cluster_admin_token: "{{ openshift_api_key }}"
       openshift_api_ca_cert: "{{ openshift_api_ca_cert }}"
       rhdh_url: "{{ _rhdh_url | default('') }}"
       rhdh_auth: oidc
@@ -415,7 +438,7 @@
       cluster_name: "cluster-{{ guid }}"
       openshift_console_url: "{{ _openshift_console_url }}"
       openshift_api_url: "{{ openshift_api_url }}"
-      openshift_cluster_admin_token: "{{ openshift_cluster_admin_token }}"
+      openshift_cluster_admin_token: "{{ openshift_api_key }}"
       openshift_api_ca_cert: "{{ openshift_api_ca_cert }}"
       rhdh_url: "{{ _rhdh_url | default('') }}"
       rhdh_auth: oidc
@@ -448,18 +471,34 @@
     kind: Namespace
     state: present
 
+- name: Debug Helm template values
+  ansible.builtin.debug:
+    msg:
+      - "Chart: {{ ocp4_workload_showroom_deployer_chart_name }}"
+      - "Version: {{ ocp4_workload_showroom_deployer_chart_version }}"
+      - "Repo URL: {{ _showroom_content_repo }}"
+      - "Content Only: {{ ocp4_workload_showroom_content_only }}"
+      - "Content Image: {{ ocp4_workload_showroom_content_image }}"
+      - "RHDH URL: {{ _rhdh_url | default('Not found') }}"
+      - "Zerotouch UI: {{ ocp4_workload_showroom_zero_touch_ui_enabled | string | lower }}"
+      - "Zerotouch Bundle: {{ ocp4_workload_showroom_zero_touch_bundle }}"
+
 - name: Render showroom helm chart with values
   kubernetes.core.helm_template:
-    chart_repo_url: "{{ ocp4_workload_dynamic_user_provisioning_showroom_chart_package_url }}"
-    chart_ref: "{{ ocp4_workload_dynamic_user_provisioning_showroom_chart_name }}"
-    chart_version: "{{ ocp4_workload_dynamic_user_provisioning_showroom_chart_version }}"
+    chart_repo_url: "{{ ocp4_workload_showroom_chart_package_url }}"
+    chart_ref: "{{ ocp4_workload_showroom_deployer_chart_name }}"
+    chart_version: "{{ ocp4_workload_showroom_deployer_chart_version }}"
     release_name: "showroom-{{ _dynamic_username }}"
     release_namespace: "{{ _dynamic_showroom_namespace }}"
     release_values:
       content:
         user_data: "{{ _showroom_user_data | to_nice_yaml(width=1337, default_style='\"') }}"
-        repoUrl: "{{ _showroom_content_repo | default(ocp4_workload_dynamic_user_provisioning_showroom_content_repo) }}"
-        repoRef: "{{ ocp4_workload_dynamic_user_provisioning_showroom_content_ref }}"
+        repoUrl: "{{ _showroom_content_repo | default(ocp4_workload_showroom_content_git_repo) }}"
+        repoRef: "{{ ocp4_workload_showroom_content_git_repo_ref }}"
+        image: "{{ ocp4_workload_showroom_content_image }}"
+        contentOnly: "{{ ocp4_workload_showroom_content_only | bool | string | lower }}"
+        zero_touch_bundle: "{{ ocp4_workload_showroom_zero_touch_bundle }}"
+        zero_touch_ui_enabled: "{{ ocp4_workload_showroom_zero_touch_ui_enabled | string | lower }}"
       guid: "{{ guid }}"
       deployer:
         domain: "{{ _ocp_apps_domain }}"
@@ -487,15 +526,6 @@
     - _showroom_content_repo is defined and _showroom_content_repo != ""
     - r_helm_templates is defined
 
-- name: Update user info with showroom and RHDH URLs
-  agnosticd_user_info:
-    user: "{{ _dynamic_username }}"
-    data:
-      showroom_url: "https://{{ r_showroom_route.resources[0].spec.host }}"
-      rhdh_url: "{{ _rhdh_url | default('') }}"
-  when:
-    - _showroom_content_repo is defined and _showroom_content_repo != ""
-    - r_showroom_route.resources | length > 0
 
 # =============================================
 # Set up Resource Quotas and Limits
