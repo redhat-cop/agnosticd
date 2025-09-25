@@ -1,0 +1,48 @@
+---
+- name: Capture reverse-proxy logs
+  ansible.builtin.command: podman logs --tail 200 reverse-proxy
+  register: r_reverse_proxy_logs
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: "{{ showroom_user | default('showroom') }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ showroom_user_uid }}"
+
+- name: Print reverse-proxy logs on failure
+  ansible.builtin.debug:
+    msg:
+      - "reverse-proxy logs (last 200 lines):"
+      - "{{ r_reverse_proxy_logs.stdout | default('') }}"
+      - "{{ r_reverse_proxy_logs.stderr | default('') }}"
+
+- name: Check TLS handshake for issued cert (hostname verified)
+  ansible.builtin.shell: |
+    set -o pipefail
+    echo | openssl s_client \
+      -verify 5 \
+      -verify_return_error \
+      -verify_hostname {{ showroom_host }} \
+      -servername {{ showroom_host }} \
+      -connect 127.0.0.1:{{ showroom_primary_port | default(443) }}
+  args:
+    executable: /bin/bash
+  register: r_tls_check
+  changed_when: false
+  failed_when: false
+
+- name: Mark TLS as verified when handshake succeeds
+  when: r_tls_check.rc == 0
+  ansible.builtin.set_fact:
+    f_tls_verified: true
+
+- name: Restart showroom service on failure
+  when: r_tls_check.rc != 0
+  ansible.builtin.service:
+    name: showroom.service
+    state: restarted
+
+- name: Pause before next TLS verification attempt
+  when: r_tls_check.rc != 0
+  ansible.builtin.pause:
+    seconds: 30
