@@ -1,0 +1,95 @@
+---
+- name: Get OpenShift token without touching kubeconfig
+  command: >
+    oc login https://{{ openshift_api_url }}:6443
+    -u {{ lookup('agnosticd_user_data', 'openshift_cluster_admin_username') }}
+    -p {{ lookup('agnosticd_user_data', 'openshift_cluster_admin_password') }}
+    --insecure-skip-tls-verify
+    --kubeconfig=/tmp/kubeconfig-demo
+  register: oc_token
+  retries: 10
+  delay: 30
+  until: oc_token.rc == 0
+
+- name: Remove X-Frame-Options header from default ingresscontroller
+  kubernetes.core.k8s:
+    api_version: operator.openshift.io/v1
+    kind: IngressController
+    name: default
+    namespace: openshift-ingress-operator
+    merge_type: merge
+    definition:
+      spec:
+        httpHeaders:
+          actions:
+            response:
+              - action:
+                  type: Delete
+                name: X-Frame-Options
+              - action:
+                  type: Delete
+                name: Content-Security-Policy
+              - action:
+                  type: Delete
+                name: referrer-policy
+
+- name: Get service-ca.crt from v4-0-config-system-service-ca ConfigMap
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: v4-0-config-system-service-ca
+    namespace: openshift-authentication
+  register: service_ca_cm
+
+- name: Extract service-ca.crt content
+  set_fact:
+    service_ca_crt: "{{ service_ca_cm.resources[0].data['service-ca.crt'] }}"
+
+- name: Scale down authentication-operator deployment
+  kubernetes.core.k8s:
+    api_version: apps/v1
+    kind: Deployment
+    name: authentication-operator
+    namespace: openshift-authentication-operator
+    definition:
+      spec:
+        replicas: 0
+    merge_type: merge
+
+#- name: Add nodeSelector to authentication-operator deployment
+#  kubernetes.core.k8s:
+#    api_version: apps/v1
+#    kind: Deployment
+#    name: authentication-operator
+#    namespace: openshift-authentication-operator
+#    definition:
+#      spec:
+#        template:
+#          spec:
+#            nodeSelector:
+#              node-role.kubernetes.io/test: ""
+#    merge_type: merge
+
+- name: Limit authentication-operator pods to 0
+  kubernetes.core.k8s:
+    api_version: v1
+    kind: ResourceQuota
+    name: limit-authentication-operator-pods
+    namespace: openshift-authentication-operator
+    definition:
+      spec:
+        hard:
+          pods: "0"
+
+- name: Patch oauth-openshift route to use reencrypt and service-ca.crt
+  kubernetes.core.k8s:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: oauth-openshift
+    namespace: openshift-authentication
+    definition:
+      spec:
+        tls:
+          termination: reencrypt
+          destinationCACertificate: "{{ service_ca_crt }}"
+    merge_type: merge
