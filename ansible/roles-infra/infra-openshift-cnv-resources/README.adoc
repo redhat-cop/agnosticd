@@ -1,0 +1,141 @@
+= infra-openshift-cnv-resources
+
+== What it does
+
+- Optionally logs in to OpenShift using `community.okd.openshift_auth`.
+- On `ACTION: provision`:
+  - Creates the target Namespace (project) if not provided via `sandbox_openshift_namespace`.
+  - Creates `NetworkAttachmentDefinition` objects from `networks`.
+  - Creates pod `containers` and runs optional `commands` in them.
+  - Creates KubeVirt `VirtualMachine` `instances`, waits until running.
+  - Creates per-instance `Service`s and `Route`s as declared.
+- On `ACTION: destroy`:
+  - Deletes created networks and optionally the Namespace.
+- On `ACTION: status|start|stop`:
+  - Reports VM status to `user_info` and file, or starts/stops VMs.
+
+== Key tasks
+
+- `tasks/create_project.yaml`: Creates Namespace and RBAC for cloning from `cnv-images`.
+- `tasks/create_networks.yaml` → `create_network.yaml`: Creates Multus `NetworkAttachmentDefinition` with OVN layer2.
+- `tasks/create_containers.yaml` → `create_container.yaml`: Creates Pods, waits ready, runs `k8s_exec`, then services/routes for each container.
+- `tasks/create_instances.yaml` → `create_instance.yaml`: Builds VM spec (CPU, memory, disks, networks, cloud-init), creates and waits `Running`.
+- `tasks/create_services.yaml` and `tasks/create_routes.yaml`: Exposes VM services and routes.
+- `tasks/start_instances.yaml`, `stop_instances.yaml`, `status_instances.yaml`: VM lifecycle/actions.
+
+== Configuration
+
+Role defaults (see `defaults/main.yaml`):
+
+- `openshift_cnv_namespace` (string): Target namespace. Defaults to `sandbox_openshift_namespace` or `"<env_type>-<guid>"`.
+- `openshift_cnv_instance_numeration` (string): Suffix pattern for instance numbering. Default: `"%d"`.
+- `openshift_cnv_delete_retries` (int): Retries for delete operations. Default: 20.
+- `openshift_cnv_delete_delay` (int): Delay between delete retries (seconds). Default: 60.
+- `openshift_cnv_retries` (int): Generic retries for API operations. Default: 6.
+- `openshift_cnv_delay` (int): Delay between retries (seconds). Default: 10.
+- `openshift_cnv_route_remove_x_frame_options_header` (bool): Removes `X-Frame-Options` on Routes when applicable. Default: false.
+- `openshift_cnv_legacy_routes` (bool): Use `host.guid.domain` instead of `host-guid.domain`. Default: false.
+
+Common inputs used by tasks:
+
+- `ACTION` (string): One of `provision`, `destroy`, `status`, `start`, `stop`.
+- `sandbox_openshift_api_url` (string): Cluster API URL.
+- `sandbox_openshift_api_key` (string): API token; used if authentication task not run.
+- `sandbox_openshift_username`/`sandbox_openshift_password` (strings): If set, role performs username/password login.
+- `guid` (string): Unique identifier appended to names/hosts.
+- `sandbox_openshift_apps_domain` (string): Base apps domain for Routes.
+
+Data structures
+
+- `networks` (list): Each item:
+  - `name` (string): Base name; `guid` is appended for resource names.
+  - `mtu` (int, optional): MTU; defaults to 1500.
+
+- `containers` (list): Each item:
+  - `name` (string)
+  - `image` (string)
+  - `cpu` (int, optional)
+  - `memory` (string, optional)
+  - `environment` (dict, optional)
+  - `ports` (YAML list body used in Service specs)
+  - `command` (list, optional)
+  - `args` (list, optional)
+  - `lifecycle` (dict, optional)
+  - `volumes` (list, optional) and `volumeMounts` (list, optional)
+  - `commands` (list of strings to run via `k8s_exec` after pod is running)
+  - `services` (list): see service item below
+  - `routes` (list): see route item below
+
+- `instances` (list): Each item:
+  - `name` (string)
+  - `count` (int, optional; default 1)
+  - `cores` (int)
+  - `memory` (string, e.g. `4Gi`)
+  - `machine_type` (string, optional; default `pc-q35-rhel9.2.0`)
+  - `bootloader` (string, `bios`|`efi`|`uefi`; default `bios`)
+  - `disk_type` (string, optional; default `virtio`)
+  - `image_type` (string: `pvc`|`registry`|`url`|`http`; default `pvc`)
+  - `image` (string): Source ref per `image_type`
+  - `image_size` (string): Requested PVC size
+  - `disks` (list of DataVolume templates) and `cdroms` (list) (optional)
+  - `networks` (list of network names; use `default` for pod network)
+  - `fixed_macs` (dict networkName→MAC, optional)
+  - `interface_model` (string, optional; default `virtio`)
+  - `disable_cloud_init` (bool, default false)
+  - `userdata` (string, optional; appended to cloud-init, `#cloud-config` header auto-managed)
+  - `networkdata` (string, optional; base64-encoded into cloud-init NoCloud)
+  - `metadata`/`tags` (dicts, optional; merged into VM annotations)
+  - `services` (list): see service item below
+  - `routes` (list): see route item below
+
+Service item (for `instances[].services` and `containers[].services`):
+
+- `name` (string)
+- `ports` (YAML list body inserted under `spec.ports`)
+- `type` (string, optional; default `ClusterIP`)
+
+Route item (for `instances[].routes` and `containers[].routes`):
+
+- `name` (string)
+- `service` (string)
+- `targetPort` (string/int)
+- `tls` (bool)
+- `tls_termination` (string, default `passthrough`)
+- `tls_destinationCACertificate` (string, optional)
+- `host` (string, optional; base host, combined with `guid` and `sandbox_openshift_apps_domain`)
+- `path` (string, optional; only for non-TLS)
+
+== Usage
+
+Example provisioning excerpt:
+
+```yaml
+- hosts: localhost
+  gather_facts: false
+  vars:
+    ACTION: provision
+    guid: abcd
+    sandbox_openshift_api_url: https://api.example:6443
+    sandbox_openshift_api_key: "..."
+    openshift_cnv_namespace: lab-abcd
+    networks:
+      - name: net-a
+    instances:
+      - name: node
+        cores: 2
+        memory: 4Gi
+        image_type: pvc
+        image: rhel9-generic
+        image_size: 30Gi
+        networks: [default, net-a]
+        services:
+          - name: node-ssh
+            ports:
+              - port: 22
+                targetPort: 22
+        routes:
+          - name: node-ssh
+            service: node-ssh
+            targetPort: 22
+            tls: false
+```
