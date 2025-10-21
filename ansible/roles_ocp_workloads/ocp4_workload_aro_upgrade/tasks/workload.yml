@@ -1,0 +1,86 @@
+---
+# ocp4_workload_aro_upgrade_target_version: "4.18.23"
+# ocp4_workload_aro_upgrade_channel: "stable-4.18"
+
+- name: Get current ClusterVersion to check if already at target
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: ClusterVersion
+    name: version
+  register: _initial_cluster_version
+
+- name: Check if upgrade is needed and run validation tasks
+# yamllint disable-line rule:line-length
+  when: (_initial_cluster_version.resources[0].spec.desiredUpdate.version.split('.') | map('int') | list) < (ocp4_workload_aro_upgrade_target_version.split('.') | map('int') | list)
+  block:
+
+    - name: Update OpenShift channel to version {{ ocp4_workload_aro_upgrade_channel }}
+      ansible.builtin.shell: |
+        oc patch clusterversion version --type merge -p '{"spec": {"channel": "{{ ocp4_workload_aro_upgrade_channel }}"}}'
+
+    - name: Get ClusterVersion resource
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: ClusterVersion
+        name: version
+      register: _cluster_version_info
+
+    - name: Create UpgradeConfig for {{ ocp4_workload_aro_upgrade_target_version }} and backdate to start immediately
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: upgrade.managed.openshift.io/v1alpha1
+          kind: UpgradeConfig
+          metadata:
+            name: managed-upgrade-config
+            namespace: openshift-managed-upgrade-operator
+          spec:
+            type: "ARO"
+            upgradeAt: "2025-02-08T03:20:00Z"
+            PDBForceDrainTimeout: 60
+            desired:
+              channel: "{{ ocp4_workload_aro_upgrade_channel }}"
+              version: "{{ ocp4_workload_aro_upgrade_target_version }}"
+
+    - name: Get ClusterVersion resource and wait for progression
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: ClusterVersion
+        name: version
+      register: _upgrade_cluster_version_info
+# yamllint disable-line rule:line-length
+      until: (_upgrade_cluster_version_info.resources[0].status.conditions | selectattr('type', 'equalto', 'Progressing') | map(attribute='status') | first | default('True')) | bool == false
+      retries: 120
+      delay: 60
+
+    - name: Display specific ClusterVersion conditions
+      ansible.builtin.debug:
+        msg: "{{ item.type }}: {{ item.status }} - {{ item.message }}"
+      loop: "{{ _upgrade_cluster_version_info.resources[0].status.conditions }}"
+      when: item.type == 'Progressing' or item.type == 'Available'
+
+    - name: Install matching OpenShift CLI oc
+      set_fact:
+        ocp4_client_url: >-
+          {{ '{0}/ocp/{1}/openshift-client-linux-{1}.tar.gz'.format(
+            ocp4_installer_root_url | default("https://mirror.openshift.com/pub/openshift-v4/clients"),
+            ocp4_workload_aro_upgrade_target_version
+          ) }}
+
+    - name: Ensure ocp4_client_url is set
+      assert:
+        that: ocp4_client_url | default('') | length > 0
+
+    - name: Install OpenShift CLI
+      become: true
+      unarchive:
+        src: "{{ ocp4_client_url }}"
+        remote_src: true
+        dest: /usr/bin
+        mode: 0775
+        owner: root
+        group: root
+      retries: 10
+      register: r_client
+      until: r_client is success
+      delay: 30
