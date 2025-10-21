@@ -1,0 +1,91 @@
+---
+
+# ocp4_workload_aro_machineset_suffix: "vms"
+# ocp4_workload_aro_machineset_replicas: 1
+# ocp4_workload_aro_machineset_instance_type: "Standard_D4s_v5"
+# ocp4_workload_aro_machineset_disk_size: 128
+
+# use a machineset template to generate machinesets across three zones
+# spread the replica count across the three zones
+# use the template to create the machinesets
+
+- name: Get the OpenShift cluster ID
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+    namespace: default
+  register: _cluster_id_fact
+  retries: 50
+  delay: 10
+  until:
+    - _cluster_id_fact.resources[0].status.infrastructureName is defined
+
+# Set the Openshift ID as a fact for later use
+- name: Set the Openshift ID as a fact for later use
+  ansible.builtin.set_fact:
+    _cluster_id: "{{ _cluster_id_fact.resources[0].status.infrastructureName }}"
+
+# Extract OpenShift machineSet region and first availablity zone
+- name: Extract OpenShift machineSet location
+  kubernetes.core.k8s_info:
+    api_version: machine.openshift.io/v1beta1
+    kind: MachineSet
+    namespace: openshift-machine-api
+    label_selectors: machine.openshift.io/cluster-api-machine-role=worker
+  register: _machineset_list
+  retries: 50
+  delay: 10
+  until:
+    - _machineset_list.resources[0].spec.template.spec.providerSpec.value.location is defined
+    # sometimes regions they dont have zone support
+    # https://learn.microsoft.com/en-us/azure/reliability/regions-list
+    #- _machineset_list.resources[0].spec.template.spec.providerSpec.value.zone is defined
+
+- name: Get the location for the cluster and set it as a fact for later use
+  ansible.builtin.set_fact:
+    _cluster_location: "{{ _machineset_list.resources[0].spec.template.spec.providerSpec.value.location }}"
+    _network_resource_group: "{{ _machineset_list.resources[0].spec.template.spec.providerSpec.value.networkResourceGroup }}"
+    _public_load_balancer: "{{ _machineset_list.resources[0].spec.template.spec.providerSpec.value.publicLoadBalancer }}"
+    _resource_group: "{{ _machineset_list.resources[0].spec.template.spec.providerSpec.value.resourceGroup }}"
+    _vnet: "{{ _machineset_list.resources[0].spec.template.spec.providerSpec.value.vnet }}"
+
+- name: Set multi-zone indicator for Azure regions that support zones
+  when: _machineset_list.resources[0].spec.template.spec.providerSpec.value.zone is defined
+  ansible.builtin.set_fact:
+    _multi_zone: true
+
+- name: Cast replicas to integer
+  ansible.builtin.set_fact:
+    _repliacs: "{{ ocp4_workload_aro_machineset_replicas | int }}"
+
+- name: If multizone, calculate replica counts and put the in _replicas array
+  when: _multi_zone is defined
+  ansible.builtin.set_fact:
+    _replicas: >
+      [
+        {{ (x | int) // 3 }},
+        {{ (x | int) // 3 + ((x | int) % 3 > 0) }},
+        {{ (x | int) // 3 + ((x | int) % 3 > 1) }}
+      ]
+
+- name: Assemble machineset list with replicas
+  ansible.builtin.set_fact:
+    _ocp4_workload_aro_machinesets: [
+      { "name": "{{ _cluster_id }}-worker-{{ _cluster_location }}1-{{ ocp4_workload_aro_machineset_suffix }}", "replicas": "{{ _replicas[0] }}" },
+      { "name": "{{ _cluster_id }}-worker-{{ _cluster_location }}2-{{ ocp4_workload_aro_machineset_suffix }}", "replicas": "{{ _replicas[1] }}" },
+      { "name": "{{ _cluster_id }}-worker-{{ _cluster_location }}3-{{ ocp4_workload_aro_machineset_suffix }}", "replicas": "{{ _replicas[2] }}" }
+    ]
+
+- name: Print the final machinesets list for verification
+  ansible.builtin.debug:
+    msg: "_ocp4_workload_aro_machinesets: {{ _ocp4_workload_aro_machinesets | type_debug }}"
+
+- name: Debug the machineset template
+  ansible.builtin.debug:
+    msg: "{{ lookup('template', 'machineset.yaml.j2') | from_yaml_all }}"
+
+- name: Create Machineset
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ lookup('template', 'machineset.yaml.j2') | from_yaml_all }}"
