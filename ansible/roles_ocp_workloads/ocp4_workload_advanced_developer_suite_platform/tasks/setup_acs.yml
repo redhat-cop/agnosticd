@@ -1,0 +1,184 @@
+---
+- name: Retrieve acs credentials
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: tssc-acs-integration
+    namespace: "{{ ocp4_workload_advanced_developer_suite_tssc_namespace }}"
+  register: r_acs_credentials
+  retries: 120
+  delay: 10
+  until:
+  - r_acs_credentials is defined
+  - r_acs_credentials.resources is defined
+  - r_acs_credentials.resources | length > 0
+
+- name: Get ACS token
+  set_fact:
+    _acs_token: "{{ r_acs_credentials.resources[0].data.token | b64decode }}"
+
+- name: Get ACS endpoint
+  set_fact:
+    _acs_endpoint: "{{ r_acs_credentials.resources[0].data.endpoint | b64decode }}"
+
+- name: Get all integrations
+  uri:
+    url: "https://{{ _acs_endpoint }}/v1/imageintegrations"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ _acs_token }}"
+    validate_certs: false
+    return_content: true
+  register: r_integrations_resp
+
+- name: Extract integration ID by name
+  set_fact:
+    _acs_integration_id: >-
+      {{ (r_integrations_resp.json.integrations | selectattr('name', 'equalto', _quay_host) | list | first).id
+          if (r_integrations_resp.json.integrations | selectattr('name', 'equalto', _quay_host) | list) | length > 0
+          else omit }}
+  ignore_errors: true
+
+- name: Delete integration if it exists
+  uri:
+    url: "https://{{ _acs_endpoint }}/v1/imageintegrations/{{ _acs_integration_id }}"
+    method: DELETE
+    headers:
+      Authorization: "Bearer {{ _acs_token }}"
+    validate_certs: false
+  when: _acs_integration_id is defined
+
+- name: Recreate integration with new token
+  uri:
+    url: "https://{{ _acs_endpoint }}/v1/imageintegrations"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ _acs_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      categories:
+      - REGISTRY
+      - SCANNER
+      name: "{{ _quay_host }}"
+      type: "quay"
+      quay:
+        endpoint: "{{ _quay_host }}"
+        oauthToken: "{{ _quay_rw_token }}"
+        registryRobotCredentials:
+          username: "{{ ocp4_workload_advanced_developer_suite_quay_org_name }}+tssc_rw"
+          password: "{{ _quay_rw_token }}"
+        insecure: false
+    validate_certs: false
+
+- name: Fix Route to Central
+  when: ocp4_workload_advanced_developer_suite_acs_enable_route_certs | bool
+  block:
+  - name: Get CA cert value from Central
+    kubernetes.core.k8s_info:
+      kind: Secret
+      name: central-tls
+      namespace: "{{ ocp4_workload_advanced_developer_suite_acs_namespace }}"
+    register: r_central_ca_cert
+
+  - name: Update Route central with reencrypt and CA Cert from Central
+    kubernetes.core.k8s_json_patch:
+      kind: Route
+      api_version: route.openshift.io/v1
+      namespace: "{{ ocp4_workload_advanced_developer_suite_acs_namespace }}"
+      name: central
+      patch:
+      - op: replace
+        path: /spec/tls/termination
+        value: "reencrypt"
+      - op: add
+        path: /spec/tls/destinationCACertificate
+        value: "{{ r_central_ca_cert.resources[0].data['ca.pem'] | b64decode }}"
+
+- name: Get cluster init bundle
+  ansible.builtin.uri:
+    url: "https://{{ _acs_endpoint }}/v1/cluster-init/init-bundles"
+    body: "{ \"name\": \"prod-{{ lookup('password', '/dev/null chars=ascii_lowercase,digits length=8') }}\"}"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ _acs_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    force_basic_auth: true
+    validate_certs: false
+  register: r_stackrox_cluster_init_response
+
+- name: Store cluster init bundle as a fact
+  ansible.builtin.set_fact:
+    _stackrox_bundle: "{{ r_stackrox_cluster_init_response.json.kubectlBundle | b64decode }}"
+
+- name: Create init-bundle secrets
+  kubernetes.core.k8s:
+    namespace: "{{ ocp4_workload_advanced_developer_suite_acs_namespace }}"
+    state: present
+    definition: "{{ _stackrox_bundle }}"
+  register: r_k8s
+  until: r_k8s is successful
+  retries: 30
+  delay: 5
+
+- name: Install Sensor on OpenShift Container Platform
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: platform.stackrox.io/v1alpha1
+      kind: SecuredCluster
+      metadata:
+        namespace: "{{ ocp4_workload_advanced_developer_suite_acs_namespace }}"
+        name: stackrox-secured-cluster-services
+      spec:
+        clusterName: production
+        admissionControl:
+          listenOnCreates: true
+          listenOnEvents: true
+          listenOnUpdates: true
+          bypass: BreakGlassAnnotation
+          timeoutSeconds: 3
+          contactImageScanners: ScanIfMissing
+        perNode:
+          collector:
+            collection: EBPF
+            imageFlavor: Regular
+          taintToleration: TolerateTaints
+  register: r_k8s
+  until: r_k8s is successful
+  retries: 30
+  delay: 5
+
+- name: Wait for ready sensor
+  kubernetes.core.k8s_info:
+    name: sensor
+    kind: Deployment
+    api_version: apps/v1
+    namespace: "{{ ocp4_workload_advanced_developer_suite_acs_namespace }}"
+  register: r_stackrox_sensor_deployment
+  until:
+  - r_stackrox_sensor_deployment.resources[0].status.readyReplicas is defined
+  - r_stackrox_sensor_deployment.resources[0].status.readyReplicas | int >= 1
+  delay: 20
+  retries: 15
+
+- name: Create a link in the OpenShift Console
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: console.openshift.io/v1
+      kind: ConsoleLink
+      metadata:
+        name: acs-console-link
+      spec:
+        applicationMenu:
+          imageURL: "https://upload.wikimedia.org/wikipedia/commons/3/3a/OpenShift-LogoType.svg"
+          section: Red Hat Applications
+        href: "https://{{ _acs_endpoint }}"
+        location: ApplicationMenu
+        text: Red Hat Advanced Cluster Security for Kubernetes
+  register: r_k8s
+  until: r_k8s is successful
+  retries: 30
+  delay: 5
