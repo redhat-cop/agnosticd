@@ -1,0 +1,138 @@
+---
+# Create cluster-level resource quota for student
+# This applies across ALL namespaces created by/for this student
+# RHDH software templates create namespaces (tssc-app-*, user*-*), we apply quotas
+
+- name: Create ClusterResourceQuota for {{ student_username }}
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: quota.openshift.io/v1
+      kind: ClusterResourceQuota
+      metadata:
+        name: "{{ student_username }}-quota"
+        labels:
+          user: "{{ student_username }}"
+          managed-by: ads-student-provisioning
+        annotations:
+          description: "Cluster-wide resource quota for student {{ student_username }}"
+          owner: "{{ student_username }}"
+      spec:
+        # Selector matches all namespaces created by this user
+        # RHDH templates create namespaces with annotations or labels
+        selector:
+          annotations:
+            openshift.io/requester: "{{ student_username }}"
+          labels:
+            matchLabels:
+              user: "{{ student_username }}"
+
+        # Total quota across ALL user's namespaces
+        quota:
+          hard:
+            # Compute Resources (total across all namespaces)
+            requests.cpu: "{{ ocp4_workload_advanced_developer_suite_cpu_requests }}"
+            requests.memory: "{{ ocp4_workload_advanced_developer_suite_memory_requests }}"
+            limits.cpu: "{{ ocp4_workload_advanced_developer_suite_cpu_limits }}"
+            limits.memory: "{{ ocp4_workload_advanced_developer_suite_memory_limits }}"
+
+            # Storage Resources
+            requests.storage: "{{ ocp4_workload_advanced_developer_suite_storage_requests }}"
+            persistentvolumeclaims: "{{ ocp4_workload_advanced_developer_suite_pvc_count }}"
+
+            # Object Counts (total across all namespaces)
+            pods: "{{ ocp4_workload_advanced_developer_suite_max_pods }}"
+            services: "{{ ocp4_workload_advanced_developer_suite_max_services }}"
+            secrets: "{{ ocp4_workload_advanced_developer_suite_max_secrets }}"
+            configmaps: "{{ ocp4_workload_advanced_developer_suite_max_configmaps }}"
+
+            # Extended Resources
+            count/deployments.apps: "{{ ocp4_workload_advanced_developer_suite_max_deployments }}"
+            count/routes.route.openshift.io: "{{ ocp4_workload_advanced_developer_suite_max_routes | default('20') }}"
+
+- name: Create ArgoCD AppProject for {{ student_username }}
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: argoproj.io/v1alpha1
+      kind: AppProject
+      metadata:
+        name: "{{ student_username }}-project"
+        namespace: "{{ ocp4_workload_advanced_developer_suite_tssc_gitops_namespace }}"
+        labels:
+          user: "{{ student_username }}"
+          managed-by: ads-student-provisioning
+      spec:
+        description: "GitOps project for {{ student_username }} - managed by RHDH software templates"
+
+        # Source repositories this user can deploy from
+        # RHDH creates repos in GitLab under development/ group or user's personal space
+        sourceRepos:
+          - >-
+            https://gitlab-{{ ocp4_workload_advanced_developer_suite_gitlab_namespace }}.{{ _ocp_apps_domain }}/
+            {{- student_username }}/*
+          - >-
+            https://gitlab-{{ ocp4_workload_advanced_developer_suite_gitlab_namespace }}.{{ _ocp_apps_domain }}/
+            {{- 'development/' }}{{ student_username }}*
+          - >-
+            https://gitlab-{{ ocp4_workload_advanced_developer_suite_gitlab_namespace }}.{{ _ocp_apps_domain }}/
+            {{- 'development/*' }}
+
+        # Destination namespaces created by RHDH software templates
+        # Typically: tssc-app-{component-name}, {username}-{app-name}, etc.
+        destinations:
+          - namespace: "tssc-app-*"
+            server: https://kubernetes.default.svc
+          - namespace: "{{ student_username }}-*"
+            server: https://kubernetes.default.svc
+          - namespace: "*-{{ student_username }}"
+            server: https://kubernetes.default.svc
+          - namespace: "*-{{ student_username }}-*"
+            server: https://kubernetes.default.svc
+
+        # Allow namespace creation (RHDH templates do this)
+        clusterResourceWhitelist:
+          - group: ""
+            kind: Namespace
+
+        # Prevent users from modifying cluster-level resources
+        namespaceResourceBlacklist:
+          - group: quota.openshift.io
+            kind: ClusterResourceQuota
+          - group: rbac.authorization.k8s.io
+            kind: ClusterRole
+          - group: rbac.authorization.k8s.io
+            kind: ClusterRoleBinding
+          - group: security.openshift.io
+            kind: SecurityContextConstraints
+
+        # Quota for ArgoCD Applications
+        quotas:
+          - hard:
+              count/applications: "{{ ocp4_workload_advanced_developer_suite_max_argocd_apps }}"
+
+        # Role policies - allow user to manage their apps
+        roles:
+          - name: developer
+            description: "Developer role for {{ student_username }} - can create/manage apps via RHDH"
+            policies:
+              - >-
+                p, proj:{{ student_username }}-project:developer, applications, create,
+                {{ student_username }}-project/*, allow
+              - >-
+                p, proj:{{ student_username }}-project:developer, applications, update,
+                {{ student_username }}-project/*, allow
+              - >-
+                p, proj:{{ student_username }}-project:developer, applications, delete,
+                {{ student_username }}-project/*, allow
+              - >-
+                p, proj:{{ student_username }}-project:developer, applications, sync,
+                {{ student_username }}-project/*, allow
+              - >-
+                p, proj:{{ student_username }}-project:developer, applications, get,
+                {{ student_username }}-project/*, allow
+              - >-
+                p, proj:{{ student_username }}-project:developer, repositories, get, *,
+                {{ student_username }}-project/*, allow
+            groups:
+              - "{{ student_username }}"

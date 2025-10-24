@@ -1,0 +1,211 @@
+---
+# Student Provisioning Playbook for ADS Workshop
+# Usage:
+#   ansible-playbook provision_students.yml -e @student_vars.yml -e ACTION=create
+#   ansible-playbook provision_students.yml -e @student_vars.yml -e ACTION=remove
+#
+# Prerequisites:
+#   - Platform setup completed (run setup_platform.yml first)
+#   - All platform pods running and healthy
+#
+# This playbook provisions:
+#   - User accounts in Keycloak (trusted-artifact-signer + chicken realms)
+#   - User accounts in GitLab
+#   - Per-user showroom instances
+#   - ClusterResourceQuota for each user
+#   - ArgoCD AppProject for each user
+
+- name: Provision Students for ADS Workshop
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+
+  vars:
+    # Action: create or remove
+    ACTION: "{{ ACTION | default('create') }}"
+
+    # Required vars
+    _required_vars:
+      - guid
+      - num_users
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - "{{ item }} is defined"
+          - "{{ item }} | length > 0"
+        fail_msg: "Required variable '{{ item }}' is not defined. Please provide it via -e or vars file."
+      loop: "{{ _required_vars }}"
+
+    - name: Validate ACTION parameter
+      ansible.builtin.assert:
+        that:
+          - ACTION in ['create', 'remove']
+        fail_msg: "ACTION must be 'create' or 'remove', got '{{ ACTION }}'"
+
+    - name: Show student provisioning configuration
+      ansible.builtin.debug:
+        msg:
+          - "==========================================="
+          - "ADS Workshop Student Provisioning"
+          - "==========================================="
+          - "ACTION: {{ ACTION }}"
+          - "GUID: {{ guid }}"
+          - "Number of Users: {{ num_users }}"
+          - "User Base Name: {{ ocp4_workload_advanced_developer_suite_user_base_name }}"
+          - "Password: {{ ocp4_workload_advanced_developer_suite_user_password }}"
+          - ""
+          - "Per-User Resources:"
+          - "  - Keycloak accounts (2 realms)"
+          - "  - GitLab account"
+          - "  - Showroom instance (workshop UI)"
+          - "  - ClusterResourceQuota (limits across all namespaces)"
+          - "  - ArgoCD AppProject (GitOps isolation)"
+          - ""
+          - "Cluster Quotas: {{ 'Enabled' if ocp4_workload_advanced_developer_suite_enable_cluster_quotas else 'Disabled' }}"
+          - "{{ '  CPU: ' + ocp4_workload_advanced_developer_suite_cpu_requests + ' requested, ' + ocp4_workload_advanced_developer_suite_cpu_limits + ' limit' if ocp4_workload_advanced_developer_suite_enable_cluster_quotas else '' }}"
+          - "{{ '  Memory: ' + ocp4_workload_advanced_developer_suite_memory_requests + ' requested, ' + ocp4_workload_advanced_developer_suite_memory_limits + ' limit' if ocp4_workload_advanced_developer_suite_enable_cluster_quotas else '' }}"
+          - "{{ '  Max Pods: ' + ocp4_workload_advanced_developer_suite_max_pods if ocp4_workload_advanced_developer_suite_enable_cluster_quotas else '' }}"
+          - "==========================================="
+
+    - name: Check OpenShift cluster connectivity
+      kubernetes.core.k8s_cluster_info:
+      register: r_cluster_info
+      failed_when: false
+
+    - name: Display cluster information
+      ansible.builtin.debug:
+        msg:
+          - "Connected to cluster:"
+          - "  Kubernetes: {{ r_cluster_info.version.server.kubernetes.gitVersion | default('Unknown') }}"
+          - "  OpenShift: {{ r_cluster_info.version.server.openshift | default('Unknown') }}"
+      when: r_cluster_info is defined and r_cluster_info.version is defined
+
+    - name: Fail if cluster not accessible
+      ansible.builtin.fail:
+        msg: "Cannot connect to OpenShift cluster. Check your kubeconfig."
+      when: r_cluster_info.failed | default(false)
+
+    - name: Verify platform is ready (create mode only)
+      when: ACTION == 'create'
+      block:
+        - name: Check Keycloak is deployed
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Pod
+            namespace: "{{ ocp4_workload_advanced_developer_suite_keycloak_namespace }}"
+            label_selectors:
+              - app=sso
+          register: r_keycloak_pods
+
+        - name: Fail if Keycloak not ready
+          ansible.builtin.fail:
+            msg: "Keycloak pods not found. Run setup_platform.yml first."
+          when: r_keycloak_pods.resources | length == 0
+
+        - name: Check GitLab is deployed
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Pod
+            namespace: "{{ ocp4_workload_advanced_developer_suite_gitlab_namespace }}"
+            label_selectors:
+              - app=gitlab
+          register: r_gitlab_pods
+
+        - name: Fail if GitLab not ready
+          ansible.builtin.fail:
+            msg: "GitLab pods not found. Run setup_platform.yml first."
+          when: r_gitlab_pods.resources | length == 0
+
+        - name: Check RHDH is deployed
+          kubernetes.core.k8s_info:
+            api_version: v1
+            kind: Pod
+            namespace: "{{ ocp4_workload_advanced_developer_suite_dh_namespace }}"
+            label_selectors:
+              - app.kubernetes.io/name=backstage
+          register: r_rhdh_pods
+
+        - name: Fail if RHDH not ready
+          ansible.builtin.fail:
+            msg: "RHDH pods not found. Run setup_platform.yml first."
+          when: r_rhdh_pods.resources | length == 0
+
+  tasks:
+    - name: Run students role with ACTION={{ ACTION }}
+      ansible.builtin.include_role:
+        name: ocp4_workload_advanced_developer_suite_students
+      vars:
+        become_override: false
+        ocp_username: "{{ ocp_username | default('system:admin') }}"
+
+  post_tasks:
+    - name: Get cluster apps domain
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: Ingress
+        name: cluster
+      register: r_ingress_config
+
+    - name: Set apps domain fact
+      ansible.builtin.set_fact:
+        _apps_domain: "{{ r_ingress_config.resources[0].spec.domain }}"
+
+    - name: Student provisioning complete (create)
+      ansible.builtin.debug:
+        msg:
+          - "==========================================="
+          - "Student Provisioning Complete!"
+          - "==========================================="
+          - ""
+          - "Users Created: {{ ocp4_workload_advanced_developer_suite_user_base_name }}1 to {{ ocp4_workload_advanced_developer_suite_user_base_name }}{{ num_users }}"
+          - "Password (all users): {{ ocp4_workload_advanced_developer_suite_user_password }}"
+          - ""
+          - "Student Access URLs:"
+          - "  RHDH (login here): https://backstage-tssc-dh.{{ _apps_domain }}"
+          - "  Showroom: https://showroom-showroom-user<N>.{{ _apps_domain }}"
+          - "  GitLab: https://gitlab-gitlab.{{ _apps_domain }}"
+          - ""
+          - "What Students Can Do:"
+          - "  1. Login to RHDH using Keycloak (user1/user2/etc)"
+          - "  2. Browse software catalog and templates"
+          - "  3. Create components using templates"
+          - "     - Templates create namespaces (tssc-app-*, user*-*)"
+          - "     - ClusterResourceQuota limits apply across ALL their namespaces"
+          - "  4. View workshop instructions in Showroom"
+          - "  5. Deploy apps via ArgoCD GitOps"
+          - ""
+          - "Resource Limits Per Student:"
+          - "  CPU: {{ ocp4_workload_advanced_developer_suite_cpu_requests }} requested, {{ ocp4_workload_advanced_developer_suite_cpu_limits }} limit"
+          - "  Memory: {{ ocp4_workload_advanced_developer_suite_memory_requests }} requested, {{ ocp4_workload_advanced_developer_suite_memory_limits }} limit"
+          - "  Max Pods: {{ ocp4_workload_advanced_developer_suite_max_pods }}"
+          - "  Max ArgoCD Apps: {{ ocp4_workload_advanced_developer_suite_max_argocd_apps }}"
+          - ""
+          - "To remove students:"
+          - "  ansible-playbook provision_students.yml -e @student_vars.yml -e ACTION=remove"
+          - "==========================================="
+      when: ACTION == 'create'
+
+    - name: Student removal complete
+      ansible.builtin.debug:
+        msg:
+          - "==========================================="
+          - "Student Removal Complete!"
+          - "==========================================="
+          - ""
+          - "Removed Resources:"
+          - "  - Keycloak users (both realms)"
+          - "  - Showroom instances"
+          - "  - ClusterResourceQuotas"
+          - "  - All RHDH-created namespaces (tssc-app-*, user*-*)"
+          - "  - ArgoCD AppProjects"
+          - ""
+          - "Preserved Resources:"
+          - "  - GitLab users (for audit trail)"
+          - "  - GitLab repositories"
+          - ""
+          - "Platform remains intact and ready for new students."
+          - "==========================================="
+      when: ACTION == 'remove'

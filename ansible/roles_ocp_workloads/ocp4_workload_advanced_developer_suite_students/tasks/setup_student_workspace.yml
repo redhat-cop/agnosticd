@@ -1,0 +1,158 @@
+---
+# Create student workspace with resource quotas and limits
+# This gives each student their own isolated namespace for workshop exercises
+
+- name: Create user workspace namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ student_username }}-workspace"
+        labels:
+          user: "{{ student_username }}"
+          type: user-workspace
+          managed-by: ads-student-provisioning
+        annotations:
+          owner: "{{ student_username }}"
+          email: "{{ student_username }}@demo.redhat.com"
+
+- name: Create ResourceQuota for student workspace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ResourceQuota
+      metadata:
+        name: "{{ student_username }}-quota"
+        namespace: "{{ student_username }}-workspace"
+        labels:
+          user: "{{ student_username }}"
+      spec:
+        hard:
+          # Compute Resources
+          requests.cpu: "{{ ocp4_workload_advanced_developer_suite_cpu_requests }}"
+          requests.memory: "{{ ocp4_workload_advanced_developer_suite_memory_requests }}"
+          limits.cpu: "{{ ocp4_workload_advanced_developer_suite_cpu_limits }}"
+          limits.memory: "{{ ocp4_workload_advanced_developer_suite_memory_limits }}"
+
+          # Storage Resources
+          requests.storage: "{{ ocp4_workload_advanced_developer_suite_storage_requests }}"
+          persistentvolumeclaims: "{{ ocp4_workload_advanced_developer_suite_pvc_count }}"
+
+          # Object Counts
+          pods: "{{ ocp4_workload_advanced_developer_suite_max_pods }}"
+          services: "{{ ocp4_workload_advanced_developer_suite_max_services }}"
+          secrets: "{{ ocp4_workload_advanced_developer_suite_max_secrets }}"
+          configmaps: "{{ ocp4_workload_advanced_developer_suite_max_configmaps }}"
+
+          # Extended Resources
+          count/deployments.apps: "{{ ocp4_workload_advanced_developer_suite_max_deployments }}"
+
+- name: Create LimitRange for student workspace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: LimitRange
+      metadata:
+        name: "{{ student_username }}-limits"
+        namespace: "{{ student_username }}-workspace"
+        labels:
+          user: "{{ student_username }}"
+      spec:
+        limits:
+          - default:
+              cpu: "500m"
+              memory: "1Gi"
+            defaultRequest:
+              cpu: "100m"
+              memory: "256Mi"
+            type: Container
+          - default:
+              storage: "1Gi"
+            max:
+              storage: "5Gi"
+            min:
+              storage: "100Mi"
+            type: PersistentVolumeClaim
+
+- name: Create RBAC for student workspace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: "{{ student_username }}-admin"
+        namespace: "{{ student_username }}-workspace"
+      subjects:
+        - kind: User
+          name: "{{ student_username }}"
+          apiGroup: rbac.authorization.k8s.io
+      roleRef:
+        kind: ClusterRole
+        name: admin
+        apiGroup: rbac.authorization.k8s.io
+
+- name: Create ArgoCD AppProject for student
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: argoproj.io/v1alpha1
+      kind: AppProject
+      metadata:
+        name: "{{ student_username }}-project"
+        namespace: "{{ ocp4_workload_advanced_developer_suite_tssc_gitops_namespace }}"
+        labels:
+          user: "{{ student_username }}"
+      spec:
+        description: "GitOps project for {{ student_username }} with resource quotas"
+
+        sourceRepos:
+          - >-
+            https://gitlab-{{ ocp4_workload_advanced_developer_suite_gitlab_namespace }}.{{ _ocp_apps_domain }}/
+            {{- student_username }}/*
+          - >-
+            https://gitlab-{{ ocp4_workload_advanced_developer_suite_gitlab_namespace }}.{{ _ocp_apps_domain }}/
+            {{- 'development/*' }}{{ student_username }}*
+
+        destinations:
+          - namespace: "{{ student_username }}-workspace"
+            server: https://kubernetes.default.svc
+          - namespace: "{{ student_username }}-*"
+            server: https://kubernetes.default.svc
+          - namespace: "tssc-app-*"
+            server: https://kubernetes.default.svc
+
+        clusterResourceWhitelist:
+          - group: ""
+            kind: Namespace
+
+        namespaceResourceBlacklist:
+          - group: ""
+            kind: ResourceQuota
+          - group: ""
+            kind: LimitRange
+          - group: rbac.authorization.k8s.io
+            kind: ClusterRole
+          - group: rbac.authorization.k8s.io
+            kind: ClusterRoleBinding
+
+        quotas:
+          - hard:
+              count/applications: "{{ ocp4_workload_advanced_developer_suite_max_argocd_apps }}"
+
+        roles:
+          - name: developer
+            description: "Developer role for {{ student_username }}"
+            policies:
+              - >-
+                p, proj:{{ student_username }}-project:developer, applications, *,
+                {{ student_username }}-project/*, allow
+              - >-
+                p, proj:{{ student_username }}-project:developer, repositories, get, *,
+                {{ student_username }}-project/*, allow
+            groups:
+              - "{{ student_username }}"

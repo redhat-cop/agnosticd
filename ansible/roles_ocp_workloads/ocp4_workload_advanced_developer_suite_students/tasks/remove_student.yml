@@ -1,0 +1,165 @@
+---
+# Remove a single student and all their resources
+# Called in a loop for each student or individually
+
+- name: Remove student {{ student_username }}
+  ansible.builtin.debug:
+    msg: "Removing student: {{ student_username }}"
+
+# =============================================================================
+# Delete Keycloak Users
+# =============================================================================
+- name: Delete Keycloak user from trusted-artifact-signer realm
+  uri:
+    url: >-
+      https://sso.{{ _ocp_apps_domain }}/admin/realms/trusted-artifact-signer/users/
+      {{- r_keycloak_user.json[0].id }}
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: "Bearer {{ _keycloak_access_token }}"
+    status_code: [204, 404]
+  register: r_delete_keycloak_user
+  failed_when: false
+  when:
+    - r_keycloak_user is defined
+    - r_keycloak_user.json is defined
+    - r_keycloak_user.json | length > 0
+
+- name: Delete TPA user from chicken realm
+  uri:
+    url: "https://sso.{{ _ocp_apps_domain }}/admin/realms/chicken/users/{{ r_tpa_user.json[0].id }}"
+    method: DELETE
+    validate_certs: false
+    headers:
+      Authorization: "Bearer {{ _keycloak_access_token }}"
+    status_code: [204, 404]
+  register: r_delete_tpa_user
+  failed_when: false
+  when:
+    - r_tpa_user is defined
+    - r_tpa_user.json is defined
+    - r_tpa_user.json | length > 0
+
+# =============================================================================
+# Delete GitLab User (optional - may want to keep for audit)
+# =============================================================================
+- name: Get GitLab user details for deletion
+  uri:
+    url: >-
+      https://gitlab-{{ ocp4_workload_advanced_developer_suite_gitlab_namespace }}.{{ _ocp_apps_domain }}/
+      {{- 'api/v4/users?username=' }}{{ student_username }}
+    method: GET
+    validate_certs: false
+    headers:
+      PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+    status_code: [200, 404]
+  register: r_gitlab_user_delete
+  failed_when: false
+
+# Note: We don't delete GitLab user to preserve audit trail
+# Uncomment below to delete GitLab user
+# - name: Delete GitLab user
+#   uri:
+#     url: >-
+#       https://gitlab-{{ ocp4_workload_advanced_developer_suite_gitlab_namespace }}.{{ _ocp_apps_domain }}/
+#       {{- 'api/v4/users/' }}{{ r_gitlab_user_delete.json[0].id }}
+#     method: DELETE
+#     validate_certs: false
+#     headers:
+#       PRIVATE-TOKEN: "{{ _gitlab_root_token }}"
+#     status_code: [204, 404]
+#   when:
+#     - r_gitlab_user_delete.json is defined
+#     - r_gitlab_user_delete.json | length > 0
+
+# =============================================================================
+# Delete Showroom Instance
+# =============================================================================
+- name: Delete showroom namespace for {{ student_username }}
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Namespace
+    name: "{{ ocp4_workload_showroom_namespace }}-{{ student_username }}"
+  register: r_delete_showroom_namespace
+  failed_when: false
+
+# =============================================================================
+# Delete ClusterResourceQuota
+# =============================================================================
+- name: Delete ClusterResourceQuota for student
+  kubernetes.core.k8s:
+    state: absent
+    api_version: quota.openshift.io/v1
+    kind: ClusterResourceQuota
+    name: "{{ student_username }}-quota"
+  register: r_delete_cluster_quota
+  failed_when: false
+
+# =============================================================================
+# Delete Student-Created Namespaces (RHDH software template outputs)
+# =============================================================================
+- name: Get all namespaces created by {{ student_username }}
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+    label_selectors:
+      - "user={{ student_username }}"
+  register: r_student_namespaces
+  failed_when: false
+
+- name: Get all namespaces requested by {{ student_username }}
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+  register: r_all_namespaces
+  failed_when: false
+
+- name: Filter namespaces by requester annotation
+  ansible.builtin.set_fact:
+    _requester_namespaces: >-
+      {{
+        r_all_namespaces.resources |
+        selectattr('metadata.annotations.openshift.io/requester', 'defined') |
+        selectattr('metadata.annotations.openshift.io/requester', 'equalto', student_username) |
+        map(attribute='metadata.name') |
+        list
+      }}
+  when: r_all_namespaces.resources is defined
+
+- name: Delete namespaces created by {{ student_username }}
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Namespace
+    name: "{{ item }}"
+  loop: "{{ (_student_namespaces.resources | map(attribute='metadata.name') | list) + (_requester_namespaces | default([])) }}"
+  when: item not in ['default', 'kube-system', 'openshift', 'openshift-operators']
+  register: r_delete_student_namespaces
+  failed_when: false
+
+# =============================================================================
+# Delete ArgoCD AppProject
+# =============================================================================
+- name: Delete ArgoCD AppProject for student
+  kubernetes.core.k8s:
+    state: absent
+    api_version: argoproj.io/v1alpha1
+    kind: AppProject
+    name: "{{ student_username }}-project"
+    namespace: "{{ ocp4_workload_advanced_developer_suite_tssc_gitops_namespace }}"
+  register: r_delete_argocd_project
+  failed_when: false
+
+- name: Student {{ student_username }} removed
+  ansible.builtin.debug:
+    msg:
+      - "Student {{ student_username }} has been removed:"
+      - "  - Keycloak user: {{ 'Deleted' if r_delete_keycloak_user.changed | default(false) else 'Not found or already deleted' }}"
+      - "  - TPA user: {{ 'Deleted' if r_delete_tpa_user.changed | default(false) else 'Not found or already deleted' }}"
+      - "  - GitLab user: Preserved (for audit trail)"
+      - "  - Showroom namespace: {{ 'Deleted' if r_delete_showroom_namespace.changed | default(false) else 'Not found or already deleted' }}"
+      - "  - ClusterResourceQuota: {{ 'Deleted' if r_delete_cluster_quota.changed | default(false) else 'Not found or already deleted' }}"
+      - "  - RHDH-created namespaces: {{ r_delete_student_namespaces.results | selectattr('changed', 'equalto', true) | list | length }} deleted"
+      - "  - ArgoCD project: {{ 'Deleted' if r_delete_argocd_project.changed | default(false) else 'Not found or already deleted' }}"
