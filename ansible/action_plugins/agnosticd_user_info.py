@@ -123,6 +123,7 @@ class ActionModule(ActionBase):
                     fh.write('- ' + json.dumps(body) + "\n")
 
             if data or user:
+                data = json.loads(json.dumps(data))
                 user_data = None
                 try:
                     with open(os.path.join(output_dir, f'{action}-user-data.yaml'), 'r') as fh:
