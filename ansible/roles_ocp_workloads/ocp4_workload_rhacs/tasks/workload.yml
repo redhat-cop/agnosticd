@@ -106,28 +106,52 @@
 
 - name: Fix Route to Central
   when: ocp4_workload_rhacs_enable_route_certs | bool
-  ansible.builtin.shell: |
-    CERT_SECRET=$(oc get ingresscontroller default -n openshift-ingress-operator -o jsonpath='{.spec.defaultCertificate.name}')
+  block:
+  - name: Get ingress controller default certificate name
+    kubernetes.core.k8s_info:
+      api_version: operator.openshift.io/v1
+      kind: IngressController
+      name: default
+      namespace: openshift-ingress-operator
+    register: r_ingress_controller
 
-    if [ -z "$CERT_SECRET" ]; then
-      CERT_SECRET="router-certs-default"
-    fi
+  - name: Get ingress certificate secret
+    kubernetes.core.k8s_info:
+      api_version: v1
+      kind: Secret
+      name: "{{ r_ingress_controller.resources[0].spec.defaultCertificate.name | default('router-certs-default') }}"
+      namespace: openshift-ingress
+    register: r_ingress_cert_secret
 
-    CERT_DATA=$(oc get secret $CERT_SECRET -n openshift-ingress -o jsonpath='{.data.tls\.crt}' | base64 -d | sed 's/$/\\n/' | tr -d '\n')
-    KEY_DATA=$(oc get secret $CERT_SECRET -n openshift-ingress -o jsonpath='{.data.tls\.key}' | base64 -d | sed 's/$/\\n/' | tr -d '\n')
-    DEST_CA=$(oc get secret central-tls -n stackrox -o jsonpath='{.data.ca\.pem}' | base64 -d | sed 's/$/\\n/' | tr -d '\n')
+  - name: Get StackRox central TLS secret
+    kubernetes.core.k8s_info:
+      api_version: v1
+      kind: Secret
+      name: central-tls
+      namespace: stackrox
+    register: r_central_tls_secret
 
-    oc patch route central -n stackrox --type=merge -p "{
-      \"spec\": {
-        \"tls\": {
-          \"termination\": \"reencrypt\",
-          \"certificate\": \"$CERT_DATA\",
-          \"key\": \"$KEY_DATA\",
-          \"destinationCACertificate\": \"$DEST_CA\",
-          \"insecureEdgeTerminationPolicy\": \"Redirect\"
-        }
-      }
-    }"
+  - name: Decode and format certificate data
+    set_fact:
+      cert_data: "{{ r_ingress_cert_secret.resources[0].data['tls.crt'] | b64decode }}"
+      key_data: "{{ r_ingress_cert_secret.resources[0].data['tls.key'] | b64decode }}"
+      dest_ca_data: "{{ r_central_tls_secret.resources[0].data['ca.pem'] | b64decode }}"
+
+  - name: Patch central route with ROSA certificates
+    kubernetes.core.k8s:
+      state: patched
+      api_version: route.openshift.io/v1
+      kind: Route
+      name: central
+      namespace: stackrox
+      definition:
+        spec:
+          tls:
+            termination: reencrypt
+            certificate: "{{ cert_data }}"
+            key: "{{ key_data }}"
+            destinationCACertificate: "{{ dest_ca_data }}"
+            insecureEdgeTerminationPolicy: Redirect
 
 # ACS Secured Cluster Installation
 - name: Get cluster init bundle
