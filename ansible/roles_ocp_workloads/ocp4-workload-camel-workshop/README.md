@@ -54,7 +54,7 @@ The instructions below assume:
 1. Change to root directory of the project.
 
     ```sh
-    cd ansible/roles/ocp4-workload-camel-workshop
+    cd agnosticd
     ```
 
     <br/>
@@ -77,26 +77,34 @@ The instructions below assume:
 
     1. Run the Playbook
 
-        1. With Docker:
-        
-            ```sh
-            docker run -i -t --rm --entrypoint /usr/local/bin/ansible-playbook \
-            -v $PWD:/runner \
-            -v $PWD/ansible/kube-demo:/home/runner/.kube/config \
-            quay.io/agnosticd/ee-multicloud:v0.0.11  \
-            ./ansible/install.yaml
-            ```
-        
         1. With Podman:
         
             ```sh
             podman run -i -t --rm --entrypoint /usr/local/bin/ansible-playbook \
             -v $PWD:/runner \
             -v $PWD/ansible/kube-demo:/home/runner/.kube/config \
-            quay.io/agnosticd/ee-multicloud:v0.0.11  \
-            ./ansible/install.yaml
-
+            quay.io/agnosticd/ee-multicloud:v0.0.11 \
+            ./ansible/main.yml \
+            -e '{"openshift_workloads": [{"name": "ocp4-workload-camel-workshop"}]}' \
+            -e env_type=ocp-workloads \
+            -e cloud_provider=none \
+            -e "ACTION=provision"
             ```
+
+        1. With Docker:
+        
+            ```sh
+            docker run -i -t --rm --entrypoint /usr/local/bin/ansible-playbook \
+            -v $PWD:/runner \
+            -v $PWD/ansible/kube-demo:/home/runner/.kube/config \
+            quay.io/agnosticd/ee-multicloud:v0.0.11 \
+            ./ansible/main.yml \
+            -e '{"openshift_workloads": [{"name": "ocp4-workload-camel-workshop"}]}' \
+            -e env_type=ocp-workloads \
+            -e cloud_provider=none \
+            -e "ACTION=provision"
+            ```
+        
     <br/>
 
 1. When running with Ansible Playbook (installed on your machine)
@@ -123,7 +131,7 @@ The instructions below assume:
 ### 3. Undeploy the Workshop
 
 If you wish to undeploy the demo, use the same commands as above, but with:
- - `./uninstall.yaml`
+ - `-e "ACTION=remove"`
 
 Instead of:
- - ~~`./install.yaml`~~
+ - ~~`-e "ACTION=provision"`~~
