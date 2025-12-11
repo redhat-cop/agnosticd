@@ -1,12 +1,31 @@
 ---
 
-- name: Retrieve Number of Users 1/2
-  set_fact:
-    num_users: "{{ query('kubernetes.core.k8s', kind='Secret', resource_name='htpasswd', namespace='openshift-config') | json_query('[0].data')}}"
+# - name: Retrieve Number of Users 1/2
+#   set_fact:
+#     num_users: "{{ query('kubernetes.core.k8s', kind='Secret', resource_name='htpasswd', namespace='openshift-config') | json_query('[0].data')}}"
 
-- name: Retrieve Number of Users 2/2
+# - name: Retrieve Number of Users 2/2
+#   set_fact:
+#     num_users: "{{ num_users | b64decode | regex_findall('user') | length }}"
+
+- name: Detect if num_users is already defined
   set_fact:
-    num_users: "{{ num_users | b64decode | regex_findall('user') | length }}"
+    _num_users_needs_detection: true
+  when: num_users is not defined
+
+- name: Get htpasswd secret (only if num_users is undefined)
+  kubernetes.core.k8s_info:
+    kind: Secret
+    name: htpasswd
+    namespace: openshift-config
+  register: htpasswd_secret
+  when: _num_users_needs_detection | default(false)
+
+- name: Decode htpasswd secret and count users
+  set_fact:
+    num_users: >-
+      {{ htpasswd_secret.resources[0].data.htpasswd | b64decode | regex_findall('user') | length }}
+  when: _num_users_needs_detection | default(false)
 
 - name: debug
   debug:
@@ -17,72 +36,100 @@
     users: "{{ users | default([]) + ['user' + item | string] }}"
   loop: "{{ range(1, ((num_users | int) + 1)) | list }}"
 
-# Figure out paths
-- name: Get OpenShift Apps Domain
-  set_fact:
-    route_subdomain: >-
-      {{ query('kubernetes.core.k8s',
-      api_version='config.openshift.io/v1',
-      kind='Ingress',
-      resource_name='cluster')
-      | json_query('[0].spec.appsDomain') }}
+# # Figure out paths
+# - name: Get OpenShift Apps Domain
+#   set_fact:
+#     route_subdomain: >-
+#       {{ query('kubernetes.core.k8s',
+#       api_version='config.openshift.io/v1',
+#       kind='Ingress',
+#       resource_name='cluster')
+#       | json_query('[0].spec.appsDomain') }}
 
-- name: Get OpenShift Domain
-  set_fact:
-    route_subdomain: >-
-      {{ query('kubernetes.core.k8s',
-      api_version='config.openshift.io/v1',
-      kind='Ingress',
-      resource_name='cluster')
-      | json_query('[0].spec.domain') }}
-  when:
-    - route_subdomain | length == 0
+# - name: Get OpenShift Domain
+#   set_fact:
+#     route_subdomain: >-
+#       {{ query('kubernetes.core.k8s',
+#       api_version='config.openshift.io/v1',
+#       kind='Ingress',
+#       resource_name='cluster')
+#       | json_query('[0].spec.domain') }}
+#   when:
+#     - route_subdomain | length == 0
 
-- name: Get OpenShift Console
-  set_fact:
-    console_url: >-
-      {{ query('kubernetes.core.k8s',
-      api_version='config.openshift.io/v1',
-      kind='Console',
-      resource_name='cluster')
-      | json_query('[0].status.consoleURL')  }}
+- name: Get the cluster ingress config
+  k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: route_subdomain_r
 
-- name: Get OpenShift API
+- name: set the route subdomain
   set_fact:
-    api_url: >-
-      {{ query('kubernetes.core.k8s',
-      api_version='config.openshift.io/v1',
-      kind='Infrastructure',
-      resource_name='cluster')
-      | json_query('[0].status.apiServerURL')  }}
+    route_subdomain: "{{ route_subdomain_r.resources[0].spec.domain | trim }}"
+
+# - name: Get OpenShift Console
+#   set_fact:
+#     console_url: >-
+#       {{ query('kubernetes.core.k8s',
+#       api_version='config.openshift.io/v1',
+#       kind='Console',
+#       resource_name='cluster')
+#       | json_query('[0].status.consoleURL')  }}
+
+- name: extract console_url
+  command: oc whoami --show-console
+  register: console_url_r
+
+- name: set the console
+  set_fact:
+    console_url: "{{ console_url_r.stdout | trim }}"
+
+# - name: Get OpenShift API
+#   set_fact:
+#     api_url: >-
+#       {{ query('kubernetes.core.k8s',
+#       api_version='config.openshift.io/v1',
+#       kind='Infrastructure',
+#       resource_name='cluster')
+#       | json_query('[0].status.apiServerURL')  }}
+
+# - name: set the master
+#   set_fact:
+#     master_url: "{{ api_url }}"
+
+- name: extract api_url
+  shell: oc whoami --show-server
+  register: api_url_r
 
 - name: set the master
   set_fact:
-    master_url: "{{ api_url }}"
+    master_url: "{{ api_url_r.stdout | trim }}"
 
 - name: debug
   debug:
     msg:
+      - "Number of users: {{ num_users }}"
       - "master URL: {{ master_url }}"
       - "Console URL: {{ console_url }}"
-      - "API URL: {{ api_url }}"
+      # - "API URL: {{ api_url }}"
       - "Route Subdomain: {{ route_subdomain }}"
       - "Admin username: {{ ocp_username }}"
 
-- name: Fetch OpenShift cluster version
-  set_fact:
-    openshift_version: >-
-      {{ query('kubernetes.core.k8s',
-      kind='ClusterOperator',
-      resource_name='openshift-apiserver')
-      | json_query('[0].status.versions[?name==`operator`].version
-      | [0]')
-      | split('.')
-      | slice(2)
-      | first
-      | join('.') }}
-  when: (openshift_version is not defined) or (openshift_version | length == 0)
+# - name: Fetch OpenShift cluster version
+#   set_fact:
+#     openshift_version: >-
+#       {{ query('kubernetes.core.k8s',
+#       kind='ClusterOperator',
+#       resource_name='openshift-apiserver')
+#       | json_query('[0].status.versions[?name==`operator`].version
+#       | [0]')
+#       | split('.')
+#       | slice(2)
+#       | first
+#       | join('.') }}
+#   when: (openshift_version is not defined) or (openshift_version | length == 0)
 
-- name: debug
-  debug:
-    msg: "Setting up for OpenShift version: {{ openshift_version }}"
+# - name: debug
+#   debug:
+#     msg: "Setting up for OpenShift version: {{ openshift_version }}"
