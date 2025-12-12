@@ -24,7 +24,7 @@
         repoRef: "{{ ocp4_workload_showroom_content_git_repo_ref }}"
         antoraPlaybook: "{{ ocp4_workload_showroom_content_antora_playbook }}"
         contentOnly: "{{ ocp4_workload_showroom_content_only | bool | string | lower }}"
-        zero_touch_bundle: "{{  ocp4_workload_showroom_zero_touch_bundle }}"
+        zero_touch_bundle: "{{ ocp4_workload_showroom_zero_touch_bundle }}"
         zero_touch_ui_enabled: "{{ ocp4_workload_showroom_zero_touch_ui_enabled | string | lower }}"
 
       guid: "{{ guid }}"
@@ -120,8 +120,6 @@
       setup_automation:
         setup: "{{ ('false' if ocp4_workload_showroom_automation_disable | bool  else 'true') | string | lower }}"
         vault_password: "{{ _showroom_user_data.vault_password | default('') }}"
-
-
   register: r_helm_templates
 
 - name: Deploy rendered manifests to OpenShift
@@ -129,5 +127,209 @@
     kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
     definition: "{{ r_helm_templates.stdout | from_yaml_all }}"
 
-# - name: Report Variables
-#   ansible.builtin.include_tasks: report-variables.yaml
+- name: Wait for showroom pod to be created using label selector
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+    api_version: v1
+    kind: Pod
+    namespace: "{{ _showroom_namespace }}"
+    label_selectors:
+      - app.kubernetes.io/name={{ ocp4_workload_showroom_name }}
+  register: r_showroom_pod
+  retries: 60
+  delay: 5
+  until: r_showroom_pod.resources | length > 0
+  ignore_errors: true
+
+- name: Set pod name fact from first matching pod
+  when: r_showroom_pod.resources | length > 0
+  ansible.builtin.set_fact:
+    _showroom_pod_name: "{{ r_showroom_pod.resources[0].metadata.name }}"
+
+- name: Check if showroom pod is running and ready
+  when: _showroom_pod_name is defined
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+    api_version: v1
+    kind: Pod
+    namespace: "{{ _showroom_namespace }}"
+    name: "{{ _showroom_pod_name }}"
+  register: r_pod_status
+  retries: 60
+  delay: 5
+  until:
+    - r_pod_status.resources | length > 0
+    - r_pod_status.resources[0].status.phase == 'Running'
+    - r_pod_status.resources[0].status.containerStatuses is defined
+    - r_pod_status.resources[0].status.containerStatuses | selectattr('ready', 'equalto', true) | list |
+      length == r_pod_status.resources[0].status.containerStatuses | length
+  ignore_errors: true
+
+- name: Get logs from all containers using k8s_log module
+  when:
+    - _showroom_pod_name is defined
+    - >-
+      r_pod_status.resources | length == 0 or
+      r_pod_status.resources[0].status.phase != 'Running' or
+      r_pod_status.resources[0].status.containerStatuses is not defined or
+      (r_pod_status.resources[0].status.containerStatuses | selectattr('ready', 'equalto', true) | list |
+      length != r_pod_status.resources[0].status.containerStatuses | length)
+  kubernetes.core.k8s_log:
+    kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+    namespace: "{{ _showroom_namespace }}"
+    name: "{{ _showroom_pod_name }}"
+    all_containers: true
+    tail_lines: 200
+  register: r_pod_logs
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+
+- name: Get logs from init containers
+  when:
+    - _showroom_pod_name is defined
+    - r_pod_status.resources | length > 0
+    - r_pod_status.resources[0].status.initContainerStatuses is defined
+    - r_pod_status.resources[0].status.initContainerStatuses | length > 0
+  kubernetes.core.k8s_log:
+    kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+    namespace: "{{ _showroom_namespace }}"
+    name: "{{ _showroom_pod_name }}"
+    container: "{{ item.name }}"
+    tail_lines: 200
+  register: r_init_container_logs
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+  loop: "{{ r_pod_status.resources[0].status.initContainerStatuses }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Get full pod information for describe output
+  when:
+    - _showroom_pod_name is defined
+    - >-
+      r_pod_status.resources | length == 0 or
+      r_pod_status.resources[0].status.phase != 'Running' or
+      r_pod_status.resources[0].status.containerStatuses is not defined or
+      (r_pod_status.resources[0].status.containerStatuses | selectattr('ready', 'equalto', true) | list |
+      length != r_pod_status.resources[0].status.containerStatuses | length)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{ _showroom_kubeconfig | default(omit) }}"
+    api_version: v1
+    kind: Pod
+    namespace: "{{ _showroom_namespace }}"
+    name: "{{ _showroom_pod_name }}"
+  register: r_pod_full_info
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+
+- name: Report pod failure with describe and logs
+  when:
+    - _showroom_pod_name is defined
+    - >-
+      r_pod_status.resources | length == 0 or
+      r_pod_status.resources[0].status.phase != 'Running' or
+      r_pod_status.resources[0].status.containerStatuses is not defined or
+      (r_pod_status.resources[0].status.containerStatuses | selectattr('ready', 'equalto', true) | list |
+      length != r_pod_status.resources[0].status.containerStatuses | length)
+  ansible.builtin.fail:
+    msg: |
+      ========================================================================
+      Showroom pod '{{ _showroom_pod_name }}' failed to start successfully
+      ========================================================================
+
+      POD STATUS SUMMARY:
+      ========================================================================
+
+      - Phase: {{ r_pod_status.resources[0].status.phase if r_pod_status.resources | length > 0 else 'Unknown' }}
+      - Namespace: {{ _showroom_namespace }}
+      {% if r_pod_status.resources | length > 0 and r_pod_status.resources[0].status.conditions is defined %}
+      - Conditions:
+      {% for condition in r_pod_status.resources[0].status.conditions %}
+        - {{ condition.type }}: {{ condition.status }} - {{ condition.message | default('N/A') }}
+      {% endfor %}
+      {% endif %}
+
+      CONTAINER STATUSES:
+      ========================================================================
+
+      {% if r_pod_status.resources | length > 0 and r_pod_status.resources[0].status.initContainerStatuses is defined %}
+      Init Containers:
+      {% for container in r_pod_status.resources[0].status.initContainerStatuses %}
+      - {{ container.name }}:
+        Ready: {{ container.ready | default(false) }}
+        Restarts: {{ container.restartCount | default(0) }}
+        State: {{ container.state.keys() | list | first | default('unknown') }}
+        {% if container.state.waiting is defined %}
+        Waiting Reason: {{ container.state.waiting.reason | default('N/A') }}
+        Waiting Message: {{ container.state.waiting.message | default('N/A') }}
+        {% endif %}
+        {% if container.state.terminated is defined %}
+        Terminated Reason: {{ container.state.terminated.reason | default('N/A') }}
+        Terminated Message: {{ container.state.terminated.message | default('N/A') }}
+        Exit Code: {{ container.state.terminated.exitCode | default('N/A') }}
+        {% endif %}
+      {% endfor %}
+      {% endif %}
+      {% if r_pod_status.resources | length > 0 and r_pod_status.resources[0].status.containerStatuses is defined %}
+      Main Containers:
+      {% for container in r_pod_status.resources[0].status.containerStatuses %}
+      - {{ container.name }}:
+        Ready: {{ container.ready | default(false) }}
+        Restarts: {{ container.restartCount | default(0) }}
+        State: {{ container.state.keys() | list | first | default('unknown') }}
+        {% if container.state.waiting is defined %}
+        Waiting Reason: {{ container.state.waiting.reason | default('N/A') }}
+        Waiting Message: {{ container.state.waiting.message | default('N/A') }}
+        {% endif %}
+        {% if container.state.terminated is defined %}
+        Terminated Reason: {{ container.state.terminated.reason | default('N/A') }}
+        Terminated Message: {{ container.state.terminated.message | default('N/A') }}
+        Exit Code: {{ container.state.terminated.exitCode | default('N/A') }}
+        {% endif %}
+      {% endfor %}
+      {% else %}
+      - No container status information available
+      {% endif %}
+
+      FULL POD INFORMATION (YAML):
+      ========================================================================
+
+      {{ r_pod_full_info.resources[0] | to_nice_yaml
+         if (r_pod_full_info is defined and r_pod_full_info.resources | length > 0)
+         else (r_pod_status.resources[0] | to_nice_yaml
+         if r_pod_status.resources | length > 0
+         else 'Pod information not available') }}
+
+      CONTAINER LOGS:
+      ========================================================================
+
+      {% if r_init_container_logs is defined and r_init_container_logs.results is defined %}
+      {% for result in r_init_container_logs.results %}
+      {% if result.log is defined and result.log != '' %}
+
+      === Init Container: {{ result.item.name }} ===
+      ------------------------------------------------------------------------
+
+      {{ result.log }}
+      {% endif %}
+      {% endfor %}
+      {% endif %}
+      {% if r_pod_logs is defined and r_pod_logs.log is defined and r_pod_logs.log != '' %}
+
+      === Main Container Logs ===
+      ------------------------------------------------------------------------
+
+      {{ r_pod_logs.log }}
+
+      {% endif %}
+      {% if (r_pod_logs is not defined or r_pod_logs.log is not defined or r_pod_logs.log == '') and
+            (r_init_container_logs is not defined or r_init_container_logs.results is not defined or
+             r_init_container_logs.results | selectattr('log', 'defined') | selectattr('log', 'ne', '') | list | length == 0) %}
+      Logs not available. k8s_log module may have failed. Error: {{ r_pod_logs.msg | default('Unknown error')
+                                                                    if r_pod_logs is defined else 'k8s_log task did not run' }}
+      {% endif %}
+
+      ========================================================================
