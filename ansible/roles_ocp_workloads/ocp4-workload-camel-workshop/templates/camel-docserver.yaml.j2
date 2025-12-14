@@ -1,0 +1,102 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: camel-runner-edit
+subjects:
+- kind: ServiceAccount
+  name: default
+roleRef:
+  kind: ClusterRole
+  name: edit
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: event
+type: Opaque
+data:
+  event.properties: "{{ lookup('file', role_path ~ '/deploy/camel/event.properties') | b64encode }}"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: docserver
+data:
+  docs.camel.yaml: |
+    {{ lookup('file', role_path ~ '/deploy/camel/docs.camel.yaml') | indent(4) }}
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: camel-jbang-job
+spec:
+  backoffLimit: 4
+  # ttlSecondsAfterFinished: 60
+  template:
+    spec:
+      serviceAccountName: default
+      restartPolicy: Never
+      containers:
+      - name: universal-dev
+        image: quay.io/devfile/universal-developer-image:ubi9-latest
+        command:
+        - /bin/bash
+        - -c
+        - |          
+          set -e
+          
+          echo "Initializing environment..."
+          source ~/.bashrc
+          
+          echo "Trusting Camel GitHub..."
+          # 2. Add --verbose to see details if it fails again
+          jbang trust add https://github.com/apache/camel/
+          
+          echo "Installing Camel app..."
+          jbang app install -Dcamel.jbang.version=4.16.0 camel@apache/camel
+          
+          echo "Installing Kubernetes plugin..."
+          jbang camel@apache/camel plugin add kubernetes
+
+          source ~/.bashrc
+
+          echo "Creating workspace..."
+          mkdir -p /tmp/workspace
+          cd /tmp/workspace
+          cp /app/docs.camel.yaml .
+
+          echo "Build and deploy Camel DocServer app..."
+          camel kubernetes run docs.camel.yaml \
+          --name docserver \
+          --namespace={{ webapp_namespace }} \
+          --cluster-type=openshift \
+          --trait route.enabled=true \
+          --trait route.tls-termination=edge \
+          --config secret:event \
+          --resource secret:im-credentials
+          
+          echo "Job complete!"
+        env:
+        - name: HOME
+          value: /home/user
+        - name: JBANG_JAVA_OPTIONS
+          value: "-Duser.home=/home/user"
+        resources:
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+        volumeMounts:
+        - name: camel-config
+          mountPath: /app
+      volumes:
+      - name: camel-config
+        configMap:
+          name: docserver
