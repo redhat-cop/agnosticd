@@ -1,0 +1,84 @@
+---
+- name: Evaluate {{ operators_project }} namespace if not exists
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ operators_project }}'
+    state: present
+
+- name: Evaluate Streams Subscription
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'streams-subscription.yaml.j2') }}"
+
+- name: "Wait until InstallPlan is available"
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: Subscription
+    namespace: "{{ operators_project }}"
+    name: amq-streams
+  register: sub
+  retries: 30
+  delay: 10
+  until:
+    - sub.resources[0].status.installplan.name is defined
+
+- name: Approve InstallPlan
+  shell:
+    cmd: >
+      oc patch installplan {{ sub.resources[0].status.installplan.name }} -n {{ operators_project }}
+      --type=json -p='[{"op": "replace", "path": "/spec/approved", "value": true}]'
+
+- name: Wait for Streams operator to be present
+  k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: kafkas.kafka.strimzi.io
+  register: crd_streams
+  until: crd_streams.resources | list | length == 1
+  retries: 10
+  delay: 30
+
+- name: Get Streams CSV name
+  shell:
+    cmd: >
+      oc get csv -n {{ operators_project }} -o custom-columns=NAME:.metadata.name --no-headers
+      | grep amqstreams
+  register: sub_streams_name
+
+- name: Print sub_streams_name
+  debug:
+    msg: "result: {{ sub_streams_name }} "
+
+- name: Patch AMQ Streams Operator CSV
+  kubernetes.core.k8s_json_patch:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    name: "{{ sub_streams_name.stdout }}"
+    namespace: "{{ operators_project }}"
+    patch:
+      - op: replace
+        path: /spec/install/spec/deployments/0/spec/template/spec/containers/0/resources/limits/memory
+        value: 1024Mi
+      - op: replace
+        path: /spec/install/spec/deployments/0/spec/template/spec/containers/0/resources/requests/memory
+        value: 1024Mi
+
+- name: Wait for Streams operator to update itself after memory patch
+  k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: '{{ operators_project }}'
+    name: "{{ sub_streams_name.stdout }}"
+  register: streams_operator_deployment
+  retries: 20
+  delay: 10
+  until:
+    - streams_operator_deployment.resources[0].status.phase == "Succeeded"
+
+- name: Create Streams Clusters for {{ num_users }} users
+  kubernetes.core.k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'user-streams.yaml.j2') }}"
+  retries: 15
+  delay: 30

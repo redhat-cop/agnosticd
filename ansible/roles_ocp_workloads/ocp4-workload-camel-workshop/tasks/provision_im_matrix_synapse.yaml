@@ -1,0 +1,165 @@
+---
+- name: Evaluate {{ matrix_synapse_namespace }} namespace if not exists
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ matrix_synapse_namespace }}'
+    state: present
+
+
+- name: Create Matrix resources
+  k8s:
+    state: present
+    namespace: '{{ matrix_synapse_namespace }}'
+    resource_definition: "{{ lookup('template', 'im_matrix_synapse.yaml.j2') }}"
+
+- name: wait for synapse pod
+  shell: oc get pods -o json -n {{ matrix_synapse_namespace }}
+  register: synapse_pod
+  until: synapse_pod.stdout|from_json|json_query('items[*].status.phase')|unique == ["Running"]
+  retries: 30
+  delay: 10
+
+- name: Get the pods in the {{ matrix_synapse_namespace }} namespace
+  k8s_info:
+    kind: Pod
+    namespace: "{{ matrix_synapse_namespace }}"
+  register: synapse_pod_list
+
+- name: Show Synapse Pod
+  debug:
+    msg: "{{ synapse_pod_list }}"
+
+- name: Show Synampse Pod Name
+  set_fact:
+    spodname: '{{ synapse_pod_list.resources[0].metadata.name }}'
+
+- name: Print pod name from variable
+  debug:
+    msg: "pod name: {{ spodname }} "
+
+
+- name: Wait for Synapse health endpoint
+  uri:
+    url: "https://synapse-matrix.{{ route_subdomain }}/_matrix/client/versions"
+    method: GET
+    status_code: 200
+  register: health_check
+  until: health_check.status == 200
+  retries: 30
+  delay: 10
+  failed_when: health_check.status != 200
+
+
+- name: Create Synapse Admin
+  kubernetes.core.k8s_exec:
+    namespace: "{{ matrix_synapse_namespace }}"
+    pod: '{{ synapse_pod_list.resources[0].metadata.name }}'
+    command: register_new_matrix_user -u admin -p admin -a -c /data/config/homeserver.yaml
+  register: command_status
+  # ignore_errors: True
+
+- name: Check last command status
+  debug:
+    msg: "cmd status: {{command_status.rc}}"
+
+- name: Check users
+  debug:
+    msg: "users: {{users}}"
+
+- name: Log users
+  debug:
+    msg: "user: {{item}}"
+  loop: "{{users}}"
+
+- name: Create Matrix Users
+  kubernetes.core.k8s_exec:
+    namespace: "{{ matrix_synapse_namespace }}"
+    pod: '{{ synapse_pod_list.resources[0].metadata.name }}'
+    command: register_new_matrix_user -u {{item.name}} -p {{item.password}} --no-admin -c /data/config/homeserver.yaml
+  loop: "{{im_users}}"
+  ignore_errors: true
+
+- name: Define Matrix rooms variable
+  set_fact:
+    rooms: "{{ rooms | default([]) + ['room'+item | string] }}"
+  loop: "{{ range(1,((num_users | int) + 1)) | list }}"
+
+- name: Log Matrix rooms
+  debug:
+    msg: "{{rooms}}"
+
+- name: Get Matrix Admin token
+  shell:
+    cmd: >
+      curl -X POST
+      -d '{"type":"m.login.password", "user":"admin", "password":"admin"}'
+      https://synapse-matrix.{{ route_subdomain }}/_matrix/client/r0/login | jq .access_token --raw-output
+  register: admin_token
+
+# - name: Get Admin token
+#   shell:
+#     cmd: >
+#       echo \
+#       '{"access_token":"token"}' | jq .access_token --raw-output
+#   register: token_status
+
+
+- name: Log token
+  debug:
+    msg: "token: {{admin_token.stdout}}"
+
+
+# - name: Create Matrix Rooms
+#   shell:
+#     cmd: >
+#       curl -X POST \
+#       -H "content-type: application/json" \
+#       -H "Authorization: Bearer {{admin_token.stdout}}" \
+#       https://synapse-matrix.{{ route_subdomain }}/_matrix/client/v3/createRoom
+#       -d '{"creation_content": {"m.federate": false},
+#       "name": "{{item}}","preset": "private_chat","room_alias_name": "{{item}}", "invite":["@{{users[idx]}}:rhintegration.demo"]}'
+#       | jq .room_id --raw-output
+#       | sed -r s/'!'/%21/g
+#       | sed -r s/':'/%3A/g
+#   loop: "{{rooms}}"
+#   loop_control:
+#     index_var: idx
+#   register: room_result
+
+- name: Create Matrix Rooms
+  vars:
+    # Define the JSON payload as a clean YAML structure here
+    matrix_payload:
+      creation_content:
+        m.federate: false
+      name: "{{ item }}"
+      preset: "private_chat"
+      room_alias_name: "{{ item }}"
+      invite:
+        - "@{{ users[idx] }}:rhintegration.demo"
+  shell:
+    # Use to_json to convert the var into a string automatically
+    cmd: >
+      curl -X POST
+      -H "content-type: application/json"
+      -H "Authorization: Bearer {{ admin_token.stdout }}"
+      https://synapse-matrix.{{ route_subdomain }}/_matrix/client/v3/createRoom
+      -d '{{ matrix_payload | to_json }}'
+      | jq .room_id --raw-output
+      | sed -r s/'!'/%21/g
+      | sed -r s/':'/%3A/g
+  loop: "{{ rooms }}"
+  loop_control:
+    index_var: idx
+  register: room_result
+
+
+- name: Log Matrix room result
+  debug:
+    msg: "{{room_result}}"
+
+- name: Log Matrix room result array
+  debug:
+    msg: "{{item.stdout}}"
+  loop: "{{room_result.results}}"
