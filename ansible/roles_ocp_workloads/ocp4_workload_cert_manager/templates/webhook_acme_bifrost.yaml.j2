@@ -1,0 +1,207 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: acme-bifrost-webhook
+  namespace: cert-manager
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: acme-bifrost-webhook
+  namespace: cert-manager
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - "secrets"
+  verbs:
+  - "get"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: acme-bifrost-webhook
+  namespace: cert-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: acme-bifrost-webhook
+subjects:
+- apiGroup: ""
+  kind: ServiceAccount
+  name: acme-bifrost-webhook
+  namespace: cert-manager
+---
+# ClusterRole for cert-manager to create webhook solver resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: acme-bifrost-webhook:flowcontrol-solver
+  labels:
+    app: acme-bifrost-webhook
+rules:
+- apiGroups:
+  - acme.gateway.redhat.com
+  resources:
+  - '*'
+  verbs:
+  - 'create'
+---
+# ClusterRoleBinding for cert-manager to use the webhook
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: acme-bifrost-webhook:flowcontrol-solver
+  labels:
+    app: acme-bifrost-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: acme-bifrost-webhook:flowcontrol-solver
+subjects:
+- apiGroup: ""
+  kind: ServiceAccount
+  name: cert-manager
+  namespace: cert-manager
+---
+# ClusterRole for webhook to create subjectaccessreviews (required for API aggregation)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: acme-bifrost-webhook:subjectaccessreviews
+  labels:
+    app: acme-bifrost-webhook
+rules:
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+---
+# ClusterRoleBinding for webhook subjectaccessreviews
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: acme-bifrost-webhook:subjectaccessreviews
+  labels:
+    app: acme-bifrost-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: acme-bifrost-webhook:subjectaccessreviews
+subjects:
+- apiGroup: ""
+  kind: ServiceAccount
+  name: acme-bifrost-webhook
+  namespace: cert-manager
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: acme-bifrost-webhook
+  namespace: cert-manager
+spec:
+  type: ClusterIP
+  ports:
+  - port: 443
+    targetPort: 8443
+    protocol: TCP
+    name: https
+  selector:
+    app: acme-bifrost-webhook
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: acme-bifrost-webhook
+  namespace: cert-manager
+  labels:
+    app: acme-bifrost-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: acme-bifrost-webhook
+  template:
+    metadata:
+      labels:
+        app: acme-bifrost-webhook
+    spec:
+      serviceAccountName: acme-bifrost-webhook
+      containers:
+      - name: webhook
+        image: {{ ocp4_workload_cert_manager_acme_bifrost_webhook_image }}
+        imagePullPolicy: IfNotPresent
+        args:
+        - --tls-cert-file=/tls/tls.crt
+        - --tls-private-key-file=/tls/tls.key
+        - --secure-port=8443
+        env:
+        - name: GROUP_NAME
+          value: "acme.gateway.redhat.com"
+        ports:
+        - name: https
+          containerPort: 8443
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            scheme: HTTPS
+            path: /healthz
+            port: https
+        readinessProbe:
+          httpGet:
+            scheme: HTTPS
+            path: /healthz
+            port: https
+        volumeMounts:
+        - name: certs
+          mountPath: /tls
+          readOnly: true
+      volumes:
+      - name: certs
+        secret:
+          secretName: acme-bifrost-webhook-webhook-tls
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: acme-bifrost-webhook-webhook-tls
+  namespace: cert-manager
+spec:
+  secretName: acme-bifrost-webhook-webhook-tls
+  duration: 2160h # 90d
+  renewBefore: 360h # 15d
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer
+  dnsNames:
+  - acme-bifrost-webhook
+  - acme-bifrost-webhook.cert-manager
+  - acme-bifrost-webhook.cert-manager.svc
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.acme.gateway.redhat.com
+  labels:
+    app: acme-bifrost-webhook
+  annotations:
+    cert-manager.io/inject-ca-from: "cert-manager/acme-bifrost-webhook-webhook-tls"
+spec:
+  group: acme.gateway.redhat.com
+  groupPriorityMinimum: 1000
+  versionPriority: 15
+  service:
+    name: acme-bifrost-webhook
+    namespace: cert-manager
+  version: v1alpha1
+
