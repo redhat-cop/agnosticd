@@ -1,0 +1,233 @@
+---
+- name: Evaluate {{ rocketchat_namespace }} namespace if not exists
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: '{{ rocketchat_namespace }}'
+    state: present
+
+- name: Create Mongo DB resources
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'im_rocketchat-db.yaml.j2') }}"
+
+- name: Wait for Mongo DB Pod Readyness
+  shell: oc get pods -o json -n {{ rocketchat_namespace }} -l name=mongodb
+  register: rocketchat_pod_db
+  until: rocketchat_pod_db.stdout|from_json|json_query('items[0].status.containerStatuses[0].ready') == true
+  retries: 30
+  delay: 10
+
+- name: Create RocketChat resources
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'im_rocketchat.yaml.j2') }}"
+
+- name: Wait for RocketChat Pod Readyness
+  shell: oc get pods -o json -n {{ rocketchat_namespace }} -l name=rocketchat
+  register: rocketchat_pod
+  until: rocketchat_pod.stdout|from_json|json_query('items[0].status.containerStatuses[0].ready') == true
+  retries: 30
+  delay: 10
+
+
+- name: Create RocketChat Admin
+  ansible.builtin.uri:
+    url: https://rocketchat-rocketchat.{{ route_subdomain }}/api/v1/users.register
+    method: POST
+    body_format: json
+    headers:
+      accept: json
+    body:
+      name: rcadmin
+      pass: camel
+      email: rcadmin@camel
+      username: rcadmin
+    return_content: true
+    status_code: 200
+  register: output_admin
+  until: output_admin.status is defined and output_admin.status == 200
+  retries: 30
+  delay: 10
+
+- name: Show RocketChat Admin
+  debug:
+    msg: "{{ output_admin }}"
+
+- name: RocketChat Admin Login
+  uri:
+    url: https://rocketchat-rocketchat.{{ route_subdomain }}/api/v1/login
+    method: POST
+    body_format: json
+    headers:
+      accept: json
+    body:
+      user: rcadmin
+      password: camel
+    return_content: true
+  register: admin_login
+
+
+- name: Show RocketChat Admin Token
+  debug:
+    msg: "{{ admin_login }}"
+
+- name: Show RocketChat Admin Token2
+  debug:
+    msg: "{{ admin_login.json.data.userId }}"
+
+
+# Need to disable rate limiter in order to obtain user credentials
+# the 2FA code is obtained from running (printf "%s" camel | openssl dgst -sha256 -binary | xxd -p -c 256)
+- name: Disable RC API Rate Limiter
+  uri:
+    url: https://rocketchat-rocketchat.{{ route_subdomain }}/api/v1/settings/API_Enable_Rate_Limiter
+    method: POST
+    body_format: json
+    headers:
+      accept: json
+      X-User-Id: "{{ admin_login.json.data.userId }}"
+      X-Auth-Token: "{{ admin_login.json.data.authToken }}"
+      X-2fa-method: password"
+      X-2fa-code: 4812585e944994cb91cae8b4d8d87a155e6b1a165d8bdf5ab75752c4f04b9724"
+    body:
+      value: false
+    return_content: true
+  register: rc_disable_rate_limiter
+
+- name: Create RocketChat Users
+  uri:
+    url: https://rocketchat-rocketchat.{{ route_subdomain }}/api/v1/users.create
+    method: POST
+    body_format: json
+    headers:
+      accept: json
+      X-User-Id: "{{ admin_login.json.data.userId }}"
+      X-Auth-Token: "{{ admin_login.json.data.authToken }}"
+    body:
+      name: "{{item.name}}"
+      email: "{{item.name}}@user.tld"
+      username: "{{item.name}}"
+      password: "{{item.password}}"
+    return_content: true
+  register: rc_users
+  loop: "{{im_users}}"
+
+- name: Show RocketChat Users
+  debug:
+    msg: "{{ rc_users }}"
+
+
+- name: Create RocketChat Channels
+  uri:
+    url: https://rocketchat-rocketchat.{{ route_subdomain }}/api/v1/groups.create
+    method: POST
+    body_format: json
+    headers:
+      accept: json
+      X-User-Id: "{{ admin_login.json.data.userId }}"
+      X-Auth-Token: "{{ admin_login.json.data.authToken }}"
+    body:
+      name: "room{{idx+1}}"
+      members:
+        - "{{item}}"
+    return_content: true
+  register: rc_channels
+  loop: "{{users}}"
+  loop_control:
+    index_var: idx
+
+- name: Show RocketChat Channels
+  debug:
+    msg: "{{ rc_channels }}"
+
+- name: Get workspace services for each user
+  shell: |
+    oc get svc -n {{ item }}-devspaces -o name | grep workspace | cut -c 9-
+  loop: "{{ users }}"
+  register: users_service
+
+- name: Collect into a list the user URL services
+  set_fact:
+    user_services_url_list: >-
+      {{ user_services_url_list
+      | default([]) + [{'user': item.item, 'url': item.stdout + '.' + item.item + '-devspaces.svc.cluster.local' | string}] }}
+  loop: "{{ users_service.results }}"
+
+
+- name: Create Webhooks for RocketChat to Matrix integrations
+  uri:
+    url: https://rocketchat-rocketchat.{{ route_subdomain }}/api/v1/integrations.create
+    method: POST
+    body_format: json
+    headers:
+      accept: json
+      X-User-Id: "{{ admin_login.json.data.userId }}"
+      X-Auth-Token: "{{ admin_login.json.data.authToken }}"
+    body:
+      type: "webhook-outgoing"
+      name: "Room {{idx+1}} webhooks for {{item.user}}"
+      event: "sendMessage"
+      enabled: true
+      channel: "#room{{idx+1}}"
+      username: "{{item.user}}"
+      urls:
+        - "http://r2m.{{item.user}}-devspaces.svc:80/webhook"
+        - "http://r2k.{{item.user}}-devspaces.svc:80/webhook"
+        - "http://{{ item.url }}:8080/webhook"
+      scriptEnabled: true
+      script: "class Script {process_outgoing_response({ request, response }){return false;}}"
+    return_content: true
+  register: rchat_webhooks
+  loop: "{{user_services_url_list}}"
+  loop_control:
+    index_var: idx
+
+- name: Show RocketChat Webhooks
+  debug:
+    msg: "{{ rchat_webhooks }}"
+
+- name: Call RocketChat API to get user credentials
+  uri:
+    url: "https://rocketchat-rocketchat.{{ route_subdomain }}/api/v1/login"
+    method: POST
+    body_format: json
+    body:
+      user: "{{ item.name }}"
+      password: "{{ item.password }}"
+    status_code: 200
+    return_content: true
+  register: rc_user_creds
+  loop: "{{ im_users }}"
+
+# - name: Display RC credentials
+#   debug:
+#     msg: "response: {{ item.json.data }}"
+#   loop: "{{ rc_user_creds.results }}"
+
+- name: Set variable with RocketChat credentials
+  set_fact:
+    rc_users_with_tokens: >-
+      {{ rc_users_with_tokens
+      | default([]) + [{'name': item.json.data.me.name, 'userid': item.json.data.userId, 'token': item.json.data.authToken}] }}
+  loop: "{{ rc_user_creds.results }}"
+  when: rc_user_creds.results is defined
+
+# - name: Display RC user credentials for verification 2
+#   debug:
+#     msg: "User: {{ item.userid }}, Password: {{ item.token }}"
+#   loop: "{{ rc_users_with_tokens }}"
+
+- name: Create Secret for RocketChat
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: im-credentials
+        namespace: "{{ rocketchat_namespace }}"
+      type: Opaque
+      stringData:
+        rocketchat.json: |
+          {{ rc_users_with_tokens | to_json(indent=2) }}

@@ -1,0 +1,134 @@
+---
+- name: Get the current Nodes
+  kubernetes.core.k8s_info:
+    api_version: v1
+    host: "https://{{ openshift_api_url }}:6443"
+    api_key: "{{ openshift_cluster_admin_token }}"
+    validate_certs: false
+    kind: Node
+    label_selectors:
+      - "node-role.kubernetes.io/worker="
+  register: _r_node_status
+
+- name: Set variable with the current number of workers
+  set_fact:
+    current_instance_workers: "{{ _r_node_status.resources | length }}"
+
+- name: Scale OCP using Assisted Installed
+  module_defaults:
+    group/k8s:
+      host: "{{ sandbox_openshift_api_url }}"
+      api_key: "{{ sandbox_openshift_api_key }}"
+      validate_certs: false
+
+  block:
+    - name: Get a list of clusters
+      rhpds.assisted_installer.list_clusters:
+        offline_token: "{{ ai_offline_token }}"
+        owner: true
+      register: r_list_clusters
+
+    - name: Filter the created clusters
+      ansible.builtin.set_fact:
+        cluster: "{{ item }}"
+      when: item.name == cluster_name and item.status == "installed"
+      loop: "{{ r_list_clusters.result }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Import cluster
+      rhpds.assisted_installer.import_cluster:
+        offline_token: "{{ ai_offline_token }}"
+        cluster_name: "{{ cluster_name }}"
+        #api_vip_dnsname: "{{ openshift_api_url.replace('api.','api-int.') }}"  
+        api_vip_dnsname: "{{ ai_network_prefix + '.100' if current_instance_workers | int > 1 else ai_network_prefix + '.10' }}"
+        openshift_cluster_id: "{{ cluster.openshift_cluster_id }}"
+      register: r_import_cluster
+
+    - name: Set base_dns_domain update data
+      set_fact:
+        _update_dns_domain: |-
+          {"base_dns_domain": "{{ openshift_api_url.split('.')[2:] | join('.') }}"}
+
+    - name: Update base_dns_domain (workaround for SNO)
+      when: current_instance_workers | int == 1
+      rhpds.assisted_installer.update_cluster:
+        offline_token: "{{ ai_offline_token }}"
+        cluster_id: "{{ r_import_cluster.result.id }}"
+        cluster_update_params: "{{ _update_dns_domain | to_json }}"
+
+    - name: Generate mac addresses for workers
+      ansible.builtin.set_fact:
+        ai_workers_macs: >
+            {{ ai_workers_macs + ['f6' |
+               community.general.random_mac(ai_ocp_namespace + cluster_name + 'w1' + (_index+current_instance_workers|int)|string)] }}
+        ai_workers_macs2: >
+            {{ ai_workers_macs2 + ['f6' |
+               community.general.random_mac(ai_ocp_namespace + cluster_name + 'w2' + (_index+current_instance_workers|int)|string)] }}
+      loop: "{{ range(1,worker_instance_count|int+1)|list }}"
+      loop_control:
+        loop_var: _index
+
+    - name: Set static_network_config variable
+      ansible.builtin.set_fact:
+        static_network_config: "{{ lookup('template','static_network_config_full.j2') | from_yaml}}"
+
+    - name: Create Infrastructure environment
+      rhpds.assisted_installer.create_infra_env:
+        name: "{{ cluster_name }}-scale-cluster"
+        image_type: "{{ ai_cluster_iso_type }}"
+        cluster_id: "{{ r_import_cluster.result.id }}"
+        openshift_version: "{{ cluster.openshift_version }}"
+        # ssh_authorized_key: "{{ ai_ssh_authorized_key }}"
+        offline_token: "{{ ai_offline_token }}"
+        pull_secret: "{{ ai_pull_secret }}"
+        static_network_config: "{{ static_network_config }}"
+      register: newinfraenv
+
+
+    - name: Create PVC for the installation ISO
+      kubernetes.core.k8s:
+        definition: "{{ lookup('ansible.builtin.template', 'templates/installation-iso.yaml') }}"
+        wait: true
+        wait_timeout: 300
+      vars:
+        image_url: "{{ newinfraenv.result.download_url }}"
+        namespace: "{{ ai_ocp_namespace }}"
+        pvcname: "scale-iso"
+
+    - name: Create a {{ worker_instance_count }} worker VMs for Full cluster
+      include_tasks: kubevirt/create_workers.yaml
+      vars:
+        pvcinstall: "scale-iso"
+        vmname: "{{ ai_ocp_vmname_worker_prefix }}-{{ _index + current_instance_workers | int }}"
+        namespace: "{{ ai_ocp_namespace }}"
+        storageclass: "{{ ai_storage_class }}"
+        network: "{{ cluster_name }}-openshift"
+        network_name: "{{ ai_install_use_network | default(cluster_name + '-openshift') }}"
+        pod_network: "192.168.1{{ _index+current_instance_workers | int }}.0/24"
+      loop: "{{ range(1,worker_instance_count | int + 1) | list }}"
+      loop_control:
+        loop_var: _index
+
+    - name: Set the variable ai_configure_hosts for workers
+      ansible.builtin.set_fact:
+        ai_configure_hosts: >-
+          {{ ai_configure_hosts + [
+          {'hostname': ai_ocp_vmname_worker_prefix + "-" + _index|string,
+          'role': 'worker',
+          'installation_disk': '/dev/vda'}] }}
+      loop: "{{ range(1,worker_instance_count | int + 1) | list }}"
+      loop_control:
+        loop_var: _index
+
+    - name: Wait for the hosts to be ready
+      rhpds.assisted_installer.wait_for_hosts:
+        cluster_id: "{{ r_import_cluster.result.id }}"
+        offline_token: "{{ ai_offline_token }}"
+        expected_hosts: "{{ worker_instance_count | int }}"
+        infra_env_id: "{{ newinfraenv.result.id }}"
+        configure_hosts: "{{ ai_configure_hosts }}"
+        wait_timeout: 600
+
+- name: Approve CSR
+  include_tasks: approve_csr_nodes.yaml

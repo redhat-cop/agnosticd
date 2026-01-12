@@ -1,0 +1,86 @@
+---
+- name: Get pending CSRs
+  kubernetes.core.k8s_info:
+    api_version: certificates.k8s.io/v1
+    host: "https://{{ openshift_api_url }}:6443"
+    api_key: "{{ openshift_cluster_admin_token }}"
+    validate_certs: false
+    kind: CertificateSigningRequest
+  register: all_csrs
+
+- name: Filter for pending CSRs
+  set_fact:
+    pending_csrs: "{{ all_csrs.resources | selectattr('status', 'eq', {}) | list }}"
+
+- name: Approve CSR directly via API
+  uri:
+    url: "https://{{ openshift_api_url }}:6443/apis/certificates.k8s.io/v1/certificatesigningrequests/{{ item.metadata.name }}/approval"
+    validate_certs: false
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ openshift_cluster_admin_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body: |
+      {
+        "apiVersion": "certificates.k8s.io/v1",
+        "kind": "CertificateSigningRequest",
+        "metadata": {
+          "name": "{{ item.metadata.name }}"
+        },
+        "status": {
+          "conditions": [
+            {
+              "type": "Approved",
+              "status": "True",
+              "reason": "AnsibleApproval",
+              "message": "CSR was approved by Ansible."
+            }
+          ]
+        }
+      }
+  loop: "{{ pending_csrs }}"
+  when: pending_csrs is defined and pending_csrs | length > 0
+
+
+- name: Get the current nodes
+  kubernetes.core.k8s_info:
+    api_version: v1
+    host: "https://{{ openshift_api_url }}:6443"
+    api_key: "{{ openshift_cluster_admin_token }}"
+    validate_certs: false
+    kind: Node
+    label_selectors:
+      - "node-role.kubernetes.io/worker="
+  register: r_worker_nodes
+
+- name: Count Ready nodes
+  set_fact:
+    ready_nodes_count: >-
+      {{ r_worker_nodes
+         | json_query("resources[].status.conditions[?type=='Ready' && status=='True']")
+         | length }}
+
+- name: Include this tasks again if nodes doesn't appear
+  when: (current_instance_workers|int + worker_instance_count|int) != ready_nodes_count|int
+  block:
+    - name: Wait for additional CertificateSigningRequests to appear
+      pause:
+        seconds: "10"
+    - include_tasks: approve_csr_nodes.yaml
+
+- name: Prepare IngressController definition with integer replicas
+  set_fact:
+    ingress_definition: "{{ {} | combine({'spec': {'replicas': (current_instance_workers | int + worker_instance_count | int)}}) }}"
+
+- name: Scale IngressController to the number of workers
+  kubernetes.core.k8s:
+    host: "https://{{ openshift_api_url }}:6443"
+    api_key: "{{ openshift_cluster_admin_token }}"
+    validate_certs: false
+    state: present
+    kind: IngressController
+    api_version: operator.openshift.io/v1
+    name: default
+    namespace: openshift-ingress-operator
+    definition: "{{ ingress_definition }}"
