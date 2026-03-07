@@ -1,0 +1,194 @@
+---
+- name: Create {{ shared_db_namespace }} namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ shared_db_namespace }}"
+
+- name: Create NetworkPolicies for {{ shared_db_namespace }}
+  kubernetes.core.k8s:
+    state: present
+    definition: "{{ item }}"
+  loop:
+    - apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: default-deny-ingress
+        namespace: "{{ shared_db_namespace }}"
+      spec:
+        podSelector: {}
+        policyTypes:
+          - Ingress
+    - apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-skupper-router-ingress
+        namespace: "{{ shared_db_namespace }}"
+      spec:
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/part-of: skupper
+        ingress:
+          - from:
+              - namespaceSelector:
+                  matchLabels:
+                    network.openshift.io/policy-group: ingress
+          - from:
+              - podSelector:
+                  matchLabels:
+                    app.kubernetes.io/part-of: skupper
+        policyTypes:
+          - Ingress
+    - apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-skupper-to-postgres
+        namespace: "{{ shared_db_namespace }}"
+      spec:
+        podSelector:
+          matchLabels:
+            app: postgres
+        ingress:
+          - from:
+              - podSelector:
+                  matchLabels:
+                    app.kubernetes.io/part-of: skupper
+            ports:
+              - port: 5432
+                protocol: TCP
+        policyTypes:
+          - Ingress
+
+- name: Grant read-only access to users on shared-database
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: "{{ item.name }}-view"
+        namespace: "{{ shared_db_namespace }}"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: view
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: User
+          name: "{{ item.name }}"
+  loop: "{{ im_users }}"
+
+- name: Create PostgreSQL init ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: postgres-init
+        namespace: "{{ shared_db_namespace }}"
+      data:
+        init.sh: "{{ lookup('template', 'shared-db-init.sh.j2') }}"
+
+- name: Create PostgreSQL PVC
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: postgres-data
+        namespace: "{{ shared_db_namespace }}"
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+
+- name: Create PostgreSQL Deployment
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: postgres
+        namespace: "{{ shared_db_namespace }}"
+        labels:
+          app: postgres
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: postgres
+        strategy:
+          type: Recreate
+        template:
+          metadata:
+            labels:
+              app: postgres
+          spec:
+            containers:
+              - name: postgres
+                image: registry.redhat.io/rhel9/postgresql-16:latest
+                ports:
+                  - containerPort: 5432
+                    protocol: TCP
+                env:
+                  - name: POSTGRESQL_USER
+                    value: "{{ shared_db_admin_user }}"
+                  - name: POSTGRESQL_PASSWORD
+                    value: "{{ shared_db_admin_password }}"
+                  - name: POSTGRESQL_DATABASE
+                    value: "{{ shared_db_name }}"
+                volumeMounts:
+                  - mountPath: /var/lib/pgsql/data
+                    name: postgres-data
+                  - mountPath: /opt/app-root/src/postgresql-init/
+                    name: postgres-init
+                resources:
+                  requests:
+                    memory: "256Mi"
+                    cpu: "250m"
+                  limits:
+                    memory: "512Mi"
+                    cpu: "500m"
+            volumes:
+              - name: postgres-data
+                persistentVolumeClaim:
+                  claimName: postgres-data
+              - name: postgres-init
+                configMap:
+                  name: postgres-init
+
+- name: Create PostgreSQL Service
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: postgres
+        namespace: "{{ shared_db_namespace }}"
+        labels:
+          app: postgres
+      spec:
+        ports:
+          - name: postgres
+            port: 5432
+            protocol: TCP
+            targetPort: 5432
+        selector:
+          app: postgres
+        type: ClusterIP
+
+- name: Wait for PostgreSQL Pod Readiness
+  shell: oc get pods -o json -n {{ shared_db_namespace }} -l app=postgres
+  register: postgres_pod
+  until: postgres_pod.stdout | from_json | json_query('items[0].status.containerStatuses[0].ready') == true
+  retries: 30
+  delay: 10
