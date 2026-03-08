@@ -1,0 +1,140 @@
+---
+- name: Generate cookie secret for OAuth proxy
+  set_fact:
+    docs_proxy_cookie_secret: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') | b64encode }}"
+
+- name: Get Showroom Route hostname
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: showroom
+    namespace: "{{ showroom_namespace }}"
+  register: showroom_route_result
+  until: showroom_route_result.resources | length > 0
+  retries: 10
+  delay: 10
+
+- name: Set Showroom Route URL
+  set_fact:
+    showroom_route_host: "{{ showroom_route_result.resources[0].spec.host }}"
+
+- name: Create docs-proxy ServiceAccount
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: docs-proxy
+        namespace: "{{ showroom_namespace }}"
+        annotations:
+          serviceaccounts.openshift.io/oauth-redirectreference.primary: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"docs"}}'
+
+- name: Create docs-proxy ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: docs-proxy-config
+        namespace: "{{ showroom_namespace }}"
+      data:
+        default.conf: |
+          server {
+              listen 8081;
+              location / {
+                  add_header Set-Cookie "username=$http_x_forwarded_user; Path=/; Domain=.{{ route_subdomain }}; SameSite=Lax";
+                  return 302 https://{{ showroom_route_host }};
+              }
+          }
+
+- name: Create docs-proxy Deployment
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: docs-proxy
+        namespace: "{{ showroom_namespace }}"
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: docs-proxy
+        template:
+          metadata:
+            labels:
+              app: docs-proxy
+          spec:
+            serviceAccountName: docs-proxy
+            containers:
+              - name: oauth-proxy
+                image: registry.redhat.io/openshift4/ose-oauth-proxy:v4.14
+                ports:
+                  - containerPort: 8443
+                    name: proxy
+                args:
+                  - --https-address=:8443
+                  - --provider=openshift
+                  - --upstream=http://localhost:8081
+                  - --tls-cert=/etc/tls/private/tls.crt
+                  - --tls-key=/etc/tls/private/tls.key
+                  - --cookie-secret={{ docs_proxy_cookie_secret }}
+                  - --openshift-service-account=docs-proxy
+                  - --pass-user-headers=true
+                volumeMounts:
+                  - name: tls
+                    mountPath: /etc/tls/private
+              - name: nginx
+                image: nginxinc/nginx-unprivileged:alpine
+                ports:
+                  - containerPort: 8081
+                volumeMounts:
+                  - name: config
+                    mountPath: /etc/nginx/conf.d
+            volumes:
+              - name: config
+                configMap:
+                  name: docs-proxy-config
+              - name: tls
+                secret:
+                  secretName: docs-proxy-tls
+
+- name: Create docs-proxy Service
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: docs-proxy
+        namespace: "{{ showroom_namespace }}"
+        annotations:
+          service.beta.openshift.io/serving-cert-secret-name: docs-proxy-tls
+      spec:
+        selector:
+          app: docs-proxy
+        ports:
+          - port: 8443
+            targetPort: 8443
+            name: proxy
+
+- name: Create docs Route
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: route.openshift.io/v1
+      kind: Route
+      metadata:
+        name: docs
+        namespace: "{{ showroom_namespace }}"
+      spec:
+        host: "docs.{{ route_subdomain }}"
+        port:
+          targetPort: proxy
+        to:
+          name: docs-proxy
+        tls:
+          termination: reencrypt
