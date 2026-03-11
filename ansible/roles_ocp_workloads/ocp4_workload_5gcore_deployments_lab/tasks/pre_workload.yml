@@ -1,0 +1,991 @@
+---
+# Implement your Pre Workload deployment tasks here
+
+- name: Fail if pull-secret var is empty
+  ansible.builtin.assert:
+    that:
+      - ocp4_pull_secret is defined
+      - ocp4_pull_secret | default("") | length > 0
+    fail_msg: ocp4_pull_secret variable must be defined
+    success_msg: ocp4_pull_secret variable is defined
+
+- name: Debug system facts for requirements check
+  ansible.builtin.debug:
+    msg: |
+      System Facts:
+      - Memory: {{ ansible_memtotal_mb }} MB (Required: {{ hypervisor_min_memory_mb }} MB)
+      - CPUs: {{ ansible_processor_vcpus }} (Required: {{ hypervisor_min_cpus }})
+      - Distribution: {{ ansible_distribution }}
+      - Distribution Version: {{ ansible_distribution_version }}
+      - Architecture: {{ ansible_architecture }}
+      - Kernel: {{ ansible_kernel }}
+
+- name: Check system requirements
+  ansible.builtin.assert:
+    that:
+      - ansible_memtotal_mb >= hypervisor_min_memory_mb
+      - ansible_processor_vcpus >= hypervisor_min_cpus
+      - ansible_distribution in hypervisor_supported_distributions
+    fail_msg: "Insufficient system resources."
+    success_msg: "System meets minimum requirements"
+
+- name: Define public hostname fact
+  ansible.builtin.set_fact:
+    bastion_public_hostname: "{{ hostvars[groups['bastions'][0]]['public_dns_name'] | default('') }}"
+    bastion_ssh_password: "{{ student_password }}"
+    bastion_ssh_user_name: "{{ student_name }}"
+
+- name: Find an extra disk for libvirt folder
+  ansible.builtin.set_fact:
+    _disks: "{{ _disks|default([]) + [ item ] }}"
+    _diskname: "{{ '/dev/' + item.key }}"
+  when:
+    - not item.value.partitions
+    - item.key is search ("nvme*") or item.key is search ("vd*")
+    - min_value|int <= item.value.sectors|int * item.value.sectorsize|int
+    - extra_disk_libvirt_images is true
+  vars:
+    min_value: '{{ 500 * 1024 * 1024 * 1024  }}' #500GB
+  with_dict: "{{ ansible_devices }}"
+
+- name: The device selected to store libvirt files
+  debug:
+    msg: "{{ item }}"
+  with_dict: "{{ _disks }}"
+  when:
+    - _diskname is defined
+
+- name: Create a xfs filesystem on {{ _diskname }}
+  community.general.filesystem:
+    fstype: "xfs"
+    dev: "{{ _diskname }}"
+    force: true
+    state: present
+    resizefs: true
+  when:
+    - _diskname is defined
+
+- name: Create /var/lib/libvirt directory if it does not exist
+  ansible.builtin.file:
+    path: /var/lib/libvirt
+    state: directory
+    mode: '0755'
+
+- name: Mount up device in /var/lib/libvirt
+  ansible.posix.mount:
+    path: /var/lib/libvirt
+    src: "{{ _diskname }}"
+    fstype: xfs
+    state: mounted
+  when:
+    - _diskname is defined
+
+- name: Create /var/lib/libvirt/images directory if it does not exist
+  ansible.builtin.file:
+    path: /var/lib/libvirt/images
+    state: directory
+    mode: '0755'
+
+- name: Ensure libvirt file applies the proper SELinux context
+  ansible.builtin.shell:
+    cmd: restorecon -R /var/lib/libvirt
+
+- name: Ensure lab dependencies are installed
+  ansible.builtin.dnf:
+    name:
+      - libvirt
+      - libvirt-daemon-driver-qemu
+      - qemu-kvm
+      - git
+      - dnsmasq
+      - policycoreutils-python-utils
+      - podman
+      - httpd-tools
+      - haproxy
+      - pip
+      - firewalld
+      - nmstate
+      - container-selinux
+      - shadow-utils
+    state: latest
+  when: install_lab_dependencies|bool
+
+- name: Ensure required Python modules are installed
+  ansible.builtin.pip:
+    name: kubernetes, passlib, pyopenssl, cherrypy, firewall, minio
+  when: install_lab_dependencies|bool
+
+- name: Ensure kcli rpm is installed
+  ansible.builtin.dnf:
+    name: "{{ kcli_rpm }}"
+    disable_gpg_check: true
+  when: install_lab_dependencies|bool
+
+- name: Ensure libvirtd service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: libvirtd
+
+- name: Check if default image pool exists
+  ansible.builtin.shell:
+    cmd: kcli list pool | grep -c default
+  register: default_pool
+  failed_when: default_pool.stderr != ""
+
+- name: Ensure default image pool is present
+  ansible.builtin.command:
+    cmd: kcli create pool -p /var/lib/libvirt/images default
+  register: pool_result
+  failed_when: pool_result.rc != 0 and "already exists" not in pool_result.stderr
+  changed_when: pool_result.rc == 0
+
+- name: Ensure default network is present
+  ansible.builtin.command:
+    cmd: kcli create network -c 192.168.122.0/24 default
+  register: network_result
+  failed_when: network_result.rc != 0 and "already exists" not in network_result.stderr
+  changed_when: network_result.rc == 0
+
+- name: Ensure lab network is present
+  ansible.builtin.command:
+    cmd: "kcli create network -c {{ lab_network_cidr }} -P dhcp=false -P dns=false --domain {{ lab_network_domain }} 5gdeploymentlab"
+  register: lab_network_result
+  failed_when: lab_network_result.rc != 0 and "already exists" not in lab_network_result.stderr
+  changed_when: lab_network_result.rc == 0
+
+- name: Ensure sriov-network is present
+  ansible.builtin.command:
+    cmd: "kcli create network -c {{ lab_sriov_cidr }} -P dhcp=false -P dns=false --domain {{ lab_sriov_domain }} -i sriov-network"
+  register: sriov_network_result
+  failed_when: sriov_network_result.rc != 0 and "already exists" not in sriov_network_result.stderr
+  changed_when: sriov_network_result.rc == 0
+
+- name: Ensure ptp-network is present
+  ansible.builtin.command:
+    cmd: "kcli create network -c {{ lab_ptp_cidr }} -P dhcp=false -P dns=false --domain {{ lab_ptp_domain }} -i ptp-network"
+  register: ptp_network_result
+  failed_when: ptp_network_result.rc != 0 and "already exists" not in ptp_network_result.stderr
+  changed_when: ptp_network_result.rc == 0
+
+- name: Ensure oc/kubectl/openshift-installer tooling is present
+  ansible.builtin.command:
+    cmd: "kcli download {{ item.binary }} -P version={{ item.version }} -P tag='{{ item.tag }}'"
+  loop:
+    - {binary: "oc", version: "stable", tag: "{{ ocp4_major_release }}"}
+    - {binary: "kubectl", version: "latest", tag: "{{ ocp4_major_release }}"}
+    - {binary: "openshift-installer", version: "stable", tag: "{{ ocp4_minor_release }}"}
+    #- {binary: "oc-mirror", version: "stable", tag: "{{ ocp4_major_release }}"}
+  #when: install_lab_dependencies|bool in 4.20
+
+- name: Ensure oc/kubectl/openshift-installer are in the PATH
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/usr/bin/{{ item }}"
+    mode: "0755"
+    remote_src: true
+    force: false #only copy if the file does not exist or it's different
+  loop:
+    - oc
+    - kubectl
+    - openshift-install
+    #- oc-mirror is there for the golden image playbook
+  #when: install_lab_dependencies|bool in 4.20
+
+- name: Ensure DNSMasq folder exists
+  ansible.builtin.file:
+    path: /opt/dnsmasq/include.d/
+    state: directory
+    mode: "0755"
+
+- name: Ensure DNSMasq config files exist
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.destination }}"
+    mode: "{{ item.mode }}"
+  # yamllint disable rule:line-length
+  retries: 5
+  delay: 10
+  loop:
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/dnsmasq.conf", destination: "/opt/dnsmasq/dnsmasq.conf", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/upstream-resolv.conf", destination: "/opt/dnsmasq/upstream-resolv.conf", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/hub.ipv4", destination: "/opt/dnsmasq/include.d/hub.ipv4", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/infrastructure-host.ipv4", destination: "/opt/dnsmasq/include.d/infrastructure-host.ipv4", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/mno.ipv4", destination: "/opt/dnsmasq/include.d/mno.ipv4", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/dnsmasq/dnsmasq-virt.service", destination: "/etc/systemd/system/dnsmasq-virt.service", mode: "0644"}
+  # yamllint enable rule:line-length
+
+- name: Ensure DNS Upstream server is configured
+  ansible.builtin.replace:
+    path: /opt/dnsmasq/upstream-resolv.conf
+    regexp: 'UPSTREAM_DNS'
+    replace: "{{ upstream_dns }}"
+
+- name: Ensure DNSMasq lease file exists
+  ansible.builtin.file:
+    path: /opt/dnsmasq/hosts.leases
+    state: touch
+    mode: "0644"
+    setype: "dnsmasq_lease_t"
+
+- name: Ensure DNSMasq lease file has the proper SELinux context
+  community.general.sefcontext:
+    target: '/opt/dnsmasq/(.*)?\.leases'
+    setype: dnsmasq_lease_t
+    state: present
+
+- name: Ensure DNSMasq config files has the proper SELinux context
+  community.general.sefcontext:
+    target: "{{ item }}"
+    setype: dnsmasq_etc_t
+    state: present
+  loop:
+    - '/opt/dnsmasq/include.d(/.*)?'
+    - '/opt/dnsmasq/(.*)?\.conf'
+    - '/opt/dnsmasq'
+
+- name: Ensure DNSMasq file applies the proper SELinux context
+  ansible.builtin.command:
+    cmd: restorecon -rv /opt/dnsmasq/
+
+- name: Ensure DNSMasq service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: dnsmasq-virt
+
+- name: Ensure dispatcher script exists
+  ansible.builtin.get_url:
+  # yamllint disable rule:line-length
+    url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hypervisor/forcedns"
+    dest: "/etc/NetworkManager/dispatcher.d/forcedns"
+    mode: "0755"
+  # yamllint enable rule:line-length
+
+- name: Ensure NetworkManager is restarted
+  ansible.builtin.systemd:
+    state: restarted
+    name: NetworkManager
+
+- name: Ensure dispatcher script has run
+  ansible.builtin.shell:
+    cmd: /etc/NetworkManager/dispatcher.d/forcedns
+
+- name: Ensure disconnected webcache config files exist
+  ansible.builtin.get_url:
+    # yamllint disable rule:line-length
+    url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/webcache/podman-webcache.service"
+    # yamllint enable rule:line-length
+    dest: "/etc/systemd/system/podman-webcache.service"
+    mode: "0644"
+  retries: 5
+  delay: 10
+
+- name: Ensure webcache folder exist
+  ansible.builtin.file:
+    path: /opt/webcache/data
+    state: directory
+    mode: "0777"
+
+- name: Ensure disconnected webcache service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-webcache
+
+- name: Download live and rootfs images
+  ansible.builtin.get_url:
+    url: "{{ item }}"
+    dest: "/opt/webcache/data/"
+    mode: "0644"
+  loop:
+    - "{{ rhcos_live_image_url }}"
+    - "{{ rhcos_rootfs_image_url }}"
+  poll: 0
+  async: 900
+  register: download_rhcos
+  retries: 3
+  delay: 10
+  when: download_rhcos_isos|bool
+
+- name: Ensure ksushy is installed
+  ansible.builtin.command:
+    cmd: kcli create sushy-service --port 9000
+  register: sushy_async
+  async: 120
+  poll: 0
+  #when: install_lab_dependencies|bool in 4.20
+
+- name: Ensure disconnected registry folders exist
+  ansible.builtin.file:
+    path: /opt/registry/{{ item }}
+    state: directory
+    mode: "0755"
+  loop:
+    - auth
+    - certs
+    - data
+    - conf
+
+- name: Ensure disconnected registry config files exist
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.destination }}"
+    mode: "{{ item.mode }}"
+  # yamllint disable rule:line-length
+  retries: 5
+  delay: 10
+  loop:
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/registry-key.pem", destination: "/opt/registry/certs/registry-key.pem", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/registry-cert.pem", destination: "/opt/registry/certs/registry-cert.pem", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/config.yml", destination: "/opt/registry/conf/config.yml", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/podman-registry.service", destination: "/etc/systemd/system/podman-registry.service", mode: "0644"}
+  # yamllint enable rule:line-length
+
+- name: Ensure disconnected registry user credentials exist
+  community.general.htpasswd:
+    path: /opt/registry/auth/htpasswd
+    crypt_scheme: bcrypt
+    name: "{{ lab_registry_user }}"
+    password: "{{ lab_registry_password }}"
+    mode: 0640
+
+- name: Ensure disconnected registry service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-registry
+
+- name: Ensure disconnected registry cert is trusted
+  ansible.builtin.copy:
+    src: "/opt/registry/certs/registry-cert.pem"
+    dest: "/etc/pki/ca-trust/source/anchors/registry-cert.pem"
+    mode: "0755"
+    remote_src: true
+
+- name: Ensure trusted certs are updated
+  ansible.builtin.command:
+    cmd: update-ca-trust extract
+
+- name: Ensure pull secret is copied to the bastion host
+  ansible.builtin.copy:
+    content: "{{ocp4_pull_secret }}"
+    dest: "{{ item.destination }}"
+    mode: '0644'
+  loop:
+    - {destination: "/root/openshift_pull.json"}
+    #- {destination: "/home/{{ student_name }}/.docker/config.json"}
+    - {destination: "/root/.docker/config.json"}
+  when: student_name is defined
+
+# oc-mirror: populate local registry with OCP 4.18/4.19/4.20 + Core RDS operators
+- name: Download ImageSetConfiguration for 5G Core lab
+  ansible.builtin.get_url:
+    # yamllint disable rule:line-length
+    url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/{{ imageset_config_file }}"
+    # yamllint enable rule:line-length
+    dest: "/root/{{ imageset_config_file }}"
+    mode: "0644"
+  retries: 5
+  delay: 10
+  when: run_oc_mirror | default(true) | bool
+
+- name: Login to local registry so oc-mirror can push images
+  containers.podman.podman_login:
+    username: "{{ lab_registry_user }}"
+    password: "{{ lab_registry_password }}"
+    registry: "{{ lab_registry_host }}"
+  when: run_oc_mirror | default(true) | bool
+
+- name: Mirror OCP 4.18/4.19/4.20 releases and operators to local registry (async)
+  ansible.builtin.shell:
+    cmd: >-
+      oc-mirror
+      --parallel-images=10
+      --v2
+      --workspace file://
+      --config={{ imageset_config_file }}
+      docker://{{ lab_registry_host }}
+      | tee -a /root/mirroring.log
+  args:
+    chdir: /root/
+  register: oc_mirror_async_result
+  async: "{{ oc_mirror_timeout | default(7200) }}"
+  poll: 0
+  when: run_oc_mirror | default(true) | bool
+
+# oc-mirror runs in background while VMs and other services are configured.
+
+# MinIO S3 required for Multicluster Observability and cluster logging
+- name: Ensure S3 storage config files exist
+  ansible.builtin.get_url:
+    url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/minio/podman-minio.service"
+    dest: "/etc/systemd/system/podman-minio.service"
+    mode: "0644"
+  retries: 5
+  delay: 10
+  when: lab_deploy_minio | default(false) | bool
+
+- name: Ensure s3 folder exist
+  ansible.builtin.file:
+    path: /opt/minio/s3-volume
+    state: directory
+    mode: "0755"
+  when: lab_deploy_minio | default(false) | bool
+
+- name: Ensure s3 storage service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-minio
+  when: lab_deploy_minio | default(false) | bool
+
+- name: Download S3 mc client
+  ansible.builtin.get_url:
+    url: https://dl.min.io/client/mc/release/linux-amd64/mc
+    dest: /usr/bin/mc
+    mode: "0744"
+  when: lab_deploy_minio | default(false) | bool
+
+- name: Create a S3 storage
+  ansible.builtin.shell:
+    cmd: mc alias set minio http://192.168.125.1:9002 admin admin1234
+  retries: 3
+  delay: 10
+  register: s3_alias_result
+  until: s3_alias_result.rc == 0 or 'Added `minio` successfully.' in s3_alias_result.stdout
+  failed_when: s3_alias_result.rc != 0 and 'Added `minio` successfully.' not in s3_alias_result.stdout
+  changed_when: s3_alias_result.rc == 0
+  when: lab_deploy_minio | default(false) | bool
+
+# Observability: Multicluster Observability and cluster logging need S3 buckets (logs, multiclusterobservability).
+# When using MinIO as S3 backend, the tasks below create these buckets on the hypervisor.
+# When using ODF, buckets are typically created in the cluster (e.g. ObjectBucketClaim in workload).
+- name: Ensure observability and logging S3 buckets exist (when using MinIO)
+  block:
+    - name: Check if observability/logging buckets exist
+      ansible.builtin.shell:
+        cmd: "mc stat minio/{{ item.name }}"
+      loop:
+        - {name: "logs"}
+        - {name: "multiclusterobservability"}
+  rescue:
+    - name: Create observability and logging buckets
+      ansible.builtin.shell:
+        cmd: "mc mb minio/{{ item.name }}"
+      retries: 3
+      delay: 10
+      register: result
+      until: result.rc == 0 or "Bucket created successfully" in result.stdout
+      failed_when: result.rc != 0 and "Bucket created successfully" not in result.stdout
+      loop:
+        - {name: "logs"}
+        - {name: "multiclusterobservability"}
+  when: (lab_deploy_minio | default(false) | bool) and (lab_deploy_observability | default(true) | bool)
+
+- name: Ensure firewalld is enabled
+  ansible.builtin.systemd:
+    state: started
+    masked: false
+    enabled: true
+    name: firewalld
+
+- name: Permit Lab traffic in public and libvirt zones for services
+  ansible.posix.firewalld:
+    zone: "{{ item[0] }}"
+    service: "{{ item[1] }}"
+    permanent: true
+    state: enabled
+  with_nested:
+    - [ 'public', 'libvirt' ]
+    - [ 'https', 'http', 'dns', 'libvirt', 'git', 'dhcp' ]
+  register: firewalld_service
+  ignore_errors: true
+
+- name: Permit Lab traffic in public and libvirt zones for haproxy, webcache, registry, ksushy, git
+  ansible.posix.firewalld:
+    zone: "{{ item[0] }}"
+    port: "{{ item[1] }}"
+    permanent: true
+    state: enabled
+  with_nested:
+    - [ 'public', 'libvirt' ]
+    - [ '6443/tcp', '8080/tcp', '8443/tcp', '9000/tcp', '3000/tcp', '2222/tcp', '9000/tcp', '9001/tcp', '9002/tcp' ]
+  register: firewalld_port
+  ignore_errors: true
+
+- name: Ensure firewalld service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: false
+    enabled: true
+    name: firewalld
+  when: firewalld_service.changed or
+      firewalld_port.changed
+  ignore_errors: true
+
+- name: Wait for registry port {{ lab_registry_host.split(":")[1] }} to become open on the host
+  ansible.builtin.wait_for:
+    port: "{{ lab_registry_host.split(':')[1] }}"
+    host: "{{ lab_registry_host.split(':')[0] }}"
+    delay: 0
+    sleep: 10
+    timeout: 60
+
+- name: Ensure registry is running by login into it
+  containers.podman.podman_login:
+    username: admin
+    password: 'r3dh4t1!'
+    registry: "{{ lab_registry_host }}"
+    authfile: auth.json
+
+- name: Ensure git server folder exists
+  ansible.builtin.file:
+    path: /opt/gitea/
+    state: directory
+    owner: 1000
+    group: 1000
+    mode: "0755"
+
+- name: Ensure git server config file exists
+  ansible.builtin.get_url:
+    # yamllint disable rule:line-length
+    url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/gitea/podman-gitea.service"
+    # yamllint enable rule:line-length
+    dest: "/etc/systemd/system/podman-gitea.service"
+    mode: "0644"
+  retries: 5
+  delay: 10
+
+- name: Ensure git server service is enabled and running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-gitea
+
+- name: Ensure gitea admin user is created
+  ansible.builtin.shell:
+    # yamllint disable rule:line-length
+    cmd: podman exec --user 1000 gitea /bin/sh -c 'gitea admin user create --username student --password student --email student@5g-deployment.lab --must-change-password=false --admin'
+    # yamllint enable rule:line-length
+  retries: 5
+  delay: 10
+  register: gitea_user_result
+  until: gitea_user_result.rc == 0 or "user already exists" in gitea_user_result.stdout
+  failed_when: gitea_user_result.rc != 0 and "user already exists" not in gitea_user_result.stdout
+  changed_when: gitea_user_result.rc == 0
+
+- name: Ensure github repos are copied to gitea
+  ansible.builtin.uri:
+    url: http://infra.5g-deployment.lab:3000/api/v1/repos/migrate
+    user: student
+    password: student
+    method: POST
+    # yamllint disable rule:line-length
+    body: '{"service":"2","clone_addr":"{{ item.repo_url }}","uid":1,"repo_name":"{{ item.repo_name }}"}'
+    # yamllint enable rule:line-length
+    body_format: json
+    return_content: true
+    force_basic_auth: true
+  register: result
+  until: >-
+    result.status == 201 or
+    (result.json is defined and
+     result.json.message is defined and
+     "The repository with the same name already exists" in result.json.message)
+  retries: 10
+  delay: 10
+  failed_when: >-
+    result.status != 201 and
+    (result.json is not defined or
+     result.json.message is not defined or
+     "The repository with the same name already exists" not in result.json.message)
+  # yamllint disable rule:line-length
+  loop:
+    - {repo_url: "https://github.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab.git", repo_name: "5g-core-deployments-on-ocp-lab"}
+  # yamllint enable rule:line-length
+
+# MNO: 3 master VMs (single disk)
+- name: Ensure MNO master VMs exist
+  ansible.builtin.shell:
+    cmd: "kcli create vm -P start=False -P uefi_legacy=true -P plan=hub -P memory={{ item.memory }} -P numcpus={{ item.cpus }} -P disks=[{{ item.disk }}] -P nets=['{\"name\": \"5gdeploymentlab\", \"mac\": \"{{ item.mac }}\"}','{\"name\":\"ptp-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"0\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"1\"}'] -P uuid={{ item.uuid }} -P name={{ item.name }}"
+  register: result
+  failed_when: result.rc != 0 and "not created because VM" not in result.stderr
+  loop:
+    - {name: "ocp-mno-master-00", cpus: "{{ lab_mno_master_vm_cpus }}", disk: "{{ lab_mno_master_vm_disk }}", memory: "{{ lab_mno_master_vm_memory }}", mac: "aa:aa:aa:aa:02:01", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0201"}
+    - {name: "ocp-mno-master-01", cpus: "{{ lab_mno_master_vm_cpus }}", disk: "{{ lab_mno_master_vm_disk }}", memory: "{{ lab_mno_master_vm_memory }}", mac: "aa:aa:aa:aa:02:02", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0202"}
+    - {name: "ocp-mno-master-02", cpus: "{{ lab_mno_master_vm_cpus }}", disk: "{{ lab_mno_master_vm_disk }}", memory: "{{ lab_mno_master_vm_memory }}", mac: "aa:aa:aa:aa:02:03", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0203"}
+
+# MNO: 9 worker VMs (two disks: system + ODF)
+- name: Ensure MNO worker VMs exist
+  ansible.builtin.shell:
+    cmd: "kcli create vm -P start=False -P uefi_legacy=true -P plan=hub -P memory={{ item.memory }} -P numcpus={{ item.cpus }} -P disks=[{{ item.disk }},{{ item.extra_disk }}] -P nets=['{\"name\": \"5gdeploymentlab\", \"mac\": \"{{ item.mac }}\"}','{\"name\":\"ptp-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"0\"}','{\"name\":\"sriov-network\",\"type\":\"igb\",\"vfio\":\"true\",\"noconf\":\"true\",\"numa\":\"1\"}'] -P uuid={{ item.uuid }} -P name={{ item.name }}"
+  register: result
+  failed_when: result.rc != 0 and "not created because VM" not in result.stderr
+  loop:
+    - {name: "ocp-mno-worker-00", cpus: "{{ lab_mno_worker_vm_cpus }}", disk: "{{ lab_mno_worker_vm_disk }}", extra_disk: "{{ lab_mno_worker_vm_extra_disk }}", memory: "{{ lab_mno_worker_vm_memory }}", mac: "aa:aa:aa:aa:02:04", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0204"}
+    - {name: "ocp-mno-worker-01", cpus: "{{ lab_mno_worker_vm_cpus }}", disk: "{{ lab_mno_worker_vm_disk }}", extra_disk: "{{ lab_mno_worker_vm_extra_disk }}", memory: "{{ lab_mno_worker_vm_memory }}", mac: "aa:aa:aa:aa:02:05", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0205"}
+    - {name: "ocp-mno-worker-02", cpus: "{{ lab_mno_worker_vm_cpus }}", disk: "{{ lab_mno_worker_vm_disk }}", extra_disk: "{{ lab_mno_worker_vm_extra_disk }}", memory: "{{ lab_mno_worker_vm_memory }}", mac: "aa:aa:aa:aa:02:06", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0206"}
+    - {name: "ocp-mno-worker-10", cpus: "{{ lab_mno_worker_vm_cpus }}", disk: "{{ lab_mno_worker_vm_disk }}", extra_disk: "{{ lab_mno_worker_vm_extra_disk }}", memory: "{{ lab_mno_worker_vm_memory }}", mac: "aa:aa:aa:aa:02:07", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0207"}
+    - {name: "ocp-mno-worker-11", cpus: "{{ lab_mno_worker_vm_cpus }}", disk: "{{ lab_mno_worker_vm_disk }}", extra_disk: "{{ lab_mno_worker_vm_extra_disk }}", memory: "{{ lab_mno_worker_vm_memory }}", mac: "aa:aa:aa:aa:02:08", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0208"}
+    - {name: "ocp-mno-worker-12", cpus: "{{ lab_mno_worker_vm_cpus }}", disk: "{{ lab_mno_worker_vm_disk }}", extra_disk: "{{ lab_mno_worker_vm_extra_disk }}", memory: "{{ lab_mno_worker_vm_memory }}", mac: "aa:aa:aa:aa:02:09", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0209"}
+    - {name: "ocp-mno-worker-20", cpus: "{{ lab_mno_worker_vm_cpus }}", disk: "{{ lab_mno_worker_vm_disk }}", extra_disk: "{{ lab_mno_worker_vm_extra_disk }}", memory: "{{ lab_mno_worker_vm_memory }}", mac: "aa:aa:aa:aa:02:10", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0210"}
+    - {name: "ocp-mno-worker-21", cpus: "{{ lab_mno_worker_vm_cpus }}", disk: "{{ lab_mno_worker_vm_disk }}", extra_disk: "{{ lab_mno_worker_vm_extra_disk }}", memory: "{{ lab_mno_worker_vm_memory }}", mac: "aa:aa:aa:aa:02:11", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0211"}
+    - {name: "ocp-mno-worker-22", cpus: "{{ lab_mno_worker_vm_cpus }}", disk: "{{ lab_mno_worker_vm_disk }}", extra_disk: "{{ lab_mno_worker_vm_extra_disk }}", memory: "{{ lab_mno_worker_vm_memory }}", mac: "aa:aa:aa:aa:02:12", uuid: "uuid=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa0212"}
+
+
+- name: Ensure plan file exists
+  ansible.builtin.get_url:
+    # yamllint disable rule:line-length
+    url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/hub-cluster/hub.yml"
+    # yamllint enable rule:line-length
+    dest: "/root/hub.yml"
+    mode: "0644"
+  retries: 5
+  delay: 10
+
+- name: Setup admin password
+  ansible.builtin.set_fact:
+    strong_admin_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
+    strong_dev_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
+    strong_lab_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') }}"
+
+- name: Set password to hub admin user
+  ansible.builtin.replace:
+    path: "/root/hub.yml"
+    regexp: '{{ item.regexp }}'
+    replace: "'{{ item.password }}'"
+  loop:
+    - {regexp: "CHANGE_ADMIN_PWD", password: "{{ strong_admin_password }}"}
+    - {regexp: "CHANGE_DEV_PWD", password: "{{ strong_dev_password }}"}
+
+- name: Write password to a file
+  ansible.builtin.copy:
+    content: "{{ item.password }}"
+    dest: "{{ item.dest }}"
+  loop:
+    - {dest: "/home/{{ student_name }}/cred-admin.txt", password: "{{ strong_admin_password }}"}
+    - {dest: "/home/{{ student_name }}/cred-dev.txt", password: "{{ strong_dev_password }}"}
+
+- name: Ensure .ssh directory exists
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: '0700'
+    owner: "{{ item.owner }}"
+  loop:
+    - {path: "/home/{{ student_name }}/.ssh", owner: "{{ student_name }}"}
+    - {path: "/root/.ssh", owner: "root"}
+
+- name: Ensure ssh-key exists
+  community.crypto.openssh_keypair:
+    path: "{{ item.path }}"
+    owner: "{{ item.owner }}"
+  loop:
+    - {path: "/home/{{ student_name }}/.ssh/id_rsa", owner: "{{ student_name }}"}
+    - {path: "/root/.ssh/id_rsa", owner: "root"}
+
+- name: Async check sushy tools are installed
+  ansible.builtin.async_status:
+    jid: "{{ sushy_async.ansible_job_id }}"
+  register: job_result
+  until: job_result.finished
+  retries: 10
+  delay: 5
+
+- name: Ensure sushy tools are running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: ksushy
+
+- name: Ensure sushy is listening for redfish connections
+  ansible.builtin.uri:
+    url: https://infra.5g-deployment.lab:9000/redfish/v1/Systems/local/ocp-mno-master-00
+    method: GET
+    status_code: 200
+    validate_certs: false
+
+# Showroom
+
+- name: Ensure lab-user exists and it is part of libvirt group
+  ansible.builtin.user:
+    name: lab-user
+    groups: libvirt
+
+- name: Ensure Git settings are configured for lab-user
+  community.general.git_config:
+    name: "{{ item.parameter }}"
+    value: "{{ item.value }}"
+    scope: global
+  loop:
+    - {parameter: "user.email", value: "student@5g-deployment.lab"}
+    - {parameter: "user.name", value: "Student"}
+  become: true
+  become_user: lab-user
+
+- name: Ensure showroom folder exists
+  ansible.builtin.file:
+    path: /opt/showroom
+    state: directory
+    mode: "0755"
+
+- name: Ensure lab-content folder exists
+  ansible.builtin.file:
+    path: /opt/showroom/lab-content
+    state: directory
+    mode: "0755"
+
+- name: Generate lab-content on the hypervisor host - Clone repo
+  ansible.builtin.git:
+    repo: "{{ lab_repo }}"
+    dest: /opt/showroom/lab-repo/
+    single_branch: true
+    version: "{{ lab_version }}"
+
+- name: Generate lab-content on the hypervisor host - Modify required files
+  ansible.builtin.replace:
+    path: "{{ item.file }}"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  loop:
+  # yamllint disable rule:line-length
+    - {regexp: "demo_environment_here", value: "true", file: "/opt/showroom/lab-repo/site.yml"}
+    - {regexp: "admin_password_here", value: "{{ strong_admin_password }}", file: "/opt/showroom/lab-repo/documentation/modules/ROOT/pages/_attributes.adoc"}
+  # yamllint enable rule:line-length
+
+- name: Generate lab-content on the hypervisor host - Run Antora
+  containers.podman.podman_container:
+    name: antora_build
+    image: quay.io/rhsysdeseng/showroom:antora-v3.0.0
+    state: started
+    detach: false
+    remove: true
+    volumes:
+      - "/opt/showroom/lab-repo:/antora:z"
+    command: "site.yml"
+
+- name: Generate lab-content on the hypervisor host - Copy generated files
+  ansible.builtin.copy:
+    src: /opt/showroom/lab-repo/gh-pages/
+    dest: /opt/showroom/lab-content/
+    remote_src: true
+    directory_mode: true
+
+- name: Generate lab-content on the hypervisor host - Download showroom html files
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.destination }}"
+    mode: "{{ item.mode }}"
+  # yamllint disable rule:line-length
+  retries: 5
+  delay: 10
+  loop:
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/index.html", destination: "/opt/showroom/lab-content/index.html", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/split.css", destination: "/opt/showroom/lab-content/split.css", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/tabs.css", destination: "/opt/showroom/lab-content/tabs.css", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/webfiles/tabs.js", destination: "/opt/showroom/lab-content/tabs.js", mode: "0644"}
+  # yamllint enable rule:line-length
+
+- name: Generate lab-content on the hypervisor host - Modify showroom html files
+  ansible.builtin.replace:
+    path: "/opt/showroom/lab-content/index.html"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  loop:
+    - {regexp: "<CHANGEME_LAB_VERSION>", value: "{{ lab_release }}"}
+    - {regexp: "<CHANGEME_HYPERVISOR_PUBLIC_HOSTNAME>", value: "{{ bastion_public_hostname }}"}
+
+- name: Configure showroom - Download showroom services and configurations
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ item.destination }}"
+    mode: "{{ item.mode }}"
+  # yamllint disable rule:line-length
+  retries: 5
+  delay: 10
+  loop:
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-apache.service", destination: "/etc/systemd/system/podman-showroom-apache.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-wetty.service", destination: "/etc/systemd/system/podman-showroom-wetty.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-firefox.service", destination: "/etc/systemd/system/podman-showroom-firefox.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/firefox-config.tar.gz", destination: "/tmp/firefox-config.tar.gz", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/podman-showroom-traefik.service", destination: "/etc/systemd/system/podman-showroom-traefik.service", mode: "0644"}
+    - {url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/showroom/traefik-config.tar.gz", destination: "/tmp/traefik-config.tar.gz", mode: "0644"}
+  # yamllint enable rule:line-length
+
+- name: Configure showroom - Ensure content apache is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-apache
+
+- name: Configure showroom - Configure wetty
+  ansible.builtin.replace:
+    path: "/etc/systemd/system/podman-showroom-wetty.service"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  loop:
+    - {regexp: "<CHANGEME_LAB_USER>", value: "{{ bastion_ssh_user_name }}"}
+    - {regexp: "<CHANGEME_LAB_USER_PWD>", value: "{{ bastion_ssh_password }}"}
+
+- name: Configure showroom - Ensure wetty is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-wetty
+
+- name: Configure showroom - Configure Firefox 1/2
+  ansible.builtin.unarchive:
+    src: /tmp/firefox-config.tar.gz
+    dest: /opt/showroom/
+    remote_src: true
+
+- name: Configure showroom - Configure Firefox 2/2
+  ansible.builtin.replace:
+    path: "/etc/systemd/system/podman-showroom-firefox.service"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  loop:
+    - {regexp: "<CHANGEME_LAB_USER>", value: "{{ bastion_ssh_user_name }}"}
+    - {regexp: "<CHANGEME_LAB_USER_PWD>", value: "{{ strong_lab_password }}"}
+
+- name: Configure showroom - Ensure Firefox is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-firefox
+
+- name: Ensure traefik folder exists
+  ansible.builtin.file:
+    path: /opt/showroom/traefik
+    state: directory
+    mode: "0755"
+
+- name: Create htpasswd entry
+  ansible.builtin.shell: echo "{{ strong_lab_password }}" | htpasswd -i -n "{{ bastion_ssh_user_name }}"
+  register: lab_htpass_user
+  changed_when: false
+
+- name: Configure showroom - Configure Traefik 1/2
+  ansible.builtin.unarchive:
+    src: /tmp/traefik-config.tar.gz
+    dest: /opt/showroom/traefik
+    remote_src: true
+
+- name: Configure showroom - Configure Traefik 2/2
+  ansible.builtin.replace:
+    path: "/opt/showroom/traefik/config/traefik/dynamic_config.yml"
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.value }}"
+  loop:
+    - {regexp: "<CHANGEME_HTPASS_USER>", value: "{{ lab_htpass_user.stdout }}"}
+    - {regexp: "<CHANGEME_HYPERVISOR_PUBLIC_HOSTNAME>", value: "{{ bastion_public_hostname }}"}
+
+- name: Configure showroom - Ensure Traefik is running
+  ansible.builtin.systemd:
+    state: restarted
+    daemon_reload: true
+    enabled: true
+    name: podman-showroom-traefik
+
+- name: Async check download live and rootfs images
+  block:
+    - name: Checking the async jobs
+      ansible.builtin.async_status:
+        jid: "{{ async_result_item.ansible_job_id }}"
+      loop: "{{ download_rhcos.results }}"
+      loop_control:
+        loop_var: "async_result_item"
+      register: job_result
+      until: job_result.finished
+      retries: 60
+      delay: 10
+  rescue:
+    - name: Check status of {{ rhcos_live_image }}
+      ansible.builtin.stat:
+        path: "/opt/webcache/data/{{ rhcos_live_image }}"
+      register: rhcos_live_image_file
+    - name: "{{ rhcos_live_image }} was not downloaded. Re-downloading again..."
+      ansible.builtin.get_url:
+        url: "{{ rhcos_live_image_url }}"
+        dest: "/opt/webcache/data/"
+        mode: "0644"
+      register: download_live_result
+      until: not download_live_result.failed
+      retries: 3
+      delay: 10
+      when: not rhcos_live_image_file.stat.exists
+    - name: Check status of {{ rhcos_rootfs_image }}
+      ansible.builtin.stat:
+        path: "/opt/webcache/data/{{ rhcos_rootfs_image }}"
+      register: rhcos_rootfs_image_file
+    - name: "{{ rhcos_rootfs_image }} was not downloaded. Re-downloading again..."
+      ansible.builtin.get_url:
+        url: "{{ rhcos_rootfs_image_url }}"
+        dest: "/opt/webcache/data/"
+        mode: "0644"
+      register: download_rootfs_result
+      until: not download_rootfs_result.failed
+      retries: 3
+      delay: 10
+      when: not rhcos_rootfs_image_file.stat.exists
+  when: download_rhcos_isos|bool
+
+# oc-mirror was launched async in pre_workload.yml. Wait here before Hub install needs the images.
+- name: Wait for oc-mirror to complete
+  ansible.builtin.async_status:
+    jid: "{{ oc_mirror_async_result.ansible_job_id }}"
+  register: oc_mirror_job_result
+  until: oc_mirror_job_result.finished
+  retries: "{{ ((oc_mirror_timeout | default(7200)) / 30) | int }}"
+  delay: 30
+  failed_when: >
+    oc_mirror_job_result.failed or
+    'some errors occurred during the mirroring' in
+    ((oc_mirror_job_result.stdout | default('')) + (oc_mirror_job_result.stderr | default('')))
+  when: run_oc_mirror | default(true) | bool
+
+- name: Show last 25 lines of oc-mirror log
+  ansible.builtin.shell:
+    cmd: tail -25 /root/mirroring.log
+  register: oc_mirror_log_tail
+  changed_when: false
+  when: run_oc_mirror | default(true) | bool
+
+- name: Print oc-mirror log summary
+  ansible.builtin.debug:
+    msg: "{{ oc_mirror_log_tail.stdout_lines }}"
+  when: run_oc_mirror | default(true) | bool
+
+- name: Check oc-mirror log for errors
+  ansible.builtin.shell:
+    cmd: grep -c '\[ERROR\]' /root/mirroring.log
+  register: oc_mirror_error_count
+  changed_when: false
+  failed_when: false
+  when: run_oc_mirror | default(true) | bool
+
+- name: Fail if oc-mirror log contains errors
+  ansible.builtin.fail:
+    msg: >-
+      oc-mirror reported {{ oc_mirror_error_count.stdout | trim }} error(s).
+      Review /root/mirroring.log for details.
+  when:
+    - run_oc_mirror | default(true) | bool
+    - oc_mirror_error_count.stdout | trim | int > 0
+
+# Leave this as the last task in the playbook.
+- name: pre_workload tasks complete
+  debug:
+    msg: "Pre-Workload tasks completed successfully."
+  when: not silent|bool
