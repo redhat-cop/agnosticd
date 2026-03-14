@@ -3,20 +3,13 @@
   set_fact:
     docs_proxy_cookie_secret: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits') | b64encode }}"
 
-- name: Get Showroom Route hostname
-  kubernetes.core.k8s_info:
+- name: Delete Showroom Route to enforce authentication via proxy
+  kubernetes.core.k8s:
+    state: absent
     api_version: route.openshift.io/v1
     kind: Route
     name: showroom
     namespace: "{{ docs_namespace }}"
-  register: showroom_route_result
-  until: showroom_route_result.resources | length > 0
-  retries: 30
-  delay: 10
-
-- name: Set Showroom Route URL
-  set_fact:
-    showroom_route_host: "{{ showroom_route_result.resources[0].spec.host }}"
 
 - name: Create docs-proxy ServiceAccount
   kubernetes.core.k8s:
@@ -44,13 +37,18 @@
           server {
               listen 8081;
               location / {
-                  add_header Set-Cookie "username=$http_x_forwarded_user; Path=/; Domain=.{{ route_subdomain }}; SameSite=Lax";
-                  return 302 https://{{ showroom_route_host }};
+                  add_header Set-Cookie "username=$http_x_forwarded_user; Path=/; SameSite=Lax" always;
+                  proxy_pass http://showroom:8080;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  sub_filter_once off;
+                  sub_filter_types text/html;
+                  sub_filter 'src="https://showroom-{{ docs_namespace }}.{{ route_subdomain }}/' 'src="/';
               }
               location = /logout {
-                  add_header Set-Cookie "username=; Path=/; Domain=.{{ route_subdomain }}; Expires=Thu, 01 Jan 1970 00:00:00 GMT" always;
+                  add_header Set-Cookie "username=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT" always;
                   add_header Set-Cookie "_oauth_proxy=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT" always;
-                  return 302 https://docs.{{ route_subdomain }}/oauth/sign_in;
+                  return 302 https://$host/oauth/sign_in;
               }
           }
 
