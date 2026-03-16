@@ -5,7 +5,8 @@ The `workload.yml` file deploys **only the Hub cluster and ArgoCD** for the 5G C
 ## What Workload Does
 
 ### 1. Hub Cluster Deployment
-- Golden image / disconnected registry settings, hub cluster creation with kcli.
+- Hub cluster creation with kcli using the **local disconnected registry** pre-populated by oc-mirror in pre_workload.
+- `disconnected_update: false` — kcli does not perform its own image mirroring; all OCP release and operator images (4.18/4.19/4.20) are already available at `infra.5g-deployment.lab:8443`.
 - Manifests from **5g-core-deployments-on-ocp-lab** (hub-related).
 - Hub kubeconfig retrieval and login.
 
@@ -27,26 +28,24 @@ The `workload.yml` file deploys **only the Hub cluster and ArgoCD** for the 5G C
 
 ## What Workload Does Not Do
 
-- **No** SNO or MNO cluster deployment.
-- **No** seed-cluster or MNO kubeconfig extraction.
-- **No** OADP/LCA/LVMS/SR-IOV/Logging/PTP installation on a seed/MNO cluster.
-- **No** SR-IOV/PTP/Logging/PerformanceProfile on MNO nodes.
+- **No** MNO cluster deployment.
+- **No** MNO kubeconfig extraction.
+- **No** Telco Core RDS configuration on MNO nodes.
 
-MNO operators (ODF, NMState, SR-IOV, PTP, MetalLB, Numaresources, Logging, PerformanceProfile, SCTP, etc.) are intended to be applied by you via the lab repo's **PolicyGenerators** and **ClusterInstance** flow, not by this role's workload phase.
+MNO operators (ODF, NMState, SR-IOV, PTP, MetalLB, Numaresources, Logging) and PerformanceProfile, SCTP, etc. are intended to be applied by you via the lab repo's **PolicyGenerators** and **ClusterInstance** flow, not by this role's workload phase.
 
 ## Key Components (Hub only)
 
 - OpenShift Hub cluster (e.g. 4.20).
 - ArgoCD (GitOps / ZTP support).
 - LVM storage, Multi-Cluster Hub, Multi-Cluster Engine.
-- Lab content and ArgoCD apps from **alosadagrande/5g-core-deployments-on-ocp-lab**.
+- Lab content and ArgoCD apps from **rhsyseng/5g-core-deployments-on-ocp-lab**.
 
 ## After Workload
 
 1. **Hub** and **ArgoCD** are ready.
 2. **12 MNO VMs** are created and defined (pre_workload); they are **not** installed by this role.
 3. You install the **MNO** cluster using the lab repo's **ClusterInstance** and **PolicyGenerators** (no SiteConfig/PolicyGenTemplates in this role).
-4. No MinIO by default; use **ODF** for S3 in the 5G Core lab.
 
 ## Time and Prerequisites
 

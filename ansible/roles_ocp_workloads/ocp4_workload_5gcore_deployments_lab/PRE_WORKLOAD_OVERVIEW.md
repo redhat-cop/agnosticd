@@ -21,8 +21,18 @@ The `pre_workload.yml` file contains the initial setup and preparation tasks for
 ### 5. Container Registry
 - Podman registry on port 8443, auth, SSL, systemd service.
 
-### 6. S3 Storage (MinIO) – Optional
-- **Only if `lab_deploy_minio` is true.** For 5G Core, default is **false**; ODF provides S3. When enabled: MinIO on port 9002, buckets, `mc` client.
+#### 5b. OCP Release and Operator Mirroring (oc-mirror)
+- Runs immediately after the registry is up and its certificate is trusted.
+- Downloads `imageset-mirror-core.yaml` (ImageSetConfiguration) from the lab repo (`lab-materials/lab-env-data/registry/`).
+- Executes a single **`oc-mirror`** run (async, configurable timeout via `oc_mirror_timeout`, default 7200s / 2h) targeting `docker://infra.5g-deployment.lab:8443`, mirroring:
+  - OCP releases **4.18**, **4.19**, and **4.20**
+  - All operator indexes for the 5G Core RDS stack: ODF, NMState, SR-IOV, PTP, MetalLB, Numaresources, Logging, PerformanceProfile/SCTP
+- Applies the resulting **IDMS/ITMS** manifests on the hypervisor so they are available for both Hub installation and future MNO deployment.
+- **Toggle**: set `run_oc_mirror: false` to skip this block when the registry is already pre-populated.
+
+### 6. S3 Storage (MinIO)
+- **Enabled by default** (`lab_deploy_minio: true`). MinIO is required to provide S3 storage for **RHACM multi-cluster observability** on the Hub. Disable with `lab_deploy_minio: false` if not needed.
+- When enabled: MinIO on port 9002, buckets, `mc` client.
 
 ### 7. Git Server (Gitea)
 - Gitea on port 3000, admin user, **migration of 5g-core-deployments-on-ocp-lab** from GitHub.
@@ -50,12 +60,12 @@ The `pre_workload.yml` file contains the initial setup and preparation tasks for
 
 | Service           | Port | Purpose              | Notes                    |
 |-------------------|------|----------------------|--------------------------|
-| Container Registry| 8443 | OpenShift images     | Always                   |
-| Gitea             | 3000 | Lab repo (5G Core)   | Always                   |
-| MinIO             | 9002 | S3 (optional)         | Only if `lab_deploy_minio` |
-| Web Cache         | 8080 | Image caching        | Always                   |
-| Redfish (ksushy)  | 9000 | BMC simulation       | Always                   |
-| Lab Showroom      | 80   | Lab docs             | Always                   |
+| Container Registry| 8443 | OpenShift images (oc-mirror) | Always                                        |
+| Gitea             | 3000 | Lab repo (5G Core)           | Always                                        |
+| MinIO             | 9002 | S3 for RHACM observability   | Always (default); disable with `lab_deploy_minio: false` |
+| Web Cache         | 8080 | Image caching                | Always                                        |
+| Redfish (ksushy)  | 9000 | BMC simulation               | Always                                        |
+| Lab Showroom      | 80   | Lab docs                     | Always                                        |
 
 ## Network
 

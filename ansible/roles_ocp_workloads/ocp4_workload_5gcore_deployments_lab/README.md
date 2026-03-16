@@ -2,13 +2,13 @@
 
 ## Overview
 
-The `ocp4_workload_5gcore_deployments_lab` Ansible role automates the preparation of a 5G Core lab environment on OpenShift. This lab provides **1 Hub cluster** and prepares **12 VMs** for a single **MNO (Mobile Network Operator) cluster** (3 master nodes + 9 worker nodes in 3 failure domains). The role does **not** deploy the MNO cluster automatically; it prepares the Hub, ArgoCD, and infrastructure so you can deploy the MNO using **ClusterInstance** and **PolicyGenerators** from the 5g-core-deployments-on-ocp-lab repository.
+The `ocp4_workload_5gcore_deployments_lab` Ansible role automates the preparation of a 5G Core lab environment on OpenShift. This lab provides **1 Hub cluster** and prepares **12 VMs** for a single **MNO (Multi Node OpenShift) cluster** (3 master nodes + 9 worker nodes in 3 failure domains). The role does **not** deploy the MNO cluster automatically; it prepares the Hub, ArgoCD, and infrastructure so you can deploy the MNO using **ClusterInstance** and **PolicyGenerators** from the 5g-core-deployments-on-ocp-lab repository.
 
 ## What This Lab Prepares
 
 - **Hub Cluster**: Full OpenShift cluster with Multi-Cluster Management and ArgoCD.
 - **MNO VMs**: 3 masters (`ocp-mno-master-00`–`02`) and 9 workers (`ocp-mno-worker-00`–`02`, `10`–`12`, `20`–`22`) in 3 failure domains (3 workers per MCP).
-- **Infrastructure**: Gitea, container registry, web cache, dnsmasq, and (optionally) MinIO. For 5G Core, **MinIO is disabled by default**; ODF is used for S3.
+- **Infrastructure**: Gitea, container registry (pre-populated with OCP 4.18/4.19/4.20 and telco core RDS operators via oc-mirror), web cache, dnsmasq, and MinIO. **MinIO is enabled by default** to provide S3 storage for RHACM multi-cluster observability.
 - **Lab content**: Materials from `alosadagrande/5g-core-deployments-on-ocp-lab` (branch/tag `main`).
 
 ## Prerequisites
@@ -116,26 +116,37 @@ ansible-playbook -i inventory run-role.yml \
 
 ### Feature toggles
 
-| Variable                 | Default | Description                          |
-|--------------------------|---------|--------------------------------------|
-| `lab_deploy_minio`       | `false` | Deploy MinIO (5G Core uses ODF for S3) |
-| `install_lab_dependencies` | `false` | Install extra lab tools           |
-| `download_rhcos_isos`    | `false` | Download RHCOS images               |
-| `extra_disk_libvirt_images` | `true` | Use extra disk for libvirt       |
+| Variable                    | Default | Description                                                                 |
+|-----------------------------|---------|-----------------------------------------------------------------------------|
+| `lab_deploy_minio`          | `true`  | Deploy MinIO for RHACM multi-cluster observability S3 storage               |
+| `install_lab_dependencies`  | `false` | Install extra lab tools                                                     |
+| `download_rhcos_isos`       | `false` | Download RHCOS images                                                       |
+| `extra_disk_libvirt_images` | `true`  | Use extra disk for libvirt                                                  |
+
+### Disconnected registry mirroring (oc-mirror)
+
+| Variable               | Default                        | Description                                                                 |
+|------------------------|--------------------------------|-----------------------------------------------------------------------------|
+| `run_oc_mirror`        | `true`                         | Run oc-mirror to populate the local registry; set `false` if registry is pre-populated |
+| `oc_mirror_timeout`    | `7200`                         | Async timeout in seconds for the oc-mirror run (2h default)                 |
+| `imageset_config_file` | `imageset-mirror-core.yaml`    | ImageSetConfiguration file downloaded from the lab repo                     |
+| `disconnected_update`  | `false`                        | Keep `false`; oc-mirror handles registry population (kcli does not mirror)  |
 
 ## Deployment Process
 
 ### Phase 1: Pre-workload
 
 - System validation, storage, kcli, Podman, dnsmasq, registry, Gitea, web cache.
-- Optional MinIO only if `lab_deploy_minio` is true.
+- **oc-mirror**: downloads `imageset-mirror-core.yaml` from the lab repo and runs `oc-mirror` (async, up to 2h) to populate the local registry with OCP 4.18, 4.19, and 4.20 releases plus all required RDS Core operator indexes. Skippable via `run_oc_mirror: false`.
+- MinIO deployed by default (`lab_deploy_minio: true`) for RHACM multi-cluster observability S3 storage.
 - Creation of **12 MNO VMs**: 3 masters, 9 workers (hostnames and MACs as per plan).
 - Lab materials from `5g-core-deployments-on-ocp-lab` (dnsmasq, forcedns, webcache, hub.yml, showroom).
 
 ### Phase 2: Workload (Hub only)
 
-- Hub cluster deployment, ArgoCD setup, hub operators, Multi-Cluster Hub/Engine.
-- **No** automatic SNO or MNO cluster deployment.
+- Hub cluster deployment using the local disconnected registry pre-populated by oc-mirror (`disconnected_update: false`; kcli does not perform its own mirroring).
+- ArgoCD setup, hub operators, Multi-Cluster Hub/Engine.
+- **No** automatic MNO cluster deployment.
 - After workload, the role finishes with Hub and ArgoCD ready; you deploy the MNO using **ClusterInstance** and **PolicyGenerators** from the lab repo.
 
 ### Phase 3: Your MNO deployment
@@ -150,7 +161,7 @@ ansible-playbook -i inventory run-role.yml \
 - **Hub kubeconfig**: e.g. `kcli scp hub:/root/.kcli/clusters/hub/auth/kubeconfig ./hub-kubeconfig`
 - **ArgoCD**: URL per lab (e.g. `https://argocd.5g-deployment.lab`), credentials per ArgoCD docs.
 - **Gitea**: e.g. `http://infra.5g-deployment.lab:3000`
-- **MinIO**: Only if `lab_deploy_minio` was set to `true` (not default for 5G Core).
+- **MinIO**: deployed by default; accessible for RHACM observability. Disable with `lab_deploy_minio: false`.
 
 ### MNO VM hostnames (OpenShift node names)
 
@@ -162,6 +173,29 @@ ansible-playbook -i inventory run-role.yml \
 ## Cleanup
 
 The role’s remove_workload logic uses `kcli delete plan hub --yes`, which removes the hub plan and all VMs created under it (Hub + 12 MNO VMs). Optional MinIO service is stopped only if `lab_deploy_minio` was true.
+
+## Disconnected Registry Mirroring
+
+The role uses **oc-mirror** to populate the local container registry before Hub deployment. This ensures a fully disconnected environment where the Hub (and later the MNO) can pull all required images from `infra.5g-deployment.lab:8443` without internet access at install time.
+
+### How it works
+
+1. `pre_workload.yml` starts the local podman registry (port 8443) and configures its certificate.
+2. The `imageset-mirror-core.yaml` ImageSetConfiguration is downloaded from the lab repo.
+3. `oc-mirror` runs asynchronously (default timeout: 2h) targeting `docker://infra.5g-deployment.lab:8443`, mirroring:
+   - OCP releases 4.18, 4.19, and 4.20
+   - All operator indexes required for the 5G Core RDS stack (ODF, NMState, SR-IOV, PTP, MetalLB, Numaresources, Logging, PerformanceProfile/SCTP)
+4. The resulting IDMS/ITMS manifests are applied on the hypervisor.
+5. `workload.yml` deploys the Hub using this pre-populated registry (`disconnected_update: false`; kcli does not perform its own image mirroring).
+
+### Key variables
+
+| Variable               | Default                     | Notes                                              |
+|------------------------|-----------------------------|----------------------------------------------------|
+| `run_oc_mirror`        | `true`                      | Set `false` to skip if registry is pre-populated   |
+| `oc_mirror_timeout`    | `7200`                      | Increase for slow connections                      |
+| `imageset_config_file` | `imageset-mirror-core.yaml` | Stored in `lab-materials/lab-env-data/registry/`   |
+| `disconnected_update`  | `false`                     | oc-mirror handles mirroring; kcli does not         |
 
 ## Support and resources
 
