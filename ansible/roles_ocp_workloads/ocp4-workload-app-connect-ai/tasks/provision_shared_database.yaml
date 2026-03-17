@@ -8,6 +8,37 @@
       metadata:
         name: "{{ shared_db_namespace }}"
 
+- name: Create ClusterRole for {{ shared_db_namespace }} namespace visibility
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: shared-db-namespace-viewer
+      rules:
+        - apiGroups: [""]
+          resources: ["namespaces"]
+          resourceNames: ["{{ shared_db_namespace }}"]
+          verbs: ["get"]
+
+- name: Bind {{ shared_db_namespace }} namespace visibility to authenticated users
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: shared-db-namespace-viewer
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: shared-db-namespace-viewer
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: Group
+          name: system:authenticated
+
 - name: Create NetworkPolicies for {{ shared_db_namespace }}
   kubernetes.core.k8s:
     state: present
@@ -62,7 +93,33 @@
         policyTypes:
           - Ingress
 
-- name: Grant read-only access to users on shared-database
+- name: Create shared-database viewer Role (excludes accesstokens)
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: shared-db-viewer
+        namespace: "{{ shared_db_namespace }}"
+      rules:
+        - apiGroups: [""]
+          resources: ["pods", "services", "configmaps", "persistentvolumeclaims", "events"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["apps"]
+          resources: ["deployments", "replicasets", "statefulsets"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["skupper.io"]
+          resources: ["sites", "connectors", "listeners", "links"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["skupper.io"]
+          resources: ["accesstokens"]
+          verbs: ["list"]
+        - apiGroups: ["operators.coreos.com"]
+          resources: ["clusterserviceversions"]
+          verbs: ["get", "list", "watch"]
+
+- name: Grant shared-db-viewer to users on shared-database
   kubernetes.core.k8s:
     state: present
     definition:
@@ -73,13 +130,87 @@
         namespace: "{{ shared_db_namespace }}"
       roleRef:
         apiGroup: rbac.authorization.k8s.io
-        kind: ClusterRole
-        name: view
+        kind: Role
+        name: shared-db-viewer
       subjects:
         - apiGroup: rbac.authorization.k8s.io
           kind: User
           name: "{{ item.name }}"
   loop: "{{ im_users }}"
+
+- name: Create AccessToken creator Role for each user
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: "{{ item.name }}-accesstoken-creator"
+        namespace: "{{ shared_db_namespace }}"
+      rules:
+        - apiGroups: ["skupper.io"]
+          resources: ["accesstokens"]
+          verbs: ["create"]
+        - apiGroups: ["skupper.io"]
+          resources: ["accesstokens"]
+          resourceNames: ["token-{{ item.name }}"]
+          verbs: ["get", "list", "watch", "delete"]
+  loop: "{{ im_users }}"
+
+- name: Bind AccessToken creator Role to each user
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: "{{ item.name }}-accesstoken-creator"
+        namespace: "{{ shared_db_namespace }}"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: Role
+        name: "{{ item.name }}-accesstoken-creator"
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: User
+          name: "{{ item.name }}"
+  loop: "{{ im_users }}"
+
+- name: Create ValidatingAdmissionPolicy for AccessToken naming
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: admissionregistration.k8s.io/v1
+      kind: ValidatingAdmissionPolicy
+      metadata:
+        name: accesstoken-naming-policy
+      spec:
+        failurePolicy: Fail
+        matchConstraints:
+          resourceRules:
+            - apiGroups: ["skupper.io"]
+              apiVersions: ["*"]
+              operations: ["CREATE"]
+              resources: ["accesstokens"]
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "{{ shared_db_namespace }}"
+        validations:
+          - expression: "object.metadata.name == 'token-' + request.userInfo.username"
+            message: "AccessToken name must be 'token-<your-username>'"
+
+- name: Create ValidatingAdmissionPolicyBinding for AccessToken naming
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: admissionregistration.k8s.io/v1
+      kind: ValidatingAdmissionPolicyBinding
+      metadata:
+        name: accesstoken-naming-binding
+      spec:
+        policyName: accesstoken-naming-policy
+        validationActions:
+          - Deny
 
 - name: Create PostgreSQL init ConfigMap
   kubernetes.core.k8s:
