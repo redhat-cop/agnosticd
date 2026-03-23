@@ -1,0 +1,237 @@
+---
+# ============================================================
+# Infrastructure: Namespace, SCC, MongoDB, Helpdesk app
+# ============================================================
+
+- name: Create {{ helpdesk_namespace }} namespace
+  k8s:
+    api_version: v1
+    kind: Namespace
+    name: "{{ helpdesk_namespace }}"
+    state: present
+
+- name: Grant anyuid SCC to default SA in {{ helpdesk_namespace }}
+  shell: >
+    oc adm policy add-scc-to-user anyuid -z default -n {{ helpdesk_namespace }}
+
+- name: Create Helpdesk DB resources
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'helpdesk-db.yaml.j2') }}"
+
+- name: Wait for Helpdesk DB pod readiness
+  shell: oc get pods -o json -n {{ helpdesk_namespace }} -l app=helpdesk-db
+  register: helpdesk_db_pod
+  until: helpdesk_db_pod.stdout|from_json|json_query('items[0].status.containerStatuses[0].ready') == true
+  retries: 20
+  delay: 30
+
+- name: Create Helpdesk app resources
+  k8s:
+    state: present
+    resource_definition: "{{ lookup('template', 'helpdesk.yaml.j2') }}"
+
+- name: Wait for Helpdesk pod readiness
+  shell: oc get pods -o json -n {{ helpdesk_namespace }} -l app=helpdesk
+  register: helpdesk_pod
+  until: helpdesk_pod.stdout|from_json|json_query('items[0].status.containerStatuses[0].ready') == true
+  retries: 20
+  delay: 30
+
+# ============================================================
+# Install: Run Trudesk install via API
+# ============================================================
+
+- name: Get Helpdesk route
+  shell: oc get route helpdesk -n {{ helpdesk_namespace }} -o jsonpath='{.spec.host}'
+  register: helpdesk_route
+
+- name: Set Helpdesk URL
+  set_fact:
+    helpdesk_url: "https://{{ helpdesk_route.stdout }}"
+
+- name: Run Helpdesk install
+  uri:
+    url: "{{ helpdesk_url }}/install"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      "mongo[host]": helpdesk-db
+      "mongo[port]": "27017"
+      "mongo[username]": "{{ helpdesk_db_user }}"
+      "mongo[password]": "{{ helpdesk_db_password }}"
+      "mongo[database]": "{{ helpdesk_db_name }}"
+      "account[username]": "{{ helpdesk_admin_user }}"
+      "account[fullname]": "Admin"
+      "account[password]": "{{ helpdesk_admin_password }}"
+      "account[cpassword]": "{{ helpdesk_admin_password }}"
+      "account[email]": "admin@globex.com"
+      "elastic[enable]": "false"
+    validate_certs: false
+    status_code: [200, 302]
+    return_content: true
+  register: helpdesk_install
+  until: helpdesk_install.status is defined and helpdesk_install.status in [200, 302]
+  retries: 20
+  delay: 30
+
+- name: Restart Helpdesk pod to exit install mode
+  shell: oc rollout restart deployment/helpdesk -n {{ helpdesk_namespace }}
+
+- name: Wait for Helpdesk pod readiness after restart
+  shell: oc get pods -o json -n {{ helpdesk_namespace }} -l app=helpdesk
+  register: helpdesk_pod_restart
+  until: >
+    helpdesk_pod_restart.stdout|from_json|json_query('items[0].status.containerStatuses[0].ready') == true
+    and helpdesk_pod_restart.stdout|from_json|json_query('items[0].status.containerStatuses[0].restartCount') == 0
+  retries: 20
+  delay: 30
+
+# ============================================================
+# Branding: Login, apply settings, rebuild CSS
+# ============================================================
+
+- name: Login as admin to get access token
+  uri:
+    url: "{{ helpdesk_url }}/api/v1/login"
+    method: POST
+    body_format: json
+    body:
+      username: "{{ helpdesk_admin_user }}"
+      password: "{{ helpdesk_admin_password }}"
+    validate_certs: false
+    return_content: true
+    status_code: 200
+  register: helpdesk_admin_login
+  until: helpdesk_admin_login.status is defined and helpdesk_admin_login.status == 200
+  retries: 20
+  delay: 30
+
+- name: Set admin access token
+  set_fact:
+    helpdesk_admin_token: "{{ helpdesk_admin_login.json.accessToken }}"
+
+- name: Apply branding settings
+  uri:
+    url: "{{ helpdesk_url }}/api/v1/settings"
+    method: PUT
+    body_format: json
+    headers:
+      accesstoken: "{{ helpdesk_admin_token }}"
+    body:
+      - { name: "gen:sitetitle", value: "Globex Helpdesk" }
+      - { name: "color:headerbg", value: "#8B0000" }
+      - { name: "color:headerprimary", value: "#FFFFFF" }
+      - { name: "color:primary", value: "#151515" }
+      - { name: "color:secondary", value: "#F0F0F0" }
+      - { name: "color:tertiary", value: "#CC0000" }
+      - { name: "color:quaternary", value: "#D2D2D2" }
+      - { name: "gen:customlogo", value: true }
+      - { name: "gen:customlogofilename", value: "topLogo.svg" }
+      - { name: "gen:custompagelogo", value: true }
+      - { name: "gen:custompagelogofilename", value: "pageLogo.svg" }
+      - { name: "gen:customfavicon", value: true }
+      - { name: "gen:customfaviconfilename", value: "favicon.svg" }
+    validate_certs: false
+    return_content: true
+    status_code: 200
+
+- name: Trigger CSS rebuild
+  uri:
+    url: "{{ helpdesk_url }}/api/v1/settings/buildsass"
+    method: GET
+    headers:
+      accesstoken: "{{ helpdesk_admin_token }}"
+    validate_certs: false
+    return_content: true
+    status_code: 200
+
+# ============================================================
+# User provisioning: Get role ID, create groups and users
+# ============================================================
+
+- name: Get roles
+  uri:
+    url: "{{ helpdesk_url }}/api/v1/roles"
+    method: GET
+    headers:
+      accesstoken: "{{ helpdesk_admin_token }}"
+    validate_certs: false
+    return_content: true
+    status_code: 200
+  register: helpdesk_roles
+
+- name: Set User role ID
+  set_fact:
+    helpdesk_user_role_id: "{{ helpdesk_roles.json.roles | selectattr('name', 'equalto', 'User') | map(attribute='_id') | first }}"
+
+- name: Remove all members from Default Group
+  uri:
+    url: "{{ helpdesk_url }}/api/v1/groups/all"
+    method: GET
+    headers:
+      accesstoken: "{{ helpdesk_admin_token }}"
+    validate_certs: false
+    return_content: true
+    status_code: 200
+  register: helpdesk_groups_list
+
+- name: Get Default Group ID
+  set_fact:
+    helpdesk_default_group_id: "{{ helpdesk_groups_list.json.groups | selectattr('name', 'equalto', 'Default Group') | map(attribute='_id') | first }}"
+
+- name: Clear Default Group members
+  uri:
+    url: "{{ helpdesk_url }}/api/v1/groups/{{ helpdesk_default_group_id }}"
+    method: PUT
+    body_format: json
+    headers:
+      accesstoken: "{{ helpdesk_admin_token }}"
+    body:
+      name: "Default Group"
+      members: []
+    validate_certs: false
+    return_content: true
+    status_code: 200
+
+- name: Create groups for each user
+  uri:
+    url: "{{ helpdesk_url }}/api/v1/groups/create"
+    method: POST
+    body_format: json
+    headers:
+      accesstoken: "{{ helpdesk_admin_token }}"
+    body:
+      name: "User {{ idx + 1 }} Group"
+      members: []
+    validate_certs: false
+    return_content: true
+    status_code: 200
+  register: helpdesk_user_groups
+  loop: "{{ im_users }}"
+  loop_control:
+    index_var: idx
+
+- name: Create user accounts
+  uri:
+    url: "{{ helpdesk_url }}/api/v1/users/create"
+    method: POST
+    body_format: json
+    headers:
+      accesstoken: "{{ helpdesk_admin_token }}"
+    body:
+      aUsername: "{{ item.item.name }}"
+      aFullname: "User {{ item.idx + 1 }}"
+      aEmail: "{{ item.item.name }}@globex.com"
+      aPass: "{{ item.item.password }}"
+      aPassConfirm: "{{ item.item.password }}"
+      aRole: "{{ helpdesk_user_role_id }}"
+      aGrps:
+        - "{{ item.json.group._id }}"
+    validate_certs: false
+    return_content: true
+    status_code: 200
+  loop: "{{ helpdesk_user_groups.results }}"
+  loop_control:
+    loop_var: item
+    label: "{{ item.item.name }}"
