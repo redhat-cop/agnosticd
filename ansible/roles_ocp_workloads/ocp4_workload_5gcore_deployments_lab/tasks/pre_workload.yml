@@ -384,10 +384,11 @@
 - name: Download ImageSetConfiguration for 5G Core lab
   ansible.builtin.get_url:
     # yamllint disable rule:line-length
-    url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/{{ imageset_config_file }}"
+    url: "https://raw.githubusercontent.com/{{ repo_user }}/5g-core-deployments-on-ocp-lab/{{ lab_version }}/lab-materials/lab-env-data/registry/{{ item }}"
     # yamllint enable rule:line-length
-    dest: "/root/{{ imageset_config_file }}"
+    dest: "/root/{{ item }}"
     mode: "0644"
+  loop: "{{ imageset_config_files }}"
   retries: 5
   delay: 10
   when: run_oc_mirror | default(true) | bool
@@ -399,24 +400,38 @@
     registry: "{{ lab_registry_host }}"
   when: run_oc_mirror | default(true) | bool
 
+- name: Create oc-mirror workspace directories
+  ansible.builtin.file:
+    path: "/root/workspace-{{ item | replace('imageset-mirror-core-', '') | replace('.yaml', '') }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ imageset_config_files }}"
+  when: run_oc_mirror | default(true) | bool
+
+# oc-mirror runs sequentially (418→419→420) in a single async job to avoid
+# the port 55000 conflict that occurs when multiple instances run in parallel.
 - name: Mirror OCP 4.18/4.19/4.20 releases and operators to local registry (async)
   ansible.builtin.shell:
     cmd: >-
-      oc-mirror
-      --parallel-images=10
-      --v2
-      --workspace file://
-      --config={{ imageset_config_file }}
+      oc-mirror --parallel-images=10 --v2
+      --workspace file:///root/workspace-418/
+      --config=/root/imageset-mirror-core-418.yaml
       docker://{{ lab_registry_host }}
-      | tee -a /root/mirroring.log
-  args:
-    chdir: /root/
+      | tee -a /root/mirroring-418.log &&
+      oc-mirror --parallel-images=10 --v2
+      --workspace file:///root/workspace-419/
+      --config=/root/imageset-mirror-core-419.yaml
+      docker://{{ lab_registry_host }}
+      | tee -a /root/mirroring-419.log &&
+      oc-mirror --parallel-images=10 --v2
+      --workspace file:///root/workspace-420/
+      --config=/root/imageset-mirror-core-420.yaml
+      docker://{{ lab_registry_host }}
+      | tee -a /root/mirroring-420.log
   register: oc_mirror_async_result
   async: "{{ oc_mirror_timeout | default(7200) }}"
   poll: 0
   when: run_oc_mirror | default(true) | bool
-
-# oc-mirror runs in background while VMs and other services are configured.
 
 # MinIO S3 required for Multicluster Observability and cluster logging
 - name: Ensure S3 storage config files exist
@@ -922,7 +937,7 @@
   when: download_rhcos_isos|bool
 
 # oc-mirror was launched async in pre_workload.yml. Wait here before Hub install needs the images.
-- name: Wait for oc-mirror to complete
+- name: Wait for oc-mirror sequence to complete
   ansible.builtin.async_status:
     jid: "{{ oc_mirror_async_result.ansible_job_id }}"
   register: oc_mirror_job_result
@@ -935,34 +950,40 @@
     ((oc_mirror_job_result.stdout | default('')) + (oc_mirror_job_result.stderr | default('')))
   when: run_oc_mirror | default(true) | bool
 
-- name: Show last 25 lines of oc-mirror log
+- name: Show last 25 lines of each oc-mirror log
   ansible.builtin.shell:
-    cmd: tail -25 /root/mirroring.log
-  register: oc_mirror_log_tail
+    cmd: >-
+      tail -25 /root/mirroring-{{ item | replace('imageset-mirror-core-', '') | replace('.yaml', '') }}.log
+  loop: "{{ imageset_config_files }}"
+  register: oc_mirror_log_tails
   changed_when: false
   when: run_oc_mirror | default(true) | bool
 
-- name: Print oc-mirror log summary
+- name: Print oc-mirror log summaries
   ansible.builtin.debug:
-    msg: "{{ oc_mirror_log_tail.stdout_lines }}"
+    msg: "{{ item.stdout_lines }}"
+  loop: "{{ oc_mirror_log_tails.results }}"
   when: run_oc_mirror | default(true) | bool
 
-- name: Check oc-mirror log for errors
+- name: Check oc-mirror logs for errors
   ansible.builtin.shell:
-    cmd: grep -c '\[ERROR\]' /root/mirroring.log
-  register: oc_mirror_error_count
+    cmd: >-
+      grep -c '\[ERROR\]' /root/mirroring-{{ item | replace('imageset-mirror-core-', '') | replace('.yaml', '') }}.log
+  loop: "{{ imageset_config_files }}"
+  register: oc_mirror_error_counts
   changed_when: false
   failed_when: false
   when: run_oc_mirror | default(true) | bool
 
-- name: Fail if oc-mirror log contains errors
+- name: Fail if any oc-mirror log contains errors
   ansible.builtin.fail:
     msg: >-
-      oc-mirror reported {{ oc_mirror_error_count.stdout | trim }} error(s).
-      Review /root/mirroring.log for details.
+      oc-mirror for {{ item.item }} reported {{ item.stdout | trim }} error(s).
+      Review /root/mirroring-{{ item.item | replace('imageset-mirror-core-', '') | replace('.yaml', '') }}.log for details.
+  loop: "{{ oc_mirror_error_counts.results }}"
   when:
     - run_oc_mirror | default(true) | bool
-    - oc_mirror_error_count.stdout | trim | int > 0
+    - item.stdout | trim | int > 0
 
 # Leave this as the last task in the playbook.
 - name: pre_workload tasks complete
