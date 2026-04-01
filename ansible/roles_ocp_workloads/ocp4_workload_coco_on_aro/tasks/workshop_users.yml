@@ -1,0 +1,168 @@
+---
+# Workshop user setup (htpasswd OAuth, namespaces, RBAC, kubeconfigs, tmux).
+# Mirrors tasks from tasks/create_users.sh for automated provisioning.
+
+- name: Build htpasswd file for devel and uadmin
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cd "{{ ocp4_workload_coco_on_aro_home }}"
+    htpasswd -b -c users.htpasswd devel devel
+    htpasswd -b users.htpasswd uadmin uadmin
+  args:
+    executable: /bin/bash
+
+- name: Create or update htpass-secret in openshift-config
+  ansible.builtin.shell: |
+    set -euo pipefail
+    oc create secret generic htpass-secret \
+      --from-file=htpasswd={{ ocp4_workload_coco_on_aro_home }}/users.htpasswd \
+      -n openshift-config \
+      --dry-run=client -o yaml | oc apply -f -
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Patch OAuth cluster for htpasswd identity provider
+  ansible.builtin.shell: |
+    set -euo pipefail
+    oc patch oauth cluster --type=merge -p '{
+      "spec": {
+        "identityProviders": [
+          {
+            "name": "my_htpasswd_auth",
+            "mappingMethod": "claim",
+            "type": "HTPasswd",
+            "htpasswd": {
+              "fileData": {
+                "name": "htpass-secret"
+              }
+            }
+          }
+        ]
+      }
+    }'
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Wait for authentication cluster operator
+  ansible.builtin.shell: |
+    set -euo pipefail
+    sleep 5
+    oc wait clusteroperator/authentication --for=condition=Progressing=False --timeout=300s
+    oc wait clusteroperator/authentication --for=condition=Available=True --timeout=300s
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Grant devel edit role in default namespace
+  ansible.builtin.command: oc adm policy add-role-to-user edit devel -n default
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+
+- name: Create fraud-detection namespace
+  ansible.builtin.command: oc create namespace fraud-detection
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  register: r_fraud_ns
+  failed_when:
+    - r_fraud_ns.rc != 0
+    - '"AlreadyExists" not in (r_fraud_ns.stderr | default(""))'
+
+- name: Grant devel edit role in fraud-detection namespace
+  ansible.builtin.command: oc adm policy add-role-to-user edit devel -n fraud-detection
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+
+- name: Apply sandboxed-admin ClusterRole
+  ansible.builtin.shell: |
+    set -euo pipefail
+    oc apply -f - <<'EOF'
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: sandboxed-admin-role
+    rules:
+      - apiGroups: ["apps"]
+        resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+        verbs: ["*"]
+      - apiGroups: [""]
+        resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts"]
+        verbs: ["*"]
+      - apiGroups: [""]
+        resources: ["namespaces"]
+        verbs: ["get", "list", "watch", "create", "patch", "update"]
+      - apiGroups: ["operators.coreos.com"]
+        resources: ["operatorgroups", "subscriptions", "installplans", "clusterserviceversions"]
+        verbs: ["*"]
+      - apiGroups: ["kataconfiguration.openshift.io"]
+        resources: ["kataconfigs"]
+        verbs: ["*"]
+      - apiGroups: ["node.k8s.io"]
+        resources: ["runtimeclasses"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["machineconfiguration.openshift.io"]
+        resources: ["machineconfigpools", "machineconfigs"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: [""]
+        resources: ["nodes"]
+        verbs: ["get", "list", "watch", "patch", "update"]
+    EOF
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Grant uadmin admin in operator namespaces when they exist
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for ns in openshift-sandboxed-containers-operator openshift-cloud-controller-manager; do
+      if oc get namespace "$ns" &>/dev/null; then
+        oc adm policy add-role-to-user admin uadmin -n "$ns"
+      fi
+    done
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Bind sandboxed-admin ClusterRole to uadmin
+  ansible.builtin.command: oc adm policy add-cluster-role-to-user sandboxed-admin-role uadmin
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+
+- name: Create devel and uadmin kubeconfig files
+  ansible.builtin.shell: |
+    set -euo pipefail
+    MY_SERVER=$(oc whoami --show-server)
+    KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/devel.kubeconfig oc login -u devel -p devel --server="$MY_SERVER"
+    KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/uadmin.kubeconfig oc login -u uadmin -p uadmin --server="$MY_SERVER"
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Create detached tmux session for workshop layout (no attach)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tmux has-session -t work 2>/dev/null && tmux kill-session -t work || true
+    tmux new-session -d -s "work" -n "main" "export PS1='[opsec \W]\$ '; bash" \; \
+    set -g mouse on \; \
+    set -g status-justify centre \; \
+    set -g window-status-format "  #I:#W  " \; \
+    set -g window-status-current-format " [ #I:#W ] " \; \
+    unbind -n MouseDrag1Pane \; \
+    unbind -T copy-mode MouseDrag1Pane \; \
+    split-window -v -t "work:main" "export KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/devel.kubeconfig; export PS1='[devel \W]\$ '; bash" \; \
+    select-pane -t 0 \; \
+    new-window -t "work" -n "admin" "export KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/uadmin.kubeconfig; export PS1='[uadmin \W]\$ '; bash" \; \
+    select-window -t "work:main"
+  args:
+    executable: /bin/bash
+
+- name: Workshop user setup complete
+  ansible.builtin.debug:
+    msg: "Htpasswd users, RBAC, kubeconfigs, and tmux session 'work' are configured."
