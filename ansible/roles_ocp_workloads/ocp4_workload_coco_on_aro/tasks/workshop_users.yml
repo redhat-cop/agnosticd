@@ -1,6 +1,5 @@
 ---
 # Workshop user setup (htpasswd OAuth, namespaces, RBAC, kubeconfigs, tmux).
-# Mirrors tasks from tasks/create_users.sh for automated provisioning.
 
 - name: Build htpasswd file for devel and uadmin
   ansible.builtin.shell: |
@@ -18,6 +17,7 @@
       --from-file=htpasswd={{ ocp4_workload_coco_on_aro_home }}/users.htpasswd \
       -n openshift-config \
       --dry-run=client -o yaml | oc apply -f -
+    rm -f {{ ocp4_workload_coco_on_aro_home }}/users.htpasswd
   environment:
     KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
   args:
@@ -138,31 +138,53 @@
   ansible.builtin.shell: |
     set -euo pipefail
     MY_SERVER=$(oc whoami --show-server)
-    KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/devel.kubeconfig oc login -u devel -p devel --server="$MY_SERVER"
-    KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/uadmin.kubeconfig oc login -u uadmin -p uadmin --server="$MY_SERVER"
+    KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/.kube/devel.kubeconfig oc login -u devel -p devel --server="$MY_SERVER"
+    KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/.kube/uadmin.kubeconfig oc login -u uadmin -p uadmin --server="$MY_SERVER"
   environment:
     KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
   args:
     executable: /bin/bash
 
 - name: Create detached tmux session for workshop layout (no attach)
+  environment:
+    _OPSEC_MOTD_B64: "{{ bastion_custom_motd | b64encode }}"
   ansible.builtin.shell: |
     set -euo pipefail
-    tmux has-session -t work 2>/dev/null && tmux kill-session -t work || true
-    tmux new-session -d -s "work" -n "main" "export PS1='[opsec \W]\$ '; bash" \; \
+    TMUX_S="{{ ocp4_workload_coco_on_aro_tmux_session }}"
+    KUBECONFIG_DEVEL="{{ ocp4_workload_coco_on_aro_home }}/.kube/devel.kubeconfig"
+    KUBECONFIG_UADMIN="{{ ocp4_workload_coco_on_aro_home }}/.kube/uadmin.kubeconfig"
+    tmux has-session -t "$TMUX_S" 2>/dev/null && tmux kill-session -t "$TMUX_S" || true
+    tmux new-session -d -s "$TMUX_S" -n "main" "printf '%s' \"${_OPSEC_MOTD_B64}\" | base64 -d; echo; export PS1='[opsec \W]\$ '; exec bash" \; \
     set -g mouse on \; \
     set -g status-justify centre \; \
     set -g window-status-format "  #I:#W  " \; \
     set -g window-status-current-format " [ #I:#W ] " \; \
     unbind -n MouseDrag1Pane \; \
     unbind -T copy-mode MouseDrag1Pane \; \
-    split-window -v -t "work:main" "export KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/devel.kubeconfig; export PS1='[devel \W]\$ '; bash" \; \
+    split-window -v -t "$TMUX_S:main" \
+      "export KUBECONFIG=$KUBECONFIG_DEVEL; export PS1='[devel \W]\$ '; bash" \; \
     select-pane -t 0 \; \
-    new-window -t "work" -n "admin" "export KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/uadmin.kubeconfig; export PS1='[uadmin \W]\$ '; bash" \; \
-    select-window -t "work:main"
+    new-window -t "$TMUX_S" -n "admin" \
+      "export KUBECONFIG=$KUBECONFIG_UADMIN; export PS1='[uadmin \W]\$ '; bash" \; \
+    select-window -t "$TMUX_S:main"
   args:
     executable: /bin/bash
 
+- name: Configure bashrc to attach to workshop tmux on interactive login
+  when: ocp4_workload_coco_on_aro_bashrc_tmux_auto_attach | default(true) | bool
+  ansible.builtin.blockinfile:
+    path: "{{ ocp4_workload_coco_on_aro_home }}/.bashrc"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK ocp4_workload_coco_on_aro tmux auto-attach"
+    block: |
+      if [[ $- == *i* ]] && command -v tmux &>/dev/null && [[ -z "${TMUX:-}" ]]; then
+        tmux attach-session -t {{ ocp4_workload_coco_on_aro_tmux_session }} 2>/dev/null || true
+      fi
+    create: true
+    mode: "0644"
+
 - name: Workshop user setup complete
   ansible.builtin.debug:
-    msg: "Htpasswd users, RBAC, kubeconfigs, and tmux session 'work' are configured."
+    msg: >-
+      Htpasswd users, RBAC, kubeconfigs, and tmux session
+      '{{ ocp4_workload_coco_on_aro_tmux_session }}' are configured;
+      interactive shells attach via .bashrc.
