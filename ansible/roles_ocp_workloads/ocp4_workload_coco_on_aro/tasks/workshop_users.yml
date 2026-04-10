@@ -77,27 +77,30 @@
   environment:
     KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
 
-- name: Apply sandboxed-admin ClusterRole
+- name: Apply sandboxed-admin cluster-scoped ClusterRole (Kata, nodes, MC, namespace list)
   ansible.builtin.shell: |
     set -euo pipefail
     oc apply -f - <<'EOF'
     apiVersion: rbac.authorization.k8s.io/v1
     kind: ClusterRole
     metadata:
-      name: sandboxed-admin-role
+      name: sandboxed-admin-cluster-role
     rules:
-      - apiGroups: ["apps"]
-        resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
-        verbs: ["*"]
-      - apiGroups: [""]
-        resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts"]
-        verbs: ["*"]
       - apiGroups: [""]
         resources: ["namespaces"]
-        verbs: ["get", "list", "watch", "create", "patch", "update"]
-      - apiGroups: ["operators.coreos.com"]
-        resources: ["operatorgroups", "subscriptions", "installplans", "clusterserviceversions"]
-        verbs: ["*"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["config.openshift.io"]
+        resources: ["infrastructures"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["imageregistry.operator.openshift.io"]
+        resources: ["configs"]
+        verbs: ["get", "list", "watch", "patch", "update"]
+      - apiGroups: ["dscinitialization.opendatahub.io"]
+        resources: ["dscinitializations"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["datasciencecluster.opendatahub.io"]
+        resources: ["datascienceclusters"]
+        verbs: ["get", "list", "watch"]
       - apiGroups: ["kataconfiguration.openshift.io"]
         resources: ["kataconfigs"]
         verbs: ["*"]
@@ -116,23 +119,50 @@
   args:
     executable: /bin/bash
 
-- name: Grant uadmin admin in operator namespaces when they exist
+- name: Apply sandboxed-admin namespace workload ClusterRole (bound per-namespace only)
   ansible.builtin.shell: |
     set -euo pipefail
-    for ns in openshift-sandboxed-containers-operator openshift-cloud-controller-manager; do
+    oc apply -f - <<'EOF'
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: sandboxed-admin-namespace-role
+    rules:
+      - apiGroups: ["apps"]
+        resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+        verbs: ["*"]
+      - apiGroups: [""]
+        resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts"]
+        verbs: ["*"]
+      - apiGroups: ["operators.coreos.com"]
+        resources: ["operatorgroups", "subscriptions", "installplans", "clusterserviceversions"]
+        verbs: ["*"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        resources: ["roles", "rolebindings"]
+        verbs: ["*"]
+    EOF
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Bind cluster-scoped sandboxed-admin ClusterRole to uadmin
+  ansible.builtin.command: oc adm policy add-cluster-role-to-user sandboxed-admin-cluster-role uadmin
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+
+- name: Bind workload sandboxed-admin ClusterRole to uadmin in allowed namespaces that exist
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for ns in {{ ocp4_workload_coco_on_aro_uadmin_namespaces | join(' ') }}; do
       if oc get namespace "$ns" &>/dev/null; then
-        oc adm policy add-role-to-user admin uadmin -n "$ns"
+        oc adm policy add-role-to-user sandboxed-admin-namespace-role uadmin -n "$ns"
       fi
     done
   environment:
     KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
   args:
     executable: /bin/bash
-
-- name: Bind sandboxed-admin ClusterRole to uadmin
-  ansible.builtin.command: oc adm policy add-cluster-role-to-user sandboxed-admin-role uadmin
-  environment:
-    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
 
 - name: Create devel and uadmin kubeconfig files
   ansible.builtin.shell: |
@@ -162,9 +192,9 @@
     the default and fraud-detection namespaces!
     ---------------------------------------------------------------'
     ADMIN_INTRO='---------------------------------------------------------------
-    I am the admin user, I am the only one capable of accessing
-    the openshift-sandboxed-containers-operator and
-    openshift-cloud-controller-manager namespaces!
+    I am the admin user, workload admin is limited to namespaces:
+    {{ ocp4_workload_coco_on_aro_uadmin_namespaces | join(", ") }}
+    (only existing namespaces receive RBAC; cluster APIs: Kata/nodes/MC).
     ---------------------------------------------------------------'
     tmux has-session -t "$TMUX_S" 2>/dev/null && tmux kill-session -t "$TMUX_S" || true
     tmux new-session -d -s "$TMUX_S" -n "main" \
