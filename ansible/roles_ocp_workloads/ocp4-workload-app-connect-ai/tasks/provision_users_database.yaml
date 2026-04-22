@@ -1,0 +1,76 @@
+---
+# Database schemas, tables, and sample data are created by the init SQL template
+# (shared-db-init.sql.j2) which runs on PostgreSQL first startup.
+# This task file handles AccessGrants and credential storage.
+
+# Create AccessGrants for each user
+- name: Create Skupper AccessGrants for users
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: skupper.io/v2alpha1
+      kind: AccessGrant
+      metadata:
+        name: "grant-{{ item.name }}"
+        namespace: "{{ shared_db_namespace }}"
+      spec:
+        redemptionsAllowed: 1
+        expirationWindow: 168h
+  loop: "{{ im_users }}"
+
+- name: Wait for AccessGrants to be Ready
+  kubernetes.core.k8s_info:
+    api_version: skupper.io/v2alpha1
+    kind: AccessGrant
+    name: "grant-{{ item.name }}"
+    namespace: "{{ shared_db_namespace }}"
+  register: grant_result
+  retries: 20
+  delay: 30
+  until:
+    - grant_result.resources | length > 0
+    - grant_result.resources[0].status.status is defined
+    - grant_result.resources[0].status.status == "Ready"
+  loop: "{{ im_users }}"
+
+# Collect grant details for each user
+- name: Collect AccessGrant details for each user
+  kubernetes.core.k8s_info:
+    api_version: skupper.io/v2alpha1
+    kind: AccessGrant
+    name: "grant-{{ item.name }}"
+    namespace: "{{ shared_db_namespace }}"
+  register: grant_details
+  loop: "{{ im_users }}"
+
+- name: Build database credentials with grant details
+  set_fact:
+    db_users_with_grants: >-
+      {{ db_users_with_grants | default([]) + [{
+        'name': item.item.name,
+        'password': item.item.password,
+        'grant_url': item.resources[0].status.url,
+        'grant_code': item.resources[0].status.code,
+        'grant_ca': item.resources[0].status.ca
+      }] }}
+  loop: "{{ grant_details.results }}"
+
+# Store all DB credentials as JSON in the docs namespace
+- name: Create database credentials secret in docs namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: db-credentials
+        namespace: "{{ docs_namespace }}"
+      type: Opaque
+      stringData:
+        db.json: |
+          {{ db_users_with_grants | to_json(indent=2) }}
+
+- name: Display database credentials
+  debug:
+    msg: "User: {{ item.name }}, Password: {{ item.password }}"
+  loop: "{{ im_users }}"

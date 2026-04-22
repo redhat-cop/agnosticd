@@ -1,0 +1,82 @@
+---
+# Launch the predeploy Job that builds and deploys Camel apps.
+# The Job runs in the background — use provision_lab_camel_flows_wait.yaml
+# later in the flow to wait for completion and clean up.
+
+- name: Set predeploy variables
+  set_fact:
+    _predeploy_namespace: "{{ im_users[-1].name }}-devspaces"
+
+- name: Create predeploy ServiceAccount
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: predeploy-job
+        namespace: "{{ _predeploy_namespace }}"
+
+- name: Create predeploy ClusterRoleBinding
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: predeploy-job-cluster-admin
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-admin
+      subjects:
+        - kind: ServiceAccount
+          name: predeploy-job
+          namespace: "{{ _predeploy_namespace }}"
+
+- name: Create predeploy Job
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: predeploy-apps
+        namespace: "{{ _predeploy_namespace }}"
+      spec:
+        backoffLimit: 4
+        template:
+          spec:
+            serviceAccountName: predeploy-job
+            restartPolicy: Never
+            containers:
+              - name: builder
+                image: quay.io/devfile/universal-developer-image:ubi10-latest
+                command:
+                  - bash
+                  - -c
+                  - |
+                    set -euo pipefail
+
+                    # Install JBang and Camel CLI
+                    curl -Ls https://sh.jbang.dev | bash -s - app setup
+                    export PATH="$HOME/.jbang/bin:$PATH"
+                    jbang trust add https://github.com/apache/camel/
+                    jbang app install -Dcamel.jbang.version=4.18.1 camel@apache/camel
+                    camel plugin add kubernetes
+
+                    # Clone deploy assets repo
+                    git clone --branch {{ lab_deploy_assets_branch }} --depth 1 {{ lab_deploy_assets_repo }} /projects/lab-deploy-assets
+                    cd /projects/lab-deploy-assets
+                    chmod +x *.sh
+
+                    # Build and deploy
+                    bash build.sh
+                    bash deploy.sh
+                resources:
+                  requests:
+                    memory: "2Gi"
+                    cpu: "1"
+                  limits:
+                    memory: "4Gi"
+                    cpu: "2"
