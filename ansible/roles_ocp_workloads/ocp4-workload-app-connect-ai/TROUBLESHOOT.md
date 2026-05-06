@@ -142,6 +142,112 @@ oc delete pod -l app.kubernetes.io/part-of=skupper -n openshift-operators
 
 ---
 
+### Link stuck at `Not Operational` despite active router connections
+
+**Symptoms**
+
+```
+$ oc get link token-user1 -n shared-database
+NAME          STATUS    REMOTE SITE   MESSAGE
+token-user1   Pending                 Not Operational
+```
+
+The router data plane is connected (verifiable via `oc exec` into the router pod and running `skstat -c`), inter-router connections show TLSv1.3 with computed next hops, but the Link CR never transitions to Ready. Listeners show `No matching connectors`. TCP connectivity through the network actually works.
+
+**Cause**
+
+The `kube-adaptor` sidecar in the `skupper-router` pod manages a leader lease (`skupper-site-leader`). If the lease is lost due to a transient infrastructure issue (e.g., etcd timeout), the kube-adaptor re-acquires the lease but may fail to restart the site event controller. This failure is not retried — the site controller stays down permanently. The local site stops appearing in the `skupper-network-status` ConfigMap, so the controller never marks Links as Ready.
+
+**Diagnosis**
+
+Check the kube-adaptor logs for a failed site controller restart:
+
+```bash
+oc logs -n shared-database deployment/skupper-router -c kube-adaptor | grep -i "failed\|lost leader\|site event"
+```
+
+Look for the pattern:
+```
+COLLECTOR: Lost leader lock after ...
+COLLECTOR: Became leader. Starting status sync and site controller after ...
+COLLECTOR: Failed to start controller for emitting site events: ...
+```
+
+Also check the `skupper-network-status` ConfigMap — if the local site is missing, this is the issue:
+
+```bash
+oc get configmap skupper-network-status -n shared-database -o jsonpath='{.data.NetworkStatus}' | jq '.siteStatus[].site.name'
+```
+
+**Resolution**
+
+Delete the `skupper-router` pod in the affected namespace. The Deployment recreates it and the kube-adaptor starts cleanly:
+
+```bash
+oc delete pod -n shared-database -l app.kubernetes.io/part-of=skupper
+oc wait --for=condition=Ready pod -l app.kubernetes.io/part-of=skupper -n shared-database --timeout=120s
+```
+
+Allow 30 seconds for the network status to fully reconcile, then verify:
+
+```bash
+oc get link -n shared-database
+oc get listener -n user1-devspaces
+```
+
+---
+
+### AccessToken redemption fails with `EOF` after controller restart
+
+**Symptoms**
+
+```
+$ oc get accesstoken token-user1 -n shared-database
+NAME          REDEEMED   STATUS   MESSAGE
+token-user1              Error    Controller got error: Post "https://skupper-grant-server-...:443/...": EOF
+```
+
+No Link is created. The grant server route returns HTTP 000 (connection refused).
+
+**Cause**
+
+The `skupper-grant-server` Service selector includes the `pod-template-hash` label. This label is unique per ReplicaSet. If the Skupper controller Deployment is restarted via `oc rollout restart` (which creates a new ReplicaSet), the new pod gets a different hash. The controller reconciles the Service selector with the **old** hash from its previous state, causing a mismatch. The Service has no endpoints and the grant server becomes unreachable.
+
+**Diagnosis**
+
+Compare the pod hash with the service selector hash:
+
+```bash
+# Pod hash
+oc get pod -n openshift-operators -l app.kubernetes.io/name=skupper-controller \
+  -o jsonpath='{.items[0].metadata.labels.pod-template-hash}'
+
+# Service selector hash
+oc get svc skupper-grant-server -n openshift-operators \
+  -o jsonpath='{.spec.selector.pod-template-hash}'
+
+# Check endpoints
+oc get endpoints skupper-grant-server -n openshift-operators
+```
+
+If the hashes differ and endpoints show `<none>`, this is the issue.
+
+**Resolution**
+
+Delete the controller pod directly (do **not** use `oc rollout restart`):
+
+```bash
+oc delete pod -n openshift-operators -l app.kubernetes.io/name=skupper-controller
+```
+
+This creates a new pod within the same ReplicaSet, preserving the hash. The controller reconciles the Service selector correctly on startup.
+
+**Prevention**
+
+Never use `oc rollout restart` on the Skupper controller Deployment. Always use `oc delete pod` to restart the controller.
+
+---
+
 ## Shared Database
 
 ### PostgreSQL init script not running
