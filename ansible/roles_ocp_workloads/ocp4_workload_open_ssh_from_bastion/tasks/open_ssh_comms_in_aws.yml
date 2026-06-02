@@ -1,0 +1,183 @@
+---
+- name: Execute the SSH ACCESS workload
+  when:
+    - ocp4_workload_open_ssh_from_bastion_enable | bool
+  module_defaults:
+    group/aws:
+      region: "{{ ocp4_workload_open_ssh_from_bastion_region }}"
+      access_key: "{{ ocp4_workload_open_ssh_from_bastion_access_key_id }}"
+      secret_key: "{{ ocp4_workload_open_ssh_from_bastion_secret_access_key }}"
+  block:
+    ###########################################################################
+    #
+    # Step 1: Create a VPC Peering Connection between the Bastion and
+    # Cluster VPCs
+    #
+    ###########################################################################
+
+    - name: Get Bastion VPC
+      amazon.aws.ec2_vpc_net_info:
+        filters:
+          "cidr": "{{ ocp4_workload_open_ssh_from_bastion_bastion_cidr }}"
+      register: r_bastion_vpc
+
+    - name: Display the Bastion VPC
+      ansible.builtin.debug:
+        var: r_bastion_vpc.vpcs[0].vpc_id
+
+    - name: Get Cluster VPC
+      amazon.aws.ec2_vpc_net_info:
+        filters:
+          "cidr": "{{ ocp4_workload_open_ssh_from_bastion_cluster_cidr }}"
+      register: r_cluster_vpc
+
+    - name: Display the Cluster VPC
+      ansible.builtin.debug:
+        var: r_cluster_vpc.vpcs[0].vpc_id
+
+    - name: Create VPC Peering Connection between VPCs
+      amazon.aws.ec2_vpc_peering:
+        vpc_id: "{{ r_bastion_vpc.vpcs[0].vpc_id }}"
+        peer_vpc_id: "{{ r_cluster_vpc.vpcs[0].vpc_id }}"
+      register: r_vpc_peering
+
+    - name: Accept VPC Peering request
+      amazon.aws.ec2_vpc_peering:
+        peering_id: "{{ r_vpc_peering.peering_id }}"
+        state: "accept"
+
+    ###########################################################################
+    #
+    # Step 2: Add route from Bastion to Cluster as well as from Cluster to
+    #         Bastion subnet via the Peering connection
+    #
+    ###########################################################################
+
+    - name: Debug - Get all Route Tables
+      when:
+        - not ocp4_workload_open_ssh_from_bastion_silent | bool
+      block:
+        - name: Get all Route Tables
+          amazon.aws.ec2_vpc_route_table_info:
+          register: r_all_route_tables
+
+        - name: Display all Route Tables
+          ansible.builtin.debug:
+            var: r_all_route_tables
+
+    - name: Get filtered list of Bastion route tables
+      amazon.aws.ec2_vpc_route_table_info:
+        filters:
+          "tag:env_type": ocp4-cluster
+          association.main: false
+          vpc-id: "{{ r_bastion_vpc.vpcs[0].vpc_id }}"
+      register: r_bastion_filtered_routes
+
+    - name: Display the filtered list of Bastion route tables
+      ansible.builtin.debug:
+        var: r_bastion_filtered_routes
+      when:
+        - not ocp4_workload_open_ssh_from_bastion_silent | bool
+
+    - name: Get filtered list of Cluster route tables
+      amazon.aws.ec2_vpc_route_table_info:
+        filters:
+          "tag:env_type": ocp4-cluster
+          "tag:Name": "*private*"
+          association.main: false
+          vpc-id: "{{ r_cluster_vpc.vpcs[0].vpc_id }}"
+      register: r_cluster_filtered_routes
+
+    - name: Display the filtered list of Cluster route tables
+      ansible.builtin.debug:
+        var: r_cluster_filtered_routes
+      when:
+        - not ocp4_workload_open_ssh_from_bastion_silent | bool
+
+    - name: Add route from Bastion to Cluster via VPC Peering Connection
+      amazon.aws.ec2_vpc_route_table:
+        vpc_id: "{{ r_bastion_vpc.vpcs[0].vpc_id }}"
+        route_table_id: "{{ item }}"
+        lookup: id
+        purge_routes: false
+        routes:
+          - dest: "{{ ocp4_workload_open_ssh_from_bastion_cluster_cidr }}"
+            vpc_peering_connection_id: "{{ r_vpc_peering.peering_id }}"
+      loop: "{{ r_bastion_filtered_routes.route_tables | map(attribute='route_table_id') | list }}"
+
+    - name: Add route from Cluster to Bastion via VPC Peering Connection
+      amazon.aws.ec2_vpc_route_table:
+        vpc_id: "{{ r_cluster_vpc.vpcs[0].vpc_id }}"
+        route_table_id: "{{ item }}"
+        lookup: id
+        purge_routes: false
+        routes:
+          - dest: "{{ ocp4_workload_open_ssh_from_bastion_bastion_cidr }}"
+            vpc_peering_connection_id: "{{ r_vpc_peering.peering_id }}"
+      loop: "{{ r_cluster_filtered_routes.route_tables | map(attribute='route_table_id') | list }}"
+
+    ###########################################################################
+    #
+    # Step 3: Add security group rules in Cluster 'controlplane' and 'node'
+    #         security groups allowing SSH (22/tcp) from the Bastion cidr
+    #
+    ###########################################################################
+
+    - name: Debug - Get all Security Groups
+      when:
+        - not ocp4_workload_open_ssh_from_bastion_silent | bool
+      block:
+        - name: Get all Security Group Info
+          amazon.aws.ec2_security_group_info:
+          register: r_all_sg_info
+
+        - name: Display all Security Groups
+          ansible.builtin.debug:
+            var: r_all_sg_info
+
+    # NOTE: Newer versions of OpenShift (v4.16+) have 'controlplane' and 'node' in the
+    #       security group names while older have 'master' and 'worker'.
+
+    - name: Get Security Groups info for the cluster controlplane and nodes
+      amazon.aws.ec2_security_group_info:
+        filters:
+          vpc-id: "{{ r_cluster_vpc.vpcs[0].vpc_id }}"
+          "tag:Name": "{{ item }}"
+      loop:
+        - "*controlplane*"
+        - "*node*"
+        - "*master*"
+        - "*worker*"
+      register: r_filtered_cluster_sg_info
+
+    - name: Display filtered list of Security Groups for the cluster controlplane and nodes
+      ansible.builtin.debug:
+        var: >-
+          r_filtered_cluster_sg_info.results
+          | map(attribute='security_groups')
+          | flatten
+          | map(attribute='group_name')
+          | list
+      when:
+        - not ocp4_workload_open_ssh_from_bastion_silent | bool
+
+    - name: Add rule to Security Groups allowing SSH from the Bastion to the Cluster
+      amazon.aws.ec2_security_group:
+        name: "{{ item }}"
+        purge_rules: false
+        purge_rules_egress: false
+        description: Allow SSH from Bastion to Cluster
+        vpc_id: "{{ r_cluster_vpc.vpcs[0].vpc_id }}"
+        rules:
+          - proto: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ip: "{{ ocp4_workload_open_ssh_from_bastion_bastion_cidr }}"
+      loop: >-
+        {{
+          r_filtered_cluster_sg_info.results
+          | map(attribute='security_groups')
+          | flatten
+          | map(attribute='group_name')
+          | list
+        }}
