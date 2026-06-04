@@ -1,0 +1,146 @@
+---
+# Single attempt to create a metal machine pool with specific instance type
+# Includes detection of stuck provisioning and automatic cleanup/retry
+
+- name: Check if metal machine pool already exists
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa describe machinepool
+    --cluster {{ rosa_cluster_name }}
+    --machinepool {{ rosa_metal_pool_name }}
+    --output json
+  register: r_existing_machinepool
+  failed_when: false
+  changed_when: false
+
+- name: Skip if pool exists and is healthy
+  when:
+    - r_existing_machinepool.rc == 0
+    - (r_existing_machinepool.stdout | from_json).status.current_replicas == rosa_metal_replicas
+  block:
+    - name: Metal machine pool is already healthy
+      ansible.builtin.debug:
+        msg: >-
+          Metal machine pool '{{ rosa_metal_pool_name }}' already exists and is healthy
+          ({{ (r_existing_machinepool.stdout | from_json).status.current_replicas }}/{{ rosa_metal_replicas }} replicas)
+
+    - name: Set successful instance type
+      ansible.builtin.set_fact:
+        rosa_metal_successful_instance_type: "{{ (r_existing_machinepool.stdout | from_json).aws_node_pool.instance_type }}"
+
+    - name: End attempts early
+      ansible.builtin.meta: end_play
+
+- name: Delete existing stuck/failed machine pool if it exists
+  when:
+    - r_existing_machinepool.rc == 0
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa delete machinepool
+    --cluster {{ rosa_cluster_name }}
+    --machinepool {{ rosa_metal_pool_name }}
+    --yes
+  register: r_delete_machinepool
+
+- name: Wait for machine pool deletion to complete
+  when: r_existing_machinepool.rc == 0
+  ansible.builtin.pause:
+    seconds: 10
+
+- name: Create metal machine pool with {{ rosa_metal_current_instance_type }}
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa create machinepool
+    --cluster {{ rosa_cluster_name }}
+    --name {{ rosa_metal_pool_name }}
+    --instance-type {{ rosa_metal_current_instance_type }}
+    --replicas {{ rosa_metal_replicas }}
+    --disk-size {{ rosa_metal_disk_size }}
+    {% if rosa_metal_availability_zone | length > 0 %}--availability-zone {{ rosa_metal_availability_zone }}{% endif %}
+    --yes
+    --output json
+  register: r_create_machinepool
+
+- name: Record machine pool creation start time
+  ansible.builtin.set_fact:
+    rosa_metal_pool_create_time: "{{ ansible_date_time.epoch }}"
+
+- name: Wait and check if instances are provisioning
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa describe machinepool
+    --cluster {{ rosa_cluster_name }}
+    --machinepool {{ rosa_metal_pool_name }}
+    --output json
+  register: r_machinepool_status
+  until:
+    - r_machinepool_status.rc == 0
+    - (r_machinepool_status.stdout | from_json).status.current_replicas | int > 0
+  retries: "{{ (rosa_metal_provision_timeout / 30) | int }}"
+  delay: 30
+  failed_when: false
+
+- name: Check if machine pool is stuck (0 replicas after timeout)
+  when:
+    - r_machinepool_status.rc == 0
+    - (r_machinepool_status.stdout | from_json).status.current_replicas | default(0) | int == 0
+  block:
+    - name: Machine pool stuck with {{ rosa_metal_current_instance_type }}
+      ansible.builtin.debug:
+        msg: >-
+          Metal machine pool failed to provision any instances with {{ rosa_metal_current_instance_type }}.
+          Current replicas: {{ (r_machinepool_status.stdout | from_json).status.current_replicas | default(0) }}
+          Desired replicas: {{ rosa_metal_replicas }}
+          This is likely due to AWS capacity constraints.
+
+    - name: Delete failed machine pool
+      ansible.builtin.command: >-
+        {{ rosa_binary_path }}/rosa delete machinepool
+        --cluster {{ rosa_cluster_name }}
+        --machinepool {{ rosa_metal_pool_name }}
+        --yes
+
+    - name: Wait for deletion
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Fail this attempt to try next instance type
+      ansible.builtin.fail:
+        msg: "Instance type {{ rosa_metal_current_instance_type }} unavailable, trying next option..."
+
+- name: Wait for all replicas to provision
+  ansible.builtin.command: >-
+    {{ rosa_binary_path }}/rosa describe machinepool
+    --cluster {{ rosa_cluster_name }}
+    --machinepool {{ rosa_metal_pool_name }}
+    --output json
+  register: r_machinepool_final_status
+  until:
+    - r_machinepool_final_status.rc == 0
+    - (r_machinepool_final_status.stdout | from_json).status.current_replicas | int == rosa_metal_replicas | int
+  retries: 40
+  delay: 30
+  failed_when: false
+
+- name: Check final status
+  when:
+    - (r_machinepool_final_status.stdout | from_json).status.current_replicas | int == rosa_metal_replicas | int
+  ansible.builtin.set_fact:
+    rosa_metal_successful_instance_type: "{{ rosa_metal_current_instance_type }}"
+
+- name: Fail if not all replicas provisioned
+  when:
+    - (r_machinepool_final_status.stdout | from_json).status.current_replicas | int != rosa_metal_replicas | int
+  block:
+    - name: Not all replicas provisioned with {{ rosa_metal_current_instance_type }}
+      ansible.builtin.debug:
+        msg: >-
+          Only {{ (r_machinepool_final_status.stdout | from_json).status.current_replicas }}/{{ rosa_metal_replicas }}
+          replicas provisioned. Trying next instance type...
+
+    - name: Delete partially successful machine pool
+      ansible.builtin.command: >-
+        {{ rosa_binary_path }}/rosa delete machinepool
+        --cluster {{ rosa_cluster_name }}
+        --machinepool {{ rosa_metal_pool_name }}
+        --yes
+
+    - name: Fail to try next instance type
+      ansible.builtin.fail:
+        msg: "Partial provisioning with {{ rosa_metal_current_instance_type }}, trying next..."
