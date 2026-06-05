@@ -71,7 +71,7 @@
 
         ###########################################################################
         #
-        # Step 2: Remove routes from route tables
+        # Step 2: Get VPC Peering Connection info for route cleanup
         #
         ###########################################################################
 
@@ -83,23 +83,65 @@
           register: r_vpc_peering_info
           failed_when: false
 
-        - name: Process route cleanup when peering exists
+        - name: Process cleanup when peering exists
           when:
             - r_vpc_peering_info.vpc_peering_connections | length > 0
           block:
-            # Note: Routes pointing to deleted VPC peering become blackhole routes
-            # which AWS automatically handles. Explicit route cleanup is not required
-            # and attempting to remove them risks accidentally purging other routes.
-
             - name: Set peering ID
               ansible.builtin.set_fact:
                 _peering_id: "{{ r_vpc_peering_info.vpc_peering_connections[0].vpc_peering_connection_id }}"
 
-        ###########################################################################
-        #
-        # Step 3: Delete VPC Peering Connection
-        #
-        ###########################################################################
+            ###########################################################################
+            #
+            # Step 3: Remove routes from route tables BEFORE deleting peering
+            #
+            ###########################################################################
+
+            - name: Get Bastion route tables
+              amazon.aws.ec2_vpc_route_table_info:
+                filters:
+                  vpc-id: "{{ r_bastion_vpc.vpcs[0].vpc_id }}"
+              register: r_bastion_route_tables
+              failed_when: false
+
+            - name: Get Cluster route tables
+              amazon.aws.ec2_vpc_route_table_info:
+                filters:
+                  vpc-id: "{{ r_cluster_vpc.vpcs[0].vpc_id }}"
+              register: r_cluster_route_tables
+              failed_when: false
+
+            - name: Remove routes from Bastion route tables pointing to Cluster
+              amazon.aws.ec2_vpc_route_table:
+                route_table_id: "{{ item.route_table_id }}"
+                lookup: id
+                purge_routes: false
+                routes:
+                  - dest: "{{ ocp4_workload_open_ssh_from_bastion_cluster_cidr }}"
+                    vpc_peering_connection_id: "{{ _peering_id }}"
+                state: absent
+              loop: "{{ r_bastion_route_tables.route_tables | default([]) }}"
+              failed_when: false
+              when: r_bastion_route_tables.route_tables | length > 0
+
+            - name: Remove routes from Cluster route tables pointing to Bastion
+              amazon.aws.ec2_vpc_route_table:
+                route_table_id: "{{ item.route_table_id }}"
+                lookup: id
+                purge_routes: false
+                routes:
+                  - dest: "{{ ocp4_workload_open_ssh_from_bastion_bastion_cidr }}"
+                    vpc_peering_connection_id: "{{ _peering_id }}"
+                state: absent
+              loop: "{{ r_cluster_route_tables.route_tables | default([]) }}"
+              failed_when: false
+              when: r_cluster_route_tables.route_tables | length > 0
+
+            ###########################################################################
+            #
+            # Step 4: Delete VPC Peering Connection
+            #
+            ###########################################################################
 
             - name: Delete VPC Peering Connection
               amazon.aws.ec2_vpc_peering:
