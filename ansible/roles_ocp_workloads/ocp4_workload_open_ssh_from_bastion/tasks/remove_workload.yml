@@ -1,7 +1,111 @@
 ---
 # ------------------------------------------
-# Implement your workload removal tasks here
+# Remove SSH access from Bastion to Cluster
 # ------------------------------------------
+
+- name: Remove SSH ACCESS workload
+  when:
+    - cloud_provider == 'ec2'
+    - ocp4_workload_open_ssh_from_bastion_enable | bool
+  module_defaults:
+    group/aws:
+      region: "{{ ocp4_workload_open_ssh_from_bastion_region }}"
+      access_key: "{{ ocp4_workload_open_ssh_from_bastion_access_key_id }}"
+      secret_key: "{{ ocp4_workload_open_ssh_from_bastion_secret_access_key }}"
+  block:
+    - name: Get Bastion VPC
+      amazon.aws.ec2_vpc_net_info:
+        filters:
+          "cidr": "{{ ocp4_workload_open_ssh_from_bastion_bastion_cidr }}"
+      register: r_bastion_vpc
+      failed_when: false
+
+    - name: Get Cluster VPC
+      amazon.aws.ec2_vpc_net_info:
+        filters:
+          "cidr": "{{ ocp4_workload_open_ssh_from_bastion_cluster_cidr }}"
+      register: r_cluster_vpc
+      failed_when: false
+
+    - name: Process cleanup when VPCs exist
+      when:
+        - r_bastion_vpc.vpcs | length > 0
+        - r_cluster_vpc.vpcs | length > 0
+      block:
+        ###########################################################################
+        #
+        # Step 1: Remove security group rules from Cluster security groups
+        #
+        ###########################################################################
+
+        - name: Get Security Groups info for the cluster controlplane and nodes
+          amazon.aws.ec2_security_group_info:
+            filters:
+              vpc-id: "{{ r_cluster_vpc.vpcs[0].vpc_id }}"
+              "tag:Name": "{{ item }}"
+          loop:
+            - "*controlplane*"
+            - "*node*"
+            - "*master*"
+            - "*worker*"
+          register: r_filtered_cluster_sg_info
+          failed_when: false
+
+        - name: Remove SSH rule from Security Groups
+          amazon.aws.ec2_security_group_rule:
+            group_id: "{{ item }}"
+            protocol: tcp
+            from_port: 22
+            to_port: 22
+            cidr_ipv4: "{{ ocp4_workload_open_ssh_from_bastion_bastion_cidr }}"
+            state: absent
+          loop: >-
+            {{
+              r_filtered_cluster_sg_info.results
+              | map(attribute='security_groups')
+              | flatten
+              | map(attribute='group_id')
+              | list
+            }}
+          failed_when: false
+
+        ###########################################################################
+        #
+        # Step 2: Remove routes from route tables
+        #
+        ###########################################################################
+
+        - name: Get VPC Peering Connection
+          amazon.aws.ec2_vpc_peering_info:
+            filters:
+              requester-vpc-info.vpc-id: "{{ r_bastion_vpc.vpcs[0].vpc_id }}"
+              accepter-vpc-info.vpc-id: "{{ r_cluster_vpc.vpcs[0].vpc_id }}"
+          register: r_vpc_peering_info
+          failed_when: false
+
+        - name: Process route cleanup when peering exists
+          when:
+            - r_vpc_peering_info.vpc_peering_connections | length > 0
+          block:
+            # Note: Routes pointing to deleted VPC peering become blackhole routes
+            # which AWS automatically handles. Explicit route cleanup is not required
+            # and attempting to remove them risks accidentally purging other routes.
+
+            - name: Set peering ID
+              ansible.builtin.set_fact:
+                _peering_id: "{{ r_vpc_peering_info.vpc_peering_connections[0].vpc_peering_connection_id }}"
+
+        ###########################################################################
+        #
+        # Step 3: Delete VPC Peering Connection
+        #
+        ###########################################################################
+
+            - name: Delete VPC Peering Connection
+              amazon.aws.ec2_vpc_peering:
+                peering_id: "{{ _peering_id }}"
+                state: absent
+              failed_when: false
 
 - name: Remove_workload tasks complete
   ansible.builtin.debug:
