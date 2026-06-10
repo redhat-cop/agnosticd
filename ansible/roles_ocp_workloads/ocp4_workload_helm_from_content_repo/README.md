@@ -35,6 +35,13 @@ Generic Helm chart deployment workload for RHDP zerotouch catalog items. Deploys
 ocp4_workload_helm_from_content_repo_git_repo: https://github.com/example/my-lab-content.git
 ocp4_workload_helm_from_content_repo_git_ref: main
 
+# CNV/Babylon: Deploy to sandbox namespace where service account has permissions
+ocp4_workload_helm_from_content_repo_namespace: "{{ sandbox_openshift_namespace }}"
+# CNV cluster API authentication
+ocp4_workload_helm_from_content_repo_k8s_auth_host: "{{ sandbox_openshift_api_url }}"
+ocp4_workload_helm_from_content_repo_k8s_auth_api_key: "{{ sandbox_openshift_api_key }}"
+ocp4_workload_helm_from_content_repo_validate_certs: false
+
 # Add workload to post_software phase
 post_software_workloads:
   localhost:
