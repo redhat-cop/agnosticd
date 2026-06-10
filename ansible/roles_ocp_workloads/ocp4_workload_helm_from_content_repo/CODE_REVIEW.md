@@ -5,28 +5,39 @@
 
 ## Issues Found and Fixed
 
-### 1. ❌ Dict-to-String Type Conversion (process_helm_chart.yml)
+### 1. ❌ Passing Dynamic Dict to release_values (process_helm_chart.yml)
 
 **Issue:**
 ```yaml
-# BROKEN: Extracting dict to variable causes type conversion
-_release_values: "{{ _chart.release.values | default({}) }}"
-...
-release_values: "{{ _release_values }}"  # Becomes string!
+# BROKEN: Both approaches fail
+release_values: "{{ _chart.release.values | default({}) }}"  # Type conversion to string
+release_values: {{ _chart.release.values | default({}) }}    # YAML parse error
 ```
 
 **Root Cause:**
-- Storing a dict in an intermediate variable
-- Passing the variable to `helm_template` causes Ansible to convert dict → string
-- `helm_template` module requires dict type for `release_values`
+- `helm_template` module's `release_values` parameter requires dict type
+- **With quotes:** Ansible converts dict variable to string representation  
+- **Without quotes:** YAML parser fails because `{{` looks like inline dict syntax
+- `showroom` workload uses **literal YAML dict blocks**, not dynamic variables
+- Ansible YAML parser cannot handle unquoted Jinja2 expressions that start with `{`
 
 **Fix:**
 ```yaml
-# WORKING: Pass dict directly without quotes to preserve type
-release_values: {{ _chart.release.values | default({}) }}
+# WORKING: Write values to temp file, use values_files parameter
+- name: Write chart values to temporary file
+  ansible.builtin.copy:
+    content: "{{ _chart.release.values | default({}) | to_nice_yaml }}"
+    dest: "/tmp/helm_values_{{ _chart_name }}.yml"
+    mode: '0644'
+
+- name: Render helm chart with values file
+  kubernetes.core.helm_template:
+    ...
+    values_files:
+      - "/tmp/helm_values_{{ _chart_name }}.yml"
 ```
 
-**Reference:** `ocp4_workload_showroom` passes dict structures as literal YAML blocks. For dynamic dicts, remove quotes entirely so Ansible preserves the type.
+**Reference:** `ocp4_workload_hashicorp` uses `values_files` with temp file. This is the standard pattern for passing dynamic dicts to Helm charts in Ansible.
 
 ---
 
