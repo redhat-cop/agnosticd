@@ -10,8 +10,8 @@
 **Issue:**
 ```yaml
 # BROKEN: Both approaches fail
-release_values: "{{ _chart.release.values | default({}) }}"  # Type conversion to string
-release_values: {{ _chart.release.values | default({}) }}    # YAML parse error
+release_values: "{{ _chart['release']['values'] | default({}) }}"  # Type conversion to string
+release_values: {{ _chart['release']['values'] | default({}) }}    # YAML parse error
 ```
 
 **Root Cause:**
@@ -21,12 +21,19 @@ release_values: {{ _chart.release.values | default({}) }}    # YAML parse error
 - `showroom` workload uses **literal YAML dict blocks**, not dynamic variables
 - Ansible YAML parser cannot handle unquoted Jinja2 expressions that start with `{`
 
+**Additional Issue - Dict Method Ambiguity:**
+```
+ERROR: to_nice_yaml - cannot represent an object: <built-in method values of dict object>
+```
+- Jinja2 dot notation `_chart.release.values` called the dict `.values()` method
+- Must use bracket notation `_chart['release']['values']` to force key access
+
 **Fix:**
 ```yaml
 # WORKING: Write values to temp file, use values_files parameter
 - name: Write chart values to temporary file
   ansible.builtin.copy:
-    content: "{{ _chart.release.values | default({}) | to_nice_yaml }}"
+    content: "{{ _chart['release']['values'] | default({}) | to_nice_yaml }}"
     dest: "/tmp/helm_values_{{ _chart_name }}.yml"
     mode: '0644'
 
