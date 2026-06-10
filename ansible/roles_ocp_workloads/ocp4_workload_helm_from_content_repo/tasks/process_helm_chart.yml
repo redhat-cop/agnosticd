@@ -38,6 +38,9 @@
     values_files:
       - "/tmp/helm_values_{{ _chart_name }}.yml"
   register: r_helm_templates_repo
+  retries: "{{ ocp4_workload_helm_from_content_repo_helm_retries }}"
+  delay: "{{ ocp4_workload_helm_from_content_repo_helm_delay }}"
+  until: r_helm_templates_repo is succeeded
 
 # Render from URL
 - name: "Render chart from URL: {{ _chart_name }}"
@@ -49,6 +52,9 @@
     values_files:
       - "/tmp/helm_values_{{ _chart_name }}.yml"
   register: r_helm_templates_url
+  retries: "{{ ocp4_workload_helm_from_content_repo_helm_retries }}"
+  delay: "{{ ocp4_workload_helm_from_content_repo_helm_delay }}"
+  until: r_helm_templates_url is succeeded
 
 # Unify result into single variable
 - name: Set unified helm template result
@@ -69,10 +75,6 @@
 # =============================================
 # Security validation
 # =============================================
-
-- name: Debug helm_template result
-  ansible.builtin.debug:
-    var: r_helm_templates
 
 - name: Parse rendered manifests for security validation
   ansible.builtin.set_fact:
@@ -110,9 +112,16 @@
       - "app.kubernetes.io/instance={{ _release_name }}"
   register: r_chart_pods
   retries: "{{ ocp4_workload_helm_from_content_repo_wait_retries }}"
-  delay: 5
+  delay: "{{ ocp4_workload_helm_from_content_repo_wait_delay }}"
   until: r_chart_pods.resources | length > 0
-  ignore_errors: true
+  failed_when: false
+
+- name: "Warn if {{ _chart_name }} pods not created"
+  when:
+    - _wait_enabled | bool
+    - r_chart_pods.resources | default([]) | length == 0
+  ansible.builtin.debug:
+    msg: "WARNING: No pods found for release {{ _release_name }}. Chart may not create pods immediately or may use other resource types."
 
 - name: "Wait for {{ _chart_name }} pods to be Running and Ready"
   when:
@@ -127,12 +136,20 @@
       - "app.kubernetes.io/instance={{ _release_name }}"
   register: r_chart_pods_status
   retries: "{{ ocp4_workload_helm_from_content_repo_wait_retries }}"
-  delay: 5
+  delay: "{{ ocp4_workload_helm_from_content_repo_wait_delay }}"
   until:
     - r_chart_pods_status.resources | length > 0
     - r_chart_pods_status.resources | selectattr('status.phase', 'equalto', 'Running') | list | length == r_chart_pods_status.resources | length
     - r_chart_pods_status.resources | map(attribute='status.containerStatuses', default=[]) | flatten | selectattr('ready', 'equalto', true) | list | length > 0
-  ignore_errors: true
+  failed_when: false
+
+- name: "Warn if {{ _chart_name }} pods not ready"
+  when:
+    - _wait_enabled | bool
+    - r_chart_pods.resources | length > 0
+    - r_chart_pods_status.resources | default([]) | selectattr('status.phase', 'equalto', 'Running') | list | length != r_chart_pods_status.resources | length
+  ansible.builtin.debug:
+    msg: "WARNING: Not all pods for release {{ _release_name }} are Running and Ready. Check pod status in namespace {{ _release_namespace }}."
 
 - name: "Report {{ _chart_name }} deployment status"
   ansible.builtin.debug:
@@ -142,3 +159,12 @@
       - Namespace: {{ _release_namespace }}
       - Pods: {{ r_chart_pods_status.resources | default([]) | length }}
       - Status: {{ 'Ready' if (r_chart_pods_status.resources | default([]) | selectattr('status.phase', 'equalto', 'Running') | list | length > 0) else 'Not Ready' }}
+
+# =============================================
+# Cleanup
+# =============================================
+
+- name: Remove temporary values file
+  ansible.builtin.file:
+    path: "/tmp/helm_values_{{ _chart_name }}.yml"
+    state: absent
