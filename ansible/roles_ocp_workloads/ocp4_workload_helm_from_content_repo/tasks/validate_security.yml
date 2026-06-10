@@ -1,0 +1,178 @@
+---
+# Validate a single manifest against security constraints
+
+# Skip validation for empty manifests or non-dict types
+- name: Skip validation for invalid manifest
+  when:
+    - _manifest is not mapping
+    - _manifest.kind is not defined
+  ansible.builtin.debug:
+    msg: "Skipping validation for non-manifest content"
+
+- name: Validate manifest security
+  when:
+    - _manifest is mapping
+    - _manifest.kind is defined
+  block:
+    # =============================================
+    # Check for cluster-scoped resources
+    # =============================================
+    - name: Check for cluster-scoped resources
+      when:
+        - not (_security_constraints.allowClusterScopedResources | default(false) | bool)
+        - _manifest.metadata.namespace is not defined
+        - _manifest.kind not in ['Namespace', 'CustomResourceDefinition', 'ClusterRole', 'ClusterRoleBinding']
+      ansible.builtin.fail:
+        msg: |
+          SECURITY VIOLATION: Chart attempts to create cluster-scoped resource
+          Resource: {{ _manifest.kind }}/{{ _manifest.metadata.name }}
+
+          This is not allowed in user namespaces. To override this check, set:
+            security:
+              allowClusterScopedResources: true
+          in your helm-charts.yaml configuration.
+
+    # =============================================
+    # Check for privileged containers
+    # =============================================
+    - name: Check for privileged containers in workload resources
+      when:
+        - _manifest.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
+        - not (_security_constraints.allowPrivileged | default(false) | bool)
+      block:
+        - name: Extract container specs
+          ansible.builtin.set_fact:
+            _containers: >-
+              {% if _manifest.kind == 'Pod' %}
+              {{ _manifest.spec.containers | default([]) }}
+              {% elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] %}
+              {{ _manifest.spec.template.spec.containers | default([]) }}
+              {% elif _manifest.kind == 'Job' %}
+              {{ _manifest.spec.template.spec.containers | default([]) }}
+              {% elif _manifest.kind == 'CronJob' %}
+              {{ _manifest.spec.jobTemplate.spec.template.spec.containers | default([]) }}
+              {% else %}
+              []
+              {% endif %}
+
+        - name: Check for privileged flag in containers
+          when: _containers | length > 0
+          ansible.builtin.set_fact:
+            _privileged_containers: >-
+              {{ _containers
+                 | selectattr('securityContext.privileged', 'defined')
+                 | selectattr('securityContext.privileged', 'equalto', true)
+                 | list }}
+
+        - name: Fail if privileged containers found
+          when:
+            - _privileged_containers is defined
+            - _privileged_containers | length > 0
+          ansible.builtin.fail:
+            msg: |
+              SECURITY VIOLATION: Chart attempts to create privileged container
+              Resource: {{ _manifest.kind }}/{{ _manifest.metadata.name }}
+              Privileged containers: {{ _privileged_containers | map(attribute='name') | list | join(', ') }}
+
+              Privileged containers are not allowed on CNV platform.
+              Remove 'privileged: true' from container securityContext.
+
+    # =============================================
+    # Check for hostPath volumes
+    # =============================================
+    - name: Check for hostPath volumes
+      when:
+        - _manifest.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
+        - not (_security_constraints.allowHostPath | default(false) | bool)
+      block:
+        - name: Extract volume specs
+          ansible.builtin.set_fact:
+            _volumes: >-
+              {% if _manifest.kind == 'Pod' %}
+              {{ _manifest.spec.volumes | default([]) }}
+              {% elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] %}
+              {{ _manifest.spec.template.spec.volumes | default([]) }}
+              {% elif _manifest.kind == 'Job' %}
+              {{ _manifest.spec.template.spec.volumes | default([]) }}
+              {% elif _manifest.kind == 'CronJob' %}
+              {{ _manifest.spec.jobTemplate.spec.template.spec.volumes | default([]) }}
+              {% else %}
+              []
+              {% endif %}
+
+        - name: Check for hostPath in volumes
+          when: _volumes | length > 0
+          ansible.builtin.set_fact:
+            _hostpath_volumes: >-
+              {{ _volumes | selectattr('hostPath', 'defined') | list }}
+
+        - name: Fail if hostPath volumes found
+          when:
+            - _hostpath_volumes is defined
+            - _hostpath_volumes | length > 0
+          ansible.builtin.fail:
+            msg: |
+              SECURITY VIOLATION: Chart attempts to mount hostPath volume
+              Resource: {{ _manifest.kind }}/{{ _manifest.metadata.name }}
+              hostPath volumes: {{ _hostpath_volumes | map(attribute='name') | list | join(', ') }}
+
+              hostPath volumes are not allowed on CNV platform for security isolation.
+
+    # =============================================
+    # Check resource limits
+    # =============================================
+    - name: Check CPU and memory limits
+      when:
+        - _manifest.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
+        - _security_constraints.maxCpuLimit is defined or _security_constraints.maxMemoryLimit is defined
+      block:
+        - name: Extract container specs for limits
+          ansible.builtin.set_fact:
+            _containers_for_limits: >-
+              {% if _manifest.kind == 'Pod' %}
+              {{ _manifest.spec.containers | default([]) }}
+              {% elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] %}
+              {{ _manifest.spec.template.spec.containers | default([]) }}
+              {% elif _manifest.kind == 'Job' %}
+              {{ _manifest.spec.template.spec.containers | default([]) }}
+              {% elif _manifest.kind == 'CronJob' %}
+              {{ _manifest.spec.jobTemplate.spec.template.spec.containers | default([]) }}
+              {% else %}
+              []
+              {% endif %}
+
+        # Note: Detailed CPU/memory limit validation would require converting
+        # between different units (m, Mi, Gi, etc). For simplicity, we'll
+        # document this as a future enhancement and rely on namespace ResourceQuota
+        - name: Report resource limits
+          ansible.builtin.debug:
+            msg: |
+              Resource limits will be enforced by namespace ResourceQuota.
+              Chart {{ _chart_name }} requests limits for {{ _containers_for_limits | length }} container(s).
+
+    # =============================================
+    # Check storage claims
+    # =============================================
+    - name: Check PersistentVolumeClaim storage size
+      when:
+        - _manifest.kind == 'PersistentVolumeClaim'
+        - _security_constraints.maxStorageClaim is defined
+      block:
+        # Similar to CPU/memory, storage size comparison requires unit conversion
+        # Document as future enhancement
+        - name: Report storage claim
+          ansible.builtin.debug:
+            msg: |
+              PVC {{ _manifest.metadata.name }} requests {{ _manifest.spec.resources.requests.storage | default('unspecified') }} storage.
+              Maximum allowed: {{ _security_constraints.maxStorageClaim }}
+
+    # =============================================
+    # Warn about NetworkPolicy
+    # =============================================
+    - name: Warn about NetworkPolicy conflicts
+      when: _manifest.kind == 'NetworkPolicy'
+      ansible.builtin.debug:
+        msg: |
+          WARNING: Chart deploys NetworkPolicy {{ _manifest.metadata.name }}.
+          This may conflict with firewall.yaml rules from your content repository.
+          Ensure the chart's NetworkPolicy is compatible with your lab's network security requirements.

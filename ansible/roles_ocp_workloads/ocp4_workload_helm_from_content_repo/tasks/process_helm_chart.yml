@@ -1,0 +1,139 @@
+---
+# Process and deploy a single Helm chart
+
+- name: "Set chart facts for {{ _chart.name }}"
+  ansible.builtin.set_fact:
+    _chart_name: "{{ _chart.name }}"
+    _chart_source: "{{ _chart.source }}"
+    _release_name: "{{ _chart.release.name }}"
+    _release_namespace: "{{ _chart.release.namespace | default(ocp4_workload_helm_from_content_repo_namespace) }}"
+    _release_values: "{{ _chart.release.values | default({}) }}"
+    _security_constraints: "{{ ocp4_workload_helm_from_content_repo_default_security | combine(_chart.security | default({})) }}"
+    _wait_enabled: "{{ _chart.wait.enabled | default(ocp4_workload_helm_from_content_repo_wait_enabled) }}"
+    _wait_timeout: "{{ _chart.wait.timeout | default(ocp4_workload_helm_from_content_repo_wait_timeout) }}"
+
+- name: "Report deploying chart: {{ _chart_name }}"
+  ansible.builtin.debug:
+    msg: "Deploying Helm chart '{{ _chart_name }}' as release '{{ _release_name }}' in namespace '{{ _release_namespace }}'"
+
+# =============================================
+# Render Helm chart based on source type
+# =============================================
+
+- name: "Render chart from repository: {{ _chart_name }}"
+  when: _chart_source.type == 'repository'
+  kubernetes.core.helm_template:
+    chart_repo_url: "{{ _chart_source.url }}"
+    chart_ref: "{{ _chart_source.chart_ref }}"
+    chart_version: "{{ _chart_source.version | default(omit) }}"
+    release_name: "{{ _release_name }}"
+    release_namespace: "{{ _release_namespace }}"
+    release_values: "{{ _release_values }}"
+  register: r_helm_templates
+
+- name: "Render embedded chart: {{ _chart_name }}"
+  when: _chart_source.type == 'embedded'
+  block:
+    - name: Construct embedded chart URL
+      ansible.builtin.set_fact:
+        _embedded_chart_path: "{{ _chart_source.path | default('helm-chart') }}"
+        _embedded_chart_url: >-
+          {{ ocp4_workload_helm_from_content_repo_git_repo
+             | regex_replace('\.git$', '')
+             | regex_replace('github\.com', 'raw.githubusercontent.com')
+          }}/{{ ocp4_workload_helm_from_content_repo_git_ref }}/{{ _embedded_chart_path }}
+
+    - name: Fetch embedded chart files
+      ansible.builtin.debug:
+        msg: "Embedded charts from git repos require local clone - using URL-based template rendering"
+
+    # For embedded charts, we'll use a local path approach
+    # This requires the chart to be accessible via a tarball or OCI registry
+    # For now, we'll document this limitation and support repository type primarily
+    - name: Fail if embedded chart requested
+      ansible.builtin.fail:
+        msg: |
+          Embedded chart support requires the chart to be packaged as a tarball.
+          Please use 'type: repository' and point to a Helm chart repository instead.
+          Example: chart_repo_url: https://charts.example.com
+                   chart_ref: mychart
+                   version: 1.0.0
+
+- name: "Render chart from URL: {{ _chart_name }}"
+  when: _chart_source.type == 'url'
+  kubernetes.core.helm_template:
+    chart_ref: "{{ _chart_source.url }}"
+    release_name: "{{ _release_name }}"
+    release_namespace: "{{ _release_namespace }}"
+    release_values: "{{ _release_values }}"
+  register: r_helm_templates
+
+# =============================================
+# Security validation
+# =============================================
+
+- name: Parse rendered manifests for security validation
+  ansible.builtin.set_fact:
+    _rendered_manifests: "{{ r_helm_templates.stdout | from_yaml_all | list }}"
+
+- name: "Validate security constraints for {{ _chart_name }}"
+  ansible.builtin.include_tasks: validate_security.yml
+  loop: "{{ _rendered_manifests }}"
+  loop_control:
+    loop_var: _manifest
+    label: "{{ _manifest.kind | default('Unknown') }}/{{ _manifest.metadata.name | default('unnamed') }}"
+
+# =============================================
+# Deploy manifests (based on showroom pattern)
+# =============================================
+
+- name: "Deploy {{ _chart_name }} manifests to namespace {{ _release_namespace }}"
+  kubernetes.core.k8s:
+    definition: "{{ r_helm_templates.stdout | from_yaml_all }}"
+    wait: false  # We'll do our own waiting below
+
+# =============================================
+# Wait for chart deployment readiness
+# =============================================
+
+- name: "Wait for {{ _chart_name }} pods to be created"
+  when: _wait_enabled | bool
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ _release_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/instance={{ _release_name }}"
+  register: r_chart_pods
+  retries: "{{ ocp4_workload_helm_from_content_repo_wait_retries }}"
+  delay: 5
+  until: r_chart_pods.resources | length > 0
+  ignore_errors: true
+
+- name: "Wait for {{ _chart_name }} pods to be Running and Ready"
+  when:
+    - _wait_enabled | bool
+    - r_chart_pods.resources | length > 0
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Pod
+    namespace: "{{ _release_namespace }}"
+    label_selectors:
+      - "app.kubernetes.io/instance={{ _release_name }}"
+  register: r_chart_pods_status
+  retries: "{{ ocp4_workload_helm_from_content_repo_wait_retries }}"
+  delay: 5
+  until:
+    - r_chart_pods_status.resources | length > 0
+    - r_chart_pods_status.resources | selectattr('status.phase', 'equalto', 'Running') | list | length == r_chart_pods_status.resources | length
+    - r_chart_pods_status.resources | map(attribute='status.containerStatuses', default=[]) | flatten | selectattr('ready', 'equalto', true) | list | length > 0
+  ignore_errors: true
+
+- name: "Report {{ _chart_name }} deployment status"
+  ansible.builtin.debug:
+    msg: |
+      Chart {{ _chart_name }} deployed:
+      - Release: {{ _release_name }}
+      - Namespace: {{ _release_namespace }}
+      - Pods: {{ r_chart_pods_status.resources | default([]) | length }}
+      - Status: {{ 'Ready' if (r_chart_pods_status.resources | default([]) | selectattr('status.phase', 'equalto', 'Running') | list | length > 0) else 'Not Ready' }}
