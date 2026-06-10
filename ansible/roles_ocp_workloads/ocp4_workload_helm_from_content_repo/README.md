@@ -85,6 +85,8 @@ charts:
     release:
       name: myapp-cache
       values:
+        networkPolicy:
+          enabled: false  # Required: sandbox service account lacks RBAC
         master:
           persistence:
             size: 2Gi
@@ -325,6 +327,29 @@ post_software_workloads:
    - PVC not binding (check storage class)
    - Image pull errors (check registry credentials)
    - Resource limits too low (check chart values)
+
+### NetworkPolicy permission denied
+
+**Symptom:** Deployment fails with error like:
+```
+'networkpolicies.networking.k8s.io "chart-name" is forbidden: 
+User "system:serviceaccount:namespace:sandbox" cannot get resource "networkpolicies"'
+```
+
+**Root cause:** In CNV/Babylon environments, the sandbox service account has limited RBAC permissions and cannot create NetworkPolicy resources in the namespace.
+
+**Solution:** Disable NetworkPolicy creation in chart values:
+```yaml
+# config/helm-charts.yaml
+charts:
+  - name: redis
+    release:
+      values:
+        networkPolicy:
+          enabled: false  # Required for sandbox environments
+```
+
+**Note:** Most Bitnami charts (redis, postgresql, mysql, etc.) create NetworkPolicy resources by default. Always set `networkPolicy.enabled: false` for charts deployed in sandbox namespaces.
 
 ---
 
