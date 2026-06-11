@@ -143,7 +143,21 @@ charts:
     wait:                           # Wait configuration (optional)
       enabled: boolean              # Wait for readiness (default: true)
       timeout: integer              # Wait timeout in seconds (default: 600)
+    
+    routes:                         # OpenShift Routes for service exposure (optional)
+      - name: string                # Route name (required)
+        service: string             # Service name to route to (required)
+        host: string                # Hostname prefix (optional, defaults to name)
+        targetPort: int|string      # Service port to target (required)
+        path: string                # URL path (optional, default: /)
+        tls: boolean                # Enable TLS (optional, default: false)
+        tls_termination: edge|reencrypt|passthrough  # TLS termination type (default: edge)
+        tls_insecure_policy: Redirect|Allow|None     # HTTP redirect policy (default: Redirect)
+        tls_destination_ca_cert: string              # CA cert for reencrypt (optional)
+        remove_x_frame_options: boolean              # Allow iframe embedding (default: true)
 ```
+
+**Note:** Route hostname pattern is `{host}-{guid}.{apps_domain}` (e.g., `redis-abc123.apps.cluster.com`)
 
 ---
 
@@ -269,6 +283,51 @@ charts:
       maxStorageClaim: 20Gi                # Override default 10Gi limit
     wait:
       timeout: 900  # Prometheus takes longer to start
+```
+
+### Example 4: Web App with Route for Showroom Iframe
+
+```yaml
+# config/helm-charts.yaml
+charts:
+  - name: nginx
+    enabled: true
+    source:
+      type: repository
+      url: https://charts.bitnami.com/bitnami
+      chart_ref: nginx
+      version: "18.0.0"
+    release:
+      name: myapp-web
+      values:
+        global:
+          compatibility:
+            openshift:
+              adaptSecurityContext: force  # Required for OpenShift
+        networkPolicy:
+          enabled: false  # Required in sandbox environments
+    
+    # Create Route for external access
+    routes:
+      - name: webapp
+        service: myapp-web-nginx
+        host: webapp
+        targetPort: 8080
+        tls: true
+        tls_termination: edge
+        remove_x_frame_options: true  # Allow Showroom iframe embedding
+    
+    wait:
+      enabled: true
+      timeout: 300
+```
+
+**Showroom integration:** Add to `content/modules/m1/ui-config.yml`:
+```yaml
+tabs:
+  - title: Web App
+    url: "https://webapp-${guid}.${apps_domain}/"
+    external: false  # Iframe embed (X-Frame-Options removed)
 ```
 
 ---
