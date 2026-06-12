@@ -11,7 +11,7 @@
 
 - name: "Extract pod labels from {{ _rendered_chart.chart_name }} workload manifests"
   ansible.builtin.set_fact:
-    _pod_label_selectors: >-
+    _expected_pod_labels: >-
       {{
         _rendered_chart.manifests
         | selectattr('kind', 'in', ['Deployment', 'StatefulSet', 'DaemonSet'])
@@ -20,9 +20,6 @@
         | list
         | first
         | default({'app.kubernetes.io/instance': _rendered_chart.release_name})
-        | dict2items
-        | map('join', '=')
-        | list
       }}
 
 # =============================================
@@ -73,6 +70,8 @@
       failed_when: false
       changed_when: false
 
+    # Query ALL pods in namespace to avoid k8s_info label_selector bug
+    # Then filter in Ansible using Jinja2 (bugs #13, #550, #634)
     - name: "Wait for {{ _rendered_chart.chart_name }} pods to be created"
       when:
         - _rendered_chart.wait_enabled | bool
@@ -82,13 +81,34 @@
         api_version: v1
         kind: Pod
         namespace: "{{ _rendered_chart.release_namespace }}"
-        label_selectors: "{{ _pod_label_selectors }}"
-      register: r_chart_pods
+      register: r_all_pods
       retries: 60
       delay: 5
-      until: r_chart_pods.resources | length > 0
+      until:
+        - r_all_pods.resources | length > 0
+        - >-
+          r_all_pods.resources
+          | selectattr('metadata.labels', 'defined')
+          | selectattr('metadata.labels', 'issuperset', _expected_pod_labels.items())
+          | list
+          | length > 0
       failed_when: false
       changed_when: false
+
+    - name: "Filter pods matching {{ _rendered_chart.chart_name }} labels"
+      when:
+        - _rendered_chart.wait_enabled | bool
+        - _workload_resource | length > 0
+        - r_all_pods.resources | default([]) | length > 0
+      ansible.builtin.set_fact:
+        r_chart_pods:
+          resources: >-
+            {{
+              r_all_pods.resources
+              | selectattr('metadata.labels', 'defined')
+              | selectattr('metadata.labels', 'issuperset', _expected_pod_labels.items())
+              | list
+            }}
 
     - name: "Check if {{ _rendered_chart.chart_name }} pod is running and ready"
       when:
