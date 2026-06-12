@@ -17,11 +17,29 @@
     # =============================================
     # Check for cluster-scoped resources
     # =============================================
+    - name: Define cluster-scoped resource types
+      ansible.builtin.set_fact:
+        _cluster_scoped_kinds:
+          - ClusterRole
+          - ClusterRoleBinding
+          - CustomResourceDefinition
+          - PersistentVolume
+          - StorageClass
+          - Namespace
+          - Node
+          - ClusterResourceQuota
+          - ValidatingWebhookConfiguration
+          - MutatingWebhookConfiguration
+          - PriorityClass
+          - RuntimeClass
+          - CSIDriver
+          - CSINode
+          - VolumeAttachment
+
     - name: Check for cluster-scoped resources
       when:
         - not (_security_constraints.allowClusterScopedResources | default(false) | bool)
-        - _manifest.metadata.namespace is not defined
-        - _manifest.kind not in ['Namespace', 'CustomResourceDefinition', 'ClusterRole', 'ClusterRoleBinding']
+        - _manifest.kind in _cluster_scoped_kinds
       ansible.builtin.fail:
         msg: |
           SECURITY VIOLATION: Chart attempts to create cluster-scoped resource
@@ -81,6 +99,52 @@
               Remove 'privileged: true' from container securityContext.
 
     # =============================================
+    # Check for host namespace access
+    # =============================================
+    - name: Check for host namespace usage
+      when:
+        - _manifest.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
+        - not (_security_constraints.allowHostNamespace | default(false) | bool)
+      block:
+        - name: Extract pod spec for host namespace check
+          ansible.builtin.set_fact:
+            _pod_spec_host: |-
+              {% if _manifest.kind == 'Pod' -%}
+              {{ _manifest.spec | default({}) }}
+              {%- elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] -%}
+              {{ _manifest.spec.template.spec | default({}) }}
+              {%- elif _manifest.kind == 'Job' -%}
+              {{ _manifest.spec.template.spec | default({}) }}
+              {%- elif _manifest.kind == 'CronJob' -%}
+              {{ _manifest.spec.jobTemplate.spec.template.spec | default({}) }}
+              {%- else -%}
+              {}
+              {%- endif %}
+
+        - name: Check for hostNetwork, hostIPC, or hostPID
+          when:
+            - (_pod_spec_host.hostNetwork | default(false) | bool) or
+              (_pod_spec_host.hostIPC | default(false) | bool) or
+              (_pod_spec_host.hostPID | default(false) | bool)
+          ansible.builtin.fail:
+            msg: |
+              SECURITY VIOLATION: Chart attempts to use host namespaces
+              Resource: {{ _manifest.kind }}/{{ _manifest.metadata.name }}
+              Violations:
+              {%- if _pod_spec_host.hostNetwork | default(false) | bool %}
+              - hostNetwork: true
+              {%- endif %}
+              {%- if _pod_spec_host.hostIPC | default(false) | bool %}
+              - hostIPC: true
+              {%- endif %}
+              {%- if _pod_spec_host.hostPID | default(false) | bool %}
+              - hostPID: true
+              {%- endif %}
+
+              These settings are not allowed on CNV platform (blocked by restricted-v2 SCC).
+              Remove hostNetwork, hostIPC, and hostPID from pod spec.
+
+    # =============================================
     # Check for hostPath volumes
     # =============================================
     - name: Check for hostPath volumes
@@ -120,6 +184,56 @@
               hostPath volumes: {{ _hostpath_volumes | map(attribute='name') | list | join(', ') }}
 
               hostPath volumes are not allowed on CNV platform for security isolation.
+
+    # =============================================
+    # Check for hostPort in containers
+    # =============================================
+    - name: Check for hostPort usage
+      when:
+        - _manifest.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
+        - not (_security_constraints.allowHostPort | default(false) | bool)
+      block:
+        - name: Extract container specs for hostPort check
+          ansible.builtin.set_fact:
+            _containers_hostport: |-
+              {% if _manifest.kind == 'Pod' -%}
+              {{ _manifest.spec.containers | default([]) }}
+              {%- elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] -%}
+              {{ _manifest.spec.template.spec.containers | default([]) }}
+              {%- elif _manifest.kind == 'Job' -%}
+              {{ _manifest.spec.template.spec.containers | default([]) }}
+              {%- elif _manifest.kind == 'CronJob' -%}
+              {{ _manifest.spec.jobTemplate.spec.template.spec.containers | default([]) }}
+              {%- else -%}
+              []
+              {%- endif %}
+
+        - name: Check for hostPort in container ports
+          when: _containers_hostport | length > 0
+          ansible.builtin.set_fact:
+            _hostport_containers: >-
+              {% set containers_with_hostport = [] -%}
+              {% for container in _containers_hostport -%}
+                {% for port in container.ports | default([]) -%}
+                  {% if port.hostPort is defined -%}
+                    {{ containers_with_hostport.append({'container': container.name, 'hostPort': port.hostPort}) or '' }}
+                  {%- endif -%}
+                {%- endfor -%}
+              {%- endfor -%}
+              {{ containers_with_hostport }}
+
+        - name: Fail if hostPort found
+          when:
+            - _hostport_containers is defined
+            - _hostport_containers | length > 0
+          ansible.builtin.fail:
+            msg: |
+              SECURITY VIOLATION: Chart attempts to bind to host ports
+              Resource: {{ _manifest.kind }}/{{ _manifest.metadata.name }}
+              Containers with hostPort: {{ _hostport_containers | map(attribute='container') | list | unique | join(', ') }}
+
+              hostPort is not allowed on CNV platform (blocked by restricted-v2 SCC).
+              Remove hostPort from container port definitions.
 
     # =============================================
     # Check resource limits
