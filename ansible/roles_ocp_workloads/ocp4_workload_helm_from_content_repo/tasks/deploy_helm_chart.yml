@@ -43,13 +43,41 @@
         definition: "{{ _rendered_chart.manifests }}"
         wait: false
 
-    - name: "Allow time for controllers to process manifests"
+    # Wait for parent workload resource (Deployment/StatefulSet) instead of pods
+    # This avoids k8s_info label_selector bug where it fails to find pods that don't exist yet
+    - name: "Find workload resource for {{ _rendered_chart.chart_name }}"
       when: _rendered_chart.wait_enabled | bool
-      ansible.builtin.pause:
-        seconds: 3
+      ansible.builtin.set_fact:
+        _workload_resource: >-
+          {{
+            _rendered_chart.manifests
+            | selectattr('kind', 'in', ['Deployment', 'StatefulSet', 'DaemonSet'])
+            | list
+            | first
+            | default({})
+          }}
+
+    - name: "Wait for {{ _rendered_chart.chart_name }} workload to be created"
+      when:
+        - _rendered_chart.wait_enabled | bool
+        - _workload_resource | length > 0
+      kubernetes.core.k8s_info:
+        api_version: "{{ _workload_resource.apiVersion }}"
+        kind: "{{ _workload_resource.kind }}"
+        name: "{{ _workload_resource.metadata.name }}"
+        namespace: "{{ _rendered_chart.release_namespace }}"
+      register: r_workload
+      retries: 12
+      delay: 5
+      until: r_workload.resources | length > 0
+      failed_when: false
+      changed_when: false
 
     - name: "Wait for {{ _rendered_chart.chart_name }} pods to be created"
-      when: _rendered_chart.wait_enabled | bool
+      when:
+        - _rendered_chart.wait_enabled | bool
+        - _workload_resource | length > 0
+        - r_workload.resources | default([]) | length > 0
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Pod
@@ -207,12 +235,20 @@
 
           ========================================================================
 
+    - name: "Warn if {{ _rendered_chart.chart_name }} has no workload resources"
+      when:
+        - _rendered_chart.wait_enabled | bool
+        - _workload_resource | default({}) | length == 0
+      ansible.builtin.debug:
+        msg: "INFO: Chart {{ _rendered_chart.chart_name }} has no workload resources (Deployment/StatefulSet/DaemonSet). Skipping pod wait."
+
     - name: "Warn if {{ _rendered_chart.chart_name }} pods not created"
       when:
         - _rendered_chart.wait_enabled | bool
+        - _workload_resource | default({}) | length > 0
         - r_chart_pods.resources | default([]) | length == 0
       ansible.builtin.debug:
-        msg: "WARNING: No pods found for release {{ _rendered_chart.release_name }}. Chart may not create pods immediately or may use other resource types."
+        msg: "WARNING: No pods found for release {{ _rendered_chart.release_name }} after waiting. The {{ _workload_resource.kind }} {{ _workload_resource.metadata.name }} exists but has not created pods yet."
 
     - name: "Report {{ _rendered_chart.chart_name }} deployment status"
       ansible.builtin.debug:
@@ -220,6 +256,7 @@
           Chart {{ _rendered_chart.chart_name }} deployed:
           - Release: {{ _rendered_chart.release_name }}
           - Namespace: {{ _rendered_chart.release_namespace }}
+          - Workload: {{ _workload_resource.kind + '/' + _workload_resource.metadata.name if _workload_resource | default({}) | length > 0 else 'None' }}
           - Pods: {{ r_chart_pods.resources | default([]) | length }}
           - Status: {{ 'Ready' if (r_pod_status is defined and r_pod_status.resources | default([]) | length > 0 and r_pod_status.resources[0].status.phase == 'Running') else 'Deployed (check pods for readiness)' }}
 
