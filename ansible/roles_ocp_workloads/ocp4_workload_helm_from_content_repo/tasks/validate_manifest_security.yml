@@ -16,6 +16,49 @@
     - _manifest.kind is defined
   block:
     # =============================================
+    # Extract workload specs once (if applicable)
+    # =============================================
+    - name: Extract containers, pod spec, and volumes from workload manifests
+      when: _manifest.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
+      ansible.builtin.set_fact:
+        _workload_containers: |-
+          {% if _manifest.kind == 'Pod' -%}
+          {{ _manifest.spec.containers | default([]) }}
+          {%- elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] -%}
+          {{ _manifest.spec.template.spec.containers | default([]) }}
+          {%- elif _manifest.kind == 'Job' -%}
+          {{ _manifest.spec.template.spec.containers | default([]) }}
+          {%- elif _manifest.kind == 'CronJob' -%}
+          {{ _manifest.spec.jobTemplate.spec.template.spec.containers | default([]) }}
+          {%- else -%}
+          []
+          {%- endif %}
+        _workload_pod_spec: |-
+          {% if _manifest.kind == 'Pod' -%}
+          {{ _manifest.spec | default({}) }}
+          {%- elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] -%}
+          {{ _manifest.spec.template.spec | default({}) }}
+          {%- elif _manifest.kind == 'Job' -%}
+          {{ _manifest.spec.template.spec | default({}) }}
+          {%- elif _manifest.kind == 'CronJob' -%}
+          {{ _manifest.spec.jobTemplate.spec.template.spec | default({}) }}
+          {%- else -%}
+          {}
+          {%- endif %}
+        _workload_volumes: |-
+          {% if _manifest.kind == 'Pod' -%}
+          {{ _manifest.spec.volumes | default([]) }}
+          {%- elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] -%}
+          {{ _manifest.spec.template.spec.volumes | default([]) }}
+          {%- elif _manifest.kind == 'Job' -%}
+          {{ _manifest.spec.template.spec.volumes | default([]) }}
+          {%- elif _manifest.kind == 'CronJob' -%}
+          {{ _manifest.spec.jobTemplate.spec.template.spec.volumes | default([]) }}
+          {%- else -%}
+          []
+          {%- endif %}
+
+    # =============================================
     # Check for cluster-scoped resources
     # =============================================
     - name: Define cluster-scoped resource types
@@ -54,42 +97,24 @@
     # =============================================
     # Check for privileged containers
     # =============================================
-    - name: Check for privileged containers in workload resources
+    - name: Check for privileged containers
       when:
-        - _manifest.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
+        - _workload_containers is defined
         - not (_security_constraints.allowPrivileged | default(false) | bool)
       block:
-        - name: Extract container specs
-          ansible.builtin.set_fact:
-            _containers: |-
-              {% if _manifest.kind == 'Pod' -%}
-              {{ _manifest.spec.containers | default([]) }}
-              {%- elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] -%}
-              {{ _manifest.spec.template.spec.containers | default([]) }}
-              {%- elif _manifest.kind == 'Job' -%}
-              {{ _manifest.spec.template.spec.containers | default([]) }}
-              {%- elif _manifest.kind == 'CronJob' -%}
-              {{ _manifest.spec.jobTemplate.spec.template.spec.containers | default([]) }}
-              {%- else -%}
-              []
-              {%- endif %}
-
-        - name: Check for privileged flag in containers
-          when: _containers | length > 0
+        - name: Find privileged containers
           ansible.builtin.set_fact:
             _privileged_containers: >-
-              {% set privileged = [] -%}
-              {% for container in _containers -%}
-                {% if container.securityContext is defined and container.securityContext.privileged is defined and container.securityContext.privileged -%}
-                  {{ privileged.append(container.name) or '' }}
-                {%- endif -%}
-              {%- endfor -%}
-              {{ privileged }}
+              {{
+                _workload_containers
+                | selectattr('securityContext.privileged', 'defined')
+                | selectattr('securityContext.privileged')
+                | map(attribute='name')
+                | list
+              }}
 
         - name: Add violation for privileged containers
-          when:
-            - _privileged_containers is defined
-            - _privileged_containers | length > 0
+          when: _privileged_containers | length > 0
           ansible.builtin.set_fact:
             _validation_violations: >-
               {{ _validation_violations + [{
@@ -105,47 +130,26 @@
     # =============================================
     - name: Check for host namespace usage
       when:
-        - _manifest.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
+        - _workload_pod_spec is defined
         - not (_security_constraints.allowHostNamespace | default(false) | bool)
       block:
-        - name: Extract pod spec for host namespace check
-          ansible.builtin.set_fact:
-            _pod_spec_host: |-
-              {% if _manifest.kind == 'Pod' -%}
-              {{ _manifest.spec | default({}) }}
-              {%- elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] -%}
-              {{ _manifest.spec.template.spec | default({}) }}
-              {%- elif _manifest.kind == 'Job' -%}
-              {{ _manifest.spec.template.spec | default({}) }}
-              {%- elif _manifest.kind == 'CronJob' -%}
-              {{ _manifest.spec.jobTemplate.spec.template.spec | default({}) }}
-              {%- else -%}
-              {}
-              {%- endif %}
-
         - name: Build host namespace violations list
-          when:
-            - (_pod_spec_host.hostNetwork | default(false) | bool) or
-              (_pod_spec_host.hostIPC | default(false) | bool) or
-              (_pod_spec_host.hostPID | default(false) | bool)
           ansible.builtin.set_fact:
             _host_namespace_violations: >-
               {% set violations = [] -%}
-              {% if _pod_spec_host.hostNetwork | default(false) | bool -%}
+              {% if _workload_pod_spec.hostNetwork | default(false) | bool -%}
                 {{ violations.append('hostNetwork') or '' }}
               {%- endif %}
-              {% if _pod_spec_host.hostIPC | default(false) | bool -%}
+              {% if _workload_pod_spec.hostIPC | default(false) | bool -%}
                 {{ violations.append('hostIPC') or '' }}
               {%- endif %}
-              {% if _pod_spec_host.hostPID | default(false) | bool -%}
+              {% if _workload_pod_spec.hostPID | default(false) | bool -%}
                 {{ violations.append('hostPID') or '' }}
               {%- endif %}
               {{ violations }}
 
         - name: Add violation for host namespace usage
-          when:
-            - _host_namespace_violations is defined
-            - _host_namespace_violations | length > 0
+          when: _host_namespace_violations | length > 0
           ansible.builtin.set_fact:
             _validation_violations: >-
               {{ _validation_violations + [{
@@ -161,34 +165,21 @@
     # =============================================
     - name: Check for hostPath volumes
       when:
-        - _manifest.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
+        - _workload_volumes is defined
         - not (_security_constraints.allowHostPath | default(false) | bool)
       block:
-        - name: Extract volume specs
-          ansible.builtin.set_fact:
-            _volumes: |-
-              {% if _manifest.kind == 'Pod' -%}
-              {{ _manifest.spec.volumes | default([]) }}
-              {%- elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] -%}
-              {{ _manifest.spec.template.spec.volumes | default([]) }}
-              {%- elif _manifest.kind == 'Job' -%}
-              {{ _manifest.spec.template.spec.volumes | default([]) }}
-              {%- elif _manifest.kind == 'CronJob' -%}
-              {{ _manifest.spec.jobTemplate.spec.template.spec.volumes | default([]) }}
-              {%- else -%}
-              []
-              {%- endif %}
-
-        - name: Check for hostPath in volumes
-          when: _volumes | length > 0
+        - name: Find hostPath volumes
           ansible.builtin.set_fact:
             _hostpath_volumes: >-
-              {{ _volumes | selectattr('hostPath', 'defined') | map(attribute='name') | list }}
+              {{
+                _workload_volumes
+                | selectattr('hostPath', 'defined')
+                | map(attribute='name')
+                | list
+              }}
 
         - name: Add violation for hostPath volumes
-          when:
-            - _hostpath_volumes is defined
-            - _hostpath_volumes | length > 0
+          when: _hostpath_volumes | length > 0
           ansible.builtin.set_fact:
             _validation_violations: >-
               {{ _validation_violations + [{
@@ -204,30 +195,14 @@
     # =============================================
     - name: Check for hostPort usage
       when:
-        - _manifest.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
+        - _workload_containers is defined
         - not (_security_constraints.allowHostPort | default(false) | bool)
       block:
-        - name: Extract container specs for hostPort check
-          ansible.builtin.set_fact:
-            _containers_hostport: |-
-              {% if _manifest.kind == 'Pod' -%}
-              {{ _manifest.spec.containers | default([]) }}
-              {%- elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] -%}
-              {{ _manifest.spec.template.spec.containers | default([]) }}
-              {%- elif _manifest.kind == 'Job' -%}
-              {{ _manifest.spec.template.spec.containers | default([]) }}
-              {%- elif _manifest.kind == 'CronJob' -%}
-              {{ _manifest.spec.jobTemplate.spec.template.spec.containers | default([]) }}
-              {%- else -%}
-              []
-              {%- endif %}
-
-        - name: Check for hostPort in container ports
-          when: _containers_hostport | length > 0
+        - name: Find containers with hostPort
           ansible.builtin.set_fact:
             _hostport_containers: >-
               {% set containers_with_hostport = [] -%}
-              {% for container in _containers_hostport -%}
+              {% for container in _workload_containers -%}
                 {% for port in container.ports | default([]) -%}
                   {% if port.hostPort is defined -%}
                     {{ containers_with_hostport.append(container.name) or '' }}
@@ -237,9 +212,7 @@
               {{ containers_with_hostport | unique }}
 
         - name: Add violation for hostPort usage
-          when:
-            - _hostport_containers is defined
-            - _hostport_containers | length > 0
+          when: _hostport_containers | length > 0
           ansible.builtin.set_fact:
             _validation_violations: >-
               {{ _validation_violations + [{
