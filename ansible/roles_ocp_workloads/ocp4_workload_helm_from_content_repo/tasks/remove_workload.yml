@@ -1,14 +1,100 @@
 ---
-# ocp4_workload_helm_from_content_repo remove tasks
+# Workload removal tasks
 
 - name: Remove workload
   ansible.builtin.debug:
     msg: "Removing Helm chart deployment workload for user {{ ocp_username }}"
 
-# Note: Helm charts deployed by this workload are in the namespace
-# Namespace deletion (handled by base config) will remove all resources
-# No explicit removal needed here
+# =============================================
+# Fetch helm-charts.yaml to identify resources
+# =============================================
+
+- name: Check if helm-charts.yaml exists in content repository
+  when: ocp4_workload_helm_from_content_repo_git_repo | length > 0
+  block:
+    - name: Fetch helm-charts.yaml from content repository
+      ansible.builtin.uri:
+        url: "{{ ocp4_workload_helm_from_content_repo_git_config_url }}/helm-charts.yaml"
+        return_content: true
+        status_code: [200, 404]
+      register: r_helm_charts_yaml_remove
+      failed_when: false
+
+    - name: Parse helm-charts configuration
+      when:
+        - r_helm_charts_yaml_remove.status == 200
+        - r_helm_charts_yaml_remove.content is defined
+      ansible.builtin.set_fact:
+        ocp4_workload_helm_from_content_repo_helm_charts: >-
+          {{ (r_helm_charts_yaml_remove.content | from_yaml).charts | default([]) }}
+
+- name: Filter enabled charts for removal
+  ansible.builtin.set_fact:
+    _enabled_charts_remove: >-
+      {{ ocp4_workload_helm_from_content_repo_helm_charts
+         | selectattr('enabled', 'defined')
+         | selectattr('enabled', 'equalto', true)
+         | list }}
+
+- name: Report charts to remove
+  ansible.builtin.debug:
+    msg: "Found {{ _enabled_charts_remove | default([]) | length }} Helm chart(s) to remove"
+
+# =============================================
+# Clone content repo if needed for path-based charts
+# =============================================
+
+- name: Clone content repository for path-based charts removal
+  when:
+    - _enabled_charts_remove | default([]) | selectattr('source.type', 'equalto', 'path') | list | length > 0
+    - ocp4_workload_helm_from_content_repo_git_repo | length > 0
+  block:
+    - name: Create temporary directory for content repo
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: helm_content_repo_remove_
+      register: r_content_repo_dir_remove
+
+    - name: Clone content repository
+      ansible.builtin.git:
+        repo: "{{ ocp4_workload_helm_from_content_repo_git_repo }}"
+        dest: "{{ r_content_repo_dir_remove.path }}"
+        version: "{{ ocp4_workload_helm_from_content_repo_git_ref }}"
+        depth: 1
+        force: yes
+      register: r_git_clone_remove
+
+    - name: Set content repo clone path
+      ansible.builtin.set_fact:
+        ocp4_workload_helm_from_content_repo_clone_path: "{{ r_content_repo_dir_remove.path }}"
+
+# =============================================
+# Remove each Helm chart's resources
+# =============================================
+
+- name: Remove Helm chart resources
+  when: _enabled_charts_remove | default([]) | length > 0
+  ansible.builtin.include_tasks: remove_helm_chart.yml
+  loop: "{{ _enabled_charts_remove }}"
+  loop_control:
+    loop_var: _chart
+    label: "{{ _chart.name }}"
+
+# =============================================
+# Cleanup
+# =============================================
+
+- name: Cleanup temporary content repository
+  when: r_content_repo_dir_remove is defined
+  ansible.builtin.file:
+    path: "{{ r_content_repo_dir_remove.path }}"
+    state: absent
+
+# =============================================
+# Completion
+# =============================================
 
 - name: Workload removal complete
+  when: not silent | bool
   ansible.builtin.debug:
-    msg: "Workload removal completed successfully (resources removed with namespace)"
+    msg: "Workload removal completed successfully ({{ _enabled_charts_remove | default([]) | length }} chart(s) removed)"

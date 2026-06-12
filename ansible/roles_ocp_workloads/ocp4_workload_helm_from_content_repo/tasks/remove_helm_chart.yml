@@ -1,0 +1,113 @@
+---
+# Remove resources for a single Helm chart
+
+- name: "Set chart facts for removal: {{ _chart.name }}"
+  ansible.builtin.set_fact:
+    _chart_name: "{{ _chart.name }}"
+    _chart_source: "{{ _chart.source }}"
+    _release_name: "{{ _chart.release.name }}"
+    _release_namespace: "{{ _chart.release.namespace | default(ocp4_workload_helm_from_content_repo_namespace) }}"
+
+- name: "Report removing chart: {{ _chart_name }}"
+  ansible.builtin.debug:
+    msg: "Removing Helm chart '{{ _chart_name }}' (release '{{ _release_name }}') from namespace '{{ _release_namespace }}'"
+
+# =============================================
+# Render Helm chart to get resource list
+# =============================================
+
+- name: Write chart values to temporary file
+  ansible.builtin.copy:
+    content: "{{ _chart['release']['values'] | default({}) | to_nice_yaml }}"
+    dest: "/tmp/helm_values_remove_{{ _chart_name }}.yml"
+    mode: '0644'
+
+# Render from repository
+- name: "Render chart from repository for removal: {{ _chart_name }}"
+  when: _chart_source.type == 'repository'
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+  kubernetes.core.helm_template:
+    chart_repo_url: "{{ _chart_source.url }}"
+    chart_ref: "{{ _chart_source.chart_ref }}"
+    chart_version: "{{ _chart_source.version | default(omit) }}"
+    release_name: "{{ _release_name }}"
+    release_namespace: "{{ _release_namespace }}"
+    values_files:
+      - "/tmp/helm_values_remove_{{ _chart_name }}.yml"
+  register: r_helm_templates_remove_repo
+  failed_when: false
+
+# Render from URL
+- name: "Render chart from URL for removal: {{ _chart_name }}"
+  when: _chart_source.type == 'url'
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+  kubernetes.core.helm_template:
+    chart_ref: "{{ _chart_source.url }}"
+    release_name: "{{ _release_name }}"
+    release_namespace: "{{ _release_namespace }}"
+    values_files:
+      - "/tmp/helm_values_remove_{{ _chart_name }}.yml"
+  register: r_helm_templates_remove_url
+  failed_when: false
+
+# Render from local path
+- name: "Render chart from local path for removal: {{ _chart_name }}"
+  when: _chart_source.type == 'path'
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+  kubernetes.core.helm_template:
+    chart_ref: "{{ ocp4_workload_helm_from_content_repo_clone_path }}/{{ _chart_source.path }}"
+    release_name: "{{ _release_name }}"
+    release_namespace: "{{ _release_namespace }}"
+    values_files:
+      - "/tmp/helm_values_remove_{{ _chart_name }}.yml"
+  register: r_helm_templates_remove_path
+  failed_when: false
+
+# Unify result
+- name: Set unified helm template result for removal
+  ansible.builtin.set_fact:
+    r_helm_templates_remove: >-
+      {{
+        r_helm_templates_remove_repo if _chart_source.type == 'repository'
+        else r_helm_templates_remove_url if _chart_source.type == 'url'
+        else r_helm_templates_remove_path
+      }}
+
+# =============================================
+# Delete manifests
+# =============================================
+
+- name: "Delete {{ _chart_name }} manifests from namespace {{ _release_namespace }}"
+  when: r_helm_templates_remove is defined and r_helm_templates_remove.stdout is defined
+  kubernetes.core.k8s:
+    namespace: "{{ _release_namespace }}"
+    host: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_host | default(omit) }}"
+    api_key: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_api_key | default(omit) }}"
+    validate_certs: "{{ ocp4_workload_helm_from_content_repo_validate_certs }}"
+    kubeconfig: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+    definition: "{{ r_helm_templates_remove.stdout | from_yaml_all }}"
+    state: absent
+    wait: true
+    wait_timeout: 300
+  register: r_delete_resources
+  failed_when: false
+
+- name: "Report {{ _chart_name }} removal status"
+  ansible.builtin.debug:
+    msg: |
+      Chart {{ _chart_name }} removal:
+      - Release: {{ _release_name }}
+      - Namespace: {{ _release_namespace }}
+      - Status: {{ 'Removed' if r_delete_resources is changed else 'Already absent' }}
+
+# =============================================
+# Cleanup
+# =============================================
+
+- name: Remove temporary values file
+  ansible.builtin.file:
+    path: "/tmp/helm_values_remove_{{ _chart_name }}.yml"
+    state: absent

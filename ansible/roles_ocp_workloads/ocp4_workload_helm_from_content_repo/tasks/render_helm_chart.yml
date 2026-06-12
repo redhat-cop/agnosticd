@@ -1,0 +1,137 @@
+---
+# Render a single Helm chart and add to _rendered_charts list
+
+- name: "Set chart facts for {{ _chart.name }}"
+  ansible.builtin.set_fact:
+    _chart_name: "{{ _chart.name }}"
+    _chart_source: "{{ _chart.source }}"
+    _release_name: "{{ _chart.release.name }}"
+    _release_namespace: "{{ _chart.release.namespace | default(ocp4_workload_helm_from_content_repo_namespace) }}"
+    _security_constraints: "{{ ocp4_workload_helm_from_content_repo_default_security | combine(_chart.security | default({})) }}"
+    _wait_enabled: "{{ _chart.wait.enabled | default(ocp4_workload_helm_from_content_repo_wait_enabled) }}"
+    _wait_timeout: "{{ _chart.wait.timeout | default(ocp4_workload_helm_from_content_repo_wait_timeout) }}"
+
+- name: "Report rendering chart: {{ _chart_name }}"
+  ansible.builtin.debug:
+    msg: "Rendering Helm chart '{{ _chart_name }}' as release '{{ _release_name }}' in namespace '{{ _release_namespace }}'"
+
+- name: "Validate chart source type for {{ _chart_name }}"
+  ansible.builtin.assert:
+    that:
+      - _chart_source.type is defined
+      - _chart_source.type in ['repository', 'url', 'path', 'embedded']
+    fail_msg: |
+      Invalid chart source type: {{ _chart_source.type | default('undefined') }}
+      Chart: {{ _chart_name }}
+      Supported types: repository, url, path
+      (embedded type not yet supported - use repository instead)
+
+# =============================================
+# Render Helm chart based on source type
+# =============================================
+
+# Write chart values to temporary file (all source types)
+- name: Write chart values to temporary file
+  ansible.builtin.copy:
+    content: "{{ _chart['release']['values'] | default({}) | to_nice_yaml }}"
+    dest: "/tmp/helm_values_{{ _chart_name }}.yml"
+    mode: '0644'
+
+# Render from repository
+- name: "Render chart from repository: {{ _chart_name }}"
+  when: _chart_source.type == 'repository'
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+  kubernetes.core.helm_template:
+    chart_repo_url: "{{ _chart_source.url }}"
+    chart_ref: "{{ _chart_source.chart_ref }}"
+    chart_version: "{{ _chart_source.version | default(omit) }}"
+    release_name: "{{ _release_name }}"
+    release_namespace: "{{ _release_namespace }}"
+    values_files:
+      - "/tmp/helm_values_{{ _chart_name }}.yml"
+  register: r_helm_templates_repo
+  retries: "{{ ocp4_workload_helm_from_content_repo_helm_retries }}"
+  delay: "{{ ocp4_workload_helm_from_content_repo_helm_delay }}"
+  until: r_helm_templates_repo is succeeded
+
+# Render from URL
+- name: "Render chart from URL: {{ _chart_name }}"
+  when: _chart_source.type == 'url'
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+  kubernetes.core.helm_template:
+    chart_ref: "{{ _chart_source.url }}"
+    release_name: "{{ _release_name }}"
+    release_namespace: "{{ _release_namespace }}"
+    values_files:
+      - "/tmp/helm_values_{{ _chart_name }}.yml"
+  register: r_helm_templates_url
+  retries: "{{ ocp4_workload_helm_from_content_repo_helm_retries }}"
+  delay: "{{ ocp4_workload_helm_from_content_repo_helm_delay }}"
+  until: r_helm_templates_url is succeeded
+
+# Render from local path (content repo)
+- name: "Render chart from local path: {{ _chart_name }}"
+  when: _chart_source.type == 'path'
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+  kubernetes.core.helm_template:
+    chart_ref: "{{ ocp4_workload_helm_from_content_repo_clone_path }}/{{ _chart_source.path }}"
+    release_name: "{{ _release_name }}"
+    release_namespace: "{{ _release_namespace }}"
+    values_files:
+      - "/tmp/helm_values_{{ _chart_name }}.yml"
+  register: r_helm_templates_path
+  retries: "{{ ocp4_workload_helm_from_content_repo_helm_retries }}"
+  delay: "{{ ocp4_workload_helm_from_content_repo_helm_delay }}"
+  until: r_helm_templates_path is succeeded
+
+# Fail for embedded charts (not yet supported)
+- name: Fail if embedded chart requested
+  when: _chart_source.type == 'embedded'
+  ansible.builtin.fail:
+    msg: |
+      Embedded chart support requires the chart to be packaged as a tarball.
+      Please use 'type: repository' and point to a Helm chart repository instead.
+      Example: chart_repo_url: https://charts.example.com
+               chart_ref: mychart
+               version: 1.0.0
+
+# Unify result into single variable
+- name: Set unified helm template result
+  ansible.builtin.set_fact:
+    r_helm_templates: >-
+      {{
+        r_helm_templates_repo if _chart_source.type == 'repository'
+        else r_helm_templates_url if _chart_source.type == 'url'
+        else r_helm_templates_path
+      }}
+
+# =============================================
+# Store rendered chart for validation and deployment
+# =============================================
+
+- name: Parse rendered manifests
+  ansible.builtin.set_fact:
+    _rendered_manifests: "{{ r_helm_templates.stdout | from_yaml_all | list }}"
+
+- name: "Add rendered chart to list: {{ _chart_name }}"
+  ansible.builtin.set_fact:
+    _rendered_charts: >-
+      {{ _rendered_charts + [{
+        'chart_name': _chart_name,
+        'release_name': _release_name,
+        'release_namespace': _release_namespace,
+        'security_constraints': _security_constraints,
+        'wait_enabled': _wait_enabled,
+        'wait_timeout': _wait_timeout,
+        'manifests': _rendered_manifests,
+        'manifest_yaml': r_helm_templates.stdout,
+        'chart_config': _chart
+      }] }}
+
+- name: Remove temporary values file
+  ansible.builtin.file:
+    path: "/tmp/helm_values_{{ _chart_name }}.yml"
+    state: absent

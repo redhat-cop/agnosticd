@@ -1,5 +1,6 @@
 ---
 # Validate a single manifest against security constraints
+# Adds violations to _validation_violations list instead of failing
 
 # Skip validation for empty manifests or non-dict types
 - name: Skip validation for invalid manifest
@@ -36,19 +37,19 @@
           - CSINode
           - VolumeAttachment
 
-    - name: Check for cluster-scoped resources
+    - name: Add violation for cluster-scoped resources
       when:
         - not (_security_constraints.allowClusterScopedResources | default(false) | bool)
         - _manifest.kind in _cluster_scoped_kinds
-      ansible.builtin.fail:
-        msg: |
-          SECURITY VIOLATION: Chart attempts to create cluster-scoped resource
-          Resource: {{ _manifest.kind }}/{{ _manifest.metadata.name }}
-
-          This is not allowed in user namespaces. To override this check, set:
-            security:
-              allowClusterScopedResources: true
-          in your helm-charts.yaml configuration.
+      ansible.builtin.set_fact:
+        _validation_violations: >-
+          {{ _validation_violations + [{
+            'chart_name': _chart_name,
+            'resource_kind': _manifest.kind,
+            'resource_name': _manifest.metadata.name,
+            'violation_type': 'Cluster-scoped resource not allowed',
+            'details': 'This resource type requires allowClusterScopedResources: true in security configuration'
+          }] }}
 
     # =============================================
     # Check for privileged containers
@@ -80,23 +81,24 @@
               {% set privileged = [] -%}
               {% for container in _containers -%}
                 {% if container.securityContext is defined and container.securityContext.privileged is defined and container.securityContext.privileged -%}
-                  {{ privileged.append(container) or '' }}
+                  {{ privileged.append(container.name) or '' }}
                 {%- endif -%}
               {%- endfor -%}
               {{ privileged }}
 
-        - name: Fail if privileged containers found
+        - name: Add violation for privileged containers
           when:
             - _privileged_containers is defined
             - _privileged_containers | length > 0
-          ansible.builtin.fail:
-            msg: |
-              SECURITY VIOLATION: Chart attempts to create privileged container
-              Resource: {{ _manifest.kind }}/{{ _manifest.metadata.name }}
-              Privileged containers: {{ _privileged_containers | map(attribute='name') | list | join(', ') }}
-
-              Privileged containers are not allowed on CNV platform.
-              Remove 'privileged: true' from container securityContext.
+          ansible.builtin.set_fact:
+            _validation_violations: >-
+              {{ _validation_violations + [{
+                'chart_name': _chart_name,
+                'resource_kind': _manifest.kind,
+                'resource_name': _manifest.metadata.name,
+                'violation_type': 'Privileged containers not allowed',
+                'details': 'Containers with privileged=true: ' + (_privileged_containers | join(', '))
+              }] }}
 
     # =============================================
     # Check for host namespace access
@@ -121,28 +123,38 @@
               {}
               {%- endif %}
 
-        - name: Check for hostNetwork, hostIPC, or hostPID
+        - name: Build host namespace violations list
           when:
             - (_pod_spec_host.hostNetwork | default(false) | bool) or
               (_pod_spec_host.hostIPC | default(false) | bool) or
               (_pod_spec_host.hostPID | default(false) | bool)
-          ansible.builtin.fail:
-            msg: |
-              SECURITY VIOLATION: Chart attempts to use host namespaces
-              Resource: {{ _manifest.kind }}/{{ _manifest.metadata.name }}
-              Violations:
-              {%- if _pod_spec_host.hostNetwork | default(false) | bool %}
-              - hostNetwork: true
+          ansible.builtin.set_fact:
+            _host_namespace_violations: >-
+              {% set violations = [] -%}
+              {% if _pod_spec_host.hostNetwork | default(false) | bool -%}
+                {{ violations.append('hostNetwork') or '' }}
               {%- endif %}
-              {%- if _pod_spec_host.hostIPC | default(false) | bool %}
-              - hostIPC: true
+              {% if _pod_spec_host.hostIPC | default(false) | bool -%}
+                {{ violations.append('hostIPC') or '' }}
               {%- endif %}
-              {%- if _pod_spec_host.hostPID | default(false) | bool %}
-              - hostPID: true
+              {% if _pod_spec_host.hostPID | default(false) | bool -%}
+                {{ violations.append('hostPID') or '' }}
               {%- endif %}
+              {{ violations }}
 
-              These settings are not allowed on CNV platform (blocked by restricted-v2 SCC).
-              Remove hostNetwork, hostIPC, and hostPID from pod spec.
+        - name: Add violation for host namespace usage
+          when:
+            - _host_namespace_violations is defined
+            - _host_namespace_violations | length > 0
+          ansible.builtin.set_fact:
+            _validation_violations: >-
+              {{ _validation_violations + [{
+                'chart_name': _chart_name,
+                'resource_kind': _manifest.kind,
+                'resource_name': _manifest.metadata.name,
+                'violation_type': 'Host namespace access not allowed',
+                'details': 'Blocked by restricted-v2 SCC. Violations: ' + (_host_namespace_violations | join(', '))
+              }] }}
 
     # =============================================
     # Check for hostPath volumes
@@ -171,19 +183,21 @@
           when: _volumes | length > 0
           ansible.builtin.set_fact:
             _hostpath_volumes: >-
-              {{ _volumes | selectattr('hostPath', 'defined') | list }}
+              {{ _volumes | selectattr('hostPath', 'defined') | map(attribute='name') | list }}
 
-        - name: Fail if hostPath volumes found
+        - name: Add violation for hostPath volumes
           when:
             - _hostpath_volumes is defined
             - _hostpath_volumes | length > 0
-          ansible.builtin.fail:
-            msg: |
-              SECURITY VIOLATION: Chart attempts to mount hostPath volume
-              Resource: {{ _manifest.kind }}/{{ _manifest.metadata.name }}
-              hostPath volumes: {{ _hostpath_volumes | map(attribute='name') | list | join(', ') }}
-
-              hostPath volumes are not allowed on CNV platform for security isolation.
+          ansible.builtin.set_fact:
+            _validation_violations: >-
+              {{ _validation_violations + [{
+                'chart_name': _chart_name,
+                'resource_kind': _manifest.kind,
+                'resource_name': _manifest.metadata.name,
+                'violation_type': 'hostPath volumes not allowed',
+                'details': 'hostPath volumes: ' + (_hostpath_volumes | join(', '))
+              }] }}
 
     # =============================================
     # Check for hostPort in containers
@@ -216,72 +230,25 @@
               {% for container in _containers_hostport -%}
                 {% for port in container.ports | default([]) -%}
                   {% if port.hostPort is defined -%}
-                    {{ containers_with_hostport.append({'container': container.name, 'hostPort': port.hostPort}) or '' }}
+                    {{ containers_with_hostport.append(container.name) or '' }}
                   {%- endif -%}
                 {%- endfor -%}
               {%- endfor -%}
-              {{ containers_with_hostport }}
+              {{ containers_with_hostport | unique }}
 
-        - name: Fail if hostPort found
+        - name: Add violation for hostPort usage
           when:
             - _hostport_containers is defined
             - _hostport_containers | length > 0
-          ansible.builtin.fail:
-            msg: |
-              SECURITY VIOLATION: Chart attempts to bind to host ports
-              Resource: {{ _manifest.kind }}/{{ _manifest.metadata.name }}
-              Containers with hostPort: {{ _hostport_containers | map(attribute='container') | list | unique | join(', ') }}
-
-              hostPort is not allowed on CNV platform (blocked by restricted-v2 SCC).
-              Remove hostPort from container port definitions.
-
-    # =============================================
-    # Check resource limits
-    # =============================================
-    - name: Check CPU and memory limits
-      when:
-        - _manifest.kind in ['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job', 'CronJob']
-        - _security_constraints.maxCpuLimit is defined or _security_constraints.maxMemoryLimit is defined
-      block:
-        - name: Extract container specs for limits
           ansible.builtin.set_fact:
-            _containers_for_limits: |-
-              {% if _manifest.kind == 'Pod' -%}
-              {{ _manifest.spec.containers | default([]) }}
-              {%- elif _manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] -%}
-              {{ _manifest.spec.template.spec.containers | default([]) }}
-              {%- elif _manifest.kind == 'Job' -%}
-              {{ _manifest.spec.template.spec.containers | default([]) }}
-              {%- elif _manifest.kind == 'CronJob' -%}
-              {{ _manifest.spec.jobTemplate.spec.template.spec.containers | default([]) }}
-              {%- else -%}
-              []
-              {%- endif %}
-
-        # Note: Detailed CPU/memory limit validation would require converting
-        # between different units (m, Mi, Gi, etc). For simplicity, we'll
-        # document this as a future enhancement and rely on namespace ResourceQuota
-        - name: Report resource limits
-          ansible.builtin.debug:
-            msg: |
-              Resource limits will be enforced by namespace ResourceQuota.
-              Chart {{ _chart_name }} requests limits for {{ _containers_for_limits | length }} container(s).
-
-    # =============================================
-    # Check storage claims
-    # =============================================
-    - name: Check PersistentVolumeClaim storage size
-      when:
-        - _manifest.kind == 'PersistentVolumeClaim'
-        - _security_constraints.maxStorageClaim is defined
-      block:
-        # Similar to CPU/memory, storage size comparison requires unit conversion
-        # Document as future enhancement
-        - name: Report storage claim
-          ansible.builtin.debug:
-            msg: |
-              PVC {{ _manifest.metadata.name }} requests {{ _manifest.spec.resources.requests.storage | default('unspecified') }} storage.
-              Maximum allowed: {{ _security_constraints.maxStorageClaim }}
+            _validation_violations: >-
+              {{ _validation_violations + [{
+                'chart_name': _chart_name,
+                'resource_kind': _manifest.kind,
+                'resource_name': _manifest.metadata.name,
+                'violation_type': 'hostPort not allowed',
+                'details': 'Blocked by restricted-v2 SCC. Containers with hostPort: ' + (_hostport_containers | join(', '))
+              }] }}
 
     # =============================================
     # Warn about NetworkPolicy
@@ -290,6 +257,6 @@
       when: _manifest.kind == 'NetworkPolicy'
       ansible.builtin.debug:
         msg: |
-          WARNING: Chart deploys NetworkPolicy {{ _manifest.metadata.name }}.
+          WARNING: Chart {{ _chart_name }} deploys NetworkPolicy {{ _manifest.metadata.name }}.
           This may conflict with firewall.yaml rules from your content repository.
           Ensure the chart's NetworkPolicy is compatible with your lab's network security requirements.

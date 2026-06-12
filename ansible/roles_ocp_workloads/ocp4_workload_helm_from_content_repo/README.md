@@ -5,11 +5,14 @@
 Generic Helm chart deployment workload for RHDP zerotouch catalog items. Deploys Helm charts from content git repositories with security validation and lifecycle management.
 
 **Key Features:**
-- ✅ Deploy Helm charts from remote chart repositories
-- ✅ Security validation (cluster-scoped blocking, privileged detection, resource limits)
-- ✅ Automatic readiness waiting with comprehensive failure reporting
-- ✅ Backwards compatible with existing VMs-only labs
-- ✅ Reusable across all catalog items
+- Deploy Helm charts from repository, URL, or local path sources
+- Security validation (cluster-scoped, privileged, hostPath, hostNamespace, hostPort)
+- Comprehensive error diagnostics (pod logs, container states, failure reasons)
+- Automatic readiness waiting with configurable timeout
+- Resource cleanup on catalog item destruction
+- OpenShift Route creation with TLS and iframe support
+- CNV and non-CNV deployment support (k8s_auth or kubeconfig)
+- Backwards compatible with existing VMs-only labs
 
 **Based on proven pattern:** Uses the same `kubernetes.core.helm_template` + `kubernetes.core.k8s` pattern as the production `ocp4_workload_showroom` workload.
 
@@ -18,8 +21,9 @@ Generic Helm chart deployment workload for RHDP zerotouch catalog items. Deploys
 ## Prerequisites
 
 - OpenShift cluster with namespace created
-- Helm chart repository accessible via HTTPS
+- Kubernetes authentication (CNV: API token, AWS/Azure: kubeconfig)
 - Content git repository with `config/helm-charts.yaml`
+- Helm chart repository accessible via HTTPS (for repository/URL sources)
 
 ---
 
@@ -41,6 +45,24 @@ ocp4_workload_helm_from_content_repo_namespace: "{{ sandbox_openshift_namespace 
 ocp4_workload_helm_from_content_repo_k8s_auth_host: "{{ sandbox_openshift_api_url }}"
 ocp4_workload_helm_from_content_repo_k8s_auth_api_key: "{{ sandbox_openshift_api_key }}"
 ocp4_workload_helm_from_content_repo_validate_certs: false
+
+# Add workload to post_software phase
+post_software_workloads:
+  localhost:
+    - ocp4_workload_helm_from_content_repo
+```
+
+**Alternative: AWS/Azure (kubeconfig-based authentication)**
+
+```yaml
+# Configure content repository
+ocp4_workload_helm_from_content_repo_git_repo: https://github.com/example/my-lab-content.git
+ocp4_workload_helm_from_content_repo_git_ref: main
+
+# AWS/Azure: Use kubeconfig file
+ocp4_workload_helm_from_content_repo_namespace: "{{ guid }}"
+ocp4_workload_helm_from_content_repo_kubeconfig: "{{ hostvars[groups['bastions'][0]]['ansible_env']['HOME'] }}/.kube/config"
+ocp4_workload_helm_from_content_repo_validate_certs: true
 
 # Add workload to post_software phase
 post_software_workloads:
@@ -107,11 +129,16 @@ charts:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ocp4_workload_helm_from_content_repo_namespace` | `{{ guid }}` | Target namespace for deployments |
+| `ocp4_workload_helm_from_content_repo_namespace` | `{{ guid }}` | Target namespace (CNV: override to `{{ sandbox_openshift_namespace }}`) |
 | `ocp4_workload_helm_from_content_repo_git_repo` | `""` | Content git repository URL |
 | `ocp4_workload_helm_from_content_repo_git_ref` | `main` | Git branch/tag/commit |
+| `ocp4_workload_helm_from_content_repo_k8s_auth_host` | `""` | Kubernetes API host (CNV deployments) |
+| `ocp4_workload_helm_from_content_repo_k8s_auth_api_key` | `""` | Kubernetes API token (CNV deployments) |
+| `ocp4_workload_helm_from_content_repo_kubeconfig` | `""` | Path to kubeconfig file (non-CNV deployments) |
+| `ocp4_workload_helm_from_content_repo_validate_certs` | `true` | Validate TLS certificates |
 | `ocp4_workload_helm_from_content_repo_wait_enabled` | `true` | Wait for pods to be Ready |
 | `ocp4_workload_helm_from_content_repo_wait_timeout` | `600` | Maximum wait time (seconds) |
+| `ocp4_workload_helm_from_content_repo_wait_retries` | `60` | Number of retry attempts for readiness checks |
 
 ### helm-charts.yaml Schema
 
@@ -122,10 +149,15 @@ charts:
   - name: string                    # Chart identifier (required)
     enabled: boolean                # Deploy this chart (required)
     source:                         # Chart source (required)
-      type: repository | url        # Source type
+      type: repository | url | path # Source type
+      # For repository type:
       url: string                   # Chart repository URL
       chart_ref: string             # Chart name in repository
       version: string               # Chart version (optional)
+      # For url type:
+      url: string                   # Direct URL to chart tarball
+      # For path type:
+      path: string                  # Relative path in content repo
     
     release:                        # Helm release config (required)
       name: string                  # Release name (required)
@@ -136,9 +168,11 @@ charts:
       allowClusterScopedResources: boolean  # Allow ClusterRole, etc (default: false)
       allowPrivileged: boolean              # Allow privileged containers (default: false)
       allowHostPath: boolean                # Allow hostPath volumes (default: false)
-      maxCpuLimit: string                   # Max CPU limit per container (default: 4000m)
-      maxMemoryLimit: string                # Max memory limit per container (default: 8Gi)
-      maxStorageClaim: string               # Max PVC size (default: 10Gi)
+      allowHostNamespace: boolean           # Allow hostNetwork/IPC/PID (default: false)
+      allowHostPort: boolean                # Allow hostPort in containers (default: false)
+      maxCpuLimit: string                   # Advisory CPU limit (default: 4000m)
+      maxMemoryLimit: string                # Advisory memory limit (default: 8Gi)
+      maxStorageClaim: string               # Advisory storage limit (default: 10Gi)
     
     wait:                           # Wait configuration (optional)
       enabled: boolean              # Wait for readiness (default: true)
@@ -177,8 +211,14 @@ charts:
 | **Cluster-scoped resources** | FAIL if detected | `allowClusterScopedResources: true` |
 | **Privileged containers** | FAIL if `privileged: true` | `allowPrivileged: true` |
 | **hostPath volumes** | FAIL if detected | `allowHostPath: true` |
+| **hostNamespace usage** | FAIL if hostNetwork/IPC/PID detected | `allowHostNamespace: true` |
+| **hostPort binding** | FAIL if hostPort detected | `allowHostPort: true` |
 | **NetworkPolicy** | WARN if chart creates one | N/A (warning only) |
-| **Resource limits** | INFO (enforced by quota) | Set `maxCpuLimit`, `maxMemoryLimit` |
+| **Resource limits** | REPORT only (advisory limits) | Set `maxCpuLimit`, `maxMemoryLimit` |
+
+**Fail-Fast Validation:** All charts are validated before any deployment occurs. If any chart violates security constraints, the workload fails with a comprehensive error report listing ALL violations across ALL charts. This prevents partial deployments that waste namespace quota.
+
+**Note:** Resource limits (CPU, memory, storage) are advisory only. Actual enforcement is via namespace ResourceQuota configured by the platform.
 
 ### Security Best Practices
 
@@ -330,6 +370,56 @@ tabs:
     external: false  # Iframe embed (X-Frame-Options removed)
 ```
 
+### Example 5: Custom Chart from Content Repository (Path-Based)
+
+For custom Helm charts stored in your lab content repository:
+
+```yaml
+# Content repository structure:
+# /helm-chart/
+#   Chart.yaml
+#   values.yaml
+#   templates/
+#     deployment.yaml
+#     service.yaml
+
+# config/helm-charts.yaml
+charts:
+  - name: custom-app
+    enabled: true
+    source:
+      type: path
+      path: helm-chart  # Relative path in content repo
+    
+    release:
+      name: custom-app
+      values:
+        image:
+          repository: quay.io/myorg/custom-app
+          tag: "1.0.0"
+        replicaCount: 2
+        service:
+          port: 8080
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+    
+    routes:
+      - name: app
+        service: custom-app
+        targetPort: 8080
+        tls: true
+        remove_x_frame_options: true
+```
+
+**Use case:** Deploy multi-container pods, custom application stacks, or specialized configurations not available in public chart repositories.
+
+**Chart location:** The workload clones your content repository and renders the chart from the specified path. Changes to the chart are automatically deployed when you update the content repository.
+
 ---
 
 ## Integration with Existing Labs
@@ -357,6 +447,122 @@ post_software_workloads:
   localhost:
     - ocp4_workload_helm_from_content_repo  # Deploys charts
     # VMs created by zero-touch-base-rhel config
+```
+
+---
+
+## Error Diagnostics
+
+When chart deployment fails, the workload provides comprehensive diagnostic information to help identify the issue quickly.
+
+### Automatic Failure Reporting
+
+If pods fail to reach Ready state within the timeout period, the workload collects and displays:
+
+1. **Pod Status Summary**
+   - Current phase (Pending, CrashLoopBackOff, etc.)
+   - Pod conditions with messages
+   - Namespace and pod name
+
+2. **Container Status Details**
+   - Init container states (waiting/terminated reasons, exit codes)
+   - Main container states (waiting/terminated reasons, exit codes)
+   - Ready status for each container
+
+3. **Complete Container Logs**
+   - Last 200 lines from each init container
+   - Last 200 lines from all main containers
+   - Helps identify configuration errors, missing dependencies, connection failures
+
+### Example Diagnostic Output
+
+```
+========================================================================
+Chart postgresql pod 'lab-db-postgresql-0' failed to start
+========================================================================
+
+POD STATUS SUMMARY:
+- Phase: Running
+- Namespace: sandbox-abc123-zt-rhelbu
+- Conditions:
+  - Initialized: True - N/A
+  - Ready: False - containers with unready status: [postgresql]
+  - ContainersReady: False - containers with unready status: [postgresql]
+
+CONTAINER STATUSES:
+Init Containers:
+- init-chmod-data:
+  Ready: True
+  State: terminated
+  Terminated: Completed (exit 0)
+
+Main Containers:
+- postgresql:
+  Ready: False
+  State: waiting
+  Waiting: CrashLoopBackOff
+
+CONTAINER LOGS:
+=== Init Container: init-chmod-data ===
+Successfully set permissions on /bitnami/postgresql/data
+
+=== Main Container Logs ===
+postgresql: error: database system was interrupted
+postgresql: FATAL: data directory "/bitnami/postgresql/data" has wrong ownership
+========================================================================
+```
+
+This diagnostic output appears in Ansible task output and helps identify issues without manual `oc logs` or `oc describe` commands.
+
+---
+
+## Resource Cleanup
+
+The workload supports cleanup of deployed Helm chart resources when catalog items are destroyed.
+
+### Enabling Cleanup
+
+Add the workload to `remove_workloads` in your catalog item configuration:
+
+```yaml
+# Catalog common.yaml
+post_software_workloads:
+  localhost:
+    - ocp4_workload_helm_from_content_repo
+
+# Enable cleanup on destroy
+remove_workloads:
+  - ocp4_workload_helm_from_content_repo
+```
+
+### Cleanup Process
+
+When `ACTION=destroy`, the workload:
+
+1. Fetches `config/helm-charts.yaml` from content repository
+2. Filters for enabled charts
+3. For each chart:
+   - Renders chart with `helm_template` (to get resource list)
+   - Deletes all resources using `kubernetes.core.k8s` with `state: absent`
+   - Waits for resource deletion (300s timeout)
+4. Cleans up temporary directories
+5. Reports completion
+
+Resources are deleted **before** namespace deletion, ensuring proper cleanup even if namespace deletion is delayed or prevented.
+
+### Manual Cleanup
+
+If you need to manually remove chart resources:
+
+```bash
+# List deployed resources
+oc get all -n <namespace> -l app.kubernetes.io/instance=<release-name>
+
+# Delete resources
+oc delete all -n <namespace> -l app.kubernetes.io/instance=<release-name>
+
+# Delete PVCs (if any)
+oc delete pvc -n <namespace> -l app.kubernetes.io/instance=<release-name>
 ```
 
 ---
@@ -453,18 +659,39 @@ This workload follows AgnosticD conventions:
 ### Workflow
 
 ```
-1. Fetch config/helm-charts.yaml from content git repo
+1. Validate required variables (pre_workload)
    ↓
-2. Filter for enabled: true charts
+2. Fetch config/helm-charts.yaml from content git repo
    ↓
-3. For each chart:
+3. Filter for enabled: true charts
+   ↓
+4. Clone content repo (if path-based charts exist)
+   ↓
+5. RENDER PHASE: For each chart:
    ├─ Render via kubernetes.core.helm_template
-   ├─ Parse manifests for security validation
-   ├─ Check cluster-scoped, privileged, hostPath
-   ├─ Deploy via kubernetes.core.k8s
-   └─ Wait for pods Ready (with failure reporting)
+   ├─ Parse YAML to manifest objects
+   └─ Store in _rendered_charts list
    ↓
-4. Report deployment summary
+6. VALIDATION PHASE: For ALL rendered charts:
+   ├─ Check cluster-scoped resources (ClusterRole, CRD, etc.)
+   ├─ Check privileged containers (securityContext.privileged)
+   ├─ Check host namespace access (hostNetwork, hostIPC, hostPID)
+   ├─ Check hostPath volumes
+   ├─ Check hostPort bindings
+   ├─ Accumulate violations across all charts
+   └─ FAIL before deployment if ANY violations found
+        (prevents partial deployments that waste quota)
+   ↓
+7. DEPLOYMENT PHASE: For each validated chart:
+   ├─ Extract pod labels from rendered manifests
+   ├─ Deploy via kubernetes.core.k8s
+   ├─ Create OpenShift Routes (if defined)
+   ├─ Wait for pods Ready using extracted labels
+   └─ On failure: collect pod logs and container states
+   ↓
+8. Report deployment summary (post_workload)
+   ↓
+9. Cleanup temporary directories
 ```
 
 ### Why This Pattern?
@@ -480,7 +707,7 @@ This workload follows AgnosticD conventions:
 
 ## References
 
-- **Base pattern:** `ocp4_workload_showroom` workload
-- **Platform docs:** `~/Projects/cursor-revisit/platform/showroom-deployer-helm-reference.md`
-- **Design doc:** `~/Projects/cursor-revisit/platform/foreman-generic-helm-workload-security-design.md`
-- **Research:** `~/Projects/cursor-revisit/operations/foreman-poc-progress.md`
+- **Base pattern:** `ocp4_workload_showroom` workload (RHDP Showroom deployment)
+- **Helm documentation:** https://helm.sh/docs/
+- **Kubernetes module docs:** https://docs.ansible.com/ansible/latest/collections/kubernetes/core/
+- **OpenShift Security Context Constraints:** https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html

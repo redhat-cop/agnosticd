@@ -1,0 +1,261 @@
+---
+# Deploy a pre-rendered and validated Helm chart
+
+- name: "Set deployment facts for {{ _rendered_chart.chart_name }}"
+  ansible.builtin.set_fact:
+    _chart_name: "{{ _rendered_chart.chart_name }}"
+    _release_name: "{{ _rendered_chart.release_name }}"
+    _release_namespace: "{{ _rendered_chart.release_namespace }}"
+    _wait_enabled: "{{ _rendered_chart.wait_enabled }}"
+    _wait_timeout: "{{ _rendered_chart.wait_timeout }}"
+    _chart_config: "{{ _rendered_chart.chart_config }}"
+
+- name: "Report deploying chart: {{ _chart_name }}"
+  ansible.builtin.debug:
+    msg: "Deploying Helm chart '{{ _chart_name }}' as release '{{ _release_name }}' in namespace '{{ _release_namespace }}'"
+
+# =============================================
+# Extract pod labels from rendered manifests
+# =============================================
+
+- name: "Extract pod labels from {{ _chart_name }} workload manifests"
+  ansible.builtin.set_fact:
+    _pod_label_selectors: >-
+      {% set labels = {} -%}
+      {% for manifest in _rendered_chart.manifests -%}
+        {% if labels | length == 0 -%}
+          {% if manifest.kind in ['Deployment', 'StatefulSet', 'DaemonSet'] and manifest.spec.template.metadata.labels is defined -%}
+            {% set _ = labels.update(manifest.spec.template.metadata.labels) -%}
+          {% elif manifest.kind == 'Pod' and manifest.metadata.labels is defined -%}
+            {% set _ = labels.update(manifest.metadata.labels) -%}
+          {% endif -%}
+        {% endif -%}
+      {% endfor -%}
+      {% if labels | length > 0 -%}
+      {{ labels.items() | map('join', '=') | list }}
+      {%- else -%}
+      ["app.kubernetes.io/instance={{ _release_name }}"]
+      {%- endif %}
+
+- name: "Report pod label selectors for {{ _chart_name }}"
+  ansible.builtin.debug:
+    msg: "Using label selectors: {{ _pod_label_selectors }}"
+
+# =============================================
+# Deploy manifests
+# =============================================
+
+- name: "Deploy {{ _chart_name }} manifests to namespace {{ _release_namespace }}"
+  kubernetes.core.k8s:
+    namespace: "{{ _release_namespace }}"
+    host: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_host | default(omit) }}"
+    api_key: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_api_key | default(omit) }}"
+    validate_certs: "{{ ocp4_workload_helm_from_content_repo_validate_certs }}"
+    kubeconfig: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+    definition: "{{ _rendered_chart.manifest_yaml | from_yaml_all }}"
+    wait: false  # We'll do our own waiting below
+
+# =============================================
+# Wait for chart deployment readiness
+# =============================================
+
+- name: "Wait for {{ _chart_name }} pods to be created using label selector"
+  when: _wait_enabled | bool
+  kubernetes.core.k8s_info:
+    host: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_host | default(omit) }}"
+    api_key: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_api_key | default(omit) }}"
+    validate_certs: "{{ ocp4_workload_helm_from_content_repo_validate_certs }}"
+    kubeconfig: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+    api_version: v1
+    kind: Pod
+    namespace: "{{ _release_namespace }}"
+    label_selectors: "{{ _pod_label_selectors }}"
+  register: r_chart_pods
+  retries: 60
+  delay: 5
+  until: r_chart_pods.resources | length > 0
+  ignore_errors: true
+
+- name: "Set pod name fact from first matching pod"
+  when:
+    - _wait_enabled | bool
+    - r_chart_pods.resources | length > 0
+  ansible.builtin.set_fact:
+    _chart_pod_name: "{{ r_chart_pods.resources[0].metadata.name }}"
+
+- name: "Check if {{ _chart_name }} pod is running and ready"
+  when:
+    - _wait_enabled | bool
+    - _chart_pod_name is defined
+  kubernetes.core.k8s_info:
+    host: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_host | default(omit) }}"
+    api_key: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_api_key | default(omit) }}"
+    validate_certs: "{{ ocp4_workload_helm_from_content_repo_validate_certs }}"
+    kubeconfig: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+    api_version: v1
+    kind: Pod
+    namespace: "{{ _release_namespace }}"
+    name: "{{ _chart_pod_name }}"
+  register: r_pod_status
+  retries: "{{ ocp4_workload_helm_from_content_repo_wait_retries }}"
+  delay: 5
+  until:
+    - r_pod_status.resources | length > 0
+    - r_pod_status.resources[0].status.phase == 'Running'
+    - r_pod_status.resources[0].status.containerStatuses is defined
+    - >-
+      r_pod_status.resources[0].status.containerStatuses
+      | selectattr('ready', 'equalto', true)
+      | list
+      | length == r_pod_status.resources[0].status.containerStatuses | length
+  ignore_errors: true
+
+- name: "Get logs from all containers"
+  when:
+    - _wait_enabled | bool
+    - _chart_pod_name is defined
+    - >-
+      r_pod_status.resources | length == 0 or
+      r_pod_status.resources[0].status.phase != 'Running' or
+      r_pod_status.resources[0].status.containerStatuses is not defined or
+      (r_pod_status.resources[0].status.containerStatuses | selectattr('ready', 'equalto', true) | list |
+      length != r_pod_status.resources[0].status.containerStatuses | length)
+  kubernetes.core.k8s_log:
+    host: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_host | default(omit) }}"
+    api_key: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_api_key | default(omit) }}"
+    validate_certs: "{{ ocp4_workload_helm_from_content_repo_validate_certs }}"
+    kubeconfig: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+    namespace: "{{ _release_namespace }}"
+    name: "{{ _chart_pod_name }}"
+    all_containers: true
+    tail_lines: 200
+  register: r_pod_logs
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+
+- name: "Get logs from init containers"
+  when:
+    - _wait_enabled | bool
+    - _chart_pod_name is defined
+    - r_pod_status.resources | length > 0
+    - r_pod_status.resources[0].status.initContainerStatuses is defined
+    - r_pod_status.resources[0].status.initContainerStatuses | length > 0
+  kubernetes.core.k8s_log:
+    host: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_host | default(omit) }}"
+    api_key: "{{ ocp4_workload_helm_from_content_repo_k8s_auth_api_key | default(omit) }}"
+    validate_certs: "{{ ocp4_workload_helm_from_content_repo_validate_certs }}"
+    kubeconfig: "{{ ocp4_workload_helm_from_content_repo_kubeconfig | default(omit) }}"
+    namespace: "{{ _release_namespace }}"
+    name: "{{ _chart_pod_name }}"
+    container: "{{ item.name }}"
+    tail_lines: 200
+  register: r_init_container_logs
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+  loop: "{{ r_pod_status.resources[0].status.initContainerStatuses }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: "Report pod failure with diagnostic information"
+  when:
+    - _wait_enabled | bool
+    - _chart_pod_name is defined
+    - >-
+      r_pod_status.resources | length == 0 or
+      r_pod_status.resources[0].status.phase != 'Running' or
+      r_pod_status.resources[0].status.containerStatuses is not defined or
+      (r_pod_status.resources[0].status.containerStatuses | selectattr('ready', 'equalto', true) | list |
+      length != r_pod_status.resources[0].status.containerStatuses | length)
+  ansible.builtin.fail:
+    msg: |
+      ========================================================================
+      Chart {{ _chart_name }} pod '{{ _chart_pod_name }}' failed to start
+      ========================================================================
+
+      POD STATUS SUMMARY:
+      - Phase: {{ r_pod_status.resources[0].status.phase if r_pod_status.resources | length > 0 else 'Unknown' }}
+      - Namespace: {{ _release_namespace }}
+      {% if r_pod_status.resources | length > 0 and r_pod_status.resources[0].status.conditions is defined %}
+      - Conditions:
+      {% for condition in r_pod_status.resources[0].status.conditions %}
+        - {{ condition.type }}: {{ condition.status }} - {{ condition.message | default('N/A') }}
+      {% endfor %}
+      {% endif %}
+
+      CONTAINER STATUSES:
+      ========================================================================
+
+      {% if r_pod_status.resources | length > 0 and r_pod_status.resources[0].status.initContainerStatuses is defined %}
+      Init Containers:
+      {% for container in r_pod_status.resources[0].status.initContainerStatuses %}
+      - {{ container.name }}:
+        Ready: {{ container.ready | default(false) }}
+        State: {{ container.state.keys() | list | first | default('unknown') }}
+        {% if container.state.waiting is defined %}
+        Waiting: {{ container.state.waiting.reason | default('N/A') }}
+        {% endif %}
+        {% if container.state.terminated is defined %}
+        Terminated: {{ container.state.terminated.reason | default('N/A') }} (exit {{ container.state.terminated.exitCode | default('?') }})
+        {% endif %}
+      {% endfor %}
+      {% endif %}
+
+      {% if r_pod_status.resources | length > 0 and r_pod_status.resources[0].status.containerStatuses is defined %}
+      Main Containers:
+      {% for container in r_pod_status.resources[0].status.containerStatuses %}
+      - {{ container.name }}:
+        Ready: {{ container.ready | default(false) }}
+        State: {{ container.state.keys() | list | first | default('unknown') }}
+        {% if container.state.waiting is defined %}
+        Waiting: {{ container.state.waiting.reason | default('N/A') }}
+        {% endif %}
+        {% if container.state.terminated is defined %}
+        Terminated: {{ container.state.terminated.reason | default('N/A') }} (exit {{ container.state.terminated.exitCode | default('?') }})
+        {% endif %}
+      {% endfor %}
+      {% endif %}
+
+      CONTAINER LOGS:
+      ========================================================================
+
+      {% if r_init_container_logs is defined and r_init_container_logs.results is defined %}
+      {% for result in r_init_container_logs.results %}
+      {% if result.log is defined and result.log != '' %}
+      === Init Container: {{ result.item.name }} ===
+      {{ result.log }}
+
+      {% endif %}
+      {% endfor %}
+      {% endif %}
+
+      {% if r_pod_logs is defined and r_pod_logs.log is defined and r_pod_logs.log != '' %}
+      === Main Container Logs ===
+      {{ r_pod_logs.log }}
+      {% endif %}
+
+      ========================================================================
+
+- name: "Warn if {{ _chart_name }} pods not created"
+  when:
+    - _wait_enabled | bool
+    - r_chart_pods.resources | default([]) | length == 0
+  ansible.builtin.debug:
+    msg: "WARNING: No pods found for release {{ _release_name }}. Chart may not create pods immediately or may use other resource types."
+
+- name: "Report {{ _chart_name }} deployment status"
+  ansible.builtin.debug:
+    msg: |
+      Chart {{ _chart_name }} deployed:
+      - Release: {{ _release_name }}
+      - Namespace: {{ _release_namespace }}
+      - Pods: {{ r_chart_pods.resources | default([]) | length }}
+      - Status: {{ 'Ready' if (r_pod_status is defined and r_pod_status.resources | default([]) | length > 0 and r_pod_status.resources[0].status.phase == 'Running') else 'Deployed (check pods for readiness)' }}
+
+# =============================================
+# Create Routes for service exposure
+# =============================================
+
+- name: "Create Routes for {{ _chart_name }}"
+  ansible.builtin.include_tasks: create_routes.yml

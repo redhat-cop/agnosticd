@@ -1,0 +1,122 @@
+---
+# Main workload deployment tasks
+
+- name: Setting up workload for user
+  ansible.builtin.debug:
+    msg: "Setting up Helm chart deployment workload for user {{ ocp_username }}"
+
+# =============================================
+# Fetch helm-charts.yaml from content repository
+# =============================================
+
+- name: Check if helm-charts.yaml exists in content repository
+  when: ocp4_workload_helm_from_content_repo_git_repo | length > 0
+  block:
+    - name: Fetch helm-charts.yaml from content repository
+      ansible.builtin.uri:
+        url: "{{ ocp4_workload_helm_from_content_repo_git_config_url }}/helm-charts.yaml"
+        return_content: true
+        status_code: [200, 404]
+      register: r_helm_charts_yaml
+      failed_when: false
+
+    - name: Parse helm-charts configuration
+      when:
+        - r_helm_charts_yaml.status == 200
+        - r_helm_charts_yaml.content is defined
+      ansible.builtin.set_fact:
+        ocp4_workload_helm_from_content_repo_helm_charts: >-
+          {{ (r_helm_charts_yaml.content | from_yaml).charts | default([]) }}
+
+- name: Filter enabled charts
+  ansible.builtin.set_fact:
+    _enabled_charts: >-
+      {{ ocp4_workload_helm_from_content_repo_helm_charts
+         | selectattr('enabled', 'defined')
+         | selectattr('enabled', 'equalto', true)
+         | list }}
+
+- name: Report enabled charts
+  ansible.builtin.debug:
+    msg: "Found {{ _enabled_charts | length }} enabled Helm chart(s) to deploy"
+
+# =============================================
+# Clone content repo for path-based charts
+# =============================================
+
+- name: Clone content repository for path-based charts
+  when:
+    - _enabled_charts | selectattr('source.type', 'equalto', 'path') | list | length > 0
+    - ocp4_workload_helm_from_content_repo_git_repo | length > 0
+  block:
+    - name: Create temporary directory for content repo
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: helm_content_repo_
+      register: r_content_repo_dir
+
+    - name: Clone content repository
+      ansible.builtin.git:
+        repo: "{{ ocp4_workload_helm_from_content_repo_git_repo }}"
+        dest: "{{ r_content_repo_dir.path }}"
+        version: "{{ ocp4_workload_helm_from_content_repo_git_ref }}"
+        depth: 1
+        force: yes
+      register: r_git_clone
+
+    - name: Set content repo clone path
+      ansible.builtin.set_fact:
+        ocp4_workload_helm_from_content_repo_clone_path: "{{ r_content_repo_dir.path }}"
+
+    - name: Report content repo cloned
+      ansible.builtin.debug:
+        msg: "Content repository cloned to {{ ocp4_workload_helm_from_content_repo_clone_path }} for path-based charts"
+
+# =============================================
+# PHASE 1: Render all charts
+# =============================================
+
+- name: Initialize rendered charts list
+  ansible.builtin.set_fact:
+    _rendered_charts: []
+
+- name: Render all Helm charts
+  when: _enabled_charts | length > 0
+  ansible.builtin.include_tasks: render_helm_chart.yml
+  loop: "{{ _enabled_charts }}"
+  loop_control:
+    loop_var: _chart
+    label: "{{ _chart.name }}"
+
+# =============================================
+# PHASE 2: Validate all rendered manifests
+# =============================================
+
+- name: Validate all charts before deployment
+  when: _rendered_charts | length > 0
+  ansible.builtin.include_tasks: validate_all_charts.yml
+
+# =============================================
+# PHASE 3: Deploy all charts
+# =============================================
+
+- name: Deploy validated Helm charts
+  when: _rendered_charts | length > 0
+  ansible.builtin.include_tasks: deploy_helm_chart.yml
+  loop: "{{ _rendered_charts }}"
+  loop_control:
+    loop_var: _rendered_chart
+    label: "{{ _rendered_chart.chart_name }}"
+
+# =============================================
+# Report deployment summary
+# =============================================
+
+- name: Report successful deployments
+  when: _enabled_charts | length > 0
+  agnosticd_user_info:
+    msg: |
+      Deployed {{ _enabled_charts | length }} Helm chart(s):
+      {% for chart in _enabled_charts %}
+      - {{ chart.name }}: {{ chart.release.name }} in namespace {{ chart.release.namespace | default(ocp4_workload_helm_from_content_repo_namespace) }}
+      {% endfor %}
