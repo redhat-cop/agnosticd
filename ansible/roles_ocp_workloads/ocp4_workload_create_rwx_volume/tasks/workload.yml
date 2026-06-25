@@ -1,0 +1,112 @@
+---
+- name: Execute the workload
+  when:
+    - cloud_provider == 'ec2'
+    - ocp4_workload_create_rwx_volume_enable | bool
+  block:
+    #############################################################################
+    # Setup dependencies
+    #############################################################################
+
+    - name: Install dependencies
+      become: true
+      ansible.builtin.pip:
+        name:
+          - boto3
+          - openshift
+          - pyyaml
+          - kubernetes
+        state: present
+
+    - name: Ensure kubernetes.core collection is installed on bastion
+      become: true
+      command: "{{ ocp4_workload_create_rwx_volume_virtualenv_path }}/bin/ansible-galaxy collection install kubernetes.core"
+
+    #############################################################################
+    # Setup Helm
+    #############################################################################
+
+    - name: Check if Helm is already installed
+      ansible.builtin.stat:
+        path: /usr/bin/helm
+      register: r_helm
+
+    - name: Setup Helm
+      when: not r_helm.stat.exists
+      become: true
+      block:
+        - name: Set URL for helm
+          ansible.builtin.set_fact:
+            helm_url: >-
+              {{ "%s/helm/%s/helm-linux-amd64.tar.gz" |
+              format(ocp4_workload_create_rwx_volume_installer_root_url, ocp4_workload_create_rwx_volume_helm_version) }}
+
+        - name: Install helm command
+          become: true
+          ansible.builtin.unarchive:
+            src: "{{ helm_url }}"
+            remote_src: true
+            dest: /usr/bin
+            mode: 0775
+            owner: root
+            group: root
+          retries: 10
+          register: r_client
+          until: r_client is success
+          delay: 30
+
+        - name: Link downloaded helm command to helm
+          become: true
+          ansible.builtin.file:
+            src: /usr/bin/helm-linux-amd64
+            dest: /usr/bin/helm
+            owner: root
+            group: root
+            state: link
+
+        - name: Create Helm Bash completion file
+          become: true
+          ansible.builtin.shell: /usr/bin/helm completion bash >/etc/bash_completion.d/helm
+
+    #############################################################################
+    # Setup S3 bucket and drivers
+    #############################################################################
+
+    - name: Create AWS S3 bucket
+      amazon.aws.s3_bucket:
+        name: "{{ ocp4_workload_create_rwx_volume_s3_bucket_name }}"
+        region: "{{ ocp4_workload_create_rwx_volume_region }}"
+        state: present
+        aws_access_key: "{{ ocp4_workload_create_rwx_volume_access_key_id }}"
+        aws_secret_key: "{{ ocp4_workload_create_rwx_volume_secret_access_key }}"
+
+    - name: Install Amazon S3 CSI Driver
+      block:
+        - name: Add AWS helm repository
+          kubernetes.core.helm_repository:
+            name: aws-mountpoint-s3-csi-driver
+            repo_url: "{{ ocp4_workload_create_rwx_volume_helm_s3_driver_repo_url }}"
+
+        - name: Deploy AWS Mountpoint S3 CSI Driver
+          kubernetes.core.helm:
+            name: aws-mountpoint-s3-csi-driver
+            chart_ref: aws-mountpoint-s3-csi-driver/aws-mountpoint-s3-csi-driver
+            release_namespace: kube-system
+            create_namespace: true
+            update_repo_cache: true
+
+    #############################################################################
+    # Setup PersistentVolume
+    #############################################################################
+
+    - name: Create volume claim
+      kubernetes.core.k8s:
+        state: present
+        resource_definition: "{{ lookup('template', 'persistent_volume.yaml.j2') }}"
+
+# Leave this as the last task in the playbook.
+# --------------------------------------------
+- name: workload tasks complete
+  debug:
+    msg: "Workload tasks completed successfully."
+  when: not ocp4_workload_create_rwx_volume_silent | bool

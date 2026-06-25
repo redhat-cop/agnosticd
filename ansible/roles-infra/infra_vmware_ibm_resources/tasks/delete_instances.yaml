@@ -6,12 +6,58 @@
 - name: Stop instances
   include_tasks: stop_instances.yaml
 
+- name: Get disk info for each VM
+  community.vmware.vmware_guest_disk_info:
+    datacenter: "{{ vcenter_datacenter }}"
+    folder: "/Workloads/{{ env_type }}-{{ guid }}"
+    name: "{{ item.guest_name }}"
+    validate_certs: "{{ vmw_validate_certs }}"
+  loop: "{{ r_vmc_vms.virtual_machines | default([]) }}"
+  loop_control:
+    label: "{{ item.guest_name }}"
+  register: r_disk_info
+  ignore_errors: true
+
+- name: Build list of FCD disks to detach
+  ansible.builtin.set_fact:
+    _fcd_disks_to_remove: >-
+      {{
+        _fcd_disks_to_remove | default([]) + (
+          item.guest_disk_info | dict2items
+          | selectattr('value.backing_filename', 'search', 'fcd/')
+          | map('combine', {'_vm_name': item.item.guest_name})
+          | list
+        )
+      }}
+  loop: "{{ r_disk_info.results }}"
+  loop_control:
+    label: "{{ item.item.guest_name }}"
+  when: not (item.failed | default(false))
+
+- name: Detach FCD disks before VM deletion
+  when: _fcd_disks_to_remove | default([]) | length > 0
+  community.vmware.vmware_guest_disk:
+    datacenter: "{{ vcenter_datacenter }}"
+    folder: "/Workloads/{{ env_type }}-{{ guid }}"
+    name: "{{ item._vm_name }}"
+    validate_certs: "{{ vmw_validate_certs }}"
+    disk:
+      - state: absent
+        destroy: true
+        controller_type: "{{ item.value.controller_type }}"
+        controller_number: "{{ item.value.controller_bus_number }}"
+        unit_number: "{{ item.value.unit_number }}"
+  loop: "{{ _fcd_disks_to_remove | default([]) }}"
+  loop_control:
+    label: "{{ item._vm_name }} - {{ item.value.backing_filename }}"
+  ignore_errors: true
+
 - name: Remove the VMs
   register: r_vmc_instances
   community.vmware.vmware_guest:
     folder: "/Workloads/{{env_type}}-{{ guid }}"
     name: "{{ item.guest_name }}"
-    validate_certs: "{{ vmw_validate_certs | default(false) | bool }}"
+    validate_certs: "{{ vmw_validate_certs }}"
     state: "absent"
   loop: "{{ r_vmc_vms.virtual_machines|default([]) }}"
 
@@ -27,7 +73,7 @@
     folder_name: "{{ env_type }}-{{ guid }}"
     parent_folder: "Workloads"
     folder_type: vm
-    validate_certs: "{{ vmw_validate_certs | default(false) | bool }}"
+    validate_certs: "{{ vmw_validate_certs }}"
     state: absent
 
 - name: Delete additional public ips
@@ -35,4 +81,3 @@
   loop: "{{ additional_publicips|default([]) }}"
   loop_control:
     loop_var: _additional
-

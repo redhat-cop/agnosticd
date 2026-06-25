@@ -1,0 +1,171 @@
+---
+# ------------------------------------------
+# Remove SSH access from Bastion to Cluster
+# ------------------------------------------
+
+- name: Remove SSH ACCESS workload
+  when:
+    - cloud_provider == 'ec2'
+    - ocp4_workload_open_ssh_from_bastion_enable | bool
+  module_defaults:
+    group/aws:
+      region: "{{ ocp4_workload_open_ssh_from_bastion_region }}"
+      access_key: "{{ ocp4_workload_open_ssh_from_bastion_access_key_id }}"
+      secret_key: "{{ ocp4_workload_open_ssh_from_bastion_secret_access_key }}"
+  block:
+    - name: Get Bastion VPC
+      amazon.aws.ec2_vpc_net_info:
+        filters:
+          "cidr": "{{ ocp4_workload_open_ssh_from_bastion_bastion_cidr }}"
+      register: r_bastion_vpc
+      failed_when: false
+
+    - name: Get Cluster VPC
+      amazon.aws.ec2_vpc_net_info:
+        filters:
+          "cidr": "{{ ocp4_workload_open_ssh_from_bastion_cluster_cidr }}"
+      register: r_cluster_vpc
+      failed_when: false
+
+    - name: Process cleanup when VPCs exist
+      when:
+        - r_bastion_vpc.vpcs | length > 0
+        - r_cluster_vpc.vpcs | length > 0
+      block:
+        ###########################################################################
+        #
+        # Step 1: Remove security group rules from Cluster security groups
+        #
+        ###########################################################################
+
+        - name: Get Security Groups info for the cluster controlplane and nodes
+          amazon.aws.ec2_security_group_info:
+            filters:
+              vpc-id: "{{ r_cluster_vpc.vpcs[0].vpc_id }}"
+              "tag:Name": "{{ item }}"
+          loop:
+            - "*controlplane*"
+            - "*node*"
+            - "*master*"
+            - "*worker*"
+          register: r_filtered_cluster_sg_info
+          failed_when: false
+
+        # Use AWS CLI to remove specific SSH rule (compatible with older amazon.aws collections)
+        - name: Remove SSH rule from Security Groups using AWS CLI
+          ansible.builtin.command:
+            cmd: >-
+              aws ec2 revoke-security-group-ingress
+              --region {{ ocp4_workload_open_ssh_from_bastion_region }}
+              --group-id {{ item }}
+              --protocol tcp
+              --port 22
+              --cidr {{ ocp4_workload_open_ssh_from_bastion_bastion_cidr }}
+          environment:
+            AWS_ACCESS_KEY_ID: "{{ ocp4_workload_open_ssh_from_bastion_access_key_id }}"
+            AWS_SECRET_ACCESS_KEY: "{{ ocp4_workload_open_ssh_from_bastion_secret_access_key }}"
+          loop: >-
+            {{
+              r_filtered_cluster_sg_info.results
+              | map(attribute='security_groups')
+              | flatten
+              | map(attribute='group_id')
+              | list
+            }}
+          failed_when: false
+          changed_when: true
+
+        ###########################################################################
+        #
+        # Step 2: Get VPC Peering Connection info for route cleanup
+        #
+        ###########################################################################
+
+        - name: Get VPC Peering Connection
+          amazon.aws.ec2_vpc_peering_info:
+            filters:
+              requester-vpc-info.vpc-id: "{{ r_bastion_vpc.vpcs[0].vpc_id }}"
+              accepter-vpc-info.vpc-id: "{{ r_cluster_vpc.vpcs[0].vpc_id }}"
+          register: r_vpc_peering_info
+          failed_when: false
+
+        - name: Process cleanup when peering exists
+          when:
+            - r_vpc_peering_info.vpc_peering_connections | length > 0
+          block:
+            - name: Set peering ID
+              ansible.builtin.set_fact:
+                _peering_id: "{{ r_vpc_peering_info.vpc_peering_connections[0].vpc_peering_connection_id }}"
+
+            ###########################################################################
+            #
+            # Step 3: Remove routes from route tables BEFORE deleting peering
+            #
+            ###########################################################################
+
+            - name: Get Bastion route tables
+              amazon.aws.ec2_vpc_route_table_info:
+                filters:
+                  "tag:env_type": ocp4-cluster
+                  association.main: false
+                  vpc-id: "{{ r_bastion_vpc.vpcs[0].vpc_id }}"
+              register: r_bastion_route_tables
+              failed_when: false
+
+            - name: Get Cluster route tables
+              amazon.aws.ec2_vpc_route_table_info:
+                filters:
+                  "tag:env_type": ocp4-cluster
+                  "tag:Name": "*private*"
+                  association.main: false
+                  vpc-id: "{{ r_cluster_vpc.vpcs[0].vpc_id }}"
+              register: r_cluster_route_tables
+              failed_when: false
+
+            # Use AWS CLI to surgically remove the specific routes that were
+            # added rather than using the Ansible module with the added
+            # complexity which requires purging / recreating the entire table
+            # minus the route(s) that need to be removed.
+            - name: Remove routes from Bastion route tables pointing to Cluster
+              ansible.builtin.command:
+                cmd: >-
+                  aws ec2 delete-route
+                  --region {{ ocp4_workload_open_ssh_from_bastion_region }}
+                  --route-table-id {{ item.route_table_id }}
+                  --destination-cidr-block {{ ocp4_workload_open_ssh_from_bastion_cluster_cidr }}
+              environment:
+                AWS_ACCESS_KEY_ID: "{{ ocp4_workload_open_ssh_from_bastion_access_key_id }}"
+                AWS_SECRET_ACCESS_KEY: "{{ ocp4_workload_open_ssh_from_bastion_secret_access_key }}"
+              loop: "{{ r_bastion_route_tables.route_tables | default([]) }}"
+              failed_when: false
+              changed_when: true
+
+            - name: Remove routes from Cluster route tables pointing to Bastion
+              ansible.builtin.command:
+                cmd: >-
+                  aws ec2 delete-route
+                  --region {{ ocp4_workload_open_ssh_from_bastion_region }}
+                  --route-table-id {{ item.route_table_id }}
+                  --destination-cidr-block {{ ocp4_workload_open_ssh_from_bastion_bastion_cidr }}
+              environment:
+                AWS_ACCESS_KEY_ID: "{{ ocp4_workload_open_ssh_from_bastion_access_key_id }}"
+                AWS_SECRET_ACCESS_KEY: "{{ ocp4_workload_open_ssh_from_bastion_secret_access_key }}"
+              loop: "{{ r_cluster_route_tables.route_tables | default([]) }}"
+              failed_when: false
+              changed_when: true
+
+            ###########################################################################
+            #
+            # Step 4: Delete VPC Peering Connection
+            #
+            ###########################################################################
+
+            - name: Delete VPC Peering Connection
+              amazon.aws.ec2_vpc_peering:
+                peering_id: "{{ _peering_id }}"
+                state: absent
+              failed_when: false
+
+- name: Remove_workload tasks complete
+  ansible.builtin.debug:
+    msg: "Remove Workload tasks completed successfully."

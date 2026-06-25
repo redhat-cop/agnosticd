@@ -1,0 +1,257 @@
+---
+# Workshop user setup (htpasswd OAuth, namespaces, RBAC, kubeconfigs, tmux).
+# The idea here is to create two new users: devel and uadmin.
+# The devel user will have the edit role in the default and fraud-detection namespaces.
+# The uadmin user will have the sandboxed-admin ClusterRoles: cluster-scoped
+# APIs per sandboxed-admin-cluster-role, plus workload rules in ocp4_workload_coco_on_aro_uadmin_namespaces.
+# The devel and uadmin users will have the kubeconfig files created in the ocp4_workload_coco_on_aro_home directory.
+# There will be a tmux session created in the ocp4_workload_coco_on_aro_tmux_session variable.
+# The bashrc file will be updated to automatically attach to the tmux session on interactive login.
+
+- name: Build htpasswd file for devel and uadmin
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cd "{{ ocp4_workload_coco_on_aro_home }}"
+    htpasswd -b -c users.htpasswd devel devel
+    htpasswd -b users.htpasswd uadmin uadmin
+  args:
+    executable: /bin/bash
+
+- name: Create or update htpass-secret in openshift-config
+  ansible.builtin.shell: |
+    set -euo pipefail
+    oc create secret generic htpass-secret \
+      --from-file=htpasswd={{ ocp4_workload_coco_on_aro_home }}/users.htpasswd \
+      -n openshift-config \
+      --dry-run=client -o yaml | oc apply -f -
+    rm -f {{ ocp4_workload_coco_on_aro_home }}/users.htpasswd
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Patch OAuth cluster for htpasswd identity provider
+  ansible.builtin.shell: |
+    set -euo pipefail
+    oc patch oauth cluster --type=merge -p '{
+      "spec": {
+        "identityProviders": [
+          {
+            "name": "my_htpasswd_auth",
+            "mappingMethod": "claim",
+            "type": "HTPasswd",
+            "htpasswd": {
+              "fileData": {
+                "name": "htpass-secret"
+              }
+            }
+          }
+        ]
+      }
+    }'
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Wait until htpasswd authentication accepts oc login (devel and uadmin)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    MY_SERVER=$(oc whoami --show-server)
+    until KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/.kube/devel.kubeconfig oc login -u devel -p devel --server="$MY_SERVER"; do
+      echo "Waiting for devel user to authenticate..."
+      sleep 20
+    done
+    until KUBECONFIG={{ ocp4_workload_coco_on_aro_home }}/.kube/uadmin.kubeconfig oc login -u uadmin -p uadmin --server="$MY_SERVER"; do
+      echo "Waiting for uadmin user to authenticate..."
+      sleep 20
+    done
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Apply sandboxed-admin cluster-scoped ClusterRole (Kata, nodes, MC, namespace list)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    oc apply -f - <<'EOF'
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: sandboxed-admin-cluster-role
+    rules:
+      - apiGroups: [""]
+        resources: ["namespaces"]
+        verbs: ["get", "list", "watch", "create", "patch", "update"]
+      - apiGroups: ["config.openshift.io"]
+        resources: ["infrastructures"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["imageregistry.operator.openshift.io"]
+        resources: ["configs"]
+        verbs: ["get", "list", "watch", "patch", "update"]
+      - apiGroups: ["dscinitialization.opendatahub.io"]
+        resources: ["dscinitializations"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["datasciencecluster.opendatahub.io"]
+        resources: ["datascienceclusters"]
+        verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+      - apiGroups: ["kubeflow.org"]
+        resources: ["notebooks"]
+        verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+      - apiGroups: ["kataconfiguration.openshift.io"]
+        resources: ["kataconfigs"]
+        verbs: ["*"]
+      - apiGroups: ["node.k8s.io"]
+        resources: ["runtimeclasses"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: ["machineconfiguration.openshift.io"]
+        resources: ["machineconfigpools", "machineconfigs"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: [""]
+        resources: ["nodes"]
+        verbs: ["get", "list", "watch", "patch", "update"]
+      - apiGroups: ["security.openshift.io"]
+        resources: ["securitycontextconstraints"]
+        verbs: ["use"]
+        resourceNames: ["privileged"]
+    EOF
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Apply sandboxed-admin namespace workload ClusterRole (bound per-namespace only)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    oc apply -f - <<'EOF'
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: sandboxed-admin-namespace-role
+    rules:
+      - apiGroups: ["apps"]
+        resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+        verbs: ["*"]
+      - apiGroups: [""]
+        resources: ["pods", "pods/log", "pods/exec", "pods/attach", "services", "configmaps", "secrets", "serviceaccounts"]
+        verbs: ["*"]
+      - apiGroups: ["operators.coreos.com"]
+        resources: ["operatorgroups", "subscriptions", "installplans", "clusterserviceversions"]
+        verbs: ["*"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        resources: ["roles", "rolebindings"]
+        verbs: ["*"]
+    EOF
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Bind cluster-scoped sandboxed-admin ClusterRole to uadmin
+  ansible.builtin.command: oc adm policy add-cluster-role-to-user sandboxed-admin-cluster-role uadmin
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+
+- name: Bind workload sandboxed-admin ClusterRole to uadmin in allowed namespaces
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for ns in {{ ocp4_workload_coco_on_aro_uadmin_namespaces | join(' ') }}; do
+      if ! oc get namespace "$ns" &>/dev/null; then
+        oc create namespace "$ns"
+      fi
+      if oc get namespace "$ns" &>/dev/null; then
+        oc adm policy add-role-to-user sandboxed-admin-namespace-role uadmin -n "$ns"
+      fi
+    done
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+  args:
+    executable: /bin/bash
+
+- name: Grant privileged SCC to default SA in default namespace (required for oc debug node)
+  # oc debug node/ creates a pod with hostPID/hostNetwork/hostIPC and a privileged container.
+  # Without access to the 'privileged' SCC the pod is admitted but stays Pending forever,
+  # causing oc debug to block. This grants the SA-level SCC access (OCP >= 4.11 checks the
+  # pod SA, not the user). Scope is limited to the default namespace SA only.
+  ansible.builtin.command: oc adm policy add-scc-to-user privileged -z default -n default
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+
+- name: Grant cluster-admin to kube:admin user
+  ansible.builtin.command: oc adm policy add-cluster-role-to-user cluster-admin kube:admin
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+
+- name: Grant devel edit role in default namespace
+  ansible.builtin.command: oc adm policy add-role-to-user edit devel -n default
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+
+- name: Grant devel edit role in fraud-detection namespace
+  ansible.builtin.command: oc adm policy add-role-to-user edit devel -n fraud-detection
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+
+- name: Patch OAuth cluster access token max age
+  ansible.builtin.command: >-
+    oc patch oauth cluster --type=merge -p '{"spec": {"tokenConfig": {"accessTokenMaxAgeSeconds": 0}}}'
+  environment:
+    KUBECONFIG: "{{ ocp4_workload_coco_on_aro_admin_kubeconfig }}"
+
+- name: Create detached tmux session for workshop layout (no attach)
+  environment:
+    _OPSEC_MOTD_B64: "{{ bastion_custom_motd | b64encode }}"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    TMUX_S="{{ ocp4_workload_coco_on_aro_tmux_session }}"
+    KUBECONFIG_DEVEL="{{ ocp4_workload_coco_on_aro_home }}/.kube/devel.kubeconfig"
+    KUBECONFIG_UADMIN="{{ ocp4_workload_coco_on_aro_home }}/.kube/uadmin.kubeconfig"
+    OPSEC_INTRO='---------------------------------------------------------------
+    I am the opsec admin, I am the only one capable of accessing
+    the trustee-operator-system namespace!
+    ---------------------------------------------------------------'
+    DEVEL_INTRO='---------------------------------------------------------------
+    I am the devel user, I am the only one capable of accessing
+    the default and fraud-detection namespaces!
+    ---------------------------------------------------------------'
+    ADMIN_INTRO='---------------------------------------------------------------
+    I am the admin user, workload admin is limited to namespaces:
+    {{ ocp4_workload_coco_on_aro_uadmin_namespaces | join(", ") }}
+    (only existing namespaces receive RBAC; cluster APIs: Kata/nodes/MC).
+    ---------------------------------------------------------------'
+    tmux has-session -t "$TMUX_S" 2>/dev/null && tmux kill-session -t "$TMUX_S" || true
+    tmux new-session -d -s "$TMUX_S" -n "main" \
+      "printf '%s' \"${_OPSEC_MOTD_B64}\" | base64 -d; echo; printf '%s\n' \"$OPSEC_INTRO\"; export PS1='[opsec \W]\$ '; exec bash" \; \
+    set -g mouse on \; \
+    set -g status-justify centre \; \
+    set -g window-status-format "  #I:#W  " \; \
+    set -g window-status-current-format " [ #I:#W ] " \; \
+    unbind -n MouseDrag1Pane \; \
+    unbind -T copy-mode MouseDrag1Pane \; \
+    split-window -v -t "$TMUX_S:main" \
+      "export KUBECONFIG=$KUBECONFIG_DEVEL; printf '%s\n' \"$DEVEL_INTRO\"; export PS1='[devel \W]\$ '; exec bash" \; \
+    select-pane -t 0 \; \
+    new-window -t "$TMUX_S" -n "admin" \
+      "export KUBECONFIG=$KUBECONFIG_UADMIN; printf '%s\n' \"$ADMIN_INTRO\"; export PS1='[uadmin \W]\$ '; exec bash" \; \
+    select-window -t "$TMUX_S:main"
+  args:
+    executable: /bin/bash
+
+- name: Configure bashrc to attach to workshop tmux on interactive login
+  when: ocp4_workload_coco_on_aro_bashrc_tmux_auto_attach | default(true) | bool
+  ansible.builtin.blockinfile:
+    path: "{{ ocp4_workload_coco_on_aro_home }}/.bashrc"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK ocp4_workload_coco_on_aro tmux auto-attach"
+    block: |
+      if [[ $- == *i* ]] && command -v tmux &>/dev/null && [[ -z "${TMUX:-}" ]]; then
+        tmux attach-session -t {{ ocp4_workload_coco_on_aro_tmux_session }} 2>/dev/null || true
+      fi
+    create: true
+    mode: "0644"
+
+- name: Workshop user setup complete
+  ansible.builtin.debug:
+    msg: >-
+      Htpasswd users, RBAC, kubeconfigs, and tmux session
+      '{{ ocp4_workload_coco_on_aro_tmux_session }}' are configured;
+      interactive shells attach via .bashrc.

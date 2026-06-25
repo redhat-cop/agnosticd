@@ -109,33 +109,29 @@
         az_resource_group: "{{ item.name }}"
       loop: "{{ allresourcegroups.resourcegroups }}"
 
-    - name: Get list of locks in the subscription
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_lock_info:
-        auth_source: env
-        managed_resource_id: "/subscriptions/{{ pool_subscription_id }}"
-      register: r_subscription_locks
-
-    - name: Delete all locks in the subscription
-      when: r_subscription_locks.locks|length>0
+    - name: Get list of all locks in the subscription (all scopes)
       environment:
         AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
       ansible.builtin.command: >
-        az lock delete --name {{ item.name }} --ids {{ item.id }}
-      loop: "{{ r_subscription_locks.locks }}"
+        az lock list --subscription {{ pool_subscription_id }}
+        --query "[].{name:name, id:id, resourceGroup:resourceGroup}"
+        -o json
+      register: r_subscription_locks_raw
+      changed_when: false
 
-    # Leave here until azure fixes the collection
-    #- name: Delete all locks in the subscription
-    #  when: r_subscription_locks.locks|length>0
-    #  environment:
-    #    AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-    #  azure.azcollection.azure_rm_lock:
-    #    auth_source: env
-    #    name: "{{ item.name }}"
-    #    managed_resource_id: "{{ item.id }}"
-    #    state: absent
-    #  loop: "{{ r_subscription_locks.locks }}"
+    - name: Set lock list fact
+      ansible.builtin.set_fact:
+        r_subscription_locks_list: "{{ r_subscription_locks_raw.stdout | from_json }}"
+
+    - name: Delete all locks in the subscription (all scopes)
+      when: r_subscription_locks_list | length > 0
+      environment:
+        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+      ansible.builtin.command: >
+        az lock delete --ids {{ item.id }}
+      loop: "{{ r_subscription_locks_list }}"
+      loop_control:
+        label: "{{ item.name }}"
 
     - name: Delete all resource groups owned by the subscription (RG's created by the lab user)
       when: allresourcegroups.resourcegroups|length>0
@@ -163,6 +159,17 @@
         id: "{{ azure_subscription_id }}"
       register: management_subscription
 
+    - name: Ensure pool manager SP has direct Owner on subscription
+      environment:
+        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+      azure.azcollection.azure_rm_roleassignment:
+        auth_source: env
+        scope: "{{ subscriptionfqid }}"
+        assignee_object_id: "{{ azure_open_env_app_id }}"
+        role_definition_id:
+          "/subscriptions/{{ pool_subscription_id }}/providers/Microsoft.Authorization/roleDefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635"
+        state: present
+
     - name: Get all direct role assignments for the subscription
       environment:
         AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
@@ -172,10 +179,10 @@
         strict_scope_match: True
       register: role_assignments
 
-    - name: Remove all direct role assignments from the subscription
+    - name: Remove non-pool-manager role assignments from the subscription
       environment:
         AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      when: 'item.assignee_object_id != azure_open_env_app_id'
+      when: item.assignee_object_id != azure_open_env_app_id
       azure.azcollection.azure_rm_roleassignment:
         auth_source: env
         id: "{{ item.id }}"
