@@ -1,2 +1,0 @@
-GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' IDENTIFIED BY '{{ mysql_root_password }}' WITH GRANT OPTION;
-FLUSH PRIVILEGES;
