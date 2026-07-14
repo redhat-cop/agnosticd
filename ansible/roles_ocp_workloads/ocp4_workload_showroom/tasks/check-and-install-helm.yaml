@@ -9,8 +9,13 @@
     path: /usr/bin/helm
   register: r_helm_installed
 
+- name: Check if helm is in ~/.local/bin
+  ansible.builtin.stat:
+    path: "{{ ansible_user_dir }}/.local/bin/helm"
+  register: r_helm_installed_user
+
 - name: Install Helm if it's not there
-  when: not (r_helm_installed_local.stat.exists or r_helm_installed.stat.exists)
+  when: not (r_helm_installed_local.stat.exists or r_helm_installed.stat.exists or r_helm_installed_user.stat.exists)
   block:
   - name: Set URL for helm
     ansible.builtin.set_fact:
@@ -44,10 +49,51 @@
     - name: Create Helm Bash completion file
       ansible.builtin.shell: /usr/local/bin/helm completion bash >/etc/bash_completion.d/helm
 
-  - name: Get helm version
-    ansible.builtin.shell: /usr/local/bin/helm version
-    register: r_helm_version
+    rescue:
+    - name: Install Helm to user-writable location (no sudo available)
+      block:
+      - name: Create ~/.local/bin directory
+        ansible.builtin.file:
+          path: "{{ ansible_user_dir }}/.local/bin"
+          state: directory
+          mode: "0755"
 
-  - name: Emit Helm version
-    ansible.builtin.debug:
-      msg: "Helm version installed: {{ r_helm_version.stdout }}"
+      - name: Download and extract helm to temp directory
+        ansible.builtin.unarchive:
+          src: "{{ helm_url }}"
+          remote_src: true
+          dest: "{{ ansible_user_dir }}/.local/bin"
+          mode: "0775"
+        retries: 10
+        register: r_client
+        until: r_client is success
+        delay: 30
+
+      - name: Link extracted helm binary
+        ansible.builtin.file:
+          src: "{{ ansible_user_dir }}/.local/bin/linux-amd64/helm"
+          dest: "{{ ansible_user_dir }}/.local/bin/helm"
+          state: link
+
+      - name: Update r_helm_installed_user fact
+        ansible.builtin.set_fact:
+          r_helm_installed_user:
+            stat:
+              exists: true
+
+- name: Set helm binary path
+  ansible.builtin.set_fact:
+    _showroom_helm_binary: >-
+      {% if r_helm_installed_local.stat.exists %}/usr/local/bin/helm{%
+      elif r_helm_installed.stat.exists %}/usr/bin/helm{%
+      elif r_helm_installed_user.stat.exists | default(false) %}{{ ansible_user_dir }}/.local/bin/helm{%
+      else %}/usr/local/bin/helm{% endif %}
+
+- name: Get helm version
+  ansible.builtin.command: "{{ _showroom_helm_binary }} version"
+  register: r_helm_version
+  changed_when: false
+
+- name: Emit Helm version
+  ansible.builtin.debug:
+    msg: "Helm version installed: {{ r_helm_version.stdout }}"
