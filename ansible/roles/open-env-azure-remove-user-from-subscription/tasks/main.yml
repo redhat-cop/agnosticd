@@ -133,8 +133,19 @@
       loop_control:
         label: "{{ item.name }}"
 
-    - name: Delete all resource groups owned by the subscription (RG's created by the lab user)
-      when: allresourcegroups.resourcegroups|length>0
+    - name: Split resource groups into VisualStudioOnline and regular
+      ansible.builtin.set_fact:
+        _vs_online_rgs: >-
+          {{ allresourcegroups.resourcegroups
+             | selectattr('name', 'match', '^VisualStudioOnline-')
+             | list }}
+        _regular_rgs: >-
+          {{ allresourcegroups.resourcegroups
+             | rejectattr('name', 'match', '^VisualStudioOnline-')
+             | list }}
+
+    - name: Delete regular resource groups (hard fail)
+      when: _regular_rgs | length > 0
       environment:
         AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
       azure.azcollection.azure_rm_resourcegroup:
@@ -143,17 +154,29 @@
         location: "{{ item.location }}"
         force_delete_nonempty: yes
         state: absent
-      register: r_delete_resource_groups
-      failed_when: false
-      loop: "{{ allresourcegroups.resourcegroups }}"
+      loop: "{{ _regular_rgs }}"
 
-    - name: Report resource groups that failed to delete
+    - name: Delete VisualStudioOnline resource groups (best-effort)
+      when: _vs_online_rgs | length > 0
+      environment:
+        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+      azure.azcollection.azure_rm_resourcegroup:
+        auth_source: env
+        name: "{{ item.name }}"
+        location: "{{ item.location }}"
+        force_delete_nonempty: yes
+        state: absent
+      register: r_delete_vs_rgs
+      failed_when: false
+      loop: "{{ _vs_online_rgs }}"
+
+    - name: Report VisualStudioOnline resource groups that failed to delete
       when:
-        - r_delete_resource_groups.results is defined
-        - r_delete_resource_groups.results | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0
+        - r_delete_vs_rgs.results is defined
+        - r_delete_vs_rgs.results | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0
       vars:
         _failed_rgs: >-
-          {{ r_delete_resource_groups.results
+          {{ r_delete_vs_rgs.results
              | selectattr('failed', 'defined')
              | selectattr('failed')
              | map(attribute='item')
@@ -161,9 +184,9 @@
              | list }}
       ansible.builtin.debug:
         msg: >-
-          WARNING: Failed to delete resource group(s): {{ _failed_rgs | join(', ') }}.
-          Continuing with remaining cleanup. These RGs may require manual intervention
-          (e.g. Azure DevOps billing must be removed via Organization Settings > Billing).
+          WARNING: Failed to delete VisualStudioOnline resource group(s): {{ _failed_rgs | join(', ') }}.
+          This is typically caused by Azure DevOps billing still linked to the subscription.
+          Billing must be removed manually via Azure DevOps Organization Settings > Billing.
 
     - name: Get subscription FQID
       set_fact:
@@ -232,13 +255,13 @@
       command: >
         az logout
 
-    - name: Fail if any resource groups could not be deleted
+    - name: Fail if any VisualStudioOnline resource groups could not be deleted
       when:
-        - r_delete_resource_groups.results is defined
-        - r_delete_resource_groups.results | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0
+        - r_delete_vs_rgs.results is defined
+        - r_delete_vs_rgs.results | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0
       vars:
         _failed_rgs: >-
-          {{ r_delete_resource_groups.results
+          {{ r_delete_vs_rgs.results
              | selectattr('failed', 'defined')
              | selectattr('failed')
              | map(attribute='item')
@@ -246,6 +269,6 @@
              | list }}
       ansible.builtin.fail:
         msg: >-
-          Resource group(s) could not be deleted: {{ _failed_rgs | join(', ') }}.
+          VisualStudioOnline resource group(s) could not be deleted: {{ _failed_rgs | join(', ') }}.
           All other cleanup (pool release, tags, role assignments) completed successfully.
-          Manual cleanup required for the listed resource group(s).
+          Manual cleanup required — remove Azure DevOps billing via Organization Settings.
