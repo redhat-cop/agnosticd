@@ -1,0 +1,314 @@
+---
+# ===================================================================
+# Step 1: Install OSC Operator
+# ===================================================================
+
+- name: Create OSC namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: openshift-sandboxed-containers-operator
+
+- name: Create OSC OperatorGroup
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: openshift-sandboxed-containers-operator
+        namespace: openshift-sandboxed-containers-operator
+      spec:
+        targetNamespaces:
+          - openshift-sandboxed-containers-operator
+
+- name: Create OSC Subscription
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: openshift-sandboxed-containers-operator
+        namespace: openshift-sandboxed-containers-operator
+      spec:
+        channel: "{{ ocp4_workload_osc_configure_aro_osc_channel }}"
+        installPlanApproval: Automatic
+        name: sandboxed-containers-operator
+        source: redhat-operators
+        sourceNamespace: openshift-marketplace
+
+- name: Wait for OSC controller-manager deployment
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: controller-manager
+    namespace: openshift-sandboxed-containers-operator
+  register: r_osc_deployment
+  until:
+    - r_osc_deployment.resources | length > 0
+    - r_osc_deployment.resources[0].status.readyReplicas | default(0) | int >= 1
+  delay: 25
+  retries: "{{ (ocp4_workload_osc_configure_aro_operator_wait_timeout | int / 25) | int }}"
+
+- name: OSC operator is ready
+  ansible.builtin.debug:
+    msg: "OSC operator controller-manager is ready"
+
+# ===================================================================
+# Step 2: Configure Azure networking for peer pods
+# ===================================================================
+
+- name: Get cloud-conf ConfigMap
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: cloud-conf
+    namespace: openshift-cloud-controller-manager
+  register: r_cloud_conf
+
+- name: Parse cloud config
+  ansible.builtin.set_fact:
+    _osc_cloud_conf: "{{ r_cloud_conf.resources[0].data['cloud.conf'] | from_json }}"
+
+- name: Set Azure networking facts
+  ansible.builtin.set_fact:
+    _osc_subscription_id: "{{ _osc_cloud_conf.subscriptionId }}"
+    _osc_location: "{{ _osc_cloud_conf.location }}"
+    _osc_user_rg: "{{ _osc_cloud_conf.vnetResourceGroup }}"
+    _osc_cluster_rg: "{{ _osc_cloud_conf.resourceGroup }}"
+    _osc_vnet_name: "{{ _osc_cloud_conf.vnetName }}"
+    _osc_subnet_name: "{{ _osc_cloud_conf.subnetName }}"
+    _osc_nsg_name: "{{ _osc_cloud_conf.securityGroupName }}"
+
+- name: Set Azure resource IDs
+  vars:
+    _sub_prefix: "/subscriptions/{{ _osc_subscription_id }}"
+    _net_provider: "Microsoft.Network"
+  ansible.builtin.set_fact:
+    _osc_subnet_id: >-
+      {{ _sub_prefix }}/resourceGroups/{{ _osc_user_rg
+      }}/providers/{{ _net_provider
+      }}/virtualNetworks/{{ _osc_vnet_name
+      }}/subnets/{{ _osc_subnet_name }}
+    _osc_nsg_id: >-
+      {{ _sub_prefix }}/resourceGroups/{{ _osc_cluster_rg
+      }}/providers/{{ _net_provider
+      }}/networkSecurityGroups/{{ _osc_nsg_name }}
+
+- name: Create NAT gateway public IP
+  ansible.builtin.command: >-
+    az network public-ip create
+    -g "{{ _osc_user_rg }}"
+    -n peerpod-nat-gw-ip
+    -l "{{ _osc_location }}"
+    --sku Standard
+  register: r_nat_ip
+  changed_when: r_nat_ip.rc == 0
+
+- name: Create NAT gateway
+  ansible.builtin.command: >-
+    az network nat gateway create
+    -g "{{ _osc_user_rg }}"
+    -l "{{ _osc_location }}"
+    --public-ip-addresses peerpod-nat-gw-ip
+    -n peerpod-nat-gw
+  register: r_nat_gw
+  changed_when: r_nat_gw.rc == 0
+
+- name: Associate NAT gateway with subnet
+  ansible.builtin.command: >-
+    az network vnet subnet update
+    --nat-gateway peerpod-nat-gw
+    --ids "{{ _osc_subnet_id }}"
+  register: r_subnet_update
+  changed_when: r_subnet_update.rc == 0
+
+# ===================================================================
+# Step 3: Create peer-pods ConfigMap and KataConfig
+# ===================================================================
+
+- name: Create peer-pods-cm ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: peer-pods-cm
+        namespace: openshift-sandboxed-containers-operator
+      data:
+        CLOUD_PROVIDER: "azure"
+        VXLAN_PORT: "9000"
+        AZURE_INSTANCE_SIZES: "{{ ocp4_workload_osc_configure_aro_peerpod_instance_sizes }}"
+        AZURE_INSTANCE_SIZE: "{{ ocp4_workload_osc_configure_aro_peerpod_instance_size }}"
+        AZURE_RESOURCE_GROUP: "{{ _osc_cluster_rg }}"
+        AZURE_REGION: "{{ _osc_location }}"
+        AZURE_SUBNET_ID: "{{ _osc_subnet_id }}"
+        AZURE_NSG_ID: "{{ _osc_nsg_id }}"
+        PROXY_TIMEOUT: "5m"
+        PEERPODS_LIMIT_PER_NODE: "{{ ocp4_workload_osc_configure_aro_peerpods_limit_per_node }}"
+        TAGS: "key1=value1,key2=value2"
+        ROOT_VOLUME_SIZE: "20"
+        AZURE_IMAGE_ID: ""
+
+- name: Get first worker node name
+  ansible.builtin.command: >-
+    oc get nodes -l node-role.kubernetes.io/worker
+    -o jsonpath='{.items[0].metadata.name}'
+  register: r_worker_node
+  changed_when: false
+
+- name: Label worker node for kata
+  ansible.builtin.command: >-
+    oc label node {{ r_worker_node.stdout }} workerType=kataWorker --overwrite
+  register: r_label
+  changed_when: "'labeled' in r_label.stdout"
+
+- name: Create KataConfig
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: kataconfiguration.openshift.io/v1
+      kind: KataConfig
+      metadata:
+        name: example-kataconfig
+      spec:
+        enablePeerPods: true
+        kataConfigPoolSelector:
+          matchLabels:
+            workerType: kataWorker
+
+# ===================================================================
+# Step 4: Wait for MCP and RuntimeClasses
+# ===================================================================
+
+- name: Wait for kata-oc MachineConfigPool to finish rolling
+  ansible.builtin.shell: |
+    statusUpdated=$(oc get mcp kata-oc -o=jsonpath='{.status.conditions[?(@.type=="Updated")].status}' 2>/dev/null)
+    statusUpdating=$(oc get mcp kata-oc -o=jsonpath='{.status.conditions[?(@.type=="Updating")].status}' 2>/dev/null)
+    statusDegraded=$(oc get mcp kata-oc -o=jsonpath='{.status.conditions[?(@.type=="Degraded")].status}' 2>/dev/null)
+    if [ "$statusUpdated" = "True" ] && [ "$statusUpdating" = "False" ] && [ "$statusDegraded" = "False" ]; then
+      echo "READY"
+    else
+      echo "WAITING updated=$statusUpdated updating=$statusUpdating degraded=$statusDegraded"
+    fi
+  register: r_mcp
+  until: r_mcp.stdout == "READY"
+  delay: 30
+  retries: "{{ (ocp4_workload_osc_configure_aro_mcp_wait_timeout | int / 30) | int }}"
+  changed_when: false
+
+- name: MCP kata-oc is ready
+  ansible.builtin.debug:
+    msg: "MachineConfigPool kata-oc has finished rolling"
+
+- name: Wait for kata RuntimeClass
+  kubernetes.core.k8s_info:
+    api_version: node.k8s.io/v1
+    kind: RuntimeClass
+    name: kata
+  register: r_rc_kata
+  until: r_rc_kata.resources | length > 0
+  delay: 60
+  retries: "{{ (ocp4_workload_osc_configure_aro_runtimeclass_wait_timeout | int / 60) | int }}"
+
+- name: Wait for kata-remote RuntimeClass
+  kubernetes.core.k8s_info:
+    api_version: node.k8s.io/v1
+    kind: RuntimeClass
+    name: kata-remote
+  register: r_rc_kata_remote
+  until: r_rc_kata_remote.resources | length > 0
+  delay: 60
+  retries: "{{ (ocp4_workload_osc_configure_aro_runtimeclass_wait_timeout | int / 60) | int }}"
+
+- name: RuntimeClasses ready
+  ansible.builtin.debug:
+    msg: "kata and kata-remote RuntimeClasses are available"
+
+# ===================================================================
+# Step 5: Update kata RPM (optional)
+# ===================================================================
+
+- name: Update kata RPM
+  when: ocp4_workload_osc_configure_aro_update_kata_rpm | bool
+  block:
+    - name: Get cluster version
+      ansible.builtin.command: oc version -o json
+      register: r_oc_version
+      changed_when: false
+
+    - name: Set cluster version fact
+      ansible.builtin.set_fact:
+        _osc_cluster_version: "{{ (r_oc_version.stdout | from_json).openshiftVersion | default('') }}"
+
+    - name: Download kata RPM from URL
+      ansible.builtin.get_url:
+        url: "{{ ocp4_workload_osc_configure_aro_kata_rpm_url }}"
+        dest: /tmp/kata-containers.rpm
+        mode: '0644'
+      when: ocp4_workload_osc_configure_aro_kata_rpm_url | length > 0
+
+    - name: Download kata RPM from Google Drive
+      ansible.builtin.shell: >-
+        pip install --quiet gdown &&
+        gdown "{{ ocp4_workload_osc_configure_aro_kata_rpm_gdrive_id }}"
+        -O /tmp/kata-containers.rpm
+      when: ocp4_workload_osc_configure_aro_kata_rpm_url | length == 0
+      args:
+        creates: /tmp/kata-containers.rpm
+
+    - name: Get kata worker node name
+      ansible.builtin.command: >-
+        oc get nodes -l workerType=kataWorker
+        -o jsonpath='{.items[0].metadata.name}'
+      register: r_kata_node
+      changed_when: false
+
+    - name: Install kata RPM on worker node
+      ansible.builtin.shell: |
+        set -e
+        NODE_NAME="{{ r_kata_node.stdout }}"
+
+        oc debug node/"$NODE_NAME" -- sleep infinity &
+        sleep 15
+
+        DEBUG_POD=$(oc get pods --field-selector spec.nodeName="$NODE_NAME" \
+          --sort-by=.metadata.creationTimestamp \
+          -o jsonpath='{.items[-1:].metadata.name}')
+
+        oc wait --for=condition=Ready "pod/$DEBUG_POD" --timeout=120s
+
+        oc cp /tmp/kata-containers.rpm "$DEBUG_POD:/host/tmp/kata-containers.rpm"
+
+        oc exec "$DEBUG_POD" -- chroot /host ostree admin unlock --hotfix
+        oc exec "$DEBUG_POD" -- chroot /host rpm -Uvh /tmp/kata-containers.rpm
+
+        echo "Installed version:"
+        oc exec "$DEBUG_POD" -- chroot /host rpm -q kata-containers
+
+        oc exec "$DEBUG_POD" -- chroot /host reboot || true
+        oc delete pod "$DEBUG_POD" --ignore-not-found=true
+      register: r_kata_rpm
+      changed_when: true
+
+    - name: Wait for kata worker node to be ready after reboot
+      ansible.builtin.command: >-
+        oc wait --for=condition=Ready
+        node/{{ r_kata_node.stdout }}
+        --timeout=1200s
+      register: r_node_ready
+      changed_when: false
+
+    - name: Kata RPM update complete
+      ansible.builtin.debug:
+        msg: "kata-containers RPM updated and node {{ r_kata_node.stdout }} is ready"
+
+    - name: Clean up RPM file
+      ansible.builtin.file:
+        path: /tmp/kata-containers.rpm
+        state: absent
