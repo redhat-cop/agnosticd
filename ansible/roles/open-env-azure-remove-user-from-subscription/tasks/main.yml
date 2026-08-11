@@ -68,9 +68,111 @@
       set_fact:
         pool_subscription_id: "{{ assignedsubscription.subscriptions[0].subscription_id }}"
 
+    - name: Get subscription FQID
+      set_fact:
+        subscriptionfqid: "{{ assignedsubscription.subscriptions[0].fqid }}"
+
     - name: Switch Subscriptions
       ansible.builtin.command: >
         az account set -s "{{ pool_subscription_id }}"
+
+    # ── Phase 1: Apply deny policy to block new resource creation ──
+    # Applied first so it starts propagating immediately. Azure Policy deny
+    # blocks CREATE/UPDATE but allows DELETE, so our cleanup proceeds normally.
+    # Propagation can take up to 30 min — this is defense-in-depth, not the
+    # sole protection. RBAC revocation (Phase 2) is the primary control.
+
+    - name: Write deny policy rules to temp file
+      ansible.builtin.copy:
+        content: |
+          {
+            "if": {
+              "allOf": [
+                {"not": {"field": "type", "like": "Microsoft.Authorization/*"}},
+                {"not": {"field": "type", "equals": "Microsoft.Resources/tags"}}
+              ]
+            },
+            "then": {
+              "effect": "deny"
+            }
+          }
+        dest: "/tmp/deny-policy-rules-{{ guid }}.json"
+
+    - name: Create temporary deny-all-creation policy definition
+      ansible.builtin.command: >-
+        az policy definition create
+        --name "temp-deny-creation-{{ guid }}"
+        --subscription "{{ pool_subscription_id }}"
+        --display-name "Temporary deny all resource creation (cleanup {{ guid }})"
+        --mode All
+        --rules @/tmp/deny-policy-rules-{{ guid }}.json
+      register: r_deny_policy_def
+
+    - name: Assign deny-all-creation policy to subscription
+      when: r_deny_policy_def is not failed
+      ansible.builtin.command: >-
+        az policy assignment create
+        --name "temp-deny-creation-{{ guid }}"
+        --scope "{{ subscriptionfqid }}"
+        --policy "temp-deny-creation-{{ guid }}"
+        --enforcement-mode Default
+      register: r_deny_policy_assign
+
+    - name: Remove deny policy temp file
+      ansible.builtin.file:
+        path: "/tmp/deny-policy-rules-{{ guid }}.json"
+        state: absent
+
+    # ── Phase 2: Revoke user access ──
+    # With deny policy propagating, now remove RBAC and delete the SP.
+    # RBAC removal is immediate for new auth checks; SP deletion invalidates
+    # the identity. Together with the deny policy, this closes the window
+    # where users could create resources during cleanup.
+
+    - name: Ensure pool manager SP has direct Owner on subscription
+      environment:
+        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+      azure.azcollection.azure_rm_roleassignment:
+        auth_source: env
+        scope: "{{ subscriptionfqid }}"
+        assignee_object_id: "{{ azure_open_env_app_id }}"
+        role_definition_id:
+          "/subscriptions/{{ pool_subscription_id }}/providers/Microsoft.Authorization/roleDefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635"
+        state: present
+
+    - name: Get all direct role assignments for the subscription
+      environment:
+        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+      azure.azcollection.azure_rm_roleassignment_info:
+        auth_source: env
+        scope: "{{ subscriptionfqid }}"
+        strict_scope_match: True
+      register: role_assignments
+
+    - name: Remove non-pool-manager role assignments from the subscription
+      environment:
+        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+      when: item.assignee_object_id != azure_open_env_app_id
+      azure.azcollection.azure_rm_roleassignment:
+        auth_source: env
+        id: "{{ item.id }}"
+        state: absent
+      loop: "{{ role_assignments.roleassignments }}"
+
+    - name: Get all azure applications in the subscription
+      azure.azcollection.azure_rm_adapplication_info:
+        auth_source: cli
+        tenant: "{{ azure_tenant }}"
+      register: all_apps
+
+    - ansible.builtin.set_fact: oe_app_reg="api://openenv-{{ guid }}"
+    - ansible.builtin.set_fact: oe_aro_app_reg="api://openenv-aro-{{ guid }}"
+    - name: Delete open environment app registrations
+      ansible.builtin.command: >-
+        az rest --method DELETE --url https://graph.microsoft.com/v1.0/applications/{{ item.object_id }}
+      with_items: "{{ all_apps.applications | selectattr('app_display_name', 'in', [oe_app_reg, oe_aro_app_reg]) | list }}"
+
+    # ── Phase 3: Clean up DNS and resource groups ──
 
     - name: Clean up DNS zone
       command: >
@@ -188,62 +290,57 @@
           This is typically caused by Azure DevOps billing still linked to the subscription.
           Billing must be removed manually via Azure DevOps Organization Settings > Billing.
 
-    - name: Get subscription FQID
-      set_fact:
-        subscriptionfqid: "{{ assignedsubscription.subscriptions[0].fqid }}"
+    # ── Phase 4: Second-pass to catch resource groups created during cleanup ──
+
+    - name: "Second pass: list any remaining resource groups"
+      environment:
+        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+      azure.azcollection.azure_rm_resourcegroup_info:
+        auth_source: env
+        tenant: "{{ azure_tenant }}"
+      register: remaining_resourcegroups
+
+    - name: "Second pass: report straggler resource groups"
+      when: remaining_resourcegroups.resourcegroups | length > 0
+      ansible.builtin.debug:
+        msg: >-
+          Found {{ remaining_resourcegroups.resourcegroups | length }} resource group(s) created
+          after initial listing: {{ remaining_resourcegroups.resourcegroups | map(attribute='name') | list | join(', ') }}.
+          Deleting stragglers now.
+
+    - name: "Second pass: delete straggler resource groups"
+      when: remaining_resourcegroups.resourcegroups | length > 0
+      environment:
+        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
+      azure.azcollection.azure_rm_resourcegroup:
+        auth_source: env
+        name: "{{ item.name }}"
+        location: "{{ item.location }}"
+        force_delete_nonempty: yes
+        state: absent
+      loop: "{{ remaining_resourcegroups.resourcegroups }}"
+
+    # ── Phase 5: Finalize subscription and release pool ──
+
+    - name: Remove deny-all-creation policy assignment
+      when: r_deny_policy_assign is not skipped and r_deny_policy_assign is not failed
+      ansible.builtin.command: >-
+        az policy assignment delete
+        --name "temp-deny-creation-{{ guid }}"
+        --scope "{{ subscriptionfqid }}"
+      ignore_errors: true
+
+    - name: Remove deny-all-creation policy definition
+      when: r_deny_policy_def is not failed
+      ansible.builtin.command: >-
+        az policy definition delete
+        --name "temp-deny-creation-{{ guid }}"
+        --subscription "{{ pool_subscription_id }}"
+      ignore_errors: true
 
     - name: Initialize all tags we care about on the Subscription
       command: >
         az tag create --resource-id {{ subscriptionfqid }} --tags GUID="" EMAIL="" cost-center="{{ cost_center }}"
-
-    - name: Get facts for management subscription by pool ID
-      azure.azcollection.azure_rm_subscription_info:
-        auth_source: env
-        id: "{{ azure_subscription_id }}"
-      register: management_subscription
-
-    - name: Ensure pool manager SP has direct Owner on subscription
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_roleassignment:
-        auth_source: env
-        scope: "{{ subscriptionfqid }}"
-        assignee_object_id: "{{ azure_open_env_app_id }}"
-        role_definition_id:
-          "/subscriptions/{{ pool_subscription_id }}/providers/Microsoft.Authorization/roleDefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635"
-        state: present
-
-    - name: Get all direct role assignments for the subscription
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_roleassignment_info:
-        auth_source: env
-        scope: "{{ subscriptionfqid }}"
-        strict_scope_match: True
-      register: role_assignments
-
-    - name: Remove non-pool-manager role assignments from the subscription
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      when: item.assignee_object_id != azure_open_env_app_id
-      azure.azcollection.azure_rm_roleassignment:
-        auth_source: env
-        id: "{{ item.id }}"
-        state: absent
-      loop: "{{ role_assignments.roleassignments }}"
-
-    - name: Get all azure applications in the subscription
-      azure.azcollection.azure_rm_adapplication_info:
-        auth_source: cli
-        tenant: "{{ azure_tenant }}"
-      register: all_apps
-
-    - ansible.builtin.set_fact: oe_app_reg="api://openenv-{{ guid }}"
-    - ansible.builtin.set_fact: oe_aro_app_reg="api://openenv-aro-{{ guid }}"
-    - name: Delete open environment app registrations
-      ansible.builtin.command: >-
-        az rest --method DELETE --url https://graph.microsoft.com/v1.0/applications/{{ item.object_id }}
-      with_items: "{{ all_apps.applications | selectattr('app_display_name', 'in', [oe_app_reg, oe_aro_app_reg]) | list }}"
 
     - name: Remove pool allocation from the database
       ansible.builtin.uri:
