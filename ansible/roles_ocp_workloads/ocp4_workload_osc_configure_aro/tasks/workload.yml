@@ -251,6 +251,7 @@
         url: "{{ ocp4_workload_osc_configure_aro_kata_rpm_url }}"
         dest: /tmp/kata-containers.rpm
         mode: '0644'
+        force: true
       when: ocp4_workload_osc_configure_aro_kata_rpm_url | length > 0
 
     - name: Download kata RPM from Google Drive
@@ -259,8 +260,12 @@
         gdown "{{ ocp4_workload_osc_configure_aro_kata_rpm_gdrive_id }}"
         -O /tmp/kata-containers.rpm
       when: ocp4_workload_osc_configure_aro_kata_rpm_url | length == 0
-      args:
-        creates: /tmp/kata-containers.rpm
+
+    - name: Verify downloaded file is a valid RPM
+      ansible.builtin.command: file /tmp/kata-containers.rpm
+      register: r_rpm_file_type
+      failed_when: "'RPM' not in r_rpm_file_type.stdout"
+      changed_when: false
 
     - name: Get kata worker node name
       ansible.builtin.command: >-
@@ -269,32 +274,94 @@
       register: r_kata_node
       changed_when: false
 
-    - name: Install kata RPM on worker node
+    - name: Ensure installer pod is absent
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Pod
+        name: kata-rpm-installer
+        namespace: openshift-sandboxed-containers-operator
+      ignore_errors: true
+
+    - name: Create installer pod on kata worker node
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: kata-rpm-installer
+            namespace: openshift-sandboxed-containers-operator
+          spec:
+            nodeName: "{{ r_kata_node.stdout }}"
+            restartPolicy: Never
+            hostPID: true
+            containers:
+              - name: installer
+                image: registry.access.redhat.com/ubi9/ubi:latest
+                command: ["sleep", "infinity"]
+                securityContext:
+                  privileged: true
+                volumeMounts:
+                  - name: host-root
+                    mountPath: /host
+            volumes:
+              - name: host-root
+                hostPath:
+                  path: /
+            tolerations:
+              - operator: Exists
+
+    - name: Wait for installer pod to be ready
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: kata-rpm-installer
+        namespace: openshift-sandboxed-containers-operator
+      register: r_installer_pod
+      until:
+        - r_installer_pod.resources | length > 0
+        - r_installer_pod.resources[0].status.phase == "Running"
+        - r_installer_pod.resources[0].status.containerStatuses[0].ready | default(false)
+      delay: 10
+      retries: 30
+
+    - name: Copy kata RPM to worker node
+      ansible.builtin.command: >-
+        oc cp /tmp/kata-containers.rpm
+        openshift-sandboxed-containers-operator/kata-rpm-installer:/host/tmp/kata-containers.rpm
+
+    - name: Install kata RPM via ostree hotfix
       ansible.builtin.shell: |
-        set -e
-        NODE_NAME="{{ r_kata_node.stdout }}"
+        oc exec -n openshift-sandboxed-containers-operator kata-rpm-installer -- \
+          chroot /host bash -c '
+            set -e
+            ostree admin unlock --hotfix || true
+            rpm -Uvh --force /tmp/kata-containers.rpm
+            rpm -q kata-containers
+            rm -f /tmp/kata-containers.rpm
+          '
+      register: r_rpm_install
 
-        oc debug node/"$NODE_NAME" -- sleep infinity &
-        sleep 15
+    - name: Display installed kata RPM version
+      ansible.builtin.debug:
+        msg: "Installed kata RPM: {{ r_rpm_install.stdout_lines | last }}"
 
-        DEBUG_POD=$(oc get pods --field-selector spec.nodeName="$NODE_NAME" \
-          --sort-by=.metadata.creationTimestamp \
-          -o jsonpath='{.items[-1:].metadata.name}')
-
-        oc wait --for=condition=Ready "pod/$DEBUG_POD" --timeout=120s
-
-        oc cp /tmp/kata-containers.rpm "$DEBUG_POD:/host/tmp/kata-containers.rpm"
-
-        oc exec "$DEBUG_POD" -- chroot /host ostree admin unlock --hotfix
-        oc exec "$DEBUG_POD" -- chroot /host rpm -Uvh /tmp/kata-containers.rpm
-
-        echo "Installed version:"
-        oc exec "$DEBUG_POD" -- chroot /host rpm -q kata-containers
-
-        oc exec "$DEBUG_POD" -- chroot /host reboot || true
-        oc delete pod "$DEBUG_POD" --ignore-not-found=true
-      register: r_kata_rpm
+    - name: Reboot kata worker node
+      ansible.builtin.shell: >-
+        oc exec -n openshift-sandboxed-containers-operator kata-rpm-installer
+        -- chroot /host reboot
+      ignore_errors: true
       changed_when: true
+
+    - name: Delete installer pod
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Pod
+        name: kata-rpm-installer
+        namespace: openshift-sandboxed-containers-operator
+      ignore_errors: true
 
     - name: Wait for kata worker node to be ready after reboot
       ansible.builtin.command: >-
@@ -304,9 +371,18 @@
       register: r_node_ready
       changed_when: false
 
+    - name: Verify kata RPM is installed after reboot
+      ansible.builtin.shell: >-
+        oc debug node/"{{ r_kata_node.stdout }}" --
+        chroot /host rpm -q kata-containers
+      register: r_rpm_verify
+      retries: 5
+      delay: 30
+      until: r_rpm_verify.rc == 0
+
     - name: Kata RPM update complete
       ansible.builtin.debug:
-        msg: "kata-containers RPM updated and node {{ r_kata_node.stdout }} is ready"
+        msg: "kata-containers RPM verified on node {{ r_kata_node.stdout }}: {{ r_rpm_verify.stdout | trim }}"
 
     - name: Clean up RPM file
       ansible.builtin.file:
