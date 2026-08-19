@@ -69,7 +69,7 @@
           ansible.builtin.shell: /usr/bin/helm completion bash >/etc/bash_completion.d/helm
 
     #############################################################################
-    # Setup S3 bucket and drivers
+    # Setup S3 bucket
     #############################################################################
 
     - name: Create AWS S3 bucket
@@ -80,12 +80,102 @@
         aws_access_key: "{{ ocp4_workload_create_rwx_volume_access_key_id }}"
         aws_secret_key: "{{ ocp4_workload_create_rwx_volume_secret_access_key }}"
 
+    #############################################################################
+    # Create scoped IAM user with access limited to this S3 bucket only
+    #############################################################################
+
+    - name: Create S3-only IAM policy
+      amazon.aws.iam_managed_policy:
+        policy_name: "{{ ocp4_workload_create_rwx_volume_iam_policy_name }}"
+        state: present
+        policy:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+                - s3:ListBucket
+                - s3:GetBucketLocation
+              Resource:
+                - "arn:aws:s3:::{{ ocp4_workload_create_rwx_volume_s3_bucket_name }}"
+                - "arn:aws:s3:::{{ ocp4_workload_create_rwx_volume_s3_bucket_name }}/*"
+        aws_access_key: "{{ ocp4_workload_create_rwx_volume_access_key_id }}"
+        aws_secret_key: "{{ ocp4_workload_create_rwx_volume_secret_access_key }}"
+      register: r_iam_policy
+
+    - name: Create dedicated IAM user for S3 CSI
+      amazon.aws.iam_user:
+        name: "{{ ocp4_workload_create_rwx_volume_iam_user_name }}"
+        state: present
+        managed_policies:
+          - "{{ r_iam_policy.policy.arn }}"
+        aws_access_key: "{{ ocp4_workload_create_rwx_volume_access_key_id }}"
+        aws_secret_key: "{{ ocp4_workload_create_rwx_volume_secret_access_key }}"
+
+    - name: Generate access keys for scoped IAM user
+      ansible.builtin.command:
+        cmd: >-
+          aws iam create-access-key
+          --user-name {{ ocp4_workload_create_rwx_volume_iam_user_name }}
+          --query 'AccessKey.{AccessKeyId: AccessKeyId, SecretAccessKey: SecretAccessKey}'
+          --output json
+      environment:
+        AWS_ACCESS_KEY_ID: "{{ ocp4_workload_create_rwx_volume_access_key_id }}"
+        AWS_SECRET_ACCESS_KEY: "{{ ocp4_workload_create_rwx_volume_secret_access_key }}"
+        AWS_DEFAULT_REGION: "{{ ocp4_workload_create_rwx_volume_region }}"
+      register: r_scoped_key
+      no_log: true
+
+    - name: Parse scoped access key
+      ansible.builtin.set_fact:
+        _rwx_scoped_key: "{{ r_scoped_key.stdout | from_json }}"
+      no_log: true
+
+    - name: Store scoped credentials as Kubernetes Secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ ocp4_workload_create_rwx_volume_k8s_secret_name }}"
+            namespace: kube-system
+            labels:
+              app: s3-csi-rwx
+              guid: "{{ guid }}"
+          type: Opaque
+          stringData:
+            key_id: "{{ _rwx_scoped_key.AccessKeyId }}"
+            access_key: "{{ _rwx_scoped_key.SecretAccessKey }}"
+      no_log: true
+
+    #############################################################################
+    # Install S3 CSI driver
+    # The driver reads credentials from a fixed Secret at startup (not per-PV).
+    # We tell it to use our scoped secret via Helm awsAccessSecret.name.
+    #############################################################################
+
     - name: Install Amazon S3 CSI Driver
       block:
         - name: Add AWS helm repository
           kubernetes.core.helm_repository:
             name: aws-mountpoint-s3-csi-driver
             repo_url: "{{ ocp4_workload_create_rwx_volume_helm_s3_driver_repo_url }}"
+
+        - name: Set driver version
+          ansible.builtin.set_fact:
+            ocp4_workload_create_rwx_volume_helm_s3_driver_version: >-
+              {% if ocp4_installer_version is version_compare('4.18', '<') -%}
+              {{ '2.2.2' }}
+              {%- else -%}
+              {{ '' }}
+              {%- endif %}
+
+        - name: Debug driver version
+          ansible.builtin.debug:
+            msg: "Driver version: {{ ocp4_workload_create_rwx_volume_helm_s3_driver_version }}"
 
         - name: Deploy AWS Mountpoint S3 CSI Driver
           kubernetes.core.helm:
@@ -94,6 +184,12 @@
             release_namespace: kube-system
             create_namespace: true
             update_repo_cache: true
+            chart_version: >-
+              {{ ocp4_workload_create_rwx_volume_helm_s3_driver_version
+              | default(omit, true) }}
+            values:
+              awsAccessSecret:
+                name: "{{ ocp4_workload_create_rwx_volume_k8s_secret_name }}"
 
     #############################################################################
     # Setup PersistentVolume
@@ -103,6 +199,42 @@
       kubernetes.core.k8s:
         state: present
         resource_definition: "{{ lookup('template', 'persistent_volume.yaml.j2') }}"
+
+    #############################################################################
+    # Publish RWX volume info (visible in Babylon/ITCP portal)
+    #############################################################################
+
+    - name: Publish RWX volume user info
+      agnosticd_user_info:
+        msg: |
+          RWX Volume (S3-backed shared storage) is available.
+
+          S3 Bucket: {{ ocp4_workload_create_rwx_volume_s3_bucket_name }}
+          PV Name: {{ ocp4_workload_create_rwx_volume_pv_name }}
+          PVC Name: {{ ocp4_workload_create_rwx_volume_pvc_name }}
+
+          To use it, just use the created PVC or create your own similar to:
+
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: my-shared-storage
+          spec:
+            accessModes: [ReadWriteMany]
+            storageClassName: ""
+            resources:
+              requests:
+                storage: {{ ocp4_workload_create_rwx_volume_pv_storage }}
+            volumeName: {{ ocp4_workload_create_rwx_volume_pv_name }}
+
+    - name: Publish RWX volume data
+      agnosticd_user_info:
+        data:
+          rwx_volume_enabled: true
+          rwx_s3_bucket: "{{ ocp4_workload_create_rwx_volume_s3_bucket_name }}"
+          rwx_pv_name: "{{ ocp4_workload_create_rwx_volume_pv_name }}"
+          rwx_pvc_name: "{{ ocp4_workload_create_rwx_volume_pvc_name }}"
+          rwx_pv_storage: "{{ ocp4_workload_create_rwx_volume_pv_storage }}"
 
 # Leave this as the last task in the playbook.
 # --------------------------------------------
