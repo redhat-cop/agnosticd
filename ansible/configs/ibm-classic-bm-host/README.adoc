@@ -1,0 +1,436 @@
+= IBM Classic Baremetal Host Configuration
+
+== Overview
+
+The `ibm-classic-bm-host` configuration provides a complete bare metal provisioning solution that delivers **RHEL 10 pre-installed bare metal hosts** to users, along with the infrastructure to re-provision them as needed.
+
+=== End Goal
+
+This configuration delivers:
+
+* **Bare Metal Host** - Physical server with RHEL 10 pre-installed and ready for user workloads
+* **Access to Bare Metal Host BMC** - External access to the Bare Metal host BMC web interface
+* **Bastion Host VM** - IBM Cloud Classic VM that can re-initialize the bare metal host via PXE boot
+* **Management Access** - IPMI and SSH available through the internal BMC controller interface
+* **Re-provisioning Capability** - Users can reset and re-install the bare metal host by re-enabling DHCP and resetting the server.
+
+=== Core Capabilities
+
+* **IBM Cloud Baremetal Discovery** - Automatic discovery of server VLAN information
+* **BMC User Account Management** - Create, update, delete, and check status of BMC users
+* **Power Management** - Complete power control and PXE boot functionality
+* **IBM Cloud Classic VM Deployment** - Automated VM deployment using discovered VLANs
+* **SSH Key Management** - Automated SSH key creation and distribution
+* **Integrated Inventory** - Unified inventory for baremetal and VM resources
+
+=== PXE Server and Bare Metal Host Architecture
+
+The following diagram illustrates the complete PXE server and bare metal host deployment architecture:
+
+[plantuml,pxe-architecture,svg]
+....
+@startuml
+!theme plain
+skinparam backgroundColor white
+skinparam shadowing false
+
+rectangle "Bastion Host\n(PXE Server)" as BastionHost {
+  component "Private Interface\neth0 (10.x.x.x)" as BASTION_PRIV
+  component "Public Interface\neth1 (Public IP)" as BASTION_PUB
+}
+
+rectangle "Bare Metal Host" as BareMetalHost {
+  component "Private Interface\neth1 (10.x.x.x)" as BM_PRIV
+  component "Public Interface\neth2 (Public IP)" as BM_PUB
+  component "BMC Interface\n10.x.x.x" as BMC
+}
+
+component "Private VLAN\n10.x.x.x/24" as PRIVATE_VLAN
+component "Public VLAN\nInternet Access" as PUBLIC_VLAN
+
+' Network Connections
+BASTION_PRIV --> PRIVATE_VLAN
+BASTION_PUB --> PUBLIC_VLAN
+BM_PRIV --> PRIVATE_VLAN
+BM_PUB --> PUBLIC_VLAN
+BMC --> PRIVATE_VLAN
+
+@enduml
+....
+
+==== Kickstart and HAProxy Architecture
+
+The following diagram shows the internal kickstart and management services within the Bastion Host:
+
+[plantuml,kickstart-services,svg]
+....
+@startuml
+!theme plain
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam linetype ortho
+
+' Bastion Host Services
+component "DHCP Server\nPort 67" as DHCP
+component "TFTP Server\nPort 69" as TFTP
+component "HTTP Server\nPort 80" as HTTP
+component "HAProxy\nPort 443/3900" as HAPROXY
+
+' Service Resources
+component "GRUB Config\nKernel/InitRD" as GRUB
+component "Kickstart Files\nRHEL Repository" as KS
+component "BMC Proxy\nHTTPS/Console" as BMC_PROXY
+
+' External Targets
+component "Bare Metal Host\nPrivate Interface" as BM_TARGET
+
+' External Connectivity
+component "Internet\nExternal User" as INTERNET
+
+' Service to Resource Connections
+TFTP -down-> GRUB : "Serves"
+HTTP -down-> KS : "Serves"
+HAPROXY -down-> BMC_PROXY : "Proxies"
+
+' Service to Target Connections
+DHCP -right-> BM_TARGET : "DHCP Response"
+TFTP -right-> BM_TARGET : "Boot Files"
+HTTP -right-> BM_TARGET : "Kickstart"
+
+' External Connectivity
+INTERNET -right-> HAPROXY : "HTTPS"
+
+@enduml
+....
+
+==== PXE Boot Process Flow
+
+The following diagram shows the step-by-step PXE boot process:
+
+[plantuml,pxe-boot-process,svg]
+....
+@startuml
+!theme plain
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam linetype ortho
+
+rectangle "PXE Boot Process" as PXEProcess {
+  component "1. BMC Powers On\nPXE Boot Enabled" as STEP1
+  component "2. DHCP Request\nNetwork Boot" as STEP2
+  component "3. DHCP Response\nIP + Boot Server" as STEP3
+  component "4. TFTP Request\nBoot Files" as STEP4
+  component "5. HTTP Request\nKickstart File" as STEP5
+  component "6. OS Installation\nvia HTTP Repository" as STEP6
+  component "7. Reboot to\nLocal Storage" as STEP7
+  component "8. SSH Available\nInstallation Complete" as STEP8
+}
+
+' Ansible Orchestration
+component "Ansible\nOrchestration" as ANSIBLE
+
+' Process Flow
+STEP1 -right-> STEP2
+STEP2 -right-> STEP3
+STEP3 -down-> STEP4
+STEP4 -right-> STEP5
+STEP5 -right-> STEP6
+STEP6 -down-> STEP7
+STEP7 -right-> STEP8
+
+' Ansible Management
+ANSIBLE -down-> STEP1 : "Power Control"
+STEP8 -down-> ANSIBLE : "SSH Monitoring"
+
+@enduml
+....
+
+==== Post-Installation Process
+
+The following diagram shows the post-installation monitoring and cleanup process:
+
+[plantuml,post-installation-process,svg]
+....
+@startuml
+!theme plain
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam linetype ortho
+
+rectangle "Post-Installation Process" as PostInstall {
+  component "Wait for SSH\nPort 22" as SSH_WAIT
+  component "Wait for SSH Stop\nReboot Detected" as SSH_STOP
+  component "Wait for SSH Start\nLocal Boot Complete" as SSH_START
+  component "Disable DHCP\nPrevent Re-PXE" as DHCP_DISABLE
+}
+
+' Ansible Orchestration
+component "Ansible\nOrchestration" as ANSIBLE_POST
+
+' Process Flow
+SSH_WAIT -right-> SSH_STOP
+SSH_STOP -right-> SSH_START
+SSH_START -right-> DHCP_DISABLE
+
+' Ansible Management
+ANSIBLE_POST -down-> SSH_WAIT : "SSH Monitoring"
+DHCP_DISABLE -down-> ANSIBLE_POST : "Cleanup"
+
+@enduml
+....
+
+==== Architecture Components
+
+The architecture centers around two main hosts connected via IBM Cloud Classic VLANs:
+
+* **Bastion Host (PXE Server)**: IBM Cloud Classic VM that provides PXE boot services and re-provisioning capability
+  - **Network Interfaces**: 
+    - Private Interface (eth0): Connected to private VLAN (10.x.x.x)
+    - Public Interface (eth1): Connected to public VLAN for internet access
+  - **Core Services**: 
+    - DHCP Server (Port 67): Assigns IP addresses and boot configuration (disabled after provisioning)
+    - TFTP Server (Port 69): Serves PXE boot files for installation and re-provisioning
+    - HTTP Server (Port 80): Serves kickstart files and repositories
+    - HAProxy (Port 443/3900): Provides BMC proxy and management access
+  - **Re-provisioning Role**: Users can re-enable DHCP and reset bare metal host to trigger fresh RHEL 10 installation
+  - **Service Details**: See Kickstart and HAProxy Architecture diagram below
+
+* **Bare Metal Host**: Physical server managed via BMC
+  - **Network Interfaces**: 
+    - Private Interface (eth1): Connected to private VLAN for PXE boot and management
+    - Public Interface (eth2): Connected to public VLAN for internet access
+    - BMC Interface: Connected to same private VLAN for out-of-band management (IPMI and SSH available)
+  - **Boot States**: 
+    - PXE Boot: Network boot for OS installation
+    - Local Boot: Boot from local hard disk after installation
+    - Operating System: RHEL 10 after successful installation and ready for user workloads
+  - **Re-provisioning**: Can be reset and re-installed by re-enabling DHCP on bastion and resetting the server
+
+* **Network Infrastructure**:
+  - **Private VLAN**: Isolated network (10.x.x.x/24) for PXE boot, management traffic, and BMC access
+  - **Public VLAN**: Internet-facing network for external access
+
+==== PXE Boot Process Flow Detail
+
+The PXE boot process follows these steps, with Ansible orchestrating the power management and monitoring:
+
+1. **BMC Power On**: Ansible triggers BMC to power on the bare metal host with PXE boot enabled
+2. **DHCP Request**: Host requests IP address for network boot
+3. **DHCP Response**: DHCP server responds with IP address and boot server information
+4. **TFTP Boot Files**: Host downloads kernel, initrd, and GRUB configuration via TFTP
+5. **HTTP Kickstart**: Host downloads kickstart file and accesses RHEL repository via HTTP
+6. **OS Installation**: Automated RHEL 10 installation proceeds using kickstart configuration
+7. **Reboot to Local Storage**: System reboots and boots from local hard disk
+8. **SSH Available**: Installation complete, Ansible monitors for SSH access availability
+
+==== Post-Installation Process Detail
+
+The post-installation process includes Ansible orchestration:
+
+- **SSH Connectivity**: Ansible waits for SSH port 22 to become available
+- **Reboot Detection**: Ansible waits for SSH to stop responding (indicates reboot)
+- **Local Boot Verification**: Ansible waits for SSH to start responding (indicates successful boot from local storage)
+- **PXE Disable**: Ansible automatically disables DHCP service to prevent accidental re-provisioning
+
+== Prerequisites
+
+* **IBM Cloud Classic BMC** - System with Redfish API access
+* **BMC Admin Credentials** - Administrative access to the BMC
+* **Network Connectivity** - HTTPS access to BMC from AgnosticD deployment host
+* **AgnosticD Environment** - Standard AgnosticD deployment setup
+
+== Quick Start
+
+[source,bash]
+----
+GUID=aaaa;ENV_TYPE=ibm-classic-bm-host;ansible-playbook ansible/main.yml \
+  -e @ansible/configs/${ENV_TYPE}/default_vars.yml \
+  -e env_type=${ENV_TYPE} \
+  -e ACTION=provision \
+  -e rhel_iso_url=https://example.com/images/rhel.iso \
+  -e rhel_iso_username=exampleuser \
+  -e rhel_iso_password=example password \
+  -e ibm_cloud_server_id="1234567" \
+  -e ibm_cloud_api_key=my_ibm_cloud_api_key \
+  -e kickstart_satellite_url=https://example.satellite.com/register \
+  -e kickstart_activation_key="example-activation-key" \
+  -e kickstart_auth_token="eyJh..." \
+  -e guid=${GUID} \
+  -e output_dir=/tmp/output-${GUID}
+----
+
+=== Power Management Operations
+
+[source,bash]
+----
+# Check power status
+GUID=aaaa;ENV_TYPE=ibm-classic-bm-host;ansible-playbook ansible/main.yml \
+  -e @ansible/configs/${ENV_TYPE}/default_vars.yml \
+  -e env_type=${ENV_TYPE} \
+  -e ibm_cloud_server_id="1234567" \
+  -e ibm_cloud_api_key=my_ibm_cloud_api_key \
+  -e power_action=status \
+  -e guid=${GUID}
+
+# Power on system
+GUID=aaaa;ENV_TYPE=ibm-classic-bm-host;ansible-playbook ansible/main.yml \
+  -e @ansible/configs/${ENV_TYPE}/default_vars.yml \
+  -e env_type=${ENV_TYPE} \
+  -e ibm_cloud_server_id="1234567" \
+  -e ibm_cloud_api_key=my_ibm_cloud_api_key \
+  -e power_action=on \
+  -e guid=${GUID}
+
+# PXE boot with reset
+GUID=aaaa;ENV_TYPE=ibm-classic-bm-host;ansible-playbook ansible/main.yml \
+  -e @ansible/configs/${ENV_TYPE}/default_vars.yml \
+  -e env_type=${ENV_TYPE} \
+  -e ibm_cloud_server_id="1234567" \
+  -e ibm_cloud_api_key=my_ibm_cloud_api_key \
+  -e enable_pxe_boot_and_reset=true \
+  -e guid=${GUID}
+----
+
+== Configuration Variables
+
+=== Required Variables
+
+[cols="2,1,3"]
+|===
+| Variable | Type | Description
+
+| `ibm_cloud_api_key` | String | **Hard requirement** - IBM Cloud API key for authentication
+| `ibm_cloud_server_id` | String | **Hard requirement** - IBM Cloud baremetal server ID (region is automatically discovered from this server)
+|===
+
+
+=== User Management Variables
+
+[cols="2,1,1,3"]
+|===
+| Variable | Type | Default | Description
+
+| `target_username` | String | `console` | Username to create/manage
+| `target_password` | String | `""` | Password (generated if empty)
+| `user_action` | String | `create` | Action: create, update_password, delete, status
+| `user_role` | String | `PowerUser` | Role: Administrator, Operator, ReadOnly, PowerUser
+| `enable_user` | Boolean | `true` | Enable the user account
+|===
+
+=== Power Management Variables
+
+[cols="2,1,1,3"]
+|===
+| Variable | Type | Default | Description
+
+| `power_action` | String | `status` | Action: status, on, off, force_off, reset (automatically `force_off` when ACTION=destroy)
+| `enable_pxe_boot_and_reset` | Boolean | `false` | Enable PXE boot with auto reset (automatically `true` when ACTION=provision)
+| `check_boot_order` | Boolean | `true` | Check and fix boot order to prioritize hard disk first
+|===
+
+=== Network Interface Naming
+
+The configuration uses traditional network interface naming (`eth0`, `eth1`, etc.) instead of predictable naming (`ens1f0np0`, `ens2f0np0`). This is achieved through kernel parameters in the PXE boot configuration:
+
+* **`net.ifnames=0`** - Disables systemd's predictable network interface naming
+* **`biosdevname=0`** - Disables Dell's biosdevname scheme
+
+[cols="2,1,3"]
+|===
+| Interface | Type | Description
+
+| `eth0` | Private | Private network interface (first physical port)
+| `eth1` | Public | Public network interface (second physical port)
+| `eth2` | Private | Additional private interface (bonding mode)
+| `eth3` | Public | Additional public interface (bonding mode)
+|===
+
+=== Environment Variables
+
+[cols="2,1,1,3"]
+|===
+| Variable | Type | Default | Description
+
+| `cleanup_users` | Boolean | `true` | Clean up users during destroy
+|===
+
+== Password Requirements
+
+The imported user management role enforces comprehensive password validation:
+
+* **Length**: 10-32 characters
+* **Character Types**: At least 2 of uppercase, lowercase, special characters
+* **Required**: At least one letter and one number
+* **Restrictions**: No more than 2 consecutive identical characters
+* **Security**: Cannot be username or reverse of username
+* **Character Set**: A-Z, a-z, 0-9, and ~`!@#$%^&*()-+={}[]|:;"'<>,?/._
+
+== PowerUser Role
+
+The PowerUser role provides custom OEM privileges:
+
+* **RemoteConsoleAndVirtualMediaAccess** - Console and virtual media management
+* **RemoteServerPowerRestartAccess** - Power control capabilities
+
+== Deployment Workflow
+
+1. **Pre-checks** - Validate BMC connection parameters
+2. **User Management** - Create/manage target user with role assignment
+3. **Boot Order Management** - Check and optimize boot order to prioritize hard disk first
+4. **Power Management** - Execute power operations if specified
+5. **Inventory Creation** - Generate inventory for managed servers (if configured)
+
+== Environment Cleanup
+
+[source,bash]
+----
+GUID=aaaa;ENV_TYPE=ibm-classic-bm-host;ansible-playbook ansible/destroy.yml \
+  -e @ansible/configs/${ENV_TYPE}/default_vars.yml \
+  -e env_type=${ENV_TYPE} \
+  -e ibm_cloud_server_id="1234567" \
+  -e ibm_cloud_api_key=my_ibm_cloud_api_key \
+  -e guid=${GUID}
+----
+
+== Troubleshooting
+
+=== Common Issues
+
+**BMC Connection Failed**
+* Verify BMC hostname/IP and network connectivity
+* Check BMC username and password
+* Ensure HTTPS (port 443) is accessible
+
+**User Creation Failed**
+* Check available user slots on BMC
+* Verify password meets complexity requirements
+* Ensure sufficient BMC privileges
+
+**Power Operation Failed**  
+* Check current power state with `power_action=status`
+* Verify BMC supports requested power operation
+* Some operations require specific current power states
+
+=== Debug Mode
+
+Add `-vvv` for verbose debugging:
+
+[source,bash]
+----
+ansible-playbook -vvv ansible/main.yml ...
+----
+
+== Imported Roles Reference
+
+The configuration uses these imported BMC roles:
+
+* **Source**: https://github.com/rut31337/lenovo-xclarity-ansible
+* **Integration**: Direct import into AgnosticD role structure
+* **API**: Full Redfish API support with comprehensive error handling
+* **Features**: All original playbook functionality preserved
+
+== Support
+
+* **BMC Documentation**: IBM Cloud Classic BMC guides
+* **Redfish API**: DMTF Redfish specification
+* **AgnosticD**: Standard AgnosticD documentation and community support 

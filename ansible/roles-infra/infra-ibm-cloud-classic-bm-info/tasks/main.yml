@@ -1,0 +1,199 @@
+---
+# tasks file for infra-ibm-cloud-classic-bm-info
+- name: Validate IBM Cloud API key is provided
+  ansible.builtin.fail:
+    msg: "ibm_cloud_api_key is required. Please provide it as an extra var: -e ibm_cloud_api_key=YOUR_API_KEY"
+  when: ibm_cloud_api_key is not defined or ibm_cloud_api_key == ""
+
+- name: Setup IBM Cloud CLI and login
+  ansible.builtin.include_tasks: setup_ibm_cloud_cli.yml
+
+- name: Get bare metal server details
+  ansible.builtin.command: ibmcloud sl hardware detail {{ ibm_cloud_server_id }} --output json
+  register: server_details
+  changed_when: false
+
+- name: Parse server details
+  ansible.builtin.set_fact:
+    server_info: "{{ server_details.stdout | from_json }}"
+
+- name: Extract public IP address
+  ansible.builtin.set_fact:
+    public_ip: "{{ server_info.primaryIpAddress | default(server_info.publicIpAddress | default('')) }}"
+
+- name: Extract private IP address
+  ansible.builtin.set_fact:
+    private_ip: "{{ server_info.privateIpAddress | default(server_info.primaryBackendIpAddress | default('')) }}"
+
+- name: Get VLAN information
+  ansible.builtin.command: ibmcloud sl hardware detail {{ ibm_cloud_server_id }} --output json
+  register: vlan_info
+  changed_when: false
+
+- name: Parse VLAN details
+  ansible.builtin.set_fact:
+    vlan_data: "{{ vlan_info.stdout | from_json }}"
+
+- name: Extract VLAN information from networkVlans
+  ansible.builtin.set_fact:
+    # Try to identify public and private VLANs from networkVlans array
+    public_vlan_id: "{{ (vlan_data.networkVlans | selectattr('networkSpace', 'equalto', 'PUBLIC') | first).id | default('') }}"
+    public_vlan_number: "{{ (vlan_data.networkVlans | selectattr('networkSpace', 'equalto', 'PUBLIC') | first).vlanNumber | default('') }}"
+    private_vlan_id: "{{ (vlan_data.networkVlans | selectattr('networkSpace', 'equalto', 'PRIVATE') | first).id | default('') }}"
+    private_vlan_number: "{{ (vlan_data.networkVlans | selectattr('networkSpace', 'equalto', 'PRIVATE') | first).vlanNumber | default('') }}"
+  when: vlan_data.networkVlans is defined and vlan_data.networkVlans | length > 0
+
+- name: Extract VLAN information from networkVlans (alternative method)
+  ansible.builtin.set_fact:
+    # If networkSpace field doesn't exist, try by position or other indicators
+    public_vlan_id: "{{ vlan_data.networkVlans[0].id | default('') }}"
+    public_vlan_number: "{{ vlan_data.networkVlans[0].vlanNumber | default('') }}"
+    private_vlan_id: "{{ vlan_data.networkVlans[1].id | default('') }}"
+    private_vlan_number: "{{ vlan_data.networkVlans[1].vlanNumber | default('') }}"
+  when: vlan_data.networkVlans is defined and vlan_data.networkVlans | length > 1 and (public_vlan_id is not defined or public_vlan_id == "")
+
+- name: Fallback to legacy network component extraction
+  ansible.builtin.set_fact:
+    public_vlan_id: "{{ vlan_data.primaryNetworkComponent.networkVlan.id | default(vlan_data.frontendNetworkComponents[0].networkVlan.id | default('')) }}"
+    public_vlan_number: "{{ vlan_data.primaryNetworkComponent.networkVlan.vlanNumber | default(vlan_data.frontendNetworkComponents[0].networkVlan.vlanNumber | default('')) }}"
+    private_vlan_id: "{{ vlan_data.primaryBackendNetworkComponent.networkVlan.id | default(vlan_data.backendNetworkComponents[0].networkVlan.id | default('')) }}"
+    private_vlan_number: "{{ vlan_data.primaryBackendNetworkComponent.networkVlan.vlanNumber | default(vlan_data.backendNetworkComponents[0].networkVlan.vlanNumber | default('')) }}"
+  when: (vlan_data.networkVlans is not defined or vlan_data.networkVlans | length == 0) and (vlan_data.primaryNetworkComponent is defined or (vlan_data.frontendNetworkComponents is defined and vlan_data.frontendNetworkComponents | length > 0))
+
+- name: Set empty VLAN info if not available
+  ansible.builtin.set_fact:
+    public_vlan_id: ""
+    public_vlan_number: ""
+    private_vlan_id: ""
+    private_vlan_number: ""
+  when: (public_vlan_id is not defined or public_vlan_id == "") and (private_vlan_id is not defined or private_vlan_id == "")
+
+# Extract MAC addresses from network components
+- name: Extract MAC addresses from networkComponents based on IP addresses
+  ansible.builtin.set_fact:
+    # Find private MAC (RFC 1918 private IP ranges: 10.x.x.x, 172.16-31.x.x, 192.168.x.x)
+    private_mac_address: >-
+      {{
+        (vlan_data.networkComponents 
+        | selectattr('primaryIpAddress', 'defined')
+        | selectattr('macAddress', 'defined')
+        | selectattr('name', 'equalto', 'eth')
+        | selectattr('primaryIpAddress', 'match', '^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)')
+        | first).macAddress | default('')
+      }}
+    # Find public MAC (non-private IP addresses)
+    public_mac_address: >-
+      {{
+        (vlan_data.networkComponents 
+        | selectattr('primaryIpAddress', 'defined')
+        | selectattr('macAddress', 'defined')
+        | selectattr('name', 'equalto', 'eth')
+        | rejectattr('primaryIpAddress', 'match', '^(10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)')
+        | first).macAddress | default('')
+      }}
+  when: vlan_data.networkComponents is defined and vlan_data.networkComponents | length > 0
+
+- name: Fallback MAC extraction by port number
+  ansible.builtin.set_fact:
+    # Try port-based identification as fallback
+    private_mac_address: >-
+      {{
+        (vlan_data.networkComponents 
+        | selectattr('macAddress', 'defined')
+        | selectattr('name', 'equalto', 'eth')
+        | selectattr('port', 'equalto', 0)
+        | first).macAddress | default('')
+      }}
+    public_mac_address: >-
+      {{
+        (vlan_data.networkComponents 
+        | selectattr('macAddress', 'defined')
+        | selectattr('name', 'equalto', 'eth')
+        | selectattr('port', 'equalto', 1)
+        | first).macAddress | default('')
+      }}
+  when: 
+    - vlan_data.networkComponents is defined and vlan_data.networkComponents | length > 0
+    - (private_mac_address is not defined or private_mac_address == '') or (public_mac_address is not defined or public_mac_address == '')
+
+- name: Set empty MAC addresses if not available
+  ansible.builtin.set_fact:
+    public_mac_address: ""
+    private_mac_address: ""
+  when: (public_mac_address is not defined or public_mac_address == "") and (private_mac_address is not defined or private_mac_address == "")
+
+- name: Extract remote management information
+  ansible.builtin.set_fact:
+    remote_mgmt_ip: "{{ server_info.remoteManagementAccounts[0].ipAddress | default(server_info.networkManagementIpAddress | default('')) }}"
+    remote_mgmt_user: "{{ server_info.remoteManagementAccounts[0].username | default(server_info.remoteManagementAccounts[0].user | default('')) }}"
+    remote_mgmt_password: "{{ server_info.remoteManagementAccounts[0].password | default('') }}"
+    datacenter: "{{ server_info.datacenter.name | default(server_info.datacenter | default('')) }}"
+  when: server_info.remoteManagementAccounts is defined and server_info.remoteManagementAccounts | length > 0
+
+- name: Set empty remote management info if not available
+  ansible.builtin.set_fact:
+    remote_mgmt_ip: "{{ server_info.networkManagementIpAddress | default('') }}"
+    remote_mgmt_user: ""
+    remote_mgmt_password: ""
+    datacenter: "{{ server_info.datacenter.name | default(server_info.datacenter | default('')) }}"
+  when: server_info.remoteManagementAccounts is not defined or server_info.remoteManagementAccounts | length == 0
+
+- name: Display collected information
+  ansible.builtin.debug:
+    msg:
+      - "Server ID: {{ ibm_cloud_server_id }}"
+      - "Hostname: {{ server_info.hostname | default(server_info.fullyQualifiedDomainName | default(ibm_cloud_server_id)) }}"
+      - "Datacenter: {{ datacenter }}"
+      - "Public IP: {{ public_ip }}"
+      - "Private IP: {{ private_ip }}"
+      - "Public VLAN ID: {{ public_vlan_id }}"
+      - "Private VLAN ID: {{ private_vlan_id }}"
+      - "Public MAC Address: {{ public_mac_address }}"
+      - "Private MAC Address: {{ private_mac_address }}"
+      - "Remote Management IP: {{ remote_mgmt_ip }}"
+      - "Remote Management User: {{ remote_mgmt_user }}"
+      - "Remote Management Password: [REDACTED]"
+  when: display_results | default(true)
+
+- name: Create bm_server_info dictionary
+  ansible.builtin.set_fact:
+    bm_server_info:
+      server_id: "{{ ibm_cloud_server_id }}"
+      hostname: "{{ server_info.hostname | default(server_info.fullyQualifiedDomainName | default(ibm_cloud_server_id)) }}"
+      datacenter: "{{ datacenter }}"
+      public_ip: "{{ public_ip }}"
+      private_ip: "{{ private_ip }}"
+      public_vlan_id: "{{ public_vlan_id }}"
+      private_vlan_id: "{{ private_vlan_id }}"
+      public_mac_address: "{{ public_mac_address }}"
+      private_mac_address: "{{ private_mac_address }}"
+      remote_mgmt_ip: "{{ remote_mgmt_ip }}"
+      remote_mgmt_user: "{{ remote_mgmt_user }}"
+      remote_mgmt_password: "{{ remote_mgmt_password }}"
+
+- name: Validate critical server information
+  ansible.builtin.fail:
+    msg: "Failed to retrieve critical server information. Missing values: {{ missing_values | join(', ') }}"
+  vars:
+    missing_values: >-
+      {{
+        ([] +
+        (['datacenter'] if datacenter == '' else []) +
+        (['public_ip'] if public_ip == '' else []) +
+        (['private_ip'] if private_ip == '' else []) +
+        (['public_vlan_id'] if public_vlan_id == '' else []) +
+        (['private_vlan_id'] if private_vlan_id == '' else []) +
+        (['public_mac_address'] if public_mac_address == '' else []) +
+        (['private_mac_address'] if private_mac_address == '' else []) +
+        (['remote_mgmt_ip'] if remote_mgmt_ip == '' else []) +
+        (['remote_mgmt_user'] if remote_mgmt_user == '' else []) +
+        (['remote_mgmt_password'] if remote_mgmt_password == '' else []))
+      }}
+  when: 
+    - datacenter == '' or public_ip == '' or private_ip == '' or public_vlan_id == '' or private_vlan_id == '' or public_mac_address == '' or private_mac_address == '' or remote_mgmt_ip == '' or remote_mgmt_user == '' or remote_mgmt_password == ''
+
+- name: Save results to file
+  ansible.builtin.copy:
+    content: "{{ bm_server_info | to_nice_json }}"
+    dest: "{{ output_file | default('bm_server_info.json') }}"
+  when: save_to_file | default(false) and output_file is defined 

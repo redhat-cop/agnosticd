@@ -1,0 +1,188 @@
+---
+- name: Validate IBM Cloud API key is provided
+  ansible.builtin.fail:
+    msg: "ibm_cloud_api_key is required. Please provide it as an extra var: -e ibm_cloud_api_key=YOUR_API_KEY"
+  when: ibm_cloud_api_key is not defined or ibm_cloud_api_key == ""
+
+- name: Validate VM configuration
+  ansible.builtin.fail:
+    msg: "instances list is required with at least one VM. Please provide it as an extra var."
+  when: 
+    - ACTION == 'provision'
+    - instances is not defined or instances|length == 0
+
+- name: Validate individual VM names
+  ansible.builtin.fail:
+    msg: "VM {{ item.0.name | default('at index ' + item.1|string) }}: name is required"
+  when: 
+    - ACTION == 'provision'
+    - item.0.name is not defined or item.0.name == ""
+  loop: "{{ instances | zip(range(instances|length)) | list }}"
+  loop_control:
+    label: "{{ item.0.name | default('VM ' + item.1|string) }}"
+
+- name: Validate individual VM datacenters
+  ansible.builtin.fail:
+    msg: "VM {{ item.0.name | default('at index ' + item.1|string) }}: datacenter is required"
+  when: 
+    - ACTION == 'provision'
+    - item.0.datacenter is not defined or item.0.datacenter == ""
+  loop: "{{ instances | zip(range(instances|length)) | list }}"
+  loop_control:
+    label: "{{ item.0.name | default('VM ' + item.1|string) }}"
+
+- name: Validate individual VM count values
+  ansible.builtin.fail:
+    msg: "VM {{ item.0.name | default('at index ' + item.1|string) }}: count must be a positive integer (got: {{ item.0.count }})"
+  when: 
+    - ACTION == 'provision'
+    - item.0.count is defined and (item.0.count is not number or item.0.count <= 0 or item.0.count != (item.0.count | int))
+  loop: "{{ instances | zip(range(instances|length)) | list }}"
+  loop_control:
+    label: "{{ item.0.name | default('VM ' + item.1|string) }}"
+
+- name: Validate output_dir is provided
+  ansible.builtin.fail:
+    msg: "output_dir is required. Please provide it as an extra var: -e output_dir=YOUR_OUTPUT_DIR"
+  when: output_dir is not defined or output_dir == ""
+
+- name: Validate cluster_dns_zone is provided when DNS is enabled
+  ansible.builtin.fail:
+    msg: "cluster_dns_zone is required when create_dns_records is true. Please provide it as an extra var: -e cluster_dns_zone=YOUR_DNS_ZONE"
+  when: 
+    - create_dns_records | default(false) | bool
+    - cluster_dns_zone is not defined or cluster_dns_zone == ""
+
+- name: Validate Route53 AWS credentials when DNS is enabled
+  ansible.builtin.fail:
+    msg: "Route53 AWS credentials are required when create_dns_records is true. Please provide: -e route53_aws_access_key_id=YOUR_KEY -e route53_aws_secret_access_key=YOUR_SECRET"
+  when: 
+    - create_dns_records | default(false) | bool
+    - (route53_aws_access_key_id is not defined or route53_aws_access_key_id == "" or 
+       route53_aws_secret_access_key is not defined or route53_aws_secret_access_key == "")
+
+- name: Initialize Route53 zone collection
+  ansible.builtin.set_fact:
+    all_route53_zones: []
+    route53_next_marker: ""
+  when: 
+    - create_dns_records | default(false) | bool
+    - cluster_dns_zone is defined and cluster_dns_zone != ""
+
+- name: Discover Route53 hosted zones with pagination
+  ansible.builtin.include_tasks: route53_pagination.yml
+  when: 
+    - create_dns_records | default(false) | bool
+    - cluster_dns_zone is defined and cluster_dns_zone != ""
+
+- name: Find matching hosted zone for cluster_dns_zone
+  ansible.builtin.set_fact:
+    discovered_zone: "{{ route53_all_zones | selectattr('name', 'equalto', cluster_dns_zone + '.') | first | default(omit) }}"
+  when: 
+    - create_dns_records | default(false) | bool
+    - route53_all_zones is defined
+    - route53_all_zones | length > 0
+
+- name: Set route53_aws_zone_id when zone found
+  ansible.builtin.set_fact:
+    route53_aws_zone_id: "{{ discovered_zone.id.split('/') | last }}"
+  when: 
+    - create_dns_records | default(false) | bool
+    - discovered_zone is defined
+    - discovered_zone != omit
+    - discovered_zone.id is defined
+
+- name: Display discovered Route53 zone information
+  ansible.builtin.debug:
+    msg:
+      - "✅ Route53 zone discovered automatically:"
+      - "Domain: {{ cluster_dns_zone }}"
+      - "Zone ID: {{ route53_aws_zone_id }}"
+      - "Zone Name: {{ discovered_zone.name }}"
+  when: 
+    - create_dns_records | default(false) | bool
+    - discovered_zone is defined
+    - discovered_zone != omit
+
+- name: Validate Route53 zone was found or provided
+  ansible.builtin.fail:
+    msg: |
+      Route53 hosted zone not found for domain '{{ cluster_dns_zone }}'.
+      
+      Please either:
+      1. Create a hosted zone for '{{ cluster_dns_zone }}' in AWS Route53, or
+      2. Manually provide the zone ID: -e route53_aws_zone_id=YOUR_ZONE_ID
+      
+      Available zones in your account ({{ route53_all_zones | length }} total):
+      {% if route53_all_zones is defined and route53_all_zones | length > 0 %}
+      {% for zone in route53_all_zones %}
+      - {{ zone.name }} ({{ zone.id.split('/') | last }})
+      {% endfor %}
+      {% else %}
+      (Unable to list zones - check AWS credentials)
+      {% endif %}
+  when: 
+    - create_dns_records | default(false) | bool
+    - route53_aws_zone_id is not defined or route53_aws_zone_id == ""
+
+- name: Check if Terraform is installed
+  ansible.builtin.command: terraform version
+  register: terraform_version
+  failed_when: false
+  changed_when: false
+
+- name: Install Terraform if not present
+  block:
+    - name: Download Terraform
+      ansible.builtin.get_url:
+        url: "{{ terraform_download_url }}"
+        dest: "{{ output_dir }}/terraform.zip"
+        mode: '0644'
+      
+    - name: Unzip Terraform
+      ansible.builtin.unarchive:
+        src: "{{ output_dir }}/terraform.zip"
+        dest: "/usr/local/bin/"
+        remote_src: yes
+      become: true
+      
+    - name: Make Terraform executable
+      ansible.builtin.file:
+        path: "/usr/local/bin/terraform"
+        mode: '0755'
+      become: true
+      
+    - name: Verify Terraform installation
+      ansible.builtin.command: terraform version
+      register: terraform_verify
+      failed_when: terraform_verify.rc != 0
+      changed_when: false
+      
+    - name: Clean up Terraform zip file
+      ansible.builtin.file:
+        path: "{{ output_dir }}/terraform.zip"
+        state: absent
+      
+  when: terraform_version.rc != 0
+
+- name: Create terraform working directory
+  ansible.builtin.file:
+    path: "{{ terraform_working_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Display pre-check summary
+  ansible.builtin.debug:
+    msg:
+      - "Pre-checks completed successfully"
+      - "Action: {{ ACTION }}"
+      - "IBM Cloud API Key: [REDACTED]"
+      - "Output Directory: {{ output_dir }}"
+      - "Terraform working directory: {{ terraform_working_dir }}"
+      - "{% if create_dns_records | default(false) | bool %}DNS Configuration:{% endif %}"
+      - "{% if create_dns_records | default(false) | bool %}  - DNS Records: ENABLED{% endif %}"
+      - "{% if create_dns_records | default(false) | bool %}  - Cluster DNS Zone: {{ cluster_dns_zone }}{% endif %}"
+      - "{% if create_dns_records | default(false) | bool %}  - Route53 Zone ID: {{ route53_aws_zone_id }}{% endif %}"
+      - "{% if create_dns_records | default(false) | bool %}  - AWS Region: {{ aws_region | default('us-east-1') }}{% endif %}"
+      - "{% if ACTION == 'provision' and instances is defined %}VM Configuration ({{ instances|length }} instance types, {{ instances|map(attribute='count', default=1)|sum }} total VMs):{% endif %}"
+      - "{% if ACTION == 'provision' and instances is defined %}{% for instance in instances %}  - {{ instance.name }} ({{ instance.datacenter }}) - Count: {{ instance.count | default(1) }}{% endfor %}{% endif %}" 

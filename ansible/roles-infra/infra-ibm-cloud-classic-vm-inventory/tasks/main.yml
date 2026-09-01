@@ -1,0 +1,187 @@
+---
+- name: Get Terraform outputs
+  ansible.builtin.command:
+    cmd: terraform output -json
+    chdir: "{{ terraform_working_dir }}"
+  register: terraform_outputs
+  changed_when: false
+
+- name: Parse Terraform outputs
+  ansible.builtin.set_fact:
+    vm_outputs: "{{ terraform_outputs.stdout | from_json }}"
+
+- name: Initialize VM info list
+  ansible.builtin.set_fact:
+    vm_info: []
+
+- name: Get VM count from outputs
+  ansible.builtin.set_fact:
+    vm_count: "{{ vm_outputs.vm_count.value | default(0) | int }}"
+  when: vm_outputs.vm_count is defined
+
+- name: Set VM count to 0 if not defined
+  ansible.builtin.set_fact:
+    vm_count: 0
+  when: vm_outputs.vm_count is not defined
+
+- name: Store VM information (multiple VMs)
+  ansible.builtin.set_fact:
+    vm_info: "{{ vm_info | default([]) + [vm_item] }}"
+  vars:
+    vm_item:
+      id: "{{ vm_outputs.vm_ids.value[item] }}"
+      hostname: "{{ vm_outputs.vm_hostnames.value[item] }}"
+      domain: "{{ vm_outputs.vm_domains.value[item] }}"
+      fqdn: "{{ vm_outputs.vm_fqdns.value[item] }}"
+      public_ip: "{{ vm_outputs.vm_public_ips.value[item] }}"
+      private_ip: "{{ vm_outputs.vm_private_ips.value[item] }}"
+      datacenter: "{{ vm_outputs.vm_datacenters.value[item] }}"
+      cores: "{{ vm_outputs.vm_cores.value[item] }}"
+      memory: "{{ vm_outputs.vm_memory.value[item] }}"
+      operating_system: "{{ vm_outputs.vm_operating_systems.value[item] }}"
+      network_speed: "{{ vm_outputs.vm_network_speeds.value[item] }}"
+      status: "{{ vm_outputs.vm_statuses.value[item] }}"
+      ssh_connection: "{{ vm_outputs.ssh_connection_commands.value[item] }}"
+      private_security_group_id: "{{ vm_outputs.private_security_group_ids.value[item] }}"
+      public_security_group_id: "{{ vm_outputs.public_security_group_ids.value[item] }}"
+      tags: "{{ vm_outputs.vm_tags.value[item] }}"
+      hourly_billing: "{{ vm_outputs.vm_hourly_billings.value[item] }}"
+      creation_date: "{{ vm_outputs.vm_creation_dates.value[item] }}"
+      private_vlan_id: "{{ vm_outputs.private_vlan_ids.value[item] }}"
+      public_vlan_id: "{{ vm_outputs.public_vlan_ids.value[item] }}"
+  loop: "{{ range(vm_count | int) | list }}"
+  when: vm_count | int > 0
+
+- name: Display VM deployment results
+  ansible.builtin.debug:
+    msg:
+      - "VM deployment completed successfully"
+      - "Total VMs deployed: {{ vm_info | length }}"
+      - "{% if vm_info | length > 0 %}VMs:{% endif %}"
+      - "{% for vm in vm_info %}  - {{ vm.hostname }}.{{ vm.domain }} ({{ vm.fqdn }}) - {{ vm.public_ip }} - {{ vm.status }}{% endfor %}"
+      - "{% if vm_info | length == 0 %}No VMs were created - check your instances configuration{% endif %}"
+
+- name: Display individual VM details
+  ansible.builtin.debug:
+    msg:
+      - "VM {{ item.hostname }}.{{ item.domain }} Details:"
+      - "  ID: {{ item.id }}"
+      - "  FQDN: {{ item.fqdn }}"
+      - "  Public IP: {{ item.public_ip }}"
+      - "  Private IP: {{ item.private_ip }}"
+      - "  SSH Command: {{ item.ssh_connection }}"
+      - "  Status: {{ item.status }}"
+      - "  Datacenter: {{ item.datacenter }}"
+      - "  Specs: {{ item.cores }} cores, {{ item.memory }}MB RAM"
+  loop: "{{ vm_info }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  when: vm_info | length > 0
+
+- name: Save VM information to file
+  ansible.builtin.copy:
+    content: "{{ vm_info | to_nice_json }}"
+    dest: "{{ terraform_working_dir }}/vm_info.json"
+    mode: '0644'
+  when: save_vm_info | default(true)
+
+- name: Add VMs to in-memory inventory
+  ansible.builtin.add_host:
+    name: "{{ item.fqdn }}"
+    groups: "{{ vm_groups }}"
+    ansible_host: "{{ item.public_ip }}"
+    ansible_user: "{{ ssh_user | default('root') }}"
+    ansible_ssh_private_key_file: "{{ ssh_private_key_path }}"
+  vars:
+    vm_groups: "{{ base_groups + ansible_groups }}"
+    base_groups:
+      - "{{ inventory_group | default('all') }}"
+      - "tag_{{ item.operating_system | lower | regex_replace('[^a-zA-Z0-9_]', '_') }}"
+      - "datacenter_{{ item.datacenter }}"
+    ansible_groups: "{{ item.tags | select('match', '^ansible_group:.*') | map('regex_replace', '^ansible_group:', '') | map('regex_replace', '[^a-zA-Z0-9_]', '_') | list }}"
+    # VM metadata
+    vm_id: "{{ item.id }}"
+    vm_hostname: "{{ item.hostname }}"
+    vm_domain: "{{ item.domain }}"
+    vm_fqdn: "{{ item.fqdn }}"
+    vm_public_ip: "{{ item.public_ip }}"
+    vm_private_ip: "{{ item.private_ip }}"
+    vm_datacenter: "{{ item.datacenter }}"
+    vm_cores: "{{ item.cores }}"
+    vm_memory: "{{ item.memory }}"
+    vm_operating_system: "{{ item.operating_system }}"
+    vm_network_speed: "{{ item.network_speed }}"
+    vm_status: "{{ item.status }}"
+    vm_private_security_group_id: "{{ item.private_security_group_id | default([]) }}"
+    vm_public_security_group_id: "{{ item.public_security_group_id | default([]) }}"
+    vm_tags: "{{ item.tags }}"
+    vm_hourly_billing: "{{ item.hourly_billing }}"
+    vm_creation_date: "{{ item.creation_date }}"
+    vm_private_vlan_id: "{{ item.private_vlan_id }}"
+    vm_public_vlan_id: "{{ item.public_vlan_id }}"
+  loop: "{{ vm_info }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+
+- name: Wait for SSH to be available on all VMs
+  ansible.builtin.wait_for:
+    host: "{{ item.public_ip }}"
+    port: 22
+    delay: "{{ ssh_wait_delay | default(10) }}"
+    timeout: "{{ ssh_wait_timeout | default(300) }}"
+    connect_timeout: "{{ ssh_connect_timeout | default(5) }}"
+    sleep: "{{ ssh_retry_interval | default(2) }}"
+    state: started
+  loop: "{{ vm_info }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  when: wait_for_ssh | default(true)
+
+- name: Test SSH connection to all VMs
+  ansible.builtin.command:
+    cmd: "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i {{ ssh_private_key_path }} {{ ssh_user | default('root') }}@{{ item.public_ip }} 'echo SSH connection successful'"
+  register: ssh_tests
+  failed_when: false
+  changed_when: false
+  loop: "{{ vm_info }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+  when: test_ssh_connection | default(true)
+
+- name: Display SSH test results
+  ansible.builtin.debug:
+    msg:
+      - "SSH Test for {{ item.item.hostname }}: {{ 'PASSED' if item.rc == 0 else 'FAILED' }}"
+      - "{{ item.stdout if item.rc == 0 else item.stderr }}"
+  loop: "{{ ssh_tests.results }}"
+  loop_control:
+    label: "{{ item.item.hostname }}"
+  when: test_ssh_connection | default(true) and ssh_tests is defined
+
+- name: Initialize display ansible groups
+  ansible.builtin.set_fact:
+    display_ansible_groups: {}
+
+- name: Build ansible groups for display
+  ansible.builtin.set_fact:
+    display_ansible_groups: "{{ display_ansible_groups | default({}) | combine({group_name: (display_ansible_groups[group_name] | default([])) + [item]}) }}"
+  vars:
+    group_name: "{{ ansible_group_tag.split(':', 1)[1] | regex_replace('[^a-zA-Z0-9_]', '_') }}"
+    ansible_group_tag: "{{ item.tags | select('match', '^ansible_group:.*') | first }}"
+  when: item.tags | select('match', '^ansible_group:.*') | list | length > 0
+  loop: "{{ vm_info }}"
+  loop_control:
+    label: "{{ item.hostname }}"
+
+- name: Display inventory information
+  ansible.builtin.debug:
+    msg:
+      - "In-memory inventory created successfully"
+      - "Total VMs added: {{ vm_info | length }}"
+      - "Main inventory group: {{ inventory_group | default('all') }}"
+      - "Custom ansible groups detected: {{ display_ansible_groups.keys() | list | length | default(0) }}"
+      - "{% if display_ansible_groups is defined %}{% for group_name, group_vms in display_ansible_groups.items() %}  {{ group_name }}: {{ group_vms | map(attribute='hostname') | join(', ') }}{% endfor %}{% endif %}"
+      - "Access all VMs via: ansible {{ inventory_group | default('all') }} -m ping"
+      - "{% if display_ansible_groups is defined %}{% for group_name in display_ansible_groups.keys() %}Access {{ group_name }} group via: ansible {{ group_name }} -m ping{% endfor %}{% endif %}"
+      - "Individual VM access:"
+      - "{% for vm in vm_info %}  {{ vm.hostname }}: ssh -i {{ ssh_private_key_path }} {{ ssh_user | default('root') }}@{{ vm.public_ip }}{% endfor %}" 

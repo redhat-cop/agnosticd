@@ -1,0 +1,129 @@
+---
+- name: Check if Terraform working directory exists
+  ansible.builtin.stat:
+    path: "{{ terraform_working_dir }}"
+  register: terraform_dir_stat
+
+- name: Fail if Terraform working directory doesn't exist
+  ansible.builtin.fail:
+    msg: "Terraform working directory {{ terraform_working_dir }} does not exist. Nothing to destroy."
+  when: not terraform_dir_stat.stat.exists
+
+- name: Check if Terraform state file exists
+  ansible.builtin.stat:
+    path: "{{ terraform_working_dir }}/terraform.tfstate"
+  register: terraform_state_stat
+
+- name: Fail if Terraform state file doesn't exist
+  ansible.builtin.fail:
+    msg: "Terraform state file does not exist in {{ terraform_working_dir }}. Nothing to destroy."
+  when: not terraform_state_stat.stat.exists
+
+- name: Create Terraform log directory
+  ansible.builtin.file:
+    path: "{{ output_dir }}/terraform-logs"
+    state: directory
+    mode: '0755'
+
+- name: Set terraform logging timestamp
+  ansible.builtin.shell:
+    cmd: date +%Y%m%dT%H%M%S
+  register: timestamp_result
+  changed_when: false
+
+- name: Set terraform logging timestamp fact
+  ansible.builtin.set_fact:
+    terraform_log_timestamp: "{{ timestamp_result.stdout }}"
+
+- name: Get current Terraform state (with logging)
+  ansible.builtin.shell:
+    cmd: |
+      export TF_LOG={{ terraform_log_level }}
+      export TF_LOG_PATH="{{ output_dir }}/terraform-logs/terraform-show-{{ terraform_log_timestamp }}.log"
+      echo "=== Terraform Show Started at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-show-{{ terraform_log_timestamp }}.log
+      terraform show -json 2>&1 | tee -a {{ output_dir }}/terraform-logs/terraform-show-{{ terraform_log_timestamp }}.log
+      echo "=== Terraform Show Completed at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-show-{{ terraform_log_timestamp }}.log
+    chdir: "{{ terraform_working_dir }}"
+  register: terraform_show
+  changed_when: false
+  failed_when: false
+  when: terraform_enable_logging | default(true)
+
+- name: Parse current state
+  ansible.builtin.set_fact:
+    current_state: "{{ terraform_show.stdout | from_json }}"
+  when: terraform_show.rc == 0
+
+- name: Display resources to be destroyed
+  ansible.builtin.debug:
+    msg:
+      - "Resources to be destroyed:"
+      - "{{ current_state.values.root_module.resources | map(attribute='address') | list }}"
+  when: 
+    - terraform_show.rc == 0
+    - current_state.values is defined
+    - current_state.values.root_module is defined
+
+- name: Plan Terraform destroy (with logging)
+  ansible.builtin.shell:
+    cmd: |
+      export TF_LOG={{ terraform_log_level }}
+      export TF_LOG_PATH="{{ output_dir }}/terraform-logs/terraform-destroy-plan-{{ terraform_log_timestamp }}.log"
+      echo "=== Terraform Destroy Plan Started at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-destroy-plan-{{ terraform_log_timestamp }}.log
+      terraform plan -destroy -out=destroy_plan 2>&1 | tee -a {{ output_dir }}/terraform-logs/terraform-destroy-plan-{{ terraform_log_timestamp }}.log
+      echo "=== Terraform Destroy Plan Completed at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-destroy-plan-{{ terraform_log_timestamp }}.log
+    chdir: "{{ terraform_working_dir }}"
+  register: terraform_destroy_plan
+  changed_when: terraform_destroy_plan.rc == 0
+  when: terraform_enable_logging | default(true)
+
+- name: Apply Terraform destroy (with logging)
+  ansible.builtin.shell:
+    cmd: |
+      export TF_LOG={{ terraform_log_level }}
+      export TF_LOG_PATH="{{ output_dir }}/terraform-logs/terraform-destroy-apply-{{ terraform_log_timestamp }}.log"
+      echo "=== Terraform Destroy Apply Started at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-destroy-apply-{{ terraform_log_timestamp }}.log
+      terraform apply -auto-approve destroy_plan 2>&1 | tee -a {{ output_dir }}/terraform-logs/terraform-destroy-apply-{{ terraform_log_timestamp }}.log
+      echo "=== Terraform Destroy Apply Completed at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-destroy-apply-{{ terraform_log_timestamp }}.log
+    chdir: "{{ terraform_working_dir }}"
+  register: terraform_destroy_apply
+  changed_when: terraform_destroy_apply.rc == 0
+  when: terraform_enable_logging | default(true)
+
+- name: Create master terraform destroy log file
+  ansible.builtin.shell:
+    cmd: |
+      echo "=== Terraform Destroy Summary ===" > {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      echo "Date: $(date)" >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      echo "Working Directory: {{ terraform_working_dir }}" >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      echo "GUID: {{ guid }}" >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      echo "Action: {{ ACTION }}" >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      echo "" >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      echo "=== State Check Log ===" >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      cat {{ output_dir }}/terraform-logs/terraform-show-{{ terraform_log_timestamp }}.log >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      echo "" >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      echo "=== Destroy Plan Log ===" >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      cat {{ output_dir }}/terraform-logs/terraform-destroy-plan-{{ terraform_log_timestamp }}.log >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      echo "" >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      echo "=== Destroy Apply Log ===" >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+      cat {{ output_dir }}/terraform-logs/terraform-destroy-apply-{{ terraform_log_timestamp }}.log >> {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log
+  register: master_destroy_log_creation
+  changed_when: master_destroy_log_creation.rc == 0
+  when: terraform_enable_logging | default(true)
+
+- name: Clean up Terraform files
+  ansible.builtin.file:
+    path: "{{ terraform_working_dir }}"
+    state: absent
+  when: cleanup_terraform_files | default(true)
+
+- name: Display destroy completion
+  ansible.builtin.debug:
+    msg:
+      - "VM(s) destruction completed successfully"
+      - "All resources have been removed from IBM Cloud"
+      - "Terraform working directory: {{ 'Cleaned up' if (cleanup_terraform_files | default(true)) else 'Preserved at ' + terraform_working_dir }}"
+      - "📋 Terraform destroy logs available at:"
+      - "  - Master log: {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log"
+      - "  - Individual logs: {{ output_dir }}/terraform-logs/terraform-*-{{ terraform_log_timestamp }}.log"
+      - "🔍 To view logs: tail -f {{ output_dir }}/terraform-logs/terraform-destroy-master-{{ terraform_log_timestamp }}.log" 

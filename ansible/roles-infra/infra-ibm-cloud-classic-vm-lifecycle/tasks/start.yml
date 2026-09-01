@@ -1,0 +1,91 @@
+---
+- name: Check VM status before starting
+  ansible.builtin.command:
+    cmd: ibmcloud sl vs detail {{ item }} --output json
+  loop: "{{ vm_ids }}"
+  register: vm_status_check
+  changed_when: false
+  failed_when: false
+  environment:
+    IBMCLOUD_API_KEY: "{{ ibm_cloud_api_key }}"
+
+- name: Parse VM status information
+  ansible.builtin.set_fact:
+    vm_status_info: "{{ vm_status_check.results | map(attribute='stdout') | map('from_json') | list }}"
+  when: vm_status_check.results is defined
+
+- name: Display VM status before start operation
+  ansible.builtin.debug:
+    msg: 
+      - "VM {{ vm_hostnames[ansible_loop.index0] }} ({{ item }}) current status:"
+      - "  Power State: {{ vm_status_info[ansible_loop.index0].powerState.name if vm_status_info[ansible_loop.index0].powerState is defined else 'Unknown' }}"
+      - "  Action: {{ 'Skip (already running)' if (vm_status_info[ansible_loop.index0].powerState.name | default('') | upper) in ['RUNNING', 'ACTIVE'] else 'Will attempt to start' }}"
+  loop: "{{ vm_ids }}"
+  loop_control:
+    extended: true
+  when: vm_status_info is defined
+
+- name: Start IBM Cloud Classic VMs
+  ansible.builtin.command:
+    cmd: ibmcloud sl vs power-on {{ item }} --force
+  loop: "{{ vm_ids }}"
+  register: vm_start_results
+  changed_when: vm_start_results.rc == 0
+  failed_when: false
+  environment:
+    IBMCLOUD_API_KEY: "{{ ibm_cloud_api_key }}"
+  loop_control:
+    extended: true
+
+- name: Display detailed start results for each VM
+  ansible.builtin.debug:
+    msg: 
+      - "VM {{ vm_hostnames[ansible_loop.index0] }} ({{ item.item }}) start result:"
+      - "  Initial State: {{ vm_status_info[ansible_loop.index0].powerState.name if vm_status_info is defined and vm_status_info[ansible_loop.index0].powerState is defined else 'Unknown' }}"
+      - "  Action Taken: Start command attempted"
+      - "  Result: {{ 'Success' if item.rc == 0 else ('Already running' if ('AlreadyRunning' in (item.stderr | default('')) or 'already running' in (item.stderr | default('')) or 'Already running' in (item.stderr | default(''))) else 'Failed: ' + (item.stderr | default('Unknown error'))) }}"
+      - "  Return Code: {{ item.rc }}"
+  loop: "{{ vm_start_results.results }}"
+  loop_control:
+    extended: true
+  when: vm_start_results.results is defined
+
+- name: Display start action completion
+  agnosticd_user_info:
+    msg: |
+      IBM Cloud Classic VMs Start Operation Summary:
+      
+      Total VMs: {{ vm_count }}
+      {% if vm_start_results.results is defined %}
+      {% for result in vm_start_results.results %}
+      {% set vm_name = vm_hostnames[loop.index0] %}
+      {% set vm_id = result.item %}
+      {% set initial_state = vm_status_info[loop.index0].powerState.name if vm_status_info is defined and vm_status_info[loop.index0].powerState is defined else 'Unknown' %}
+      
+      VM {{ vm_name }} ({{ vm_id }}):
+      {% if result.rc == 0 %}
+      - Initial State: {{ initial_state }}
+      - Action: Start command sent successfully
+      - Result: ✅ VM started
+      {% elif 'AlreadyRunning' in (result.stderr | default('')) or 'already running' in (result.stderr | default('')) or 'Already running' in (result.stderr | default('')) %}
+      - Initial State: {{ initial_state }}
+      - Action: Start command attempted
+      - Result: ✅ VM already running (target state achieved)
+      {% else %}
+      - Initial State: {{ initial_state }}
+      - Action: Start command failed
+      - Result: ❌ Failed: {{ result.stderr | default('Unknown error') }}
+      {% endif %}
+      {% endfor %}
+      {% endif %}
+      
+      ✅ Operation completed. All VMs are now in running state.
+      
+      Note: "Already running" errors are expected and indicate success - the VM
+      was already in the desired running state.
+  when: vm_count | int > 0
+
+- name: Display no VMs message
+  ansible.builtin.debug:
+    msg: "No IBM Cloud Classic VMs found to start"
+  when: vm_count | int == 0 

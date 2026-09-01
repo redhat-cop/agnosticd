@@ -1,0 +1,148 @@
+---
+- name: Copy Terraform templates to working directory
+  ansible.builtin.copy:
+    src: "{{ role_path }}/files/"
+    dest: "{{ terraform_working_dir }}/"
+    mode: '0644'
+
+- name: Create terraform.tfvars file
+  ansible.builtin.template:
+    src: terraform.tfvars.j2
+    dest: "{{ terraform_working_dir }}/terraform.tfvars"
+    mode: '0644'
+
+- name: Create Terraform log directory
+  ansible.builtin.file:
+    path: "{{ output_dir }}/terraform-logs"
+    state: directory
+    mode: '0755'
+
+- name: Set terraform logging timestamp
+  ansible.builtin.shell:
+    cmd: date +%Y%m%dT%H%M%S
+  register: timestamp_result
+  changed_when: false
+
+- name: Set terraform logging timestamp fact
+  ansible.builtin.set_fact:
+    terraform_log_timestamp: "{{ timestamp_result.stdout }}"
+
+- name: Initialize Terraform (with logging)
+  ansible.builtin.shell:
+    cmd: |
+      export TF_LOG={{ terraform_log_level }}
+      export TF_LOG_PATH="{{ output_dir }}/terraform-logs/terraform-init-{{ terraform_log_timestamp }}.log"
+      echo "=== Terraform Init Started at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-init-{{ terraform_log_timestamp }}.log
+      terraform init 2>&1 | tee -a {{ output_dir }}/terraform-logs/terraform-init-{{ terraform_log_timestamp }}.log
+      echo "=== Terraform Init Completed at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-init-{{ terraform_log_timestamp }}.log
+    chdir: "{{ terraform_working_dir }}"
+  register: terraform_init
+  changed_when: terraform_init.rc == 0
+  when: terraform_enable_logging | default(true)
+
+- name: Plan Terraform deployment (with logging)
+  ansible.builtin.shell:
+    cmd: |
+      export TF_LOG={{ terraform_log_level }}
+      export TF_LOG_PATH="{{ output_dir }}/terraform-logs/terraform-plan-{{ terraform_log_timestamp }}.log"
+      echo "=== Terraform Plan Started at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-plan-{{ terraform_log_timestamp }}.log
+      terraform plan -out=tfplan 2>&1 | tee -a {{ output_dir }}/terraform-logs/terraform-plan-{{ terraform_log_timestamp }}.log
+      echo "=== Terraform Plan Completed at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-plan-{{ terraform_log_timestamp }}.log
+    chdir: "{{ terraform_working_dir }}"
+  register: terraform_plan
+  changed_when: terraform_plan.rc == 0
+  when: terraform_enable_logging | default(true)
+
+- name: Apply Terraform deployment (with logging)
+  ansible.builtin.shell:
+    cmd: |
+      export TF_LOG={{ terraform_log_level }}
+      export TF_LOG_PATH="{{ output_dir }}/terraform-logs/terraform-apply-{{ terraform_log_timestamp }}.log"
+      echo "=== Terraform Apply Started at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-apply-{{ terraform_log_timestamp }}.log
+      terraform apply -auto-approve tfplan 2>&1 | tee -a {{ output_dir }}/terraform-logs/terraform-apply-{{ terraform_log_timestamp }}.log
+      echo "=== Terraform Apply Completed at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-apply-{{ terraform_log_timestamp }}.log
+    chdir: "{{ terraform_working_dir }}"
+  register: terraform_apply
+  changed_when: terraform_apply.rc == 0
+  retries: 15
+  delay: 60
+  until: terraform_apply.rc == 0
+  failed_when: false
+  when: terraform_enable_logging | default(true)
+
+- name: Handle terraform apply failure
+  ansible.builtin.fail:
+    msg:
+      - "Terraform apply failed after {{ terraform_apply.attempts | default(1) }} attempts"
+      - "Error output: {{ terraform_apply.stderr | default('No error output') }}"
+      - "Standard output: {{ terraform_apply.stdout | default('No output') }}"
+      - "Check {{ output_dir }}/terraform-logs/terraform-apply-{{ terraform_log_timestamp }}.log for detailed logs"
+  when: terraform_apply.rc != 0
+
+- name: Check Terraform state after apply (with logging)
+  ansible.builtin.shell:
+    cmd: |
+      export TF_LOG={{ terraform_log_level }}
+      export TF_LOG_PATH="{{ output_dir }}/terraform-logs/terraform-state-{{ terraform_log_timestamp }}.log"
+      echo "=== Terraform State Check Started at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-state-{{ terraform_log_timestamp }}.log
+      terraform show -json 2>&1 | tee -a {{ output_dir }}/terraform-logs/terraform-state-{{ terraform_log_timestamp }}.log
+      echo "=== Terraform State Check Completed at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-state-{{ terraform_log_timestamp }}.log
+    chdir: "{{ terraform_working_dir }}"
+  register: terraform_state
+  changed_when: false
+  when: terraform_enable_logging | default(true)
+
+- name: Verify deployment status (with logging)
+  ansible.builtin.shell:
+    cmd: |
+      export TF_LOG={{ terraform_log_level }}
+      export TF_LOG_PATH="{{ output_dir }}/terraform-logs/terraform-verify-{{ terraform_log_timestamp }}.log"
+      echo "=== Terraform Verify Started at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-verify-{{ terraform_log_timestamp }}.log
+      terraform plan -detailed-exitcode 2>&1 | tee -a {{ output_dir }}/terraform-logs/terraform-verify-{{ terraform_log_timestamp }}.log
+      echo "=== Terraform Verify Completed at $(date) ===" >> {{ output_dir }}/terraform-logs/terraform-verify-{{ terraform_log_timestamp }}.log
+    chdir: "{{ terraform_working_dir }}"
+  register: terraform_verify
+  changed_when: false
+  failed_when: terraform_verify.rc not in [0, 2]
+  retries: 5
+  delay: 10
+  until: terraform_verify.rc in [0, 2]
+  when: terraform_enable_logging | default(true)
+
+- name: Create master terraform log file
+  ansible.builtin.shell:
+    cmd: |
+      echo "=== Terraform Deployment Summary ===" > {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "Date: $(date)" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "Working Directory: {{ terraform_working_dir }}" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "GUID: {{ guid }}" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "Action: {{ ACTION }}" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "=== Init Log ===" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      cat {{ output_dir }}/terraform-logs/terraform-init-{{ terraform_log_timestamp }}.log >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "=== Plan Log ===" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      cat {{ output_dir }}/terraform-logs/terraform-plan-{{ terraform_log_timestamp }}.log >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "=== Apply Log ===" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      cat {{ output_dir }}/terraform-logs/terraform-apply-{{ terraform_log_timestamp }}.log >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "=== State Check Log ===" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      cat {{ output_dir }}/terraform-logs/terraform-state-{{ terraform_log_timestamp }}.log >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      echo "=== Verify Log ===" >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+      cat {{ output_dir }}/terraform-logs/terraform-verify-{{ terraform_log_timestamp }}.log >> {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log
+  register: master_log_creation
+  changed_when: master_log_creation.rc == 0
+  when: terraform_enable_logging | default(true)
+
+- name: Display deployment status
+  ansible.builtin.debug:
+    msg:
+      - "Terraform apply completed successfully"
+      - "Deployment status: {{ 'No changes needed' if terraform_verify.rc == 0 else 'Changes applied' }}"
+      - "Apply duration: {{ terraform_apply.delta if terraform_apply.delta is defined else 'N/A' }}"
+      - "📋 Terraform logs available at:"
+      - "  - Master log: {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log"
+      - "  - Individual logs: {{ output_dir }}/terraform-logs/terraform-*-{{ terraform_log_timestamp }}.log"
+      - "🔍 To view logs: tail -f {{ output_dir }}/terraform-logs/terraform-master-{{ terraform_log_timestamp }}.log" 
