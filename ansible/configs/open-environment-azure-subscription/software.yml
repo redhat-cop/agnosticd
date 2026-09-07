@@ -69,37 +69,50 @@
       ansible.builtin.set_fact:
         kubeconfig_path: "{{ azure_kube_config_root }}/.kube/config"
 
-    - name: Login with azure admin service principal
-      ansible.builtin.command: >-
-        az login --service-principal
-        -u "{{ azure_service_principal }}"
-        -p "{{ azure_password }}"
-        --tenant "{{ azure_tenant }}"
-      no_log: true
+    # Fetch the ARO admin kubeconfig using the per-sandbox service principal
+    # (already provided to the user) instead of the privileged admin service
+    # principal, so the admin credentials never touch the bastion. The Azure
+    # CLI session is kept in an isolated config directory that is logged out
+    # and removed afterwards, leaving no cached credentials in the interactive
+    # user's home directory.
+    - name: Fetch ARO admin kubeconfig with the sandbox service principal
+      vars:
+        _aro_az_config_dir: "/home/{{ remote_user }}/.azure-aro-{{ guid }}"
+      environment:
+        AZURE_CONFIG_DIR: "{{ _aro_az_config_dir }}"
+      block:
+        - name: Login with the sandbox service principal
+          ansible.builtin.command: >-
+            az login --service-principal
+            -u "{{ hostvars.localhost.azapp.applications[0].app_id }}"
+            -p "{{ hostvars.localhost.azpass }}"
+            --tenant "{{ azure_tenant }}"
+          no_log: true
 
-    - name: Create KUBECONFIG
-#      when: 
-#        - not install_aro_with_managed_identities | default(false) | bool    
-      ansible.builtin.command: >-
-        az aro get-admin-kubeconfig
-        --subscription "{{ hostvars.localhost.assignedsubscription.subscriptions[0].subscription_id }}"
-        --resource-group "openenv-{{ guid }}"
-        --name "aro-cluster-{{ guid }}"
-        --file "{{ kubeconfig_path }}"
+        - name: Set the default subscription
+          ansible.builtin.command: >-
+            az account set
+            --subscription "{{ hostvars.localhost.assignedsubscription.subscriptions[0].subscription_id }}"
 
-#    - name: Create KUBECONFIG When Managed Identities is enabled
-#      when: 
-#        - install_aro_with_managed_identities | default(false) | bool    
-#      ansible.builtin.command: >-
-#        az aro get-admin-kubeconfig
-#        --subscription "{{ azure_subscription_id }}"
-#        --resource-group "openenv-{{ guid }}"
-#        --name "aro-cluster-{{ guid }}"
-#        --file "{{ kubeconfig_path }}"
+        - name: Create KUBECONFIG
+          ansible.builtin.command: >-
+            az aro get-admin-kubeconfig
+            --subscription "{{ hostvars.localhost.assignedsubscription.subscriptions[0].subscription_id }}"
+            --resource-group "openenv-{{ guid }}"
+            --name "aro-cluster-{{ guid }}"
+            --file "{{ kubeconfig_path }}"
+      always:
+        - name: Log out of the Azure CLI
+          ansible.builtin.command: az logout
+          environment:
+            AZURE_CONFIG_DIR: "{{ _aro_az_config_dir }}"
+          failed_when: false
+          changed_when: false
 
-    # - name: Wait for cluster to be ready
-    #   ansible.builtin.pause:
-    #     minutes: 10
+        - name: Remove the isolated Azure CLI config directory
+          ansible.builtin.file:
+            path: "{{ _aro_az_config_dir }}"
+            state: absent
 
     - name: Kubeconfig test block
       vars:
