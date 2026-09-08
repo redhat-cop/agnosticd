@@ -1,0 +1,85 @@
+---
+- name: Set bastion host from inventory group
+  when: "'bastions' in groups and groups['bastions'] | length > 0"
+  ansible.builtin.set_fact:
+    _bastion_host: "{{ groups['bastions'][0] }}"
+
+- name: Add bastion host dynamically from variables
+  when:
+    - _bastion_host is not defined
+    - bastion_ansible_host is defined
+    - bastion_ansible_user is defined
+    - bastion_ansible_ssh_pass is defined
+  block:
+    - name: Add bastion to inventory
+      ansible.builtin.add_host:
+        name: "{{ bastion_ansible_host }}"
+        groups: bastions
+        ansible_user: "{{ bastion_ansible_user }}"
+        ansible_ssh_pass: "{{ bastion_ansible_ssh_pass }}"
+        ansible_port: "{{ bastion_ansible_port | default(22) }}"
+
+    - name: Set bastion host fact from variables
+      ansible.builtin.set_fact:
+        _bastion_host: "{{ bastion_ansible_host }}"
+
+- name: Skip virtctl installation when no bastion available
+  when: _bastion_host is not defined
+  ansible.builtin.debug:
+    msg: "No bastion host available - skipping virtctl installation"
+
+- name: Try to install virtctl
+  when: _bastion_host is defined
+  block:
+    - name: Get virtctl-clidownloads-kubevirt-hyperconverged ConsoleCLIDownload
+      kubernetes.core.k8s_info:
+        api_version: console.openshift.io/v1
+        kind: ConsoleCLIDownload
+        name: virtctl-clidownloads-kubevirt-hyperconverged
+      register: r_virtctl_cli_download
+      retries: 20
+      delay: 10
+      ignore_errors: true
+      until:
+        - r_virtctl_cli_download.resources is defined
+        - r_virtctl_cli_download.resources | length > 0
+
+    - name: Get virtctl download URL from ConsoleCLIDownload
+      when: r_virtctl_cli_download.resources | length > 0
+      ansible.builtin.set_fact:
+        _ocp4_workload_kubevirt_virtctl_url: >-
+          {{ r_virtctl_cli_download.resources[0] | to_json | from_json
+          | json_query("spec.links[?contains(href,'linux')].href") | first }}
+
+    - name: Install virtctl
+      become: true
+      delegate_to: "{{ _bastion_host }}"
+      vars:
+        ansible_ssh_extra_args: "-F /dev/null"
+      block:
+        - name: Download virtctl cli tool
+          ansible.builtin.get_url:
+            url: "{{ _ocp4_workload_kubevirt_virtctl_url }}"
+            validate_certs: false
+            dest: /tmp/virtctl.tar.gz
+            mode: ug=rw
+          register: r_virtctl
+          until: r_virtctl is success
+          retries: 20
+          delay: 10
+
+        - name: Install virtctl CLI on bastion
+          ansible.builtin.unarchive:
+            src: /tmp/virtctl.tar.gz
+            remote_src: true
+            dest: /usr/bin
+            mode: ug=rwx,o=rx
+            owner: root
+            group: root
+          args:
+            creates: /usr/bin/virtctl
+
+        - name: Remove downloaded file
+          ansible.builtin.file:
+            state: absent
+            path: /tmp/virtctl.tar.gz
