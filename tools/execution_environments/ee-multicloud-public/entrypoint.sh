@@ -154,6 +154,92 @@ if [ ! -d "/runner/requirements_collections/ansible_collections" ]; then
 fi
 export HOME=/home/runner
 
-# chain exec whatever we were asked to run (ideally an init system) to keep any envvar state we've set
-log_debug "chain exec-ing requested command $*"
-exec "${@}"
+# Ensure collections path includes all expected locations.
+# AAP may override this, so we set it explicitly to include all paths.
+if [ -z "${ANSIBLE_COLLECTIONS_PATH:-}" ]; then
+  export ANSIBLE_COLLECTIONS_PATH="/home/runner/.ansible/collections:/collections:/usr/share/ansible/collections"
+else
+  export ANSIBLE_COLLECTIONS_PATH="/home/runner/.ansible/collections:${ANSIBLE_COLLECTIONS_PATH}"
+fi
+
+mkdir -p /home/runner/.ansible/collections 2>/dev/null || true
+chmod -R ug+rwx /home/runner/.ansible/collections 2>/dev/null || true
+
+log_debug "Original arguments: $*"
+
+export ORIGINAL_ARGUMENTS=("$@")
+args=("$@")
+
+# Path to the optional dynamic dependency installer
+INSTALL_PLAYBOOK="./ansible/install_dynamic_dependencies.yml"
+
+# Detect Kubernetes environment (container group on OCP/k8s).
+# KUBERNETES_SERVICE_HOST is injected by k8s into every pod. If set, we know
+# we're running in a container group, not on a bare-metal execution node.
+# In this mode, job data (inventory, extravars) arrives via the receptor stdin
+# stream after ansible-runner worker starts — it is NOT on disk when the
+# entrypoint runs. We install an ansible-playbook wrapper that runs the dynamic
+# dependency install after ansible-runner unpacks the job data but before the
+# actual playbook is parsed.
+if [[ -n "${KUBERNETES_SERVICE_HOST:-}" ]]; then
+  log_debug "Kubernetes environment detected. Installing ansible-playbook wrapper."
+
+  WRAPPER_DIR="/runner/.ep-wrapper/bin"
+  mkdir -p "${WRAPPER_DIR}"
+
+  cat > "${WRAPPER_DIR}/ansible-playbook" <<'WRAPPER'
+#!/usr/bin/env bash
+set -eu
+
+REAL_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '.ep-wrapper' | tr '\n' ':' | sed 's/:$//')
+REAL=$(PATH="$REAL_PATH" command -v ansible-playbook)
+
+INSTALL_PLAYBOOK="./ansible/install_dynamic_dependencies.yml"
+
+if [ -z "${_EP_DEPS_INSTALLED:-}" ] && [ -f /runner/env/extravars ] && [ -f "${INSTALL_PLAYBOOK}" ]; then
+  export _EP_DEPS_INSTALLED=1
+  "${REAL}" "${INSTALL_PLAYBOOK}" \
+    -i /runner/inventory/hosts \
+    -e @/runner/env/extravars \
+    2>&1 || true
+fi
+
+exec "${REAL}" "$@"
+WRAPPER
+
+  chmod +x "${WRAPPER_DIR}/ansible-playbook"
+
+  export PATH="${WRAPPER_DIR}:${PATH}"
+
+  exec "${ORIGINAL_ARGUMENTS[@]}"
+fi
+
+# Detect AAP execution node environment (-u root pattern)
+AAP=0
+for ((i = 1; i < ${#args[@]}; i++)); do
+  if [[ "${args[i]}" == "-u" && "${args[i+1]:-}" == "root" ]]; then
+    AAP=1
+    break
+  fi
+done
+
+if (( AAP == 1 )); then
+  log_debug "AAP environment detected. Running with fixed extra-vars"
+  if [ -f "${INSTALL_PLAYBOOK}" ]; then
+    /usr/local/bin/ansible-playbook "${INSTALL_PLAYBOOK}" -i /runner/inventory/hosts -e @/runner/env/extravars
+  else
+    log_debug "Install playbook ${INSTALL_PLAYBOOK} not found, skipping dynamic dependency install"
+  fi
+else
+  shift 2
+  log_debug "Non-AAP environment. Running with processed arguments"
+  log_debug "Remaining arguments: $*"
+  if [ -f "${INSTALL_PLAYBOOK}" ]; then
+    /usr/local/bin/ansible-playbook "${INSTALL_PLAYBOOK}" "$@"
+  else
+    log_debug "Install playbook ${INSTALL_PLAYBOOK} not found, skipping dynamic dependency install"
+  fi
+fi
+
+log_debug "chain exec-ing requested command: ${ORIGINAL_ARGUMENTS[*]}"
+exec "${ORIGINAL_ARGUMENTS[@]}"
