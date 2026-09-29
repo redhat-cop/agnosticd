@@ -92,35 +92,48 @@
     regexp: 'path:\s*(bootstrap/.+/overlays/)\w+'
     replace: 'path: \1{{ ocp4_workload_oai_parasol_insurance_branch }}'
 
+# Always apply — git_clone.changed skips re-apply on retries/resume when the clone is already present
 - name: Apply the ApplicationSet YAML file
   command: "oc apply -f /tmp/ocp4_workload_oai_parasol_insurance_repo/{{ ocp4_workload_oai_parasol_insurance_yaml_file_path }}"
-  when: git_clone.changed
 
 - name: Wait 30s for the Applications to be created
   pause:
     seconds: 30
 
-- name: Wait for ArgoCD Applications to be fully healthy
+- name: Check if all Applications are fully healthy
+  shell: |
+    statuses="$(oc get applications.argoproj.io -n openshift-gitops \
+      -o jsonpath='{.items[*].status.health.status}' 2>/dev/null || true)"
+    if [ -z "${statuses}" ]; then
+      exit 1
+    fi
+    echo "${statuses}" | grep -qvE '^(\s*Healthy\s*)+$' && exit 1 || exit 0
+  register: sync_check
+  retries: "{{ ocp4_workload_oai_parasol_insurance_application_health_retries | int }}"
+  delay: "{{ ocp4_workload_oai_parasol_insurance_application_health_delay | int }}"
+  until: sync_check.rc == 0
+  failed_when: false
+  changed_when: false
+
+- name: Dump ArgoCD Application status when health wait fails
+  when: sync_check.rc != 0
   block:
-  - name: Check if all Applications are fully healthy
-    shell: |
-      if oc get applications.argoproj.io -n openshift-gitops \
-          -o jsonpath="{.items[*].status.health.status}" | grep -qvE '^(\s*Healthy\s*)+$'; then
-        exit 1
-      else
-        exit 0
-      fi
-    register: sync_check
-    retries: 360               # Retry for 360 attempts (15s * 360 = 1.5 hour)
-    delay: 15                  # Wait 15 seconds between retries
-    until: sync_check.rc == 0  # Continue retrying until all Applications are healthy
-    failed_when: sync_check.rc != 0
+  - name: Collect Application health and sync status
+    command: >-
+      oc get applications.argoproj.io -n openshift-gitops
+      -o custom-columns=NAME:.metadata.name,HEALTH:.status.health.status,SYNC:.status.sync.status,MESSAGE:.status.health.message
+    register: r_argocd_apps
+    failed_when: false
     changed_when: false
 
-  - name: Fail if Applications did not sync within the timeout
+  - name: Fail with ArgoCD Application diagnostics
     fail:
-      msg: "Timeout reached! Not all Applications are healthy."
-    when: sync_check.rc != 0
+      msg: |
+        Timeout waiting for ArgoCD Applications in openshift-gitops to become Healthy
+        (retries={{ ocp4_workload_oai_parasol_insurance_application_health_retries }},
+        delay={{ ocp4_workload_oai_parasol_insurance_application_health_delay }}s).
+
+        {{ r_argocd_apps.stdout | default('(oc get applications failed)') }}
 
 # Leave this as the last task in the playbook.
 - name: workload tasks complete
