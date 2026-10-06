@@ -15,7 +15,7 @@ version_added: "2.9"
 description:
   - Deletes ARO clusters (with NAT teardown), nested blockers (AIServices,
     Resource Mover, etc.), then topo-sorted resource groups.
-  - Does not release pool allocations; Sandbox API or the calling role owns that.
+  - Does not release pool allocations; Sandbox API owns that (standalone clean_sub is the ops exception).
   - Use resource_groups to limit deletion on shared subscriptions (delete-open-env).
 options:
   subscription_id:

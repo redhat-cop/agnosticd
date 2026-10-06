@@ -12,8 +12,9 @@ This role does the following:
 - Runs hardened Azure cleanup via ``azure_openenv_cleanup_subscription``
   (ARO + NAT teardown, AIServices/Resource Mover blockers, topo-sorted RGs)
 - Clears subscription tags
-- Unallocates the pool ID from the pool manager database (when used outside
-  Sandbox API). Sandbox API–owned sandboxes normally release the pool themselves.
+
+Pool ``/release`` is **not** called here — Sandbox API owns that (standalone
+``clean_sub`` is the only ops exception).
 
 Requirements
 ------------
@@ -32,7 +33,7 @@ Role Variables
 
 guid - the guid to use for the deployment
 requester_email - an email address to invite
-az_pool_id / azure_pool_api_secret / az_function_* - pool manager API
+az_pool_id / azure_pool_api_secret / az_function_show - pool lookup (show only; no release)
 
 License
 -------

@@ -4,7 +4,7 @@
 
 Ported from pool_mgmt/clean_sub.py (ARO NAT teardown, AIServices blockers,
 topo-sorted RG delete, leftover abort). Does NOT release pool allocations —
-Sandbox API / calling Ansible role owns that.
+Sandbox API owns that (standalone clean_sub is the ops exception).
 """
 
 from __future__ import absolute_import, division, print_function
