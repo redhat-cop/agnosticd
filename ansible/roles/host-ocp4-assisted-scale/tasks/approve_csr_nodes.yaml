@@ -1,4 +1,8 @@
 ---
+- name: Initialize CSR approval retry counter
+  set_fact:
+    _csr_approval_attempt: "{{ _csr_approval_attempt | default(0) | int + 1 }}"
+
 - name: Get pending CSRs
   kubernetes.core.k8s_info:
     api_version: certificates.k8s.io/v1
@@ -42,7 +46,6 @@
   loop: "{{ pending_csrs }}"
   when: pending_csrs is defined and pending_csrs | length > 0
 
-
 - name: Get the current nodes
   kubernetes.core.k8s_info:
     api_version: v1
@@ -58,16 +61,28 @@
   set_fact:
     ready_nodes_count: >-
       {{ r_worker_nodes
-         | json_query("resources[].status.conditions[?type=='Ready' && status=='True']")
+         | json_query("resources[?status.conditions[?type=='Ready' && status=='True']]")
          | length }}
 
 - name: Include this tasks again if nodes doesn't appear
-  when: (current_instance_workers|int + worker_instance_count|int) != ready_nodes_count|int
+  when:
+    - (current_instance_workers | int + worker_instance_count | int) != ready_nodes_count | int
+    - _csr_approval_attempt | int < 180
   block:
     - name: Wait for additional CertificateSigningRequests to appear
       pause:
-        seconds: "10"
+        seconds: "20"
     - include_tasks: approve_csr_nodes.yaml
+
+- name: Fail if CSR approval retries exhausted
+  fail:
+    msg: >-
+      CSR approval retries exhausted ({{ _csr_approval_attempt }} attempts).
+      Expected {{ current_instance_workers | int + worker_instance_count | int }}
+      ready worker nodes, but only {{ ready_nodes_count }} are ready.
+  when:
+    - (current_instance_workers | int + worker_instance_count | int) != ready_nodes_count | int
+    - _csr_approval_attempt | int >= 180
 
 - name: Prepare IngressController definition with integer replicas
   set_fact:
