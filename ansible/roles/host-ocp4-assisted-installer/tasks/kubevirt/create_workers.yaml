@@ -147,15 +147,97 @@
       volumes: {{ _instance_volumes | replace('INSTANCENAME', vmname) }}
 
 - name: Wait till VM is running
-  kubernetes.core.k8s_info:
-    api_version: kubevirt.io/v1
-    host: "{{ sandbox_openshift_api_url }}"
-    api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
-    validate_certs: false
-    kind: VirtualMachine
-    name: "{{ vmname }}"
-    namespace: "{{ namespace }}"
-  register: r_vm_status
-  until: r_vm_status.resources[0].status.printableStatus|default('') == "Running"
-  retries: "{{ ai_workers_vm_ready_retries }}"
-  delay: "{{ ai_workers_vm_ready_delay }}"
+  block:
+    - name: Wait till VM is running
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        host: "{{ sandbox_openshift_api_url }}"
+        api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+        validate_certs: false
+        kind: VirtualMachine
+        name: "{{ vmname }}"
+        namespace: "{{ namespace }}"
+      register: r_vm_status
+      until: r_vm_status.resources[0].status.printableStatus|default('') == "Running"
+      retries: "{{ ai_workers_vm_ready_retries }}"
+      delay: "{{ ai_workers_vm_ready_delay }}"
+
+  rescue:
+    - name: Fetch VM status
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        host: "{{ sandbox_openshift_api_url }}"
+        api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+        validate_certs: false
+        kind: VirtualMachine
+        name: "{{ vmname }}"
+        namespace: "{{ namespace }}"
+      register: r_diag_vm
+      ignore_errors: true
+
+    - name: Fetch VMI status
+      kubernetes.core.k8s_info:
+        api_version: kubevirt.io/v1
+        host: "{{ sandbox_openshift_api_url }}"
+        api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+        validate_certs: false
+        kind: VirtualMachineInstance
+        name: "{{ vmname }}"
+        namespace: "{{ namespace }}"
+      register: r_diag_vmi
+      ignore_errors: true
+
+    - name: Fetch virt-launcher pod
+      kubernetes.core.k8s_info:
+        api_version: v1
+        host: "{{ sandbox_openshift_api_url }}"
+        api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+        validate_certs: false
+        kind: Pod
+        namespace: "{{ namespace }}"
+        label_selectors:
+          - "vm.kubevirt.io/name={{ vmname }}"
+      register: r_diag_pod
+      ignore_errors: true
+
+    - name: Fetch events for VM name
+      kubernetes.core.k8s_info:
+        api_version: v1
+        host: "{{ sandbox_openshift_api_url }}"
+        api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+        validate_certs: false
+        kind: Event
+        namespace: "{{ namespace }}"
+        field_selectors:
+          - "involvedObject.name={{ vmname }}"
+      register: r_diag_events
+      ignore_errors: true
+
+    - name: Fetch PVCs for VM
+      kubernetes.core.k8s_info:
+        api_version: v1
+        host: "{{ sandbox_openshift_api_url }}"
+        api_key: "{{ k8s_auth_results.k8s_auth.api_key|default(sandbox_openshift_api_key) }}"
+        validate_certs: false
+        kind: PersistentVolumeClaim
+        name: "{{ item }}"
+        namespace: "{{ namespace }}"
+      loop:
+        - "{{ vmname }}"
+        - "{{ vmname }}-installation-cdrom"
+      register: r_diag_pvc
+      ignore_errors: true
+
+    - name: Print debugging info
+      ansible.builtin.debug:
+        msg:
+          - "VM wait failed: {{ vmname }} ns={{ namespace }}"
+          - "vm.status={{ r_diag_vm.resources[0].status | default({}) }}"
+          - "vmi.status={{ r_diag_vmi.resources[0].status | default({}) }}"
+          - "pod={{ r_diag_pod.resources | default([]) }}"
+          - "events={{ r_diag_events.resources | default([]) }}"
+          - "pvc={{ r_diag_pvc.results | default([]) }}"
+
+    - name: Fail after printing VM diagnostics
+      ansible.builtin.fail:
+        msg: "VM {{ vmname }} did not become Running — see debug above"
