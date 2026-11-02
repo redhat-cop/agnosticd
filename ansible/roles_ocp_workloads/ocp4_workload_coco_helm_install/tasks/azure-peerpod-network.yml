@@ -1,0 +1,230 @@
+---
+# Azure prerequisites for peer pods.
+#
+# Peer pod VMs boot outside the cluster and need a deterministic egress IP,
+# so the cluster subnet gets a NAT gateway before any pod VM is created.
+# This mirrors helpers/configure-osc.sh from the workshop guide and
+# ocp4_workload_osc_configure_aro.
+#
+# Two cluster flavours are supported:
+#   * Azure IPI (this lab): openshift-config/cloud-provider-config (INI)
+#   * ARO: openshift-cloud-controller-manager/cloud-conf (JSON)
+# The subscription and service principal come from the AgnosticD catalog
+# (azure_subscription_id, azure_service_principal, azure_tenant,
+# azure_password), i.e. the same credentials that installed the cluster.
+
+- name: Check that the Azure CLI is installed
+  ansible.builtin.command: which az
+  register: r_coco_az_bin
+  changed_when: false
+  failed_when: false
+
+- name: Fail when the Azure CLI is missing on the bastion
+  when: r_coco_az_bin.rc != 0
+  ansible.builtin.fail:
+    msg: >-
+      The Azure CLI is required to configure the peer pod NAT gateway but was
+      not found on the bastion. It is installed by host-ocp4-provisioner for
+      Azure clusters; add azure-cli to common_extra_packages otherwise.
+
+- name: Get the Azure cloud provider configuration (IPI)
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: cloud-provider-config
+    namespace: openshift-config
+  register: r_coco_ipi_cloud_conf
+  failed_when: false
+
+- name: Get the cloud configuration ConfigMap (ARO)
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: cloud-conf
+    namespace: openshift-cloud-controller-manager
+  register: r_coco_aro_cloud_conf
+  failed_when: false
+
+- name: Get the cluster Infrastructure
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: r_coco_infra
+
+- name: Read the cloud provider configuration (IPI)
+  when: r_coco_ipi_cloud_conf.resources | length > 0
+  ansible.builtin.set_fact:
+    _coco_cloud_conf_raw: >-
+      {{ r_coco_ipi_cloud_conf.resources[0].data['config']
+         | default(r_coco_ipi_cloud_conf.resources[0].data['cloud.conf'], true) }}
+
+- name: Read the cloud provider configuration (ARO)
+  when:
+    - _coco_cloud_conf_raw is not defined
+    - r_coco_aro_cloud_conf.resources | length > 0
+  ansible.builtin.set_fact:
+    _coco_cloud_conf_raw: "{{ r_coco_aro_cloud_conf.resources[0].data['cloud.conf'] }}"
+
+- name: Fail when no cloud provider configuration can be found
+  when: _coco_cloud_conf_raw is not defined
+  ansible.builtin.fail:
+    msg: >-
+      Neither openshift-config/cloud-provider-config nor
+      openshift-cloud-controller-manager/cloud-conf exists; cannot determine
+      the Azure subscription, VNet, subnet and NSG for the peer pods.
+
+- name: Detect the cloud provider configuration format
+  ansible.builtin.set_fact:
+    _coco_cloud_conf_is_json: >-
+      {{ (_coco_cloud_conf_raw | trim).startswith('{') | bool }}
+
+- name: Write the INI cloud provider configuration to a file
+  when: not _coco_cloud_conf_is_json
+  ansible.builtin.copy:
+    content: "{{ _coco_cloud_conf_raw }}"
+    dest: "{{ ocp4_workload_coco_helm_install_workdir }}/cloud.conf"
+    mode: "0600"
+  no_log: true
+
+- name: Parse the JSON cloud provider configuration (ARO)
+  when: _coco_cloud_conf_is_json
+  ansible.builtin.set_fact:
+    _coco_cloud_conf: "{{ _coco_cloud_conf_raw | from_json }}"
+
+- name: Parse the INI cloud provider configuration (IPI)
+  when: not _coco_cloud_conf_is_json
+  vars:
+    _conf: "{{ ocp4_workload_coco_helm_install_workdir }}/cloud.conf"
+  ansible.builtin.set_fact:
+    _coco_cloud_conf: >-
+      {{
+        {
+          'subscriptionId': lookup('ansible.builtin.ini', 'subscriptionId section=Global file=' ~ _conf),
+          'location': lookup('ansible.builtin.ini', 'location section=Global file=' ~ _conf),
+          'resourceGroup': lookup('ansible.builtin.ini', 'resourceGroup section=Global file=' ~ _conf),
+          'vnetResourceGroup': lookup('ansible.builtin.ini', 'vnetResourceGroup section=Global file=' ~ _conf),
+          'vnetName': lookup('ansible.builtin.ini', 'vnetName section=Global file=' ~ _conf),
+          'subnetName': lookup('ansible.builtin.ini', 'subnetName section=Global file=' ~ _conf),
+          'securityGroupName': lookup('ansible.builtin.ini', 'securityGroupName section=Global file=' ~ _conf)
+        }
+      }}
+
+- name: Set Azure networking facts
+  vars:
+    _infra: "{{ r_coco_infra.resources[0].status }}"
+    _infra_name: "{{ _infra.infrastructureName }}"
+    _azure: "{{ _infra.platformStatus.azure }}"
+  ansible.builtin.set_fact:
+    _coco_subscription_id: >-
+      {{ _coco_cloud_conf.subscriptionId | default(azure_subscription_id, true) }}
+    _coco_location: >-
+      {{ _coco_cloud_conf.location
+         | default(hostvars.localhost.azure_region | default(azure_region), true) }}
+    _coco_user_rg: >-
+      {{ _coco_cloud_conf.vnetResourceGroup
+         | default(_azure.networkResourceGroupName
+                   | default(_azure.resourceGroupName
+                             | default(_infra_name ~ '-rg', true), true), true) }}
+    _coco_cluster_rg: >-
+      {{ _coco_cloud_conf.resourceGroup
+         | default(_azure.resourceGroupName | default(_infra_name ~ '-rg', true), true) }}
+    _coco_vnet_name: >-
+      {{ _coco_cloud_conf.vnetName
+         | default(_azure.network.vnetName | default(_infra_name ~ '-vnet', true), true) }}
+    _coco_subnet_name: >-
+      {{ _coco_cloud_conf.subnetName
+         | default(_azure.network.subnetName | default(_infra_name ~ '-subnet', true), true) }}
+    _coco_nsg_name: >-
+      {{ _coco_cloud_conf.securityGroupName
+         | default(_infra_name ~ '-nsg', true) }}
+
+- name: Set Azure resource IDs
+  vars:
+    _sub_prefix: "/subscriptions/{{ _coco_subscription_id }}"
+    _net_provider: "Microsoft.Network"
+  ansible.builtin.set_fact:
+    _coco_subnet_id: >-
+      {{ _sub_prefix }}/resourceGroups/{{ _coco_user_rg
+      }}/providers/{{ _net_provider
+      }}/virtualNetworks/{{ _coco_vnet_name
+      }}/subnets/{{ _coco_subnet_name }}
+    _coco_nsg_id: >-
+      {{ _sub_prefix }}/resourceGroups/{{ _coco_cluster_rg
+      }}/providers/{{ _net_provider
+      }}/networkSecurityGroups/{{ _coco_nsg_name }}
+
+- name: Check the existing Azure CLI session
+  # The bastion keeps the credentials used to install the cluster
+  # (ocp4_cluster_azure_remove_bastion_credentials: false), so a session is
+  # usually already active; only log in again when it is not.
+  ansible.builtin.command: az account show --query id -o tsv
+  register: r_coco_az_account
+  changed_when: false
+  failed_when: false
+
+- name: Fail when no Azure session exists and no service principal is available
+  when:
+    - r_coco_az_account.rc != 0
+    - azure_service_principal | default('') | length == 0 or
+      azure_password | default('') | length == 0 or
+      azure_tenant | default('') | length == 0
+  ansible.builtin.fail:
+    msg: >-
+      No active Azure CLI session on the bastion and azure_service_principal /
+      azure_password / azure_tenant are not defined; cannot configure the peer
+      pod NAT gateway.
+
+- name: Log in to Azure with the catalog service principal
+  when: r_coco_az_account.rc != 0
+  ansible.builtin.command: >-
+    az login --service-principal
+    -u "{{ azure_service_principal }}"
+    -p "{{ azure_password }}"
+    --tenant "{{ azure_tenant }}"
+  register: r_coco_az_login
+  changed_when: r_coco_az_login.rc == 0
+  no_log: true
+
+- name: Create the NAT gateway public IP
+  ansible.builtin.command: >-
+    az network public-ip create
+    -g "{{ _coco_user_rg }}"
+    -n peerpod-nat-gw-ip
+    -l "{{ _coco_location }}"
+    --sku Standard
+    --only-show-errors
+  register: r_coco_nat_ip
+  changed_when: r_coco_nat_ip.rc == 0
+  # Re-running the lab must not fail on resources that already exist.
+  failed_when: >-
+    r_coco_nat_ip.rc != 0 and
+    'already exists' not in (r_coco_nat_ip.stderr | default('') | lower)
+
+- name: Create the NAT gateway
+  ansible.builtin.command: >-
+    az network nat gateway create
+    -g "{{ _coco_user_rg }}"
+    -l "{{ _coco_location }}"
+    --public-ip-addresses peerpod-nat-gw-ip
+    -n peerpod-nat-gw
+    --only-show-errors
+  register: r_coco_nat_gw
+  changed_when: r_coco_nat_gw.rc == 0
+  failed_when: >-
+    r_coco_nat_gw.rc != 0 and
+    'already exists' not in (r_coco_nat_gw.stderr | default('') | lower)
+
+- name: Associate the NAT gateway with the cluster subnet
+  ansible.builtin.command: >-
+    az network vnet subnet update
+    --nat-gateway peerpod-nat-gw
+    --ids "{{ _coco_subnet_id }}"
+  register: r_coco_subnet_update
+  changed_when: r_coco_subnet_update.rc == 0
+
+- name: Report the Azure network used by the peer pods
+  ansible.builtin.debug:
+    msg: >-
+      Subscription {{ _coco_subscription_id }}, region {{ _coco_location }},
+      subnet {{ _coco_subnet_id }}, NSG {{ _coco_nsg_id }}

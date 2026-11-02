@@ -1,0 +1,495 @@
+---
+# ---------------------------------------------------------------------------
+# LB1150: Confidential Containers on Red Hat OCP & MS Azure
+#
+# Installs and configures the CoCo stack (cert-manager, Trustee, OSC with
+# Azure peer pods, terminal tabs) from the Helm charts shipped in the
+# workshop-on-ARO-showroom repository.
+# ---------------------------------------------------------------------------
+
+- name: Ensure helm is available
+  ansible.builtin.include_tasks: install-helm.yml
+
+- name: Clone charts repository
+  ansible.builtin.git:
+    repo: "{{ ocp4_workload_coco_helm_install_charts_repo }}"
+    version: "{{ ocp4_workload_coco_helm_install_charts_repo_ref }}"
+    dest: "{{ ocp4_workload_coco_helm_install_charts_dir }}"
+    depth: 1
+    force: true
+    update: true
+
+- name: Ensure work directory exists
+  ansible.builtin.file:
+    path: "{{ ocp4_workload_coco_helm_install_workdir }}"
+    state: directory
+    mode: "0755"
+
+- name: Get cluster ingress domain
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: r_coco_ingress
+  until: r_coco_ingress.resources | length > 0
+  delay: 10
+  retries: 30
+
+- name: Set cluster domain fact
+  ansible.builtin.set_fact:
+    _coco_cluster_domain: >-
+      {{ r_coco_ingress.resources[0].spec.appsDomain
+         | default(r_coco_ingress.resources[0].spec.domain) }}
+
+# ---------------------------------------------------------------------------
+# Stage 1: operators
+# ---------------------------------------------------------------------------
+
+- name: Render operator values files
+  ansible.builtin.template:
+    src: "values-{{ item }}.yaml.j2"
+    dest: "{{ ocp4_workload_coco_helm_install_workdir }}/values-{{ item }}.yaml"
+    mode: "0644"
+  loop:
+    - cert-manager-operator
+    - trustee-operator
+    - osc-operator
+
+- name: Apply cert-manager operator
+  vars:
+    _coco_chart_name: cert-manager-operator
+    _coco_chart_release: cert-manager-operator
+    _coco_chart_namespace: "{{ ocp4_workload_coco_helm_install_cert_manager_namespace }}"
+    _coco_chart_values_file: "{{ ocp4_workload_coco_helm_install_workdir }}/values-cert-manager-operator.yaml"
+  ansible.builtin.include_tasks: apply-chart.yml
+
+- name: Apply Trustee operator
+  vars:
+    _coco_chart_name: trustee-operator
+    _coco_chart_release: trustee-operator
+    _coco_chart_namespace: "{{ ocp4_workload_coco_helm_install_trustee_namespace }}"
+    _coco_chart_values_file: "{{ ocp4_workload_coco_helm_install_workdir }}/values-trustee-operator.yaml"
+  ansible.builtin.include_tasks: apply-chart.yml
+
+- name: Apply OSC operator
+  vars:
+    _coco_chart_name: osc-operator
+    _coco_chart_release: osc-operator
+    _coco_chart_namespace: "{{ ocp4_workload_coco_helm_install_osc_namespace }}"
+    _coco_chart_values_file: "{{ ocp4_workload_coco_helm_install_workdir }}/values-osc-operator.yaml"
+  ansible.builtin.include_tasks: apply-chart.yml
+
+- name: Wait for cert-manager operator CSV
+  vars:
+    _coco_wait_namespace: "{{ ocp4_workload_coco_helm_install_cert_manager_namespace }}"
+  ansible.builtin.include_tasks: wait-csv.yml
+
+- name: Wait for Trustee operator CSV
+  vars:
+    _coco_wait_namespace: "{{ ocp4_workload_coco_helm_install_trustee_namespace }}"
+  ansible.builtin.include_tasks: wait-csv.yml
+
+- name: Wait for OSC operator CSV
+  vars:
+    _coco_wait_namespace: "{{ ocp4_workload_coco_helm_install_osc_namespace }}"
+  ansible.builtin.include_tasks: wait-csv.yml
+
+# ---------------------------------------------------------------------------
+# Stage 2: Trustee operands
+# ---------------------------------------------------------------------------
+
+- name: Download cosign public keys
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ ocp4_workload_coco_helm_install_workdir }}/{{ item.dest }}"
+    mode: "0644"
+    force: true
+  loop:
+    - url: "{{ ocp4_workload_coco_helm_install_cosign_pub_url }}"
+      dest: cosign.pub
+    - url: "{{ ocp4_workload_coco_helm_install_redhat_cosign_pub_url }}"
+      dest: redhat-cosign-pub-key.pem
+
+- name: Read cosign public keys
+  ansible.builtin.slurp:
+    src: "{{ ocp4_workload_coco_helm_install_workdir }}/{{ item }}"
+  loop:
+    - cosign.pub
+    - redhat-cosign-pub-key.pem
+  register: r_coco_cosign_keys
+
+- name: Set cosign key facts
+  ansible.builtin.set_fact:
+    _coco_devhub_pub_key: "{{ r_coco_cosign_keys.results[0].content | b64decode }}"
+    _coco_redhat_pub_key: "{{ r_coco_cosign_keys.results[1].content | b64decode }}"
+
+- name: Render Trustee operands values file
+  ansible.builtin.template:
+    src: values-trustee-operands.yaml.j2
+    dest: "{{ ocp4_workload_coco_helm_install_workdir }}/values-trustee-operands.yaml"
+    mode: "0644"
+
+- name: Render Trustee operands chart
+  vars:
+    _coco_chart_release: trustee-operands
+    _coco_chart_namespace: "{{ ocp4_workload_coco_helm_install_trustee_namespace }}"
+  kubernetes.core.helm_template:
+    chart_ref: "{{ ocp4_workload_coco_helm_install_charts_dir }}/charts/trustee-operands"
+    release_name: "{{ _coco_chart_release }}"
+    release_namespace: "{{ _coco_chart_namespace }}"
+    values_files:
+      - "{{ ocp4_workload_coco_helm_install_workdir }}/values-trustee-operands.yaml"
+  register: r_coco_trustee_render
+
+- name: Set rendered Trustee objects fact
+  ansible.builtin.set_fact:
+    _coco_trustee_objects: "{{ r_coco_trustee_render.stdout | from_yaml_all | select('mapping') | list }}"
+
+# The cert-manager webhook must be serving before the Issuer/Certificate
+# objects are created, otherwise the API rejects them.
+- name: Wait for cert-manager webhook
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: cert-manager-webhook
+    namespace: cert-manager
+  register: r_coco_cm_webhook
+  until:
+    - r_coco_cm_webhook.resources | length > 0
+    - r_coco_cm_webhook.resources[0].status.availableReplicas | default(0) | int >= 1
+  delay: 10
+  retries: 60
+
+# Certificates must exist and be issued before TrusteeConfig reconciles
+- name: Apply Trustee issuer, certificates and secrets
+  kubernetes.core.k8s:
+    definition: >-
+      {{ _coco_trustee_objects
+         | selectattr('kind', 'in', ['Namespace', 'Issuer', 'Certificate', 'Secret'])
+         | list }}
+
+- name: Wait for Trustee certificates to be issued
+  kubernetes.core.k8s_info:
+    api_version: cert-manager.io/v1
+    kind: Certificate
+    name: "{{ item }}"
+    namespace: "{{ ocp4_workload_coco_helm_install_trustee_namespace }}"
+  loop:
+    - kbs-https
+    - kbs-token
+  register: r_coco_cert
+  until:
+    - r_coco_cert.resources | length > 0
+    - r_coco_cert.resources[0].status.conditions | default([])
+      | selectattr('type', 'equalto', 'Ready')
+      | selectattr('status', 'equalto', 'True')
+      | list | length > 0
+  delay: 10
+  retries: 60
+
+- name: Apply remaining Trustee objects (KbsConfig, Route, TrusteeConfig)
+  kubernetes.core.k8s:
+    definition: >-
+      {{ _coco_trustee_objects
+         | rejectattr('kind', 'in', ['Namespace', 'Issuer', 'Certificate', 'Secret'])
+         | list }}
+
+- name: Wait for the Trustee deployment
+  kubernetes.core.k8s_info:
+    api_version: apps/v1
+    kind: Deployment
+    name: trustee-deployment
+    namespace: "{{ ocp4_workload_coco_helm_install_trustee_namespace }}"
+  register: r_coco_trustee_deployment
+  until:
+    - r_coco_trustee_deployment.resources | length > 0
+    - r_coco_trustee_deployment.resources[0].status.availableReplicas | default(0) | int >= 1
+  delay: 15
+  retries: "{{ (ocp4_workload_coco_helm_install_trustee_deployment_timeout | int / 15) | int }}"
+
+- name: Get KBS route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: "{{ ocp4_workload_coco_helm_install_trustee_route_name }}"
+    namespace: "{{ ocp4_workload_coco_helm_install_trustee_namespace }}"
+  register: r_coco_kbs_route
+  until:
+    - r_coco_kbs_route.resources | length > 0
+    - r_coco_kbs_route.resources[0].spec.host is defined
+  delay: 10
+  retries: 60
+
+- name: Get Trustee TLS certificate
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ 'trustee-tls-cert' }}"
+    namespace: "{{ ocp4_workload_coco_helm_install_trustee_namespace }}"
+  register: r_coco_tls_secret
+  until:
+    - r_coco_tls_secret.resources | length > 0
+    - r_coco_tls_secret.resources[0].data['tls.crt'] is defined
+  delay: 10
+  retries: 60
+
+- name: Set Trustee endpoint facts
+  ansible.builtin.set_fact:
+    _coco_kbs_host: "{{ r_coco_kbs_route.resources[0].spec.host }}"
+    _coco_kbs_url: "https://{{ r_coco_kbs_route.resources[0].spec.host }}"
+    _coco_trustee_cert: "{{ r_coco_tls_secret.resources[0].data['tls.crt'] | b64decode }}"
+
+# ---------------------------------------------------------------------------
+# Stage 3: initdata + RVPS reference values
+# ---------------------------------------------------------------------------
+
+- name: Render initdata.toml
+  ansible.builtin.template:
+    src: initdata.toml.j2
+    dest: "{{ ocp4_workload_coco_helm_install_workdir }}/initdata.toml"
+    mode: "0644"
+
+- name: Encode INITDATA (gzip + base64)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    gzip -9 -c {{ ocp4_workload_coco_helm_install_workdir }}/initdata.toml | base64 -w0
+  register: r_coco_initdata
+  changed_when: false
+
+- name: Set INITDATA fact
+  ansible.builtin.set_fact:
+    _coco_initdata: "{{ r_coco_initdata.stdout }}"
+
+- name: Compute PCR8 measurement of the initdata
+  # PCR8 = sha256(32 zero bytes || sha256(initdata.toml)), the same value the
+  # guide computes with xxd; python3 avoids depending on vim-common.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    python3 - <<'PY'
+    import hashlib
+
+    with open("{{ ocp4_workload_coco_helm_install_workdir }}/initdata.toml", "rb") as f:
+        digest = hashlib.sha256(f.read()).digest()
+
+    print(hashlib.sha256(b"\x00" * 32 + digest).hexdigest())
+    PY
+  register: r_coco_pcr8
+  changed_when: false
+
+- name: Set PCR8 fact
+  ansible.builtin.set_fact:
+    _coco_pcr8: "{{ r_coco_pcr8.stdout | trim }}"
+
+- name: Get cluster pull secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: pull-secret
+    namespace: openshift-config
+  register: r_coco_pull_secret
+
+- name: Write cluster pull secret for podman
+  ansible.builtin.copy:
+    content: "{{ r_coco_pull_secret.resources[0].data['.dockerconfigjson'] | b64decode }}"
+    dest: "{{ ocp4_workload_coco_helm_install_workdir }}/cluster-pull-secret.json"
+    mode: "0600"
+
+- name: Pull CoCo tools image
+  ansible.builtin.command: >-
+    podman pull {{ ocp4_workload_coco_helm_install_coco_tools_image }}
+  register: r_coco_tools_pull
+  retries: "{{ ocp4_workload_coco_helm_install_podman_pull_retries | int }}"
+  delay: "{{ ocp4_workload_coco_helm_install_podman_pull_delay | int }}"
+  until: r_coco_tools_pull is success
+  changed_when: r_coco_tools_pull.rc == 0
+
+- name: Generate RVPS reference values with veritas
+  ansible.builtin.command: >-
+    podman run --rm
+    --security-opt label=disable
+    -v {{ ocp4_workload_coco_helm_install_workdir }}:/workdir:Z
+    -w /workdir
+    -v {{ ocp4_workload_coco_helm_install_workdir }}/cluster-pull-secret.json:/pull-secret.json:Z
+    -v {{ ocp4_workload_coco_helm_install_workdir }}/initdata.toml:/initdata.toml:Z
+    -e REGISTRY_AUTH_FILE=/pull-secret.json
+    {{ ocp4_workload_coco_helm_install_coco_tools_image }}
+    veritas
+    --platform azure
+    --tee {{ ocp4_workload_coco_helm_install_veritas_tee }}
+    --authfile /pull-secret.json
+    --initdata /initdata.toml
+    --rekor-url {{ ocp4_workload_coco_helm_install_rekor_url }}
+    --rekor-pub-key-url {{ ocp4_workload_coco_helm_install_rekor_pub_key_url }}
+  register: r_coco_veritas
+  changed_when: true
+
+- name: Apply RVPS reference values
+  kubernetes.core.k8s:
+    definition: >-
+      {{ lookup('file', ocp4_workload_coco_helm_install_workdir ~ '/rvps-reference-values.yaml')
+         | from_yaml_all | select('mapping') | list }}
+
+- name: Restart Trustee deployment to load the fresh secrets
+  kubernetes.core.k8s:
+    api_version: apps/v1
+    kind: Deployment
+    name: trustee-deployment
+    namespace: "{{ ocp4_workload_coco_helm_install_trustee_namespace }}"
+    state: patched
+    definition:
+      spec:
+        template:
+          metadata:
+            annotations:
+              coco.redhat.com/restarted-at: "{{ now(utc=true, fmt='%Y%m%d%H%M%S') }}"
+
+# ---------------------------------------------------------------------------
+# Stage 4: Azure network + OSC operands
+# ---------------------------------------------------------------------------
+
+- name: Configure Azure networking for peer pods
+  ansible.builtin.include_tasks: azure-peerpod-network.yml
+
+- name: Get worker nodes
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+    label_selectors:
+      - node-role.kubernetes.io/worker
+  register: r_coco_workers
+  until: r_coco_workers.resources | length > 0
+  delay: 10
+  retries: 30
+
+- name: Label first worker node for Kata
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Node
+      metadata:
+        name: "{{ r_coco_workers.resources[0].metadata.name }}"
+        labels:
+          workerType: kataWorker
+    state: patched
+
+- name: Render OSC operands values file
+  ansible.builtin.template:
+    src: values-osc-operands.yaml.j2
+    dest: "{{ ocp4_workload_coco_helm_install_workdir }}/values-osc-operands.yaml"
+    mode: "0644"
+
+- name: Apply OSC operands
+  vars:
+    _coco_chart_name: osc-operands
+    _coco_chart_release: osc-operands
+    _coco_chart_namespace: "{{ ocp4_workload_coco_helm_install_osc_namespace }}"
+    _coco_chart_values_file: "{{ ocp4_workload_coco_helm_install_workdir }}/values-osc-operands.yaml"
+  ansible.builtin.include_tasks: apply-chart.yml
+
+- name: Wait for the kata-oc MachineConfigPool
+  kubernetes.core.k8s_info:
+    api_version: machineconfiguration.openshift.io/v1
+    kind: MachineConfigPool
+    name: "{{ ocp4_workload_coco_helm_install_kataconfig_pool }}"
+  register: r_coco_mcp
+  until:
+    - r_coco_mcp.resources | length > 0
+    - r_coco_mcp.resources[0].status.conditions
+      | selectattr('type', 'equalto', 'Updated')
+      | selectattr('status', 'equalto', 'True')
+      | list | length > 0
+    - r_coco_mcp.resources[0].status.conditions
+      | selectattr('type', 'equalto', 'Updating')
+      | selectattr('status', 'equalto', 'True')
+      | list | length == 0
+    - r_coco_mcp.resources[0].status.conditions
+      | selectattr('type', 'equalto', 'Degraded')
+      | selectattr('status', 'equalto', 'True')
+      | list | length == 0
+  delay: 30
+  retries: "{{ (ocp4_workload_coco_helm_install_mcp_wait_timeout | int / 30) | int }}"
+
+- name: Wait for kata and kata-remote RuntimeClasses
+  kubernetes.core.k8s_info:
+    api_version: node.k8s.io/v1
+    kind: RuntimeClass
+    name: "{{ item }}"
+  loop:
+    - kata
+    - kata-remote
+  register: r_coco_runtimeclasses
+  until: r_coco_runtimeclasses.resources | length > 0
+  delay: 30
+  retries: "{{ (ocp4_workload_coco_helm_install_runtimeclass_wait_timeout | int / 30) | int }}"
+
+# ---------------------------------------------------------------------------
+# Stage 5: terminal tabs
+# ---------------------------------------------------------------------------
+
+- name: Render terminal-tabs values file
+  ansible.builtin.template:
+    src: values-terminal-tabs.yaml.j2
+    dest: "{{ ocp4_workload_coco_helm_install_workdir }}/values-terminal-tabs.yaml"
+    mode: "0644"
+  when: ocp4_workload_coco_helm_install_terminal_tabs_enabled | bool
+
+- name: Apply terminal tabs
+  when: ocp4_workload_coco_helm_install_terminal_tabs_enabled | bool
+  vars:
+    _coco_chart_name: terminal-tabs
+    _coco_chart_release: terminal-tabs
+    _coco_chart_namespace: "{{ ocp4_workload_coco_helm_install_terminal_namespace }}"
+    _coco_chart_values_file: "{{ ocp4_workload_coco_helm_install_workdir }}/values-terminal-tabs.yaml"
+  ansible.builtin.include_tasks: apply-chart.yml
+
+# ---------------------------------------------------------------------------
+# Report data consumed by the showroom (ui-config.yml variables)
+# ---------------------------------------------------------------------------
+
+- name: Get the OpenShift console route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: console
+    namespace: openshift-console
+  register: r_coco_console_route
+  failed_when: false
+
+- name: Set the console URL fact
+  # The console route host is the authority; the deterministic name is only a
+  # fallback for clusters where the route has not been created yet.
+  ansible.builtin.set_fact:
+    _coco_console_url: >-
+      {{ ('https://' ~ r_coco_console_route.resources[0].spec.host)
+         if (r_coco_console_route.resources | default([]) | length > 0)
+         else 'https://console-openshift-console.' ~ _coco_cluster_domain }}
+
+- name: Report CoCo workshop user data
+  agnosticd_user_info:
+    data:
+      coco_cluster_domain: "{{ _coco_cluster_domain }}"
+      coco_kbs_route: "{{ _coco_kbs_url }}"
+      coco_pcr8: "{{ _coco_pcr8 }}"
+      openshift_console_url: "{{ _coco_console_url }}"
+      opsec_url: >-
+        https://{{ ocp4_workload_coco_helm_install_terminal_host_prefix
+        }}-{{ ocp4_workload_coco_helm_install_terminal_host_suffix
+        }}-opsec.{{ _coco_cluster_domain }}
+      devel_url: >-
+        https://{{ ocp4_workload_coco_helm_install_terminal_host_prefix
+        }}-{{ ocp4_workload_coco_helm_install_terminal_host_suffix
+        }}-devel.{{ _coco_cluster_domain }}
+      admin_url: >-
+        https://{{ ocp4_workload_coco_helm_install_terminal_host_prefix
+        }}-{{ ocp4_workload_coco_helm_install_terminal_host_suffix
+        }}-admin.{{ _coco_cluster_domain }}
+      osc_docs_url: "{{ ocp4_workload_coco_helm_install_osc_docs_url }}"
+      trustee_docs_url: "{{ ocp4_workload_coco_helm_install_trustee_docs_url }}"
+  when: ocp4_workload_coco_helm_install_terminal_tabs_enabled | bool
+
+- name: CoCo Helm install complete
+  ansible.builtin.debug:
+    msg: >-
+      CoCo stack installed: Trustee at {{ _coco_kbs_url }},
+      OSC peer pods on {{ _coco_location }} (RG {{ _coco_cluster_rg }}),
+      PCR8 {{ _coco_pcr8 }}
