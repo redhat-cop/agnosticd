@@ -1,0 +1,88 @@
+---
+# Remove the Azure resources that azure-peerpod-network.yml created for the
+# peer pod VMs: the subnet NAT gateway association, then the NAT gateway and
+# its public IP (the gateway cannot be deleted while it is attached).
+#
+# Everything here is best-effort. remove_workload.yml also runs as part of a
+# full cluster teardown, where the cluster API may already be gone; in that
+# case the shared facts file sets _coco_facts_skip and the az commands are
+# skipped instead of failing the removal (the resource group teardown removes
+# the resources anyway).
+
+- name: Check that the Azure CLI is installed
+  ansible.builtin.command: which az
+  register: r_coco_az_bin
+  changed_when: false
+  failed_when: false
+
+- name: Read the Azure network facts (best effort)
+  when: r_coco_az_bin.rc == 0
+  ansible.builtin.include_tasks: azure-network-facts.yml
+  vars:
+    _coco_facts_soft_fail: true
+
+- name: Check the existing Azure CLI session
+  when: not (_coco_facts_skip | default(false))
+  ansible.builtin.command: az account show --query id -o tsv
+  register: r_coco_az_account
+  changed_when: false
+  failed_when: false
+
+- name: Log in to Azure with the catalog service principal
+  when:
+    - not (_coco_facts_skip | default(false))
+    - r_coco_az_account.rc != 0
+    - azure_service_principal | default('') | length > 0
+    - azure_password | default('') | length > 0
+    - azure_tenant | default('') | length > 0
+  ansible.builtin.command: >-
+    az login --service-principal
+    -u "{{ azure_service_principal }}"
+    -p "{{ azure_password }}"
+    --tenant "{{ azure_tenant }}"
+  register: r_coco_az_login
+  # Logging in is not a state change; a failed login only means the deletes
+  # below are skipped by the API.
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Disassociate the NAT gateway from the cluster subnet
+  when: not (_coco_facts_skip | default(false))
+  ansible.builtin.command: >-
+    az network vnet subnet update
+    --ids "{{ _coco_subnet_id }}"
+    --remove natGateway
+    --only-show-errors
+  register: r_coco_subnet_disassociate
+  changed_when: r_coco_subnet_disassociate.rc == 0
+  failed_when: false
+
+- name: Delete the NAT gateway
+  when: not (_coco_facts_skip | default(false))
+  ansible.builtin.command: >-
+    az network nat gateway delete
+    -g "{{ _coco_user_rg }}"
+    -n peerpod-nat-gw
+    --only-show-errors
+  register: r_coco_nat_gw_delete
+  changed_when: r_coco_nat_gw_delete.rc == 0
+  failed_when: false
+
+- name: Delete the NAT gateway public IP
+  when: not (_coco_facts_skip | default(false))
+  ansible.builtin.command: >-
+    az network public-ip delete
+    -g "{{ _coco_user_rg }}"
+    -n peerpod-nat-gw-ip
+    --only-show-errors
+  register: r_coco_nat_ip_delete
+  changed_when: r_coco_nat_ip_delete.rc == 0
+  failed_when: false
+
+- name: Report the Azure cleanup result
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Azure peer pod network cleanup skipped (cluster or credentials unavailable)'
+         if (_coco_facts_skip | default(false))
+         else 'Azure peer pod NAT gateway and public IP deletion requested' }}
