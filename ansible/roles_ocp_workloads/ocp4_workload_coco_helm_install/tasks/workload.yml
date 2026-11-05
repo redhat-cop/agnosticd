@@ -350,24 +350,39 @@
 - name: Configure Azure networking for peer pods
   ansible.builtin.include_tasks: azure-peerpod-network.yml
 
-- name: Get worker nodes
+- name: Get all cluster nodes
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Node
+  register: r_coco_nodes
+
+- name: Get the worker-role nodes
   kubernetes.core.k8s_info:
     api_version: v1
     kind: Node
     label_selectors:
       - node-role.kubernetes.io/worker
   register: r_coco_workers
-  until: r_coco_workers.resources | length > 0
-  delay: 10
-  retries: 30
 
-- name: Label first worker node for Kata
+- name: Set the Kata node facts
+  # LB1150 is single-node (1 master, 0 workers): when no worker-role nodes
+  # exist, Kata is installed on the single node itself, exactly like the
+  # workshop guide's Azure SNO procedure.
+  vars:
+    _coco_workers: "{{ r_coco_workers.resources | default([]) }}"
+  ansible.builtin.set_fact:
+    _coco_is_sno: "{{ r_coco_nodes.resources | length == 1 }}"
+    _coco_kata_node: >-
+      {{ _coco_workers[0].metadata.name if _coco_workers | length > 0
+         else r_coco_nodes.resources[0].metadata.name }}
+
+- name: Label the Kata node
   kubernetes.core.k8s:
     definition:
       apiVersion: v1
       kind: Node
       metadata:
-        name: "{{ r_coco_workers.resources[0].metadata.name }}"
+        name: "{{ _coco_kata_node }}"
         labels:
           workerType: kataWorker
     state: patched
@@ -387,6 +402,10 @@
   ansible.builtin.include_tasks: apply-chart.yml
 
 - name: Wait for the kata-oc MachineConfigPool
+  # Skipped on single-node clusters: the workshop guide notes the kata-oc MCP
+  # wait does not apply to Azure SNO deployments (the node is already in the
+  # master pool). The RuntimeClasses below are waited for either way.
+  when: not (_coco_is_sno | bool)
   kubernetes.core.k8s_info:
     api_version: machineconfiguration.openshift.io/v1
     kind: MachineConfigPool
