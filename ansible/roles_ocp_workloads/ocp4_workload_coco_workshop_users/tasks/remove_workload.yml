@@ -1,0 +1,113 @@
+---
+# Remove the workshop RBAC bindings. The htpasswd users are removed from the
+# existing database without touching the entries owned by other roles.
+
+- name: Remove opsec/devel RBAC bindings
+  kubernetes.core.k8s:
+    state: absent
+    api_version: rbac.authorization.k8s.io/v1
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+    namespace: "{{ item.namespace | default(omit) }}"
+  loop:
+    - kind: ClusterRoleBinding
+      name: coco-opsec-sandboxed-admin
+    - kind: ClusterRoleBinding
+      name: coco-opsec-view
+    - kind: RoleBinding
+      name: coco-opsec-trustee-admin
+      namespace: "{{ ocp4_workload_coco_workshop_users_trustee_namespace }}"
+    - kind: ClusterRoleBinding
+      name: "coco-admin-{{ ocp4_workload_coco_workshop_users_admin_user }}"
+  ignore_errors: true
+
+- name: Remove coco-devel-edit RoleBindings
+  kubernetes.core.k8s:
+    state: absent
+    api_version: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    name: coco-devel-edit
+    namespace: "{{ item }}"
+  loop: "{{ ocp4_workload_coco_workshop_users_devel_namespaces }}"
+  ignore_errors: true
+
+- name: Remove the sandboxed-admin ClusterRole
+  kubernetes.core.k8s:
+    state: absent
+    api_version: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    name: sandboxed-admin-cluster-role
+  ignore_errors: true
+
+- name: Get OAuth cluster configuration
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: OAuth
+    name: cluster
+  register: r_coco_oauth
+
+- name: Find an existing HTPasswd identity provider
+  ansible.builtin.set_fact:
+    _coco_htpasswd_idps: >-
+      {{ r_coco_oauth.resources[0].spec.identityProviders | default([])
+         | selectattr('type', 'equalto', 'HTPasswd') | list }}
+
+- name: Read the current htpasswd secret
+  when: _coco_htpasswd_idps | length > 0
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ (_coco_htpasswd_idps | first).htpasswd.fileData.name }}"
+    namespace: openshift-config
+  register: r_coco_htpasswd_secret
+  failed_when: false
+
+- name: Remove the workshop users from the htpasswd database
+  when:
+    - _coco_htpasswd_idps | length > 0
+    - r_coco_htpasswd_secret is defined and
+      r_coco_htpasswd_secret.resources | default([]) | length > 0
+  block:
+    - name: Write the htpasswd database to a working file
+      ansible.builtin.copy:
+        content: "{{ r_coco_htpasswd_secret.resources[0].data.htpasswd | b64decode }}"
+        dest: "{{ ocp4_workload_coco_workshop_users_tmp_htpasswd }}"
+        mode: "0600"
+      no_log: true
+
+    - name: Delete the opsec and devel entries
+      community.general.htpasswd:
+        path: "{{ ocp4_workload_coco_workshop_users_tmp_htpasswd }}"
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
+        - "{{ ocp4_workload_coco_workshop_users_devel_user }}"
+
+    - name: Read the updated htpasswd database
+      ansible.builtin.slurp:
+        src: "{{ ocp4_workload_coco_workshop_users_tmp_htpasswd }}"
+      register: r_coco_htpasswd_file
+      no_log: true
+
+    - name: Update the htpasswd secret
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ (_coco_htpasswd_idps | first).htpasswd.fileData.name }}"
+            namespace: openshift-config
+          type: Opaque
+          data:
+            htpasswd: "{{ r_coco_htpasswd_file.content }}"
+
+    - name: Remove the temporary htpasswd file
+      ansible.builtin.file:
+        path: "{{ ocp4_workload_coco_workshop_users_tmp_htpasswd }}"
+        state: absent
+
+- name: Workshop users removal complete
+  ansible.builtin.debug:
+    msg: "Workshop personas removed"
