@@ -1,0 +1,164 @@
+---
+# Derive the Azure subscription, resource group, region, VNet, subnet and NSG
+# used by the peer pod VMs from the cluster's cloud provider configuration.
+#
+# Two cluster flavours are supported:
+#   * Azure IPI (this lab): openshift-config/cloud-provider-config (INI)
+#   * ARO: openshift-cloud-controller-manager/cloud-conf (JSON)
+#
+# Shared by azure-peerpod-network.yml (create the NAT gateway) and
+# remove-azure-peerpod-network.yml (delete it again). The removal path runs
+# with _coco_facts_soft_fail: true, so a cluster that is already gone sets
+# _coco_facts_skip instead of failing the whole removal.
+
+- name: Ensure the work directory exists
+  ansible.builtin.file:
+    path: "{{ ocp4_workload_coco_helm_install_workdir }}"
+    state: directory
+    mode: "0755"
+
+- name: Get the Azure cloud provider configuration (IPI)
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: cloud-provider-config
+    namespace: openshift-config
+  register: r_coco_ipi_cloud_conf
+  failed_when: false
+
+- name: Get the cloud configuration ConfigMap (ARO)
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: cloud-conf
+    namespace: openshift-cloud-controller-manager
+  register: r_coco_aro_cloud_conf
+  failed_when: false
+
+- name: Get the cluster Infrastructure
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: r_coco_infra
+  failed_when: false
+
+- name: Read the cloud provider configuration (IPI)
+  when: r_coco_ipi_cloud_conf.resources | length > 0
+  ansible.builtin.set_fact:
+    _coco_cloud_conf_raw: >-
+      {{ r_coco_ipi_cloud_conf.resources[0].data['config']
+         | default(r_coco_ipi_cloud_conf.resources[0].data['cloud.conf'], true) }}
+
+- name: Read the cloud provider configuration (ARO)
+  when:
+    - _coco_cloud_conf_raw is not defined
+    - r_coco_aro_cloud_conf.resources | length > 0
+  ansible.builtin.set_fact:
+    _coco_cloud_conf_raw: "{{ r_coco_aro_cloud_conf.resources[0].data['cloud.conf'] }}"
+
+- name: Skip the remaining facts when none can be found (soft mode)
+  when:
+    - _coco_cloud_conf_raw is not defined
+    - _coco_facts_soft_fail | default(false) | bool
+  ansible.builtin.set_fact:
+    _coco_facts_skip: true
+
+- name: Fail when no cloud provider configuration can be found
+  when:
+    - _coco_cloud_conf_raw is not defined
+    - not (_coco_facts_soft_fail | default(false) | bool)
+  ansible.builtin.fail:
+    msg: >-
+      Neither openshift-config/cloud-provider-config nor
+      openshift-cloud-controller-manager/cloud-conf exists; cannot determine
+      the Azure subscription, VNet, subnet and NSG for the peer pods.
+
+- name: Detect the cloud provider configuration format
+  when: not (_coco_facts_skip | default(false) | bool)
+  ansible.builtin.set_fact:
+    _coco_cloud_conf_is_json: >-
+      {{ (_coco_cloud_conf_raw | trim).startswith('{') | bool }}
+
+- name: Write the INI cloud provider configuration to a file
+  when: not (_coco_facts_skip | default(false) | bool)
+  ansible.builtin.copy:
+    content: "{{ _coco_cloud_conf_raw }}"
+    dest: "{{ ocp4_workload_coco_helm_install_workdir }}/cloud.conf"
+    mode: "0600"
+  no_log: true
+
+- name: Parse the JSON cloud provider configuration (ARO)
+  when:
+    - not (_coco_facts_skip | default(false) | bool)
+    - _coco_cloud_conf_is_json | bool
+  ansible.builtin.set_fact:
+    _coco_cloud_conf: "{{ _coco_cloud_conf_raw | from_json }}"
+
+- name: Parse the INI cloud provider configuration (IPI)
+  when:
+    - not (_coco_facts_skip | default(false) | bool)
+    - not (_coco_cloud_conf_is_json | bool)
+  vars:
+    _conf: "{{ ocp4_workload_coco_helm_install_workdir }}/cloud.conf"
+  ansible.builtin.set_fact:
+    _coco_cloud_conf: >-
+      {{
+        {
+          'subscriptionId': lookup('ansible.builtin.ini', 'subscriptionId section=Global file=' ~ _conf),
+          'location': lookup('ansible.builtin.ini', 'location section=Global file=' ~ _conf),
+          'resourceGroup': lookup('ansible.builtin.ini', 'resourceGroup section=Global file=' ~ _conf),
+          'vnetResourceGroup': lookup('ansible.builtin.ini', 'vnetResourceGroup section=Global file=' ~ _conf),
+          'vnetName': lookup('ansible.builtin.ini', 'vnetName section=Global file=' ~ _conf),
+          'subnetName': lookup('ansible.builtin.ini', 'subnetName section=Global file=' ~ _conf),
+          'securityGroupName': lookup('ansible.builtin.ini', 'securityGroupName section=Global file=' ~ _conf)
+        }
+      }}
+
+- name: Set Azure networking facts
+  when:
+    - not (_coco_facts_skip | default(false) | bool)
+    - r_coco_infra.resources | length > 0
+  vars:
+    _infra: "{{ r_coco_infra.resources[0].status }}"
+    _infra_name: "{{ _infra.infrastructureName }}"
+    _azure: "{{ _infra.platformStatus.azure }}"
+  ansible.builtin.set_fact:
+    _coco_subscription_id: >-
+      {{ _coco_cloud_conf.subscriptionId | default(azure_subscription_id, true) }}
+    _coco_location: >-
+      {{ _coco_cloud_conf.location
+         | default(hostvars.localhost.azure_region | default(azure_region), true) }}
+    _coco_user_rg: >-
+      {{ _coco_cloud_conf.vnetResourceGroup
+         | default(_azure.networkResourceGroupName
+                   | default(_azure.resourceGroupName
+                             | default(_infra_name ~ '-rg', true), true), true) }}
+    _coco_cluster_rg: >-
+      {{ _coco_cloud_conf.resourceGroup
+         | default(_azure.resourceGroupName | default(_infra_name ~ '-rg', true), true) }}
+    _coco_vnet_name: >-
+      {{ _coco_cloud_conf.vnetName
+         | default(_azure.network.vnetName | default(_infra_name ~ '-vnet', true), true) }}
+    _coco_subnet_name: >-
+      {{ _coco_cloud_conf.subnetName
+         | default(_azure.network.subnetName | default(_infra_name ~ '-subnet', true), true) }}
+    _coco_nsg_name: >-
+      {{ _coco_cloud_conf.securityGroupName
+         | default(_infra_name ~ '-nsg', true) }}
+
+- name: Set Azure resource IDs
+  when: not (_coco_facts_skip | default(false) | bool)
+  vars:
+    _sub_prefix: "/subscriptions/{{ _coco_subscription_id }}"
+    _net_provider: "Microsoft.Network"
+  ansible.builtin.set_fact:
+    _coco_subnet_id: >-
+      {{ _sub_prefix }}/resourceGroups/{{ _coco_user_rg
+      }}/providers/{{ _net_provider
+      }}/virtualNetworks/{{ _coco_vnet_name
+      }}/subnets/{{ _coco_subnet_name }}
+    _coco_nsg_id: >-
+      {{ _sub_prefix }}/resourceGroups/{{ _coco_cluster_rg
+      }}/providers/{{ _net_provider
+      }}/networkSecurityGroups/{{ _coco_nsg_name }}
