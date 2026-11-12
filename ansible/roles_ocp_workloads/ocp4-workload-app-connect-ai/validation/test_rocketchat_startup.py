@@ -27,7 +27,7 @@ TASK = next(
 class RocketChatStartupTests(unittest.TestCase):
     def test_rendered_startup_probe(self):
         template = (ROLE / "templates/im_rocketchat.yaml.j2").read_text()
-        rendered = Environment(undefined=StrictUndefined).from_string(template).render(
+        rendered = Environment(autoescape=True, undefined=StrictUndefined).from_string(template).render(
             rocketchat_namespace="rocketchat", route_subdomain="apps.example.invalid"
         )
         resources = list(yaml.safe_load_all(rendered))
