@@ -1,0 +1,139 @@
+---
+# A currentCSV means OLM resolved a version, not that installation succeeded.
+# Keep transient catalog failures retryable and report OLM status on timeout.
+- name: Wait for {{ app_connect_ai_operator_name }} to install
+  block:
+    - name: Wait for {{ app_connect_ai_operator_name }} Subscription resolution
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        name: "{{ app_connect_ai_operator_name }}"
+        namespace: kuadrant-system
+      register: r_app_connect_ai_subscription
+      retries: 60
+      delay: 30
+      until:
+        - r_app_connect_ai_subscription.resources | default([]) | length == 1
+        - >-
+          (r_app_connect_ai_subscription.resources[0].status | default({})).currentCSV
+          | default('') | length > 0
+        - >-
+          ((r_app_connect_ai_subscription.resources[0].status | default({})).installPlanRef
+          | default({})).name | default('') | length > 0
+
+    - name: Wait for {{ app_connect_ai_operator_name }} CSV to succeed
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ r_app_connect_ai_subscription.resources[0].status.currentCSV }}"
+        namespace: kuadrant-system
+      register: r_app_connect_ai_csv
+      retries: 60
+      delay: 30
+      until:
+        - r_app_connect_ai_csv.resources | default([]) | length == 1
+        - >-
+          (r_app_connect_ai_csv.resources[0].status | default({})).phase
+          | default('') == 'Succeeded'
+
+    # The RHCL CSV can succeed while dependency CSVs are still installing.
+    - name: Wait for {{ app_connect_ai_operator_name }} InstallPlan to complete
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        name: "{{ r_app_connect_ai_subscription.resources[0].status.installPlanRef.name }}"
+        namespace: kuadrant-system
+      register: r_app_connect_ai_installplan
+      retries: 60
+      delay: 30
+      until:
+        - r_app_connect_ai_installplan.resources | default([]) | length == 1
+        - >-
+          (r_app_connect_ai_installplan.resources[0].status | default({})).phase
+          | default('') == 'Complete'
+
+    - name: Wait for {{ app_connect_ai_operator_crd }} to be established
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: "{{ app_connect_ai_operator_crd }}"
+      register: r_app_connect_ai_crd
+      retries: 60
+      delay: 30
+      until:
+        - r_app_connect_ai_crd.resources | default([]) | length == 1
+        - >-
+          (r_app_connect_ai_crd.resources[0].status | default({})).conditions
+          | default([])
+          | selectattr('type', 'equalto', 'Established')
+          | selectattr('status', 'equalto', 'True') | list | length > 0
+
+  rescue:
+    # Do not let an unavailable API or missing resource hide the original failure.
+    - name: Collect OLM installation diagnostics
+      kubernetes.core.k8s_info:
+        api_version: "{{ item.api_version }}"
+        kind: "{{ item.kind }}"
+        name: "{{ item.name | default(omit) }}"
+        namespace: "{{ item.namespace }}"
+      loop:
+        - api_version: operators.coreos.com/v1alpha1
+          kind: Subscription
+          name: "{{ app_connect_ai_operator_name }}"
+          namespace: kuadrant-system
+        - api_version: operators.coreos.com/v1alpha1
+          kind: InstallPlan
+          namespace: kuadrant-system
+        - api_version: operators.coreos.com/v1alpha1
+          kind: ClusterServiceVersion
+          namespace: kuadrant-system
+        - api_version: operators.coreos.com/v1alpha1
+          kind: CatalogSource
+          name: redhat-operators
+          namespace: openshift-marketplace
+        - api_version: v1
+          kind: Pod
+          namespace: openshift-marketplace
+        - api_version: v1
+          kind: Pod
+          namespace: kuadrant-system
+        - api_version: v1
+          kind: Event
+          namespace: kuadrant-system
+      loop_control:
+        label: "{{ item.namespace }}/{{ item.kind }}"
+      register: r_app_connect_ai_olm_diagnostics
+      ignore_errors: true
+
+    - name: Report OLM diagnostic query failures
+      ansible.builtin.debug:
+        msg: "{{ item.msg | default('Diagnostic query failed') }}"
+      loop: "{{ r_app_connect_ai_olm_diagnostics.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.kind | default('unknown') }}"
+      when: item.failed | default(false)
+
+    - name: Report OLM resource status without resource specifications
+      ansible.builtin.debug:
+        msg:
+          kind: "{{ item.kind }}"
+          namespace: "{{ item.metadata.namespace | default('') }}"
+          name: "{{ item.metadata.name }}"
+          status: "{{ item.status | default({}) }}"
+          reason: "{{ item.reason | default('') }}"
+          message: "{{ item.message | default('') }}"
+      loop: >-
+        {{ r_app_connect_ai_olm_diagnostics.results | default([])
+           | selectattr('resources', 'defined')
+           | map(attribute='resources') | flatten }}
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
+
+    - name: Fail with the original operator installation failure
+      ansible.builtin.fail:
+        msg: >-
+          {{ app_connect_ai_operator_name }} installation failed at
+          '{{ ansible_failed_task.name }}':
+          {{ ansible_failed_result.msg | default('Readiness retries exhausted') }}.
+          See OLM diagnostics above for Subscription conditions, InstallPlans,
+          CSV phases, catalog connection state, pod status and events.
