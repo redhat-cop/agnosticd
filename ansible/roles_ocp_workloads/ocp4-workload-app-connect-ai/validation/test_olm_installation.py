@@ -32,7 +32,7 @@ metadata = dict(name=name or 'fixture', namespace=p['namespace'] or '')
 resource = dict(kind=kind, metadata=metadata)
 resources = [resource]
 if kind == 'Subscription':
-    resource['status'] = dict(currentCSV='fixture.v1')
+    resource['status'] = dict(currentCSV='fixture.v1', installPlanRef=dict(name='install-fixture'))
     if scenario == 'subscription_absent':
         resources = []
     elif scenario == 'subscription_no_status':
@@ -43,6 +43,18 @@ if kind == 'Subscription':
         )])
     elif scenario == 'subscription_empty_csv':
         resource['status']['currentCSV'] = ''
+    elif scenario == 'subscription_no_installplan':
+        resource['status'].pop('installPlanRef')
+elif kind == 'InstallPlan':
+    resource['status'] = dict(phase='Complete')
+    if scenario == 'installplan_absent':
+        resources = []
+    elif scenario == 'installplan_no_status':
+        resource.pop('status')
+    elif scenario == 'installplan_installing':
+        resource['status']['phase'] = 'Installing'
+    elif scenario == 'installplan_failed':
+        resource['status']['phase'] = 'Failed'
 elif kind == 'ClusterServiceVersion':
     resource['status'] = dict(phase='Succeeded')
     if scenario == 'csv_absent':
@@ -130,6 +142,22 @@ class OLMInstallationTests(unittest.TestCase):
                     self.assertIn("fixture API unavailable", output)
             return output
 
+    def test_provisioning_lets_rhcl_resolve_its_dependencies(self):
+        tasks = yaml.safe_load((TASKS.parent / "provision_cl_kuadrant.yaml").read_text())
+        definitions = [task.get("k8s", {}).get("resource_definition", "") for task in tasks]
+        self.assertFalse(any("limitador-subscription" in value for value in definitions))
+        gates = [task for task in tasks if "ansible.builtin.include_tasks" in task]
+        self.assertEqual(len(gates), 1)
+        self.assertEqual(gates[0]["vars"]["app_connect_ai_operator_name"], "rhcl-operator")
+        dependency = next(i for i, task in enumerate(tasks)
+                          if task.get("kubernetes.core.k8s_info", {}).get("name")
+                          == "limitadors.limitador.kuadrant.io")
+        instance = next(i for i, task in enumerate(tasks)
+                        if task["name"] == "Create Kuadrant instance")
+        self.assertLess(tasks.index(gates[0]), dependency)
+        self.assertLess(dependency, instance)
+        self.assertNotIn("state: absent", (TASKS.parent / "provision_cl_kuadrant.yaml").read_text())
+
     def test_success(self):
         self.run_scenario("success", True)
 
@@ -137,7 +165,10 @@ class OLMInstallationTests(unittest.TestCase):
         scenarios = [
             "subscription_absent", "subscription_no_status",
             "subscription_unresolved", "subscription_empty_csv",
+            "subscription_no_installplan",
             "csv_absent", "csv_no_status", "csv_failed",
+            "installplan_absent", "installplan_no_status",
+            "installplan_installing", "installplan_failed",
             "crd_absent", "crd_no_status", "crd_unestablished",
             "diagnostics_unavailable",
         ]
