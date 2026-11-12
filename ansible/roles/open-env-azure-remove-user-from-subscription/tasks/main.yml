@@ -205,7 +205,7 @@
       debug:
         msg: "{{ allresourcegroups }}"
 
-    - name: Empty Resource Group
+    - name: Pre-clean Recovery Services / Azure DevOps blockers per RG
       when: allresourcegroups.resourcegroups|length>0
       include_tasks: empty_resource_group.yml
       vars:
@@ -236,92 +236,25 @@
       loop_control:
         label: "{{ item.name }}"
 
-    - name: Split resource groups into VisualStudioOnline and regular
-      ansible.builtin.set_fact:
-        _vs_online_rgs: >-
-          {{ allresourcegroups.resourcegroups
-             | selectattr('name', 'match', '^VisualStudioOnline-')
-             | list }}
-        _regular_rgs: >-
-          {{ allresourcegroups.resourcegroups
-             | rejectattr('name', 'match', '^VisualStudioOnline-')
-             | list }}
+    - name: Hardened subscription cleanup (ARO, blockers, topo-sorted RGs)
+      azure_openenv_cleanup_subscription:
+        subscription_id: "{{ pool_subscription_id }}"
+        auth_source: cli
+        label: "{{ poolid.content }}"
+        ignore_leftover_prefixes:
+          - VisualStudioOnline-
+      register: r_azure_openenv_cleanup
 
-    - name: Delete regular resource groups (hard fail)
-      when: _regular_rgs | length > 0
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_resourcegroup:
-        auth_source: env
-        name: "{{ item.name }}"
-        location: "{{ item.location }}"
-        force_delete_nonempty: yes
-        state: absent
-      loop: "{{ _regular_rgs }}"
-
-    - name: Delete VisualStudioOnline resource groups (best-effort)
-      when: _vs_online_rgs | length > 0
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_resourcegroup:
-        auth_source: env
-        name: "{{ item.name }}"
-        location: "{{ item.location }}"
-        force_delete_nonempty: yes
-        state: absent
-      register: r_delete_vs_rgs
-      failed_when: false
-      loop: "{{ _vs_online_rgs }}"
-
-    - name: Report VisualStudioOnline resource groups that failed to delete
-      when:
-        - r_delete_vs_rgs.results is defined
-        - r_delete_vs_rgs.results | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0
-      vars:
-        _failed_rgs: >-
-          {{ r_delete_vs_rgs.results
-             | selectattr('failed', 'defined')
-             | selectattr('failed')
-             | map(attribute='item')
-             | map(attribute='name')
-             | list }}
+    - name: Report VisualStudioOnline leftovers (best-effort; billing-linked)
+      when: r_azure_openenv_cleanup.messages is defined
       ansible.builtin.debug:
         msg: >-
-          WARNING: Failed to delete VisualStudioOnline resource group(s): {{ _failed_rgs | join(', ') }}.
-          This is typically caused by Azure DevOps billing still linked to the subscription.
-          Billing must be removed manually via Azure DevOps Organization Settings > Billing.
+          Azure cleanup finished for {{ poolid.content }}.
+          ignored leftover prefixes include VisualStudioOnline-
+          (may remain if Azure DevOps billing is still linked).
 
-    # ── Phase 4: Second-pass to catch resource groups created during cleanup ──
-
-    - name: "Second pass: list any remaining resource groups"
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_resourcegroup_info:
-        auth_source: env
-        tenant: "{{ azure_tenant }}"
-      register: remaining_resourcegroups
-
-    - name: "Second pass: report straggler resource groups"
-      when: remaining_resourcegroups.resourcegroups | length > 0
-      ansible.builtin.debug:
-        msg: >-
-          Found {{ remaining_resourcegroups.resourcegroups | length }} resource group(s) created
-          after initial listing: {{ remaining_resourcegroups.resourcegroups | map(attribute='name') | list | join(', ') }}.
-          Deleting stragglers now.
-
-    - name: "Second pass: delete straggler resource groups"
-      when: remaining_resourcegroups.resourcegroups | length > 0
-      environment:
-        AZURE_SUBSCRIPTION_ID: "{{ pool_subscription_id }}"
-      azure.azcollection.azure_rm_resourcegroup:
-        auth_source: env
-        name: "{{ item.name }}"
-        location: "{{ item.location }}"
-        force_delete_nonempty: yes
-        state: absent
-      loop: "{{ remaining_resourcegroups.resourcegroups }}"
-
-    # ── Phase 5: Finalize subscription and release pool ──
+    # ── Phase 4: Finalize subscription ──
+    # Pool /release is owned by Sandbox API (or standalone clean_sub), not this role.
 
     - name: Remove deny-all-creation policy assignment
       when: r_deny_policy_assign is not skipped and r_deny_policy_assign is not failed
@@ -343,29 +276,12 @@
       command: >
         az tag create --resource-id {{ subscriptionfqid }} --tags GUID="" EMAIL="" cost-center="{{ cost_center }}"
 
-    - name: Remove pool allocation from the database
-      ansible.builtin.uri:
-        url: "{{ az_function_release }}{{ project_tag }}/{{ az_pool_id }}?code={{ azure_pool_api_secret }}"
-      ignore_errors: yes
-
     - name: Log out of Azure CLI
       command: >
         az logout
 
-    - name: Fail if any VisualStudioOnline resource groups could not be deleted
-      when:
-        - r_delete_vs_rgs.results is defined
-        - r_delete_vs_rgs.results | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0
-      vars:
-        _failed_rgs: >-
-          {{ r_delete_vs_rgs.results
-             | selectattr('failed', 'defined')
-             | selectattr('failed')
-             | map(attribute='item')
-             | map(attribute='name')
-             | list }}
-      ansible.builtin.fail:
+    - name: Note VisualStudioOnline RGs may remain after ignored leftover cleanup
+      ansible.builtin.debug:
         msg: >-
-          VisualStudioOnline resource group(s) could not be deleted: {{ _failed_rgs | join(', ') }}.
-          All other cleanup (pool release, tags, role assignments) completed successfully.
-          Manual cleanup required — remove Azure DevOps billing via Organization Settings.
+          If VisualStudioOnline-* resource groups remain, remove Azure DevOps
+          billing via Organization Settings > Billing, then delete those RGs manually.
