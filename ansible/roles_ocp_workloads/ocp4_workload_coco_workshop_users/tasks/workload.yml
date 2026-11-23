@@ -109,6 +109,18 @@
   register: r_coco_api_server
   changed_when: false
 
+- name: Read the API server CA from the bastion kubeconfig
+  # Runs as the workload user, whose kubeconfig embeds the cluster CA. The
+  # value is passed to the student login below so the persona kubeconfigs
+  # verify the API certificate; when it cannot be read the login falls back
+  # to the system trust store, like ocp4_workload_authentication does.
+  ansible.builtin.command: >-
+    oc config view --raw --minify
+    -o jsonpath='{.clusters[0].cluster.certificate-authority-data}'
+  register: r_coco_api_ca
+  changed_when: false
+  failed_when: false
+
 - name: Ensure the .kube directory is owned by the student user
   become: true
   ansible.builtin.file:
@@ -121,18 +133,17 @@
 - name: Log in the workshop personas and write their kubeconfigs
   # KUBECONFIG is exported inside the script: environment: variables do not
   # reliably survive become/sudo. The CA comes from the bastion kubeconfig
-  # because the API certificate may not be in the system trust store.
+  # (read by the task above, as the workload user) because the API
+  # certificate may not be in the system trust store.
   ansible.builtin.shell: |
     set -euo pipefail
-    ca_file=$(mktemp)
-    trap 'rm -f "$ca_file"' EXIT
-    ca_data=$(oc config view --raw --minify \
-      -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' || true)
-    if [ -n "$ca_data" ]; then
-      printf '%s' "$ca_data" | base64 -d > "$ca_file"
+    tls_args=""
+    ca_b64='{{ r_coco_api_ca.stdout | default("") }}'
+    if [ -n "$ca_b64" ]; then
+      ca_file=$(mktemp)
+      trap 'rm -f "$ca_file"' EXIT
+      printf '%s' "$ca_b64" | base64 -d > "$ca_file"
       tls_args="--certificate-authority=$ca_file"
-    else
-      tls_args="--insecure-skip-tls-verify=true"
     fi
     export KUBECONFIG="{{ ocp4_workload_coco_workshop_users_kubeconfig_dir }}/{{ item.name }}.kubeconfig"
     oc login "{{ r_coco_api_server.stdout }}" \
@@ -162,6 +173,15 @@
 # ---------------------------------------------------------------------------
 # RBAC
 # ---------------------------------------------------------------------------
+
+- name: List existing namespaces
+  # Namespace-scoped bindings are only created where the namespace exists:
+  # the Trustee namespace belongs to ocp4_workload_coco_helm_install and is
+  # not there when the CoCo stack is not (yet) installed.
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+  register: r_coco_namespaces
 
 - name: Apply the sandboxed-admin ClusterRole
   kubernetes.core.k8s:
@@ -216,6 +236,9 @@
           name: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
 
 - name: Give opsec admin access to the Trustee namespace
+  when: >-
+    ocp4_workload_coco_workshop_users_trustee_namespace
+    in (r_coco_namespaces.resources | map(attribute='metadata.name') | list)
   kubernetes.core.k8s:
     state: present
     definition:
@@ -233,6 +256,16 @@
           kind: User
           name: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
 
+- name: Note that the Trustee namespace does not exist
+  when: >-
+    ocp4_workload_coco_workshop_users_trustee_namespace
+    not in (r_coco_namespaces.resources | map(attribute='metadata.name') | list)
+  ansible.builtin.debug:
+    msg: >-
+      Namespace {{ ocp4_workload_coco_workshop_users_trustee_namespace }} does
+      not exist (the CoCo stack is not installed yet); skipping the opsec
+      Trustee RoleBinding.
+
 - name: Give opsec cluster-wide view access
   kubernetes.core.k8s:
     state: present
@@ -249,12 +282,6 @@
         - apiGroup: rbac.authorization.k8s.io
           kind: User
           name: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
-
-- name: List existing namespaces
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Namespace
-  register: r_coco_namespaces
 
 - name: Keep only the devel namespaces that exist
   ansible.builtin.set_fact:
