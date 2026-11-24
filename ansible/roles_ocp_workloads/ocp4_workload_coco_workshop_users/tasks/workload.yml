@@ -1,0 +1,391 @@
+---
+# ---------------------------------------------------------------------------
+# Workshop personas for LB1150: opsec, devel and admin.
+#
+# Non-destructive by design: the htpasswd Secret and the OAuth configuration
+# created by ocp4_workload_authentication are extended, never replaced.
+# No OS users and no tmux: every terminal tab SSHes to the bastion as
+# {{ student_name }} and only exports a different KUBECONFIG.
+# ---------------------------------------------------------------------------
+
+- name: Get OAuth cluster configuration
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: OAuth
+    name: cluster
+  register: r_coco_oauth
+
+- name: Find an existing HTPasswd identity provider
+  ansible.builtin.set_fact:
+    _coco_htpasswd_idps: >-
+      {{ r_coco_oauth.resources[0].spec.identityProviders | default([])
+         | selectattr('type', 'equalto', 'HTPasswd') | list }}
+
+- name: Determine htpasswd secret name
+  ansible.builtin.set_fact:
+    _coco_htpasswd_secret: >-
+      {{ (_coco_htpasswd_idps | first).htpasswd.fileData.name
+         if _coco_htpasswd_idps | length > 0 else 'htpasswd' }}
+
+- name: Read the existing htpasswd secret
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    name: "{{ _coco_htpasswd_secret }}"
+    namespace: openshift-config
+  register: r_coco_htpasswd_secret
+
+- name: Write the current htpasswd database to a working file
+  ansible.builtin.copy:
+    content: >-
+      {{ (r_coco_htpasswd_secret.resources[0].data.htpasswd | b64decode)
+         if r_coco_htpasswd_secret.resources | length > 0 else '' }}
+    dest: "{{ ocp4_workload_coco_workshop_users_tmp_htpasswd }}"
+    mode: "0600"
+  no_log: true
+
+- name: Add the opsec and devel users (append, keep existing entries)
+  community.general.htpasswd:
+    path: "{{ ocp4_workload_coco_workshop_users_tmp_htpasswd }}"
+    name: "{{ item }}"
+    password: "{{ ocp4_workload_coco_workshop_users_password }}"
+    # Same scheme as ocp4_workload_authentication (FIPS compatible)
+    hash_scheme: ldap_sha1
+  loop:
+    - "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
+    - "{{ ocp4_workload_coco_workshop_users_devel_user }}"
+  no_log: true
+
+- name: Read the updated htpasswd database
+  ansible.builtin.slurp:
+    src: "{{ ocp4_workload_coco_workshop_users_tmp_htpasswd }}"
+  register: r_coco_htpasswd_file
+  no_log: true
+
+- name: Create or update the htpasswd secret
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{ _coco_htpasswd_secret }}"
+        namespace: openshift-config
+      type: Opaque
+      data:
+        htpasswd: "{{ r_coco_htpasswd_file.content }}"
+
+- name: Add an HTPasswd identity provider when none exists
+  when: _coco_htpasswd_idps | length == 0
+  kubernetes.core.k8s:
+    state: patched
+    api_version: config.openshift.io/v1
+    kind: OAuth
+    name: cluster
+    definition:
+      spec:
+        identityProviders: >-
+          {{ r_coco_oauth.resources[0].spec.identityProviders | default([])
+             + [{
+                 'name': 'htpasswd_provider',
+                 'challenge': true,
+                 'login': true,
+                 'mappingMethod': 'claim',
+                 'type': 'HTPasswd',
+                 'htpasswd': {'fileData': {'name': _coco_htpasswd_secret}}
+               }] }}
+
+- name: Remove the temporary htpasswd file
+  ansible.builtin.file:
+    path: "{{ ocp4_workload_coco_workshop_users_tmp_htpasswd }}"
+    state: absent
+
+# ---------------------------------------------------------------------------
+# Kubeconfigs (one per persona, owned by the bastion student user)
+# ---------------------------------------------------------------------------
+
+- name: Get the API server URL
+  ansible.builtin.command: oc whoami --show-server
+  register: r_coco_api_server
+  changed_when: false
+
+- name: Read the API server CA from the bastion kubeconfig
+  # Runs as the workload user, whose kubeconfig embeds the cluster CA. The
+  # value is passed to the student login below so the persona kubeconfigs
+  # verify the API certificate; when it cannot be read the login falls back
+  # to the system trust store, like ocp4_workload_authentication does.
+  ansible.builtin.command: >-
+    oc config view --raw --minify
+    -o jsonpath='{.clusters[0].cluster.certificate-authority-data}'
+  register: r_coco_api_ca
+  changed_when: false
+  failed_when: false
+
+- name: Ensure the .kube directory is owned by the student user
+  become: true
+  ansible.builtin.file:
+    path: "{{ ocp4_workload_coco_workshop_users_kubeconfig_dir }}"
+    state: directory
+    owner: "{{ ocp4_workload_coco_workshop_users_student }}"
+    group: users
+    mode: "0700"
+
+- name: Log in the workshop personas and write their kubeconfigs
+  # KUBECONFIG is exported inside the script: environment: variables do not
+  # reliably survive become/sudo. The CA comes from the bastion kubeconfig
+  # (read by the task above, as the workload user) because the API
+  # certificate may not be in the system trust store.
+  ansible.builtin.shell: |
+    set -euo pipefail
+    tls_args=""
+    ca_b64='{{ r_coco_api_ca.stdout | default("") }}'
+    if [ -n "$ca_b64" ]; then
+      ca_file=$(mktemp)
+      trap 'rm -f "$ca_file"' EXIT
+      printf '%s' "$ca_b64" | base64 -d > "$ca_file"
+      tls_args="--certificate-authority=$ca_file"
+    fi
+    export KUBECONFIG="{{ ocp4_workload_coco_workshop_users_kubeconfig_dir }}/{{ item.name }}.kubeconfig"
+    oc login "{{ r_coco_api_server.stdout }}" \
+      --username="{{ item.user }}" \
+      --password="{{ item.password }}" \
+      $tls_args
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ ocp4_workload_coco_workshop_users_student }}"
+  loop:
+    - name: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
+      user: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
+      password: "{{ ocp4_workload_coco_workshop_users_password }}"
+    - name: "{{ ocp4_workload_coco_workshop_users_devel_user }}"
+      user: "{{ ocp4_workload_coco_workshop_users_devel_user }}"
+      password: "{{ ocp4_workload_coco_workshop_users_password }}"
+    - name: "{{ ocp4_workload_coco_workshop_users_admin_user }}"
+      user: "{{ ocp4_workload_coco_workshop_users_admin_user }}"
+      password: "{{ ocp4_workload_coco_workshop_users_admin_password }}"
+  register: r_coco_login
+  until: r_coco_login is success
+  retries: "{{ ocp4_workload_coco_workshop_users_login_retries | int }}"
+  delay: "{{ ocp4_workload_coco_workshop_users_login_delay | int }}"
+  no_log: true
+
+# ---------------------------------------------------------------------------
+# RBAC
+# ---------------------------------------------------------------------------
+
+- name: List existing namespaces
+  # Namespace-scoped bindings are only created where the namespace exists:
+  # the Trustee namespace belongs to ocp4_workload_coco_helm_install and is
+  # not there when the CoCo stack is not (yet) installed.
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Namespace
+  register: r_coco_namespaces
+
+- name: Apply the sandboxed-admin ClusterRole
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: sandboxed-admin-cluster-role
+      rules:
+        - apiGroups: [""]
+          resources: ["namespaces"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: [""]
+          resources: ["nodes"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["config.openshift.io"]
+          resources: ["infrastructures"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["kataconfiguration.openshift.io"]
+          resources: ["kataconfigs"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["node.k8s.io"]
+          resources: ["runtimeclasses"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["machineconfiguration.openshift.io"]
+          resources: ["machineconfigpools", "machineconfigs"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["confidentialcontainers.org"]
+          resources: ["trusteeconfigs", "kbsconfigs"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["security.openshift.io"]
+          resources: ["securitycontextconstraints"]
+          verbs: ["use"]
+          resourceNames: ["privileged"]
+
+- name: Bind cluster-scoped read access to opsec
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: coco-opsec-sandboxed-admin
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: sandboxed-admin-cluster-role
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: User
+          name: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
+
+- name: Give opsec admin access to the Trustee namespace
+  when: >-
+    ocp4_workload_coco_workshop_users_trustee_namespace
+    in (r_coco_namespaces.resources | map(attribute='metadata.name') | list)
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: coco-opsec-trustee-admin
+        namespace: "{{ ocp4_workload_coco_workshop_users_trustee_namespace }}"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: admin
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: User
+          name: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
+
+- name: Note that the Trustee namespace does not exist
+  when: >-
+    ocp4_workload_coco_workshop_users_trustee_namespace
+    not in (r_coco_namespaces.resources | map(attribute='metadata.name') | list)
+  ansible.builtin.debug:
+    msg: >-
+      Namespace {{ ocp4_workload_coco_workshop_users_trustee_namespace }} does
+      not exist (the CoCo stack is not installed yet); skipping the opsec
+      Trustee RoleBinding.
+
+- name: Give opsec cluster-wide view access
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: coco-opsec-view
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: view
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: User
+          name: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
+
+- name: Keep only the devel namespaces that exist
+  ansible.builtin.set_fact:
+    _coco_devel_existing_namespaces: >-
+      {{ ocp4_workload_coco_workshop_users_devel_namespaces
+         | intersect(r_coco_namespaces.resources | map(attribute='metadata.name') | list) }}
+
+- name: Give devel edit access to the workload namespaces
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: coco-devel-edit
+        namespace: "{{ item }}"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: edit
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: User
+          name: "{{ ocp4_workload_coco_workshop_users_devel_user }}"
+  loop: "{{ _coco_devel_existing_namespaces }}"
+
+- name: Ensure the admin persona is cluster-admin
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: "coco-admin-{{ ocp4_workload_coco_workshop_users_admin_user }}"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-admin
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: User
+          name: "{{ ocp4_workload_coco_workshop_users_admin_user }}"
+
+# ---------------------------------------------------------------------------
+# Showroom data
+# ---------------------------------------------------------------------------
+
+- name: Get the cluster ingress domain
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Ingress
+    name: cluster
+  register: r_coco_ingress
+
+- name: Get the OpenShift console route
+  kubernetes.core.k8s_info:
+    api_version: route.openshift.io/v1
+    kind: Route
+    name: console
+    namespace: openshift-console
+  register: r_coco_console_route
+  failed_when: false
+
+- name: Set the showroom tab URL facts
+  vars:
+    _coco_apps_domain: >-
+      {{ r_coco_ingress.resources[0].spec.appsDomain
+         | default(r_coco_ingress.resources[0].spec.domain) }}
+    _coco_terminal_host: >-
+      {{ ocp4_workload_coco_workshop_users_terminal_host_prefix
+      }}-{{ ocp4_workload_coco_workshop_users_terminal_host_suffix }}
+  ansible.builtin.set_fact:
+    _coco_console_url: >-
+      {{ ('https://' ~ r_coco_console_route.resources[0].spec.host)
+         if (r_coco_console_route.resources | default([]) | length > 0)
+         else 'https://console-openshift-console.' ~ _coco_apps_domain }}
+    _coco_opsec_url: "https://{{ _coco_terminal_host }}-{{ ocp4_workload_coco_workshop_users_opsec_user }}.{{ _coco_apps_domain }}"
+    _coco_devel_url: "https://{{ _coco_terminal_host }}-{{ ocp4_workload_coco_workshop_users_devel_user }}.{{ _coco_apps_domain }}"
+    _coco_admin_url: "https://{{ _coco_terminal_host }}-{{ ocp4_workload_coco_workshop_users_admin_user }}.{{ _coco_apps_domain }}"
+
+- name: Report workshop persona data
+  agnosticd_user_info:
+    data:
+      coco_opsec_user: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
+      coco_devel_user: "{{ ocp4_workload_coco_workshop_users_devel_user }}"
+      coco_admin_user: "{{ ocp4_workload_coco_workshop_users_admin_user }}"
+      coco_opsec_kubeconfig: "{{ ocp4_workload_coco_workshop_users_kubeconfig_dir }}/{{ ocp4_workload_coco_workshop_users_opsec_user }}.kubeconfig"
+      coco_devel_kubeconfig: "{{ ocp4_workload_coco_workshop_users_kubeconfig_dir }}/{{ ocp4_workload_coco_workshop_users_devel_user }}.kubeconfig"
+      coco_admin_kubeconfig: "{{ ocp4_workload_coco_workshop_users_kubeconfig_dir }}/{{ ocp4_workload_coco_workshop_users_admin_user }}.kubeconfig"
+      # The showroom content container runs envsubst over ui-config.yml with
+      # only the variables exported from this nested user data map: flat user
+      # data keys never reach envsubst (they only become Antora attributes).
+      # The terminal URLs are deterministic and match the wetty routes that
+      # ocp4_workload_coco_helm_install creates.
+      environment_variables:
+        openshift_console_url: "{{ _coco_console_url }}"
+        opsec_url: "{{ _coco_opsec_url }}"
+        devel_url: "{{ _coco_devel_url }}"
+        admin_url: "{{ _coco_admin_url }}"
+
+- name: Workshop users configured
+  ansible.builtin.debug:
+    msg: >-
+      Personas ready: {{ ocp4_workload_coco_workshop_users_opsec_user }},
+      {{ ocp4_workload_coco_workshop_users_devel_user }},
+      {{ ocp4_workload_coco_workshop_users_admin_user }}
+      (kubeconfigs in {{ ocp4_workload_coco_workshop_users_kubeconfig_dir }})
