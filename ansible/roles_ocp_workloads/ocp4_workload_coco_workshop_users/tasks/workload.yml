@@ -308,22 +308,110 @@
           name: "{{ ocp4_workload_coco_workshop_users_devel_user }}"
   loop: "{{ _coco_devel_existing_namespaces }}"
 
-- name: Ensure the admin persona is cluster-admin
+- name: Remove the cluster-admin binding granted by ocp4_workload_authentication
+  # This lab's admin persona is a workload administrator (like the ARO
+  # workshop's uadmin), not a cluster admin. ocp4_workload_authentication
+  # grants the admin user cluster-admin unconditionally, so drop that
+  # binding here; the restore happens in remove_workload.yml.
+  kubernetes.core.k8s:
+    state: absent
+    api_version: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    name: "cluster-admin-{{ ocp4_workload_coco_workshop_users_admin_user }}"
+
+- name: Apply the admin cluster-scoped ClusterRole
+  # Full cluster-scoped access (nodes, namespaces, operators, machine
+  # configs, CRDs, SCCs) EXCEPT RBAC escalation and impersonation: with
+  # those, the admin persona could grant itself access to the excluded
+  # trustee-operator-system namespace and the restriction would be
+  # meaningless. Namespaced access is granted per namespace below.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: coco-admin-cluster-role
+      rules:
+        - apiGroups: [""]
+          resources: ["namespaces", "nodes", "persistentvolumes"]
+          verbs: ["*"]
+        - apiGroups:
+            - config.openshift.io
+            - operator.openshift.io
+            - machineconfiguration.openshift.io
+            - kataconfiguration.openshift.io
+            - node.k8s.io
+            - storage.k8s.io
+            - apiextensions.k8s.io
+            - admissionregistration.k8s.io
+            - scheduling.k8s.io
+            - certificates.k8s.io
+            - apiregistration.k8s.io
+            - flowcontrol.apiserver.k8s.io
+          resources: ["*"]
+          verbs: ["*"]
+        - apiGroups: ["security.openshift.io"]
+          resources: ["securitycontextconstraints"]
+          verbs: ["*"]
+
+- name: Bind the cluster-scoped admin role
   kubernetes.core.k8s:
     state: present
     definition:
       apiVersion: rbac.authorization.k8s.io/v1
       kind: ClusterRoleBinding
       metadata:
-        name: "coco-admin-{{ ocp4_workload_coco_workshop_users_admin_user }}"
+        name: coco-admin-sandboxed-admin
       roleRef:
         apiGroup: rbac.authorization.k8s.io
         kind: ClusterRole
-        name: cluster-admin
+        name: coco-admin-cluster-role
       subjects:
         - apiGroup: rbac.authorization.k8s.io
           kind: User
           name: "{{ ocp4_workload_coco_workshop_users_admin_user }}"
+
+- name: Apply the admin namespace ClusterRole
+  # Unrestricted within a namespace (same shape as cluster-admin's
+  # namespaced reach); bound per namespace below. RBAC's escalation
+  # prevention keeps this from exceeding itself.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: coco-admin-namespace-role
+      rules:
+        - apiGroups: ["*"]
+          resources: ["*"]
+          verbs: ["*"]
+
+- name: Give the admin persona full access to every namespace except the excluded ones
+  # RBAC cannot subtract a namespace from a cluster-wide grant, so full
+  # namespaced access is bound namespace by namespace, skipping
+  # trustee-operator-system (opsec's domain). Namespaces created after this
+  # workload runs are not bound automatically; OpenShift still grants the
+  # creator admin in namespaces they create via `oc new-project`.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: coco-admin-namespace
+        namespace: "{{ item }}"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: coco-admin-namespace-role
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: User
+          name: "{{ ocp4_workload_coco_workshop_users_admin_user }}"
+  loop: "{{ (r_coco_namespaces.resources | map(attribute='metadata.name') | list)
+            | difference(ocp4_workload_coco_workshop_users_admin_excluded_namespaces) }}"
 
 # ---------------------------------------------------------------------------
 # Showroom data
