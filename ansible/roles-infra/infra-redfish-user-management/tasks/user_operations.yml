@@ -1,0 +1,162 @@
+---
+- name: Get detailed information for each user account
+  ansible.builtin.uri:
+    url: "https://{{ bmc_hostname }}{{ item['@odata.id'] }}"
+    method: GET
+    user: "{{ bmc_username }}"
+    password: "{{ bmc_password }}"
+    validate_certs: "{{ validate_certs }}"
+    force_basic_auth: "{{ force_basic_auth }}"
+    status_code: 200
+    timeout: "{{ connection_timeout }}"
+  register: user_details
+  loop: "{{ current_accounts.json.Members }}"
+  when: 
+    - current_accounts.json is defined 
+    - current_accounts.json.Members is defined
+    - item['@odata.id'] is defined
+  tags: [users, status]
+
+- name: Initialize user_details if not defined
+  ansible.builtin.set_fact:
+    user_details: 
+      results: []
+  when: user_details is not defined
+
+- name: Check if target user already exists
+  ansible.builtin.set_fact:
+    target_user_exists: false
+    target_user_info: {}
+    available_user_slots: []
+
+- name: Find target user and available slots
+  ansible.builtin.set_fact:
+    target_user_exists: "{{ target_user_exists or (item.json.UserName | default('')) == target_username }}"
+    target_user_info: "{{ target_user_info | combine({'endpoint': item.json['@odata.id'], 'id': item.json.Id, 'role': item.json.RoleId | default('')}) if (item.json.UserName | default('')) == target_username else target_user_info }}"
+    available_user_slots: "{{ available_user_slots + [{'json': item.json}] if (item.json.UserName | default('')) == '' and item.json['@odata.id'] is defined else available_user_slots }}"
+  loop: "{{ user_details.results }}"
+  loop_control:
+    label: "User ID {{ item.json.Id | default('Unknown') }}: {{ item.json.UserName | default('(empty)') }}"
+  when: user_details.results | length > 0
+  tags: [users, status]
+
+- name: Display user status information
+  ansible.builtin.debug:
+    msg: 
+      - "Target User Status:"
+      - "Username: {{ target_username }}"
+      - "User Exists: {{ target_user_exists }}"
+      - "User Info: {{ target_user_info if target_user_exists else 'User not found' }}"
+      - "Available Slots: {{ available_user_slots | length }}"
+  when: target_user_exists or user_action == 'status'
+  tags: [users, status]
+
+- name: Display user exists message
+  ansible.builtin.debug:
+    msg: "User '{{ target_username }}' already exists. Current role: {{ target_user_info.role }}. {{ 'Forcing password update.' if force_password_update_on_existing | bool else 'Skipping creation.' }}"
+  when: 
+    - target_user_exists 
+    - user_action == 'create'
+  tags: [users, create]
+
+- name: Force password update for existing user during create action
+  ansible.builtin.uri:
+    url: "https://{{ bmc_hostname }}{{ target_user_info.endpoint }}"
+    method: PATCH
+    user: "{{ bmc_username }}"
+    password: "{{ bmc_password }}"
+    validate_certs: "{{ validate_certs }}"
+    force_basic_auth: "{{ force_basic_auth }}"
+    body_format: json
+    body:
+      Password: "{{ target_password }}"
+      RoleId: "{{ user_role if user_role != 'PowerUser' else 'ReadOnly' }}"
+      Enabled: "{{ enable_user | bool }}"
+    status_code: [200, 202, 204]
+    timeout: "{{ connection_timeout }}"
+  when: 
+    - target_user_exists 
+    - user_action == 'create'
+    - force_password_update_on_existing | bool
+  register: force_update_result
+  tags: [users, create, force_update]
+
+- name: Display user not found message
+  ansible.builtin.debug:
+    msg: "User '{{ target_username }}' does not exist. Cannot perform action '{{ user_action }}'."
+  when: not target_user_exists and user_action in ['update_password', 'delete']
+  tags: [users, update_password, delete]
+
+- name: Display no slots message
+  ansible.builtin.debug:
+    msg: "No available user slots found. Cannot create new user '{{ target_username }}'."
+  when: not target_user_exists and user_action == 'create' and available_user_slots | length == 0
+  tags: [users, create]
+
+- name: Create new user account
+  ansible.builtin.uri:
+    url: "https://{{ bmc_hostname }}{{ available_user_slots[0].json['@odata.id'] }}"
+    method: PATCH
+    user: "{{ bmc_username }}"
+    password: "{{ bmc_password }}"
+    validate_certs: "{{ validate_certs }}"
+    force_basic_auth: "{{ force_basic_auth }}"
+    body_format: json
+    body:
+      UserName: "{{ target_username }}"
+      Password: "{{ target_password }}"
+      RoleId: "{{ user_role if user_role != 'PowerUser' else 'ReadOnly' }}"
+      Enabled: "{{ enable_user | bool }}"
+    status_code: [200, 202, 204]
+    timeout: "{{ connection_timeout }}"
+  when: 
+    - not target_user_exists 
+    - user_action == 'create'
+    - available_user_slots | length > 0
+  register: create_user_result
+  tags: [users, create]
+
+- name: Update user password
+  ansible.builtin.uri:
+    url: "https://{{ bmc_hostname }}{{ target_user_info.endpoint }}"
+    method: PATCH
+    user: "{{ bmc_username }}"
+    password: "{{ bmc_password }}"
+    validate_certs: "{{ validate_certs }}"
+    force_basic_auth: "{{ force_basic_auth }}"
+    body_format: json
+    body:
+      Password: "{{ target_password }}"
+    status_code: [200, 202, 204]
+    timeout: "{{ connection_timeout }}"
+  when: target_user_exists and user_action == 'update_password'
+  register: update_password_result
+  tags: [users, update_password]
+
+- name: Delete user account
+  ansible.builtin.uri:
+    url: "https://{{ bmc_hostname }}{{ target_user_info.endpoint }}"
+    method: PATCH
+    user: "{{ bmc_username }}"
+    password: "{{ bmc_password }}"
+    validate_certs: "{{ validate_certs }}"
+    force_basic_auth: "{{ force_basic_auth }}"
+    body_format: json
+    body:
+      UserName: ""
+    status_code: [200, 202, 204]
+    timeout: "{{ connection_timeout }}"
+  when: target_user_exists and user_action == 'delete'
+  register: delete_user_result
+  tags: [users, delete]
+
+- name: Display operation results
+  ansible.builtin.debug:
+    msg: 
+      - "User Operation Results:"
+      - "Action: {{ user_action }}"
+      - "User: {{ target_username }}"
+      - "Success: {{ 'Yes' if (create_user_result is succeeded or update_password_result is succeeded or delete_user_result is succeeded or force_update_result is succeeded) else 'N/A' }}"
+      - "{{ 'Password forcefully updated for existing user' if force_update_result is succeeded else '' }}"
+  when: user_action in ['create', 'update_password', 'delete']
+  tags: [users, results] 

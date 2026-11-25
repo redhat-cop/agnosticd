@@ -1,0 +1,122 @@
+---
+- name: Get user details after creation/update to find role ID
+  ansible.builtin.uri:
+    url: "https://{{ bmc_hostname }}{{ target_user_info.endpoint if target_user_exists else available_user_slots[0].json['@odata.id'] }}"
+    method: GET
+    user: "{{ bmc_username }}"
+    password: "{{ bmc_password }}"
+    validate_certs: "{{ validate_certs }}"
+    force_basic_auth: "{{ force_basic_auth }}"
+    status_code: 200
+    timeout: "{{ connection_timeout }}"
+  register: user_details_after_action
+  when: 
+    - (create_user_result is defined and create_user_result is succeeded) or (update_password_result is defined and update_password_result is succeeded)
+  tags: [role_management, users]
+
+- name: Extract account slot number for custom role
+  ansible.builtin.set_fact:
+    account_slot_number: "{{ (target_user_info.endpoint if target_user_exists else available_user_slots[0].json['@odata.id']) | regex_search('/(\\d+)$') | regex_replace('/', '') }}"
+  when: 
+    - user_details_after_action is defined
+    - user_details_after_action is succeeded
+  tags: [role_management, users]
+
+- name: Set custom role name based on account slot
+  ansible.builtin.set_fact:
+    custom_role_name: "CustomRole{{ account_slot_number }}"
+    custom_role_endpoint: "{{ account_service_info.json.Roles['@odata.id'] }}/CustomRole{{ account_slot_number }}"
+  when: 
+    - account_slot_number is defined
+    - account_slot_number != ""
+  tags: [role_management, users]
+
+- name: Extract user role ID
+  ansible.builtin.set_fact:
+    user_role_id: "{{ user_details_after_action.json.RoleId | default('') }}"
+    user_role_endpoint: "{{ user_details_after_action.json.Links.Role['@odata.id'] | default('') }}"
+  when: 
+    - user_details_after_action is defined
+    - user_details_after_action is succeeded
+  tags: [role_management, users]
+
+- name: Update CustomRole with PowerUser privileges
+  ansible.builtin.uri:
+    url: "https://{{ bmc_hostname }}{{ custom_role_endpoint }}"
+    method: PATCH
+    user: "{{ bmc_username }}"
+    password: "{{ bmc_password }}"
+    validate_certs: "{{ validate_certs }}"
+    force_basic_auth: "{{ force_basic_auth }}"
+    body_format: json
+    body:
+      OemPrivileges:
+        - "RemoteConsoleAndVirtualMediaAccess"
+        - "RemoteServerPowerRestartAccess"
+    status_code: [200, 202, 204]
+    timeout: "{{ connection_timeout }}"
+  when: 
+    - custom_role_endpoint is defined
+    - custom_role_endpoint != ""
+  register: poweruser_role_update
+  tags: [role_management, poweruser]
+
+- name: Assign user to CustomRole after PowerUser update
+  ansible.builtin.uri:
+    url: "https://{{ bmc_hostname }}{{ target_user_info.endpoint if target_user_exists else available_user_slots[0].json['@odata.id'] }}"
+    method: PATCH
+    user: "{{ bmc_username }}"
+    password: "{{ bmc_password }}"
+    validate_certs: "{{ validate_certs }}"
+    force_basic_auth: "{{ force_basic_auth }}"
+    body_format: json
+    body:
+      RoleId: "{{ custom_role_name }}"
+    status_code: [200, 202, 204]
+    timeout: "{{ connection_timeout }}"
+  when: 
+    - poweruser_role_update is defined
+    - poweruser_role_update is succeeded
+    - custom_role_name is defined
+  register: user_role_assignment
+  tags: [role_management, poweruser]
+
+- name: Display PowerUser role update result
+  ansible.builtin.debug:
+    msg: 
+      - "{{ custom_role_name | default('CustomRole') }} updated successfully with PowerUser privileges"
+      - "Role privileges: RemoteConsoleAndVirtualMediaAccess, RemoteServerPowerRestartAccess"
+      - "User assigned to {{ custom_role_name | default('CustomRole') }}: {{ 'Success' if (user_role_assignment is defined and user_role_assignment is succeeded) else 'Pending' }}"
+  when: 
+    - poweruser_role_update is defined
+    - poweruser_role_update is succeeded
+  tags: [role_management, poweruser]
+
+- name: Verify PowerUser role assignment
+  ansible.builtin.uri:
+    url: "https://{{ bmc_hostname }}{{ target_user_info.endpoint if target_user_exists else available_user_slots[0].json['@odata.id'] }}"
+    method: GET
+    user: "{{ bmc_username }}"
+    password: "{{ bmc_password }}"
+    validate_certs: "{{ validate_certs }}"
+    force_basic_auth: "{{ force_basic_auth }}"
+    status_code: 200
+    timeout: "{{ connection_timeout }}"
+  register: verify_poweruser_assignment
+  when: 
+    - user_role_assignment is defined
+    - user_role_assignment is succeeded
+  tags: [role_management, poweruser, verification]
+
+- name: Display PowerUser verification results
+  ansible.builtin.debug:
+    msg: 
+      - "PowerUser Role Verification:"
+      - "Username: {{ verify_poweruser_assignment.json.UserName }}"
+      - "Role ID: {{ verify_poweruser_assignment.json.RoleId }}"
+      - "Enabled: {{ verify_poweruser_assignment.json.Enabled }}"
+      - "PowerUser Setup: Complete"
+  when: 
+    - verify_poweruser_assignment is defined
+    - verify_poweruser_assignment is succeeded
+  tags: [role_management, poweruser, verification] 

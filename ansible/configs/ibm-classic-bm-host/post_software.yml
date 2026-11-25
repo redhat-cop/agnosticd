@@ -1,0 +1,220 @@
+---
+- name: Step 005 Post Software
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tags:
+    - step005
+    - post_software
+  tasks:
+    - name: Collect variables from bastion host
+      ansible.builtin.set_fact:
+        bm_server_private_netmask: "{{ hostvars[groups['bastions'][0]]['bm_server_private_netmask'] | default('255.255.255.0') }}"
+      when:
+        - groups['bastions'] is defined
+        - groups['bastions'] | length > 0
+
+    - name: Calculate CIDR prefix and bastion IP
+      ansible.builtin.set_fact:
+        # Map common netmasks to CIDR notation
+        cidr_prefix: "{{ netmask_to_cidr[bm_server_private_netmask | default('255.255.255.0')] | default('24') }}"
+        bastion_public_ip: "{{ hostvars[groups['bastions'][0]]['ansible_default_ipv4']['address'] | default(hostvars[groups['bastions'][0]]['public_ip']) }}"
+      vars:
+        netmask_to_cidr:
+          "255.255.255.0": "24"
+          "255.255.0.0": "16" 
+          "255.0.0.0": "8"
+          "255.255.255.128": "25"
+          "255.255.255.192": "26"
+      when: 
+        - bm_server_info is defined
+        - groups['bastions'] is defined
+        - groups['bastions'] | length > 0
+
+    - name: Calculate private subnet information
+      ansible.builtin.set_fact:
+        network_octets: "{{ bm_server_info.private_ip.split('.') }}"
+        private_subnet_info: "{{ bm_server_info.private_ip.split('.')[0] }}.{{ bm_server_info.private_ip.split('.')[1] }}.{{ bm_server_info.private_ip.split('.')[2] }}.0/{{ cidr_prefix }}"
+      when: 
+        - bm_server_info is defined
+        - cidr_prefix is defined
+
+    - name: Store deployment information for users
+      agnosticd_user_info:
+        msg: "IBM Cloud Classic Baremetal Deployment Complete"
+        data:
+          # BMC Access via Bastion HAProxy
+          bmc_access_url: "https://bastion-{{ guid }}.{{ cluster_dns_zone }}"
+          bmc_private_ip: "{{ bm_server_info.remote_mgmt_ip }}"
+          bmc_console_username: "console"
+          bmc_console_password: "{{ generated_password }}"
+          
+          # Baremetal Server Information  
+          baremetal_hostname: "{{ bm_server_info.hostname | default(bm_server_info.server_id) }}"
+          baremetal_public_ip: "{{ bm_server_info.public_ip }}"
+          baremetal_private_ip: "{{ bm_server_info.private_ip }}"
+          baremetal_private_subnet: "{{ private_subnet_info }}"
+          baremetal_ssh_command: "ssh cloud-user@{{ bm_server_info.hostname }}"
+          baremetal_ssh_password: "{{ generated_password }}"
+          
+          # Bastion Information
+          bastion_hostname: "bastion-{{ guid }}.{{ cluster_dns_zone }}"
+          bastion_public_ip: "{{ bastion_public_ip }}"
+          bastion_ssh_command: "ssh cloud-user@bastion-{{ guid }}.{{ cluster_dns_zone }}"
+          bastion_ssh_password: "{{ generated_password }}"
+          
+          # Network Information
+          baremetal_datacenter: "{{ bm_server_info.datacenter }}"
+      when: 
+        - bm_server_info is defined
+        - generated_password is defined
+        - bastion_public_ip is defined
+
+    - name: Display deployment summary
+      ansible.builtin.debug:
+        msg: >
+          WARNING: With great power comes great responsibility!
+          DO NOT:
+            - Share these credentials with anyone
+            - Post these credentials to any public or private repository
+            - Change ANY of these provided credentials for any reason
+
+          NOTE: Any charges related to misuse of these systems due to leaked credentials will be charged back to your cost center and reported to INFOSEC.
+
+          === IBM Cloud Classic Baremetal Deployment Summary ===
+
+          BMC Access:
+            Management URL: https://bastion-{{ guid }}.{{ cluster_dns_zone }}
+            BMC Private IP (for IPMI/SSH): {{ bm_server_info.remote_mgmt_ip }}
+            Username: console
+            Password: {{ generated_password }}
+            NOTE: The BMC server uses a self-signed certificate. You may need to add an exception to your browser to access it.
+
+          Baremetal Server:
+            Hostname: {{ bm_server_info.hostname | default(bm_server_info.server_id) }}.{{ guid }}.{{ cluster_dns_zone }}
+            Public IP: {{ bm_server_info.public_ip }}
+            Private IP: {{ bm_server_info.private_ip }}
+            Private Subnet: {{ private_subnet_info }}
+            SSH Access: ssh cloud-user@{{ bm_server_info.hostname | default(bm_server_info.server_id) }}.{{ guid }}.{{ cluster_dns_zone }}
+            SSH Password: {{ generated_password }}
+
+          Bastion Host (PXE Server):
+            Hostname: bastion-{{ guid }}.{{ cluster_dns_zone }}
+            Public IP: {{ bastion_public_ip }}
+            SSH Access: ssh cloud-user@bastion-{{ guid }}.{{ cluster_dns_zone }}
+            SSH Password: {{ generated_password }}
+
+          Network Details:
+            Datacenter: {{ bm_server_info.datacenter }}
+
+          PXE Boot and Bare Metal Host Provisioning:
+            Your bare metal host has been provisioned with RHEL 10 via PXE boot from the bastion.
+            PXE boot has now been DISABLED to prevent accidental re-provisioning by disabling the DHCP service on the bastion.
+            
+            To re-enable PXE boot in the future, run this on the bastion and restart the bare metal host:
+              sudo systemctl enable dhcpd
+              sudo systemctl start dhcpd
+      when: 
+        - bm_server_info is defined
+        - bastion_public_ip is defined
+
+- name: Disable PXE boot for provisioned bare metal host
+  hosts: bastions[0]
+  become: true
+  gather_facts: false
+  tags:
+    - step005
+    - post_software
+    - disable_pxe
+  tasks:
+    - name: Display waiting message for installation
+      ansible.builtin.debug:
+        msg: "Waiting for SSH connectivity to bare metal host {{ bm_server_info.private_ip }} (up to 30 minutes)..."
+      when: 
+        - bm_server_info is defined
+        - bm_server_info.private_ip is defined
+
+    - name: Wait for SSH connectivity to bare metal host
+      ansible.builtin.wait_for:
+        port: 22
+        host: "{{ bm_server_info.private_ip }}"
+        timeout: 1800  # 30 minutes
+        delay: 10
+      register: ssh_connectivity_check
+      when: 
+        - bm_server_info is defined
+        - bm_server_info.private_ip is defined
+
+    - name: Display SSH connectivity established
+      ansible.builtin.debug:
+        msg: "SSH connectivity established to bare metal host {{ bm_server_info.private_ip }} - proceeding to disable PXE boot"
+      when: 
+        - ssh_connectivity_check is defined
+        - ssh_connectivity_check is succeeded
+
+    - name: Disable PXE boot
+      block:
+        - name: Display PXE disable operation
+          ansible.builtin.debug:
+            msg: "Installation assumed to have started - disabling PXE boot by stopping DHCP service on bastion"
+
+        - name: Stop DHCP service
+          ansible.builtin.systemd:
+            name: dhcpd
+            state: stopped
+
+        - name: Disable DHCP service from starting on boot
+          ansible.builtin.systemd:
+            name: dhcpd
+            enabled: false
+
+        - name: Verify DHCP service is stopped
+          ansible.builtin.systemd:
+            name: dhcpd
+          register: dhcpd_status
+
+        - name: Display DHCP service status
+          ansible.builtin.debug:
+            msg: "DHCP service is {{ dhcpd_status.status.ActiveState }} and {{ 'enabled' if dhcpd_status.status.UnitFileState == 'enabled' else 'disabled' }}"
+      when: 
+        - ssh_connectivity_check is defined
+        - ssh_connectivity_check is succeeded
+
+    - name: Wait for bare metal host to reboot (SSH to stop responding)
+      ansible.builtin.wait_for:
+        port: 22
+        host: "{{ bm_server_info.private_ip }}"
+        state: stopped
+        timeout: 600  # 10 minutes
+        delay: 30     # Wait 30 seconds before checking
+      register: ssh_stopped_check
+      when: 
+        - ssh_connectivity_check is defined
+        - ssh_connectivity_check is succeeded
+
+    - name: Display reboot detected
+      ansible.builtin.debug:
+        msg: "Bare metal host {{ bm_server_info.private_ip }} has rebooted - waiting for it to boot from local storage"
+      when: 
+        - ssh_stopped_check is defined
+        - ssh_stopped_check is succeeded
+
+    - name: Wait for bare metal host to boot from local storage (SSH to start responding)
+      ansible.builtin.wait_for:
+        port: 22
+        host: "{{ bm_server_info.private_ip }}"
+        state: started
+        timeout: 1800  # 30 minutes
+        delay: 60      # Wait 1 minute before checking
+      register: ssh_started_check
+      when: 
+        - ssh_stopped_check is defined
+        - ssh_stopped_check is succeeded
+
+    - name: Display successful boot from local storage
+      ansible.builtin.debug:
+        msg: "Bare metal host {{ bm_server_info.private_ip }} has successfully booted from local storage - deployment complete"
+      when: 
+        - ssh_started_check is defined
+        - ssh_started_check is succeeded

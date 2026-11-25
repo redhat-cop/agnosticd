@@ -1,0 +1,93 @@
+---
+# IBM Cloud Classic SSH Key Infrastructure Role - Create Tasks
+
+- name: Verify IBM Cloud CLI is available and logged in
+  ansible.builtin.command: ibmcloud account show
+  register: ibmcloud_login_status
+  failed_when: false
+  changed_when: false
+
+- name: Fail if not logged in to IBM Cloud
+  ansible.builtin.fail:
+    msg: "Not logged in to IBM Cloud. Please ensure login is performed before calling this role."
+  when: ibmcloud_login_status.rc != 0
+
+- name: Check available security commands
+  ansible.builtin.command: ibmcloud sl security help
+  register: sl_security_help
+  failed_when: false
+  changed_when: false
+
+- name: Check if SSH provision key exists locally
+  stat:
+    path: "{{ ssh_provision_key_path }}"
+  register: stat_ssh_provision_key
+
+- name: Fail if SSH provision key doesn't exist
+  fail:
+    msg: "SSH provision key not found at {{ ssh_provision_key_path }}."
+  when: not stat_ssh_provision_key.stat.exists
+
+- name: List SSH keys in IBM Cloud Classic
+  ansible.builtin.command: ibmcloud sl security sshkey-list --output json
+  register: existing_ssh_keys_result
+  changed_when: false
+  failed_when: false
+
+- name: Test if ibmcloud cli ran correctly
+  ansible.builtin.set_fact:
+    softlayer_available: "{{ existing_ssh_keys_result.rc == 0 }}"
+
+- name: Fail if unable to list SSH keys
+  ansible.builtin.fail:
+    msg: |
+      Unable to list SSH keys with ibmcloud cli.
+  when: not (softlayer_available | default(false))
+
+- name: Parse existing SSH keys
+  ansible.builtin.set_fact:
+    existing_ssh_keys: "{{ existing_ssh_keys_result.stdout | from_json }}"
+  when: existing_ssh_keys_result.stdout != ""
+
+- name: Set empty SSH keys list if no output
+  ansible.builtin.set_fact:
+    existing_ssh_keys: []
+  when: existing_ssh_keys_result.stdout == ""
+
+- name: Check if SSH key with same name already exists
+  ansible.builtin.set_fact:
+    existing_ssh_key: "{{ existing_ssh_keys | selectattr('label', 'equalto', ssh_key_name) | first | default({}) }}"
+
+- name: Create SSH key in IBM Cloud Classic
+  ansible.builtin.command: >-
+    ibmcloud sl security sshkey-add 
+    "{{ ssh_key_name }}" 
+    --key "{{ ssh_provision_pubkey_content }}" 
+    --output json
+  register: ssh_key_create_result
+  failed_when: false
+  when: existing_ssh_key == {}
+
+- name: Fail if unable to create SSH key
+  ansible.builtin.fail:
+    msg: |
+      Unable to create SSH key using 'sshkey-add' command.
+  when: existing_ssh_key == {} and ssh_key_create_result.rc != 0
+
+- name: Parse created SSH key information
+  ansible.builtin.set_fact:
+    created_ssh_key: "{{ ssh_key_create_result.stdout | from_json }}"
+  when: existing_ssh_key == {} and ssh_key_create_result is defined and ssh_key_create_result.rc == 0
+
+- name: Set SSH key ID from existing or created key
+  ansible.builtin.set_fact:
+    ssh_key_id: "{{ existing_ssh_key.ID | default(created_ssh_key.id) }}"
+
+- name: Get SSH key details from list output
+  ansible.builtin.set_fact:
+    ssh_key_details: "{{ existing_ssh_keys | selectattr('ID', 'equalto', ssh_key_id) | first | default({}) }}"
+
+- name: Set SSH key details from created key if not found in list
+  ansible.builtin.set_fact:
+    ssh_key_details: "{{ created_ssh_key | default({}) }}"
+  when: ssh_key_details == {} and created_ssh_key is defined
