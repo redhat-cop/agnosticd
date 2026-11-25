@@ -130,6 +130,21 @@
     group: users
     mode: "0700"
 
+- name: Create a home directory per persona
+  # Each terminal tab starts in its persona's directory instead of the
+  # shared home, so files created in different tabs do not mix.
+  become: true
+  ansible.builtin.file:
+    path: "{{ ocp4_workload_coco_workshop_users_home }}/{{ item }}"
+    state: directory
+    owner: "{{ ocp4_workload_coco_workshop_users_student }}"
+    group: users
+    mode: "0755"
+  loop:
+    - "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
+    - "{{ ocp4_workload_coco_workshop_users_devel_user }}"
+    - "{{ ocp4_workload_coco_workshop_users_admin_user }}"
+
 - name: Log in the workshop personas and write their kubeconfigs
   # KUBECONFIG is exported inside the script: environment: variables do not
   # reliably survive become/sudo. The CA comes from the bastion kubeconfig
@@ -140,10 +155,12 @@
     tls_args=""
     ca_b64='{{ r_coco_api_ca.stdout | default("") }}'
     if [ -n "$ca_b64" ]; then
-      ca_file=$(mktemp)
-      trap 'rm -f "$ca_file"' EXIT
+      ca_file="{{ ocp4_workload_coco_workshop_users_kubeconfig_dir }}/cluster-ca.crt"
       printf '%s' "$ca_b64" | base64 -d > "$ca_file"
+      chmod 0644 "$ca_file"
       tls_args="--certificate-authority=$ca_file"
+    else
+      tls_args="--insecure-skip-tls-verify=true"
     fi
     export KUBECONFIG="{{ ocp4_workload_coco_workshop_users_kubeconfig_dir }}/{{ item.name }}.kubeconfig"
     oc login "{{ r_coco_api_server.stdout }}" \
@@ -172,73 +189,40 @@
 
 # ---------------------------------------------------------------------------
 # RBAC
+#
+# Persona matrix:
+#   admin: full access to everything except the excluded namespaces
+#          (trustee-operator-system)
+#   opsec: full access to trustee-operator-system ONLY
+#   devel: edit access to the devel namespaces ONLY (default,
+#          fraud-detection)
 # ---------------------------------------------------------------------------
 
+- name: Ensure the workshop narrative namespaces exist
+  # fraud-detection and trustee-operator-system are part of the persona
+  # matrix; create them when missing (the same approach as the ARO
+  # workshop) so the bindings are deterministic. ocp4_workload_
+  # coco_helm_install applies the CoCo stack into trustee-operator-system
+  # later; creating the namespace first is harmless.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ item }}"
+  loop: "{{ ocp4_workload_coco_workshop_users_devel_namespaces
+            + [ocp4_workload_coco_workshop_users_trustee_namespace] }}"
+
 - name: List existing namespaces
-  # Namespace-scoped bindings are only created where the namespace exists:
-  # the Trustee namespace belongs to ocp4_workload_coco_helm_install and is
-  # not there when the CoCo stack is not (yet) installed.
   kubernetes.core.k8s_info:
     api_version: v1
     kind: Namespace
   register: r_coco_namespaces
 
-- name: Apply the sandboxed-admin ClusterRole
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: rbac.authorization.k8s.io/v1
-      kind: ClusterRole
-      metadata:
-        name: sandboxed-admin-cluster-role
-      rules:
-        - apiGroups: [""]
-          resources: ["namespaces"]
-          verbs: ["get", "list", "watch"]
-        - apiGroups: [""]
-          resources: ["nodes"]
-          verbs: ["get", "list", "watch"]
-        - apiGroups: ["config.openshift.io"]
-          resources: ["infrastructures"]
-          verbs: ["get", "list", "watch"]
-        - apiGroups: ["kataconfiguration.openshift.io"]
-          resources: ["kataconfigs"]
-          verbs: ["get", "list", "watch"]
-        - apiGroups: ["node.k8s.io"]
-          resources: ["runtimeclasses"]
-          verbs: ["get", "list", "watch"]
-        - apiGroups: ["machineconfiguration.openshift.io"]
-          resources: ["machineconfigpools", "machineconfigs"]
-          verbs: ["get", "list", "watch"]
-        - apiGroups: ["confidentialcontainers.org"]
-          resources: ["trusteeconfigs", "kbsconfigs"]
-          verbs: ["get", "list", "watch"]
-        - apiGroups: ["security.openshift.io"]
-          resources: ["securitycontextconstraints"]
-          verbs: ["use"]
-          resourceNames: ["privileged"]
-
-- name: Bind cluster-scoped read access to opsec
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: rbac.authorization.k8s.io/v1
-      kind: ClusterRoleBinding
-      metadata:
-        name: coco-opsec-sandboxed-admin
-      roleRef:
-        apiGroup: rbac.authorization.k8s.io
-        kind: ClusterRole
-        name: sandboxed-admin-cluster-role
-      subjects:
-        - apiGroup: rbac.authorization.k8s.io
-          kind: User
-          name: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
-
 - name: Give opsec admin access to the Trustee namespace
-  when: >-
-    ocp4_workload_coco_workshop_users_trustee_namespace
-    in (r_coco_namespaces.resources | map(attribute='metadata.name') | list)
+  # opsec is the guardian of the Trustee namespace: full access there and
+  # nowhere else.
   kubernetes.core.k8s:
     state: present
     definition:
@@ -255,39 +239,6 @@
         - apiGroup: rbac.authorization.k8s.io
           kind: User
           name: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
-
-- name: Note that the Trustee namespace does not exist
-  when: >-
-    ocp4_workload_coco_workshop_users_trustee_namespace
-    not in (r_coco_namespaces.resources | map(attribute='metadata.name') | list)
-  ansible.builtin.debug:
-    msg: >-
-      Namespace {{ ocp4_workload_coco_workshop_users_trustee_namespace }} does
-      not exist (the CoCo stack is not installed yet); skipping the opsec
-      Trustee RoleBinding.
-
-- name: Give opsec cluster-wide view access
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: rbac.authorization.k8s.io/v1
-      kind: ClusterRoleBinding
-      metadata:
-        name: coco-opsec-view
-      roleRef:
-        apiGroup: rbac.authorization.k8s.io
-        kind: ClusterRole
-        name: view
-      subjects:
-        - apiGroup: rbac.authorization.k8s.io
-          kind: User
-          name: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
-
-- name: Keep only the devel namespaces that exist
-  ansible.builtin.set_fact:
-    _coco_devel_existing_namespaces: >-
-      {{ ocp4_workload_coco_workshop_users_devel_namespaces
-         | intersect(r_coco_namespaces.resources | map(attribute='metadata.name') | list) }}
 
 - name: Give devel edit access to the workload namespaces
   kubernetes.core.k8s:
@@ -306,24 +257,122 @@
         - apiGroup: rbac.authorization.k8s.io
           kind: User
           name: "{{ ocp4_workload_coco_workshop_users_devel_user }}"
-  loop: "{{ _coco_devel_existing_namespaces }}"
+  loop: "{{ ocp4_workload_coco_workshop_users_devel_namespaces
+            | intersect(r_coco_namespaces.resources | map(attribute='metadata.name') | list) }}"
 
-- name: Ensure the admin persona is cluster-admin
+- name: Remove the cluster-admin binding granted by ocp4_workload_authentication
+  # This lab's admin persona is a workload administrator (like the ARO
+  # workshop's uadmin), not a cluster admin. ocp4_workload_authentication
+  # grants the admin user cluster-admin unconditionally, so drop that
+  # binding here; the restore happens in remove_workload.yml.
+  kubernetes.core.k8s:
+    state: absent
+    api_version: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    name: "cluster-admin-{{ ocp4_workload_coco_workshop_users_admin_user }}"
+
+- name: Apply the admin cluster-scoped ClusterRole
+  # Full cluster-scoped access (nodes, namespaces, operators, machine
+  # configs, CRDs, SCCs) EXCEPT RBAC escalation and impersonation: with
+  # those, the admin persona could grant itself access to the excluded
+  # trustee-operator-system namespace and the restriction would be
+  # meaningless. Namespaced access is granted per namespace below.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: coco-admin-cluster-role
+      rules:
+        - apiGroups: [""]
+          resources: ["namespaces", "nodes", "persistentvolumes"]
+          verbs: ["*"]
+        - apiGroups:
+            - config.openshift.io
+            - operator.openshift.io
+            - machineconfiguration.openshift.io
+            - kataconfiguration.openshift.io
+            - node.k8s.io
+            - storage.k8s.io
+            - apiextensions.k8s.io
+            - admissionregistration.k8s.io
+            - scheduling.k8s.io
+            - certificates.k8s.io
+            - apiregistration.k8s.io
+            - flowcontrol.apiserver.k8s.io
+          resources: ["*"]
+          verbs: ["*"]
+        - apiGroups: ["security.openshift.io"]
+          resources: ["securitycontextconstraints"]
+          verbs: ["*"]
+        # Read-only operator lifecycle metadata, so `oc get csv -A` and
+        # `oc get operators` work (the console's Installed Operators
+        # overview uses the aggregated Operator resource, which lives in
+        # operators.coreos.com). Includes the Trustee operator in
+        # cluster-wide listings; writing in trustee-operator-system stays
+        # opsec-only.
+        - apiGroups: ["operators.coreos.com"]
+          resources: ["clusterserviceversions", "subscriptions", "operatorgroups", "installplans", "operators", "catalogsources"]
+          verbs: ["get", "list", "watch"]
+
+- name: Bind the cluster-scoped admin role
   kubernetes.core.k8s:
     state: present
     definition:
       apiVersion: rbac.authorization.k8s.io/v1
       kind: ClusterRoleBinding
       metadata:
-        name: "coco-admin-{{ ocp4_workload_coco_workshop_users_admin_user }}"
+        name: coco-admin-sandboxed-admin
       roleRef:
         apiGroup: rbac.authorization.k8s.io
         kind: ClusterRole
-        name: cluster-admin
+        name: coco-admin-cluster-role
       subjects:
         - apiGroup: rbac.authorization.k8s.io
           kind: User
           name: "{{ ocp4_workload_coco_workshop_users_admin_user }}"
+
+- name: Apply the admin namespace ClusterRole
+  # Unrestricted within a namespace (same shape as cluster-admin's
+  # namespaced reach); bound per namespace below. RBAC's escalation
+  # prevention keeps this from exceeding itself.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: coco-admin-namespace-role
+      rules:
+        - apiGroups: ["*"]
+          resources: ["*"]
+          verbs: ["*"]
+
+- name: Give the admin persona full access to every namespace except the excluded ones
+  # RBAC cannot subtract a namespace from a cluster-wide grant, so full
+  # namespaced access is bound namespace by namespace, skipping
+  # trustee-operator-system (opsec's domain). Namespaces created after this
+  # workload runs are not bound automatically; OpenShift still grants the
+  # creator admin in namespaces they create via `oc new-project`.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: coco-admin-namespace
+        namespace: "{{ item }}"
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: coco-admin-namespace-role
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: User
+          name: "{{ ocp4_workload_coco_workshop_users_admin_user }}"
+  loop: "{{ (r_coco_namespaces.resources | map(attribute='metadata.name') | list)
+            | difference(ocp4_workload_coco_workshop_users_admin_excluded_namespaces) }}"
 
 # ---------------------------------------------------------------------------
 # Showroom data
@@ -335,6 +384,17 @@
     kind: Ingress
     name: cluster
   register: r_coco_ingress
+
+- name: Get the cluster resource group
+  # The guide's Azure CLI steps run against the cluster's resource group
+  # (where the peer pod resources live), like the ARO workshop's
+  # openenv-<guid> group.
+  kubernetes.core.k8s_info:
+    api_version: config.openshift.io/v1
+    kind: Infrastructure
+    name: cluster
+  register: r_coco_infrastructure
+  failed_when: false
 
 - name: Get the OpenShift console route
   kubernetes.core.k8s_info:
@@ -376,12 +436,27 @@
       coco_opsec_kubeconfig: "{{ ocp4_workload_coco_workshop_users_kubeconfig_dir }}/{{ ocp4_workload_coco_workshop_users_opsec_user }}.kubeconfig"
       coco_devel_kubeconfig: "{{ ocp4_workload_coco_workshop_users_kubeconfig_dir }}/{{ ocp4_workload_coco_workshop_users_devel_user }}.kubeconfig"
       coco_admin_kubeconfig: "{{ ocp4_workload_coco_workshop_users_kubeconfig_dir }}/{{ ocp4_workload_coco_workshop_users_admin_user }}.kubeconfig"
-      # Antora attributes consumed by the guide pages (trusted-cluster.adoc,
-      # untrusted-cluster.adoc): the console link and the cluster admin
-      # credentials the guide tells the student to log in with.
+      # Antora attributes consumed by the guide pages: the console link and
+      # the per-persona login credentials the guide tells the student to
+      # use. aro_kube_* is the trusted-cluster console login, which the
+      # guide labels "Login as opsec"; the coco_* pair feeds the
+      # untrusted-cluster login block.
       aro_console: "{{ _coco_console_url }}"
-      aro_kube_username: "{{ ocp4_workload_coco_workshop_users_admin_user }}"
-      aro_kube_password: "{{ ocp4_workload_coco_workshop_users_admin_password }}"
+      aro_kube_username: "{{ ocp4_workload_coco_workshop_users_opsec_user }}"
+      aro_kube_password: "{{ ocp4_workload_coco_workshop_users_password }}"
+      coco_opsec_password: "{{ ocp4_workload_coco_workshop_users_password }}"
+      coco_devel_password: "{{ ocp4_workload_coco_workshop_users_password }}"
+      coco_admin_password: "{{ ocp4_workload_coco_workshop_users_admin_password }}"
+      # Setting azure_resource_group to a real value switches the guide from
+      # its manual mode (hidden persona notes, manual service principal
+      # login blocks) to the full workshop mode the ARO workshop runs in:
+      # persona notes, console login credentials and pre-filled Azure CLI
+      # commands. azure_tenant_id is the attribute name the guide's az
+      # login expects (the open-env config publishes the same pair).
+      azure_resource_group: >-
+        {{ r_coco_infrastructure.resources[0].status.platformStatus.azure.resourceGroupName
+           | default(az_resource_group | default(''), true) }}
+      azure_tenant_id: "{{ azure_tenant }}"
       # The showroom content container runs envsubst over ui-config.yml with
       # only the variables exported from this nested user data map: flat user
       # data keys never reach envsubst (they only become Antora attributes).
