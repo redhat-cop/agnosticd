@@ -160,13 +160,53 @@
   delay: 10
   retries: 60
 
-# Certificates must exist and be issued before TrusteeConfig reconciles
+- name: Wait for the cert-manager webhook to answer requests
+  # Deployment availability is not webhook readiness: the pod can report
+  # available while the caBundle in the ValidatingWebhookConfiguration still
+  # mismatches the serving certificate, and every Issuer/Certificate apply
+  # then fails with "x509: certificate signed by unknown authority" (seen on
+  # fresh clusters where the webhook rotated its bootstrap certificate right
+  # after becoming available). Probe the webhook for real: creating a
+  # throwaway Issuer goes through cert-manager's validating webhook, so it
+  # only succeeds once the webhook's TLS path actually works.
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: cert-manager.io/v1
+      kind: Issuer
+      metadata:
+        name: coco-webhook-readiness-probe
+        namespace: cert-manager
+      spec:
+        selfSigned: {}
+  register: r_coco_cm_webhook_probe
+  until: r_coco_cm_webhook_probe is success
+  delay: 10
+  retries: 30
+
+- name: Remove the webhook readiness probe
+  # Throwaway object, only used to exercise the validating webhook above.
+  kubernetes.core.k8s:
+    state: absent
+    api_version: cert-manager.io/v1
+    kind: Issuer
+    name: coco-webhook-readiness-probe
+    namespace: cert-manager
+  failed_when: false
+
+# Certificates must exist and be issued before TrusteeConfig reconciles.
+# Retried: the apply is idempotent and the webhook can still flap while its
+# certificate settles (belt and braces for the probe above).
 - name: Apply Trustee issuer, certificates and secrets
   kubernetes.core.k8s:
     definition: >-
       {{ _coco_trustee_objects
          | selectattr('kind', 'in', ['Namespace', 'Issuer', 'Certificate', 'Secret'])
          | list }}
+  register: r_coco_trustee_certs_apply
+  until: r_coco_trustee_certs_apply is success
+  delay: 20
+  retries: 6
 
 - name: Wait for Trustee certificates to be issued
   kubernetes.core.k8s_info:
