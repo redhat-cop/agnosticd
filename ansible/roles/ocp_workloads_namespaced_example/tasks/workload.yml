@@ -1,0 +1,163 @@
+---
+# Main workload tasks for namespaced example deployment
+# This demonstrates both oc command and kubernetes.core module approaches
+
+# Option 1: Use oc command for authentication (more robust for connectivity issues)
+- name: Login to OpenShift cluster with oc command
+  ansible.builtin.shell: |
+    oc login --server={{ sandbox_openshift_api_url }} \
+      --token={{ sandbox_openshift_api_token }} \
+      --insecure-skip-tls-verify=true
+  when: sandbox_openshift_api_token | default('') | length > 0
+  no_log: true
+  register: oc_login_result
+  retries: 3
+  delay: 10
+  until: oc_login_result.rc == 0
+
+- name: Login to OpenShift cluster with username/password
+  ansible.builtin.shell: |
+    oc login --server={{ sandbox_openshift_api_url }} \
+      --username={{ sandbox_openshift_user }} \
+      --password={{ sandbox_openshift_password }} \
+      --insecure-skip-tls-verify=true
+  when: 
+    - sandbox_openshift_api_token | default('') | length == 0
+    - sandbox_openshift_user | default('') | length > 0
+  no_log: true
+  register: oc_login_user_result
+  retries: 3
+  delay: 10
+  until: oc_login_user_result.rc == 0
+
+- name: Set target namespace using oc command
+  ansible.builtin.shell: oc project {{ sandbox_openshift_namespace }}
+  register: oc_project_result
+  retries: 3
+  delay: 5
+  until: oc_project_result.rc == 0
+
+# Use kubernetes.core module with template + from_yaml for proper type handling
+- name: Deploy example application using kubernetes.core module
+  kubernetes.core.k8s:
+    host: "{{ sandbox_openshift_api_url }}"
+    api_key: "{{ sandbox_openshift_api_token | default(omit) }}"
+    username: "{{ sandbox_openshift_user | default(omit) }}"
+    password: "{{ sandbox_openshift_password | default(omit) }}"
+    validate_certs: false
+    namespace: "{{ sandbox_openshift_namespace }}"
+    wait_timeout: 120
+    force: true
+    definition: "{{ lookup('template', 'deployment.yaml.j2') | from_yaml }}"
+    state: present
+  register: deployment_result
+  retries: 3
+  delay: 10
+  until: deployment_result is succeeded
+
+- name: Create Service using kubernetes.core module
+  kubernetes.core.k8s:
+    host: "{{ sandbox_openshift_api_url }}"
+    api_key: "{{ sandbox_openshift_api_token | default(omit) }}"
+    username: "{{ sandbox_openshift_user | default(omit) }}"
+    password: "{{ sandbox_openshift_password | default(omit) }}"
+    validate_certs: false
+    namespace: "{{ sandbox_openshift_namespace }}"
+    definition: "{{ lookup('template', 'service.yaml.j2') | from_yaml }}"
+    state: present
+  register: service_result
+  retries: 3
+  delay: 10
+  until: service_result is succeeded
+
+- name: Create Route using kubernetes.core module
+  when: ocp_workloads_namespaced_example.create_route | bool
+  kubernetes.core.k8s:
+    host: "{{ sandbox_openshift_api_url }}"
+    api_key: "{{ sandbox_openshift_api_token | default(omit) }}"
+    username: "{{ sandbox_openshift_user | default(omit) }}"
+    password: "{{ sandbox_openshift_password | default(omit) }}"
+    validate_certs: false
+    namespace: "{{ sandbox_openshift_namespace }}"
+    definition: "{{ lookup('template', 'route.yaml.j2') | from_yaml }}"
+    state: present
+  register: route_result
+  retries: 3
+  delay: 10
+  until: route_result is succeeded
+
+# Option 4: Mix both approaches for verification
+- name: Verify deployment is ready using kubernetes.core module
+  kubernetes.core.k8s_info:
+    host: "{{ sandbox_openshift_api_url }}"
+    api_key: "{{ sandbox_openshift_api_token | default(omit) }}"
+    username: "{{ sandbox_openshift_user | default(omit) }}"
+    password: "{{ sandbox_openshift_password | default(omit) }}"
+    validate_certs: false
+    api_version: apps/v1
+    kind: Deployment
+    name: "{{ ocp_workloads_namespaced_example.app_name }}"
+    namespace: "{{ sandbox_openshift_namespace }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 300
+  register: deployment_status
+
+- name: Get route URL using oc command (EXAMPLE)
+  when: ocp_workloads_namespaced_example.create_route | bool
+  ansible.builtin.shell: oc get route {{ ocp_workloads_namespaced_example.app_name }}-route -o jsonpath='{.spec.host}'
+  register: route_url_result
+
+
+- name: Display deployment information showing both approaches
+  debug:
+    msg:
+      - "=== Deployment Summary ==="
+      - "Application: {{ ocp_workloads_namespaced_example.app_name }}"
+      - "Namespace: {{ sandbox_openshift_namespace }}"
+      - "Image: {{ ocp_workloads_namespaced_example.app_image }}"
+      - "Replicas: {{ ocp_workloads_namespaced_example.app_replicas }}"
+      - ""
+      - "=== Methods Demonstrated ==="
+      - "Authentication: oc login command"
+      - "Deployment & Service: kubernetes.core.k8s module"
+      - "Route: kubernetes.core.k8s module with template"
+      - "Verification: kubernetes.core.k8s_info module"
+      - ""
+      - "=== Access Information ==="
+      - "Ready replicas: {{ deployment_status.resources[0].status.readyReplicas | default(0) }}/{{ ocp_workloads_namespaced_example.app_replicas }}"
+      - "{% if ocp_workloads_namespaced_example.create_route and route_url_result is defined and route_url_result.stdout %}Application URL: http://{{ route_url_result.stdout }}{% endif %}"
+  when: not silent | bool
+
+- name: Send structured data to AgnosticD UI
+  agnosticd_user_info:
+    msg: |
+      Namespaced workload '{{ ocp_workloads_namespaced_example.app_name }}' deployed successfully.
+      {% if ocp_workloads_namespaced_example.create_route and route_url_result is defined and route_url_result.stdout %}
+      Application URL: http://{{ route_url_result.stdout }}
+      {% endif %}
+    data:
+      workload_name: "{{ ocp_workloads_namespaced_example.app_name }}"
+      namespace: "{{ sandbox_openshift_namespace }}"
+      image: "{{ ocp_workloads_namespaced_example.app_image }}"
+      replicas: "{{ ocp_workloads_namespaced_example.app_replicas }}"
+      ready_replicas: "{{ deployment_status.resources[0].status.readyReplicas | default(0) }}"
+      service_port: "{{ ocp_workloads_namespaced_example.service_port }}"
+      deployment_method: "kubernetes.core with templates"
+      openshift_cluster: "{{ sandbox_openshift_api_url }}"
+      deployment_status: "ready"
+
+- name: Save route info to data
+  when: ocp_workloads_namespaced_example.create_route | bool and route_url_result is defined and route_url_result.stdout
+  agnosticd_user_info:
+    data:
+      application_url: "https://{{ route_url_result.stdout }}"
+      route_host: "{{ route_url_result.stdout }}"
+
+# Leave this as the last task in the playbook.
+- name: workload tasks complete
+  debug:
+    msg: "Workload Tasks completed successfully using mixed oc/kubernetes.core approach."
+  when: not silent | bool
