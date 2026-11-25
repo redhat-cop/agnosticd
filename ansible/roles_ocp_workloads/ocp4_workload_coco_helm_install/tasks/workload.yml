@@ -11,6 +11,8 @@
   ansible.builtin.include_tasks: install-helm.yml
 
 - name: Clone charts repository
+  # Retried: a transient failure talking to the git host would otherwise
+  # kill the deploy; a partial clone is recovered by update/force on retry.
   ansible.builtin.git:
     repo: "{{ ocp4_workload_coco_helm_install_charts_repo }}"
     version: "{{ ocp4_workload_coco_helm_install_charts_repo_ref }}"
@@ -18,6 +20,10 @@
     depth: 1
     force: true
     update: true
+  register: r_coco_charts_clone
+  until: r_coco_charts_clone is success
+  delay: 30
+  retries: 3
 
 - name: Ensure work directory exists
   ansible.builtin.file:
@@ -109,6 +115,10 @@
       dest: cosign.pub
     - url: "{{ ocp4_workload_coco_helm_install_redhat_cosign_pub_url }}"
       dest: redhat-cosign-pub-key.pem
+  register: r_coco_cosign_download
+  until: r_coco_cosign_download is success
+  delay: 15
+  retries: 5
 
 - name: Read cosign public keys
   ansible.builtin.slurp:
@@ -228,11 +238,20 @@
   retries: 60
 
 - name: Apply remaining Trustee objects (KbsConfig, Route, TrusteeConfig)
+  # Retried for the same reason as the chart applies: KbsConfig and
+  # TrusteeConfig are custom resources of the just-installed trustee
+  # operator, and the API server can still be establishing those CRDs (or
+  # the operator's own admission webhook settling its certificate) when the
+  # CSV already reports Succeeded. The apply is idempotent.
   kubernetes.core.k8s:
     definition: >-
       {{ _coco_trustee_objects
          | rejectattr('kind', 'in', ['Namespace', 'Issuer', 'Certificate', 'Secret'])
          | list }}
+  register: r_coco_trustee_objects_apply
+  until: r_coco_trustee_objects_apply is success
+  delay: 30
+  retries: 10
 
 - name: Wait for the Trustee deployment
   kubernetes.core.k8s_info:
@@ -359,6 +378,10 @@
   changed_when: r_coco_tools_pull.rc == 0
 
 - name: Generate RVPS reference values with veritas
+  # Retried: veritas talks to the public Rekor transparency log server and
+  # downloads its public key at runtime, so a transient network failure is
+  # possible. The run is deterministic and only writes a local file, so
+  # retrying is safe.
   ansible.builtin.command: >-
     podman --root {{ ocp4_workload_coco_helm_install_podman_root }}
     run --rm
@@ -377,6 +400,9 @@
     --rekor-url {{ ocp4_workload_coco_helm_install_rekor_url }}
     --rekor-pub-key-url {{ ocp4_workload_coco_helm_install_rekor_pub_key_url }}
   register: r_coco_veritas
+  until: r_coco_veritas is success
+  delay: 60
+  retries: 3
   changed_when: true
 
 - name: Read the RVPS reference values
@@ -387,9 +413,15 @@
   register: r_coco_rvps
 
 - name: Apply RVPS reference values
+  # Retried like the other applies: idempotent, and admission can flap while
+  # the freshly installed operators settle.
   kubernetes.core.k8s:
     definition: >-
       {{ r_coco_rvps.content | b64decode | from_yaml_all | select('mapping') | list }}
+  register: r_coco_rvps_apply
+  until: r_coco_rvps_apply is success
+  delay: 20
+  retries: 6
 
 - name: Restart Trustee deployment to load the fresh secrets
   kubernetes.core.k8s:
